@@ -1,0 +1,22 @@
+{
+  "target": "dome",
+  "grid_size": 3,
+  "tile_size": 1.0,
+  "gap_size": 0.08,
+  "target_parameters": {
+    "amplitude": 0.75,
+    "radius": 2.2
+  },
+  "design": {
+    "max_iterations": 30
+  },
+  "physics": {
+    "dt": 0.01,
+    "substeps": 4,
+    "solver_iterations": 20,
+    "num_frames": 200,
+    "rope_stiffness": 0.95,
+    "hinge_stiffness": 0.92,
+    "damping": 0.04
+  }
+}

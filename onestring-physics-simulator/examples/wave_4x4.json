@@ -1,0 +1,22 @@
+{
+  "target": "wave",
+  "grid_size": 4,
+  "tile_size": 1.0,
+  "gap_size": 0.08,
+  "target_parameters": {
+    "amplitude": 0.45,
+    "wavelength": 3.0
+  },
+  "design": {
+    "max_iterations": 45
+  },
+  "physics": {
+    "dt": 0.01,
+    "substeps": 4,
+    "solver_iterations": 24,
+    "num_frames": 220,
+    "rope_stiffness": 0.95,
+    "hinge_stiffness": 0.92,
+    "damping": 0.05
+  }
+}
