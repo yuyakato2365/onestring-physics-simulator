@@ -13,3 +13,8 @@ streamlit.out.log
 streamlit.err.log
 streamlit.pid
 .streamlit/
+app_backup_before_*.py
+src_backup_before_*/
+*_tmp/
+*_patch.zip
+tmp_pdf_text.txt

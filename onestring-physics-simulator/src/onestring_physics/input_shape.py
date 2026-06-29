@@ -28,7 +28,8 @@ def load_target_shape(path: str | Path) -> HeightField:
         warnings.warn(CLOSED_SHAPE_WARNING, stacklevel=2)
     points = np.asarray(mesh.vertices, dtype=float)
     points = normalize_shape(points)
-    return HeightField("sampled", points=points)
+    faces = np.asarray(mesh.faces, dtype=int)
+    return HeightField("sampled", points=points, faces=faces)
 
 
 def normalize_shape(mesh_or_points) -> np.ndarray:

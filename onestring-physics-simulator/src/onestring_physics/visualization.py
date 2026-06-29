@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 
 from .design_optimizer import DesignResult
+from .onestring_pipeline import FlatTileLayout, GapGraph, HingeGraph, OneStringDesignState, QuadMesh, StringPath, SurfaceMesh, TileAssembly
 
 
 def figure_target(design: DesignResult) -> go.Figure:
@@ -66,6 +67,530 @@ def figure_loss(loss_history: list[float]) -> go.Figure:
     fig.add_trace(go.Scatter(y=loss_history, mode="lines+markers", name="mean squared residual"))
     fig.update_layout(xaxis_title="recorded step", yaxis_title="loss", height=280)
     return fig
+
+
+def figure_pipeline_overview(state: OneStringDesignState) -> go.Figure:
+    fig = go.Figure()
+    nodes = {
+        "S": (0, 1),
+        "M3D": (1, 1),
+        "K3D": (2, 1),
+        "T3D": (3, 1),
+        "Omega": (0, 0),
+        "M2D": (1, 0),
+        "K2D": (2, 0),
+        "T2D top hinge": (3, 0),
+        "T2D dual hinge": (4, 0),
+        "Lift Points": (5, 0.35),
+        "String Path": (6, 0.35),
+        "Actuation": (7, 0.35),
+        "Final": (8, 0.35),
+    }
+    edges = [
+        ("S", "M3D"),
+        ("Omega", "M2D"),
+        ("M2D", "M3D"),
+        ("M3D", "K3D"),
+        ("K3D", "T3D"),
+        ("M2D", "K2D"),
+        ("K2D", "T2D top hinge"),
+        ("T2D top hinge", "T2D dual hinge"),
+        ("T2D dual hinge", "Lift Points"),
+        ("Lift Points", "String Path"),
+        ("String Path", "Actuation"),
+        ("Actuation", "Final"),
+        ("T3D", "Actuation"),
+    ]
+    for a, b in edges:
+        xa, ya = nodes[a]
+        xb, yb = nodes[b]
+        fig.add_trace(
+            go.Scatter(
+                x=[xa, xb],
+                y=[ya, yb],
+                mode="lines",
+                line=dict(color="#6b7280", width=2),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+    labels = list(nodes)
+    x = [nodes[label][0] for label in labels]
+    y = [nodes[label][1] for label in labels]
+    hover = [_stage_hover_text(state, label) for label in labels]
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y,
+            mode="markers+text",
+            marker=dict(size=28, color="#0f766e", line=dict(color="#0f172a", width=1)),
+            text=labels,
+            textposition="bottom center",
+            hovertext=hover,
+            hoverinfo="text",
+            showlegend=False,
+        )
+    )
+    fig.update_layout(
+        title="Fig. 5-style OneString pipeline",
+        height=360,
+        margin=dict(l=20, r=20, t=44, b=20),
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False, range=(-0.35, 1.35)),
+        plot_bgcolor="white",
+    )
+    return fig
+
+
+def figure_surface_mesh(surface: SurfaceMesh, title: str = "S target surface") -> go.Figure:
+    fig = go.Figure()
+    _add_quad_mesh_surface(fig, surface.vertices, surface.faces, color="#7c3aed", opacity=0.55, name="S")
+    fig.update_layout(title=title)
+    _style_scene(fig)
+    return fig
+
+
+def figure_quad_mesh(mesh: QuadMesh, title: str | None = None, show_csf: bool = False) -> go.Figure:
+    fig = go.Figure()
+    color = "#3b82f6" if mesh.vertices.shape[1] == 3 and np.ptp(mesh.vertices[:, 2]) > 1e-8 else "#14b8a6"
+    _add_quad_mesh_surface(fig, mesh.vertices, mesh.faces, color=color, opacity=0.72, name=mesh.stage)
+    if show_csf:
+        fig.add_trace(
+            go.Scatter3d(
+                x=mesh.vertices[:, 0],
+                y=mesh.vertices[:, 1],
+                z=mesh.vertices[:, 2] + 0.01,
+                mode="markers",
+                marker=dict(size=5, color=np.asarray(list(mesh.metrics.values())[: len(mesh.vertices)] or [0]), colorscale="Viridis"),
+                name="CSF sample",
+                showlegend=False,
+            )
+        )
+    fig.update_layout(title=title or mesh.stage)
+    _style_scene(fig)
+    return fig
+
+
+def figure_m3d_overlay(state: OneStringDesignState) -> go.Figure:
+    fig = go.Figure()
+    _add_quad_mesh_surface(fig, state.target_surface.vertices, state.target_surface.faces, color="#94a3b8", opacity=0.28, name="target surface S")
+    _add_quad_mesh_surface(fig, state.mesh_3d_initial.vertices, state.mesh_3d_initial.faces, color="#ef4444", opacity=0.82, name="M3D c^-1 grid")
+    failures = int(state.mesh_3d_initial.metrics.get("m3d_uv_triangle_lookup_fail_count", 0))
+    if failures:
+        fig.add_trace(
+            go.Scatter3d(
+                x=state.mesh_3d_initial.vertices[:, 0],
+                y=state.mesh_3d_initial.vertices[:, 1],
+                z=state.mesh_3d_initial.vertices[:, 2] + 0.03,
+                mode="markers",
+                marker=dict(size=5, color="#dc2626"),
+                name="UV lookup failures",
+            )
+        )
+    fig.update_layout(title="M3D inverse parameterization overlay on target surface")
+    _style_scene(fig)
+    return fig
+
+
+def figure_flat_tile_layout(
+    layout: FlatTileLayout,
+    title: str = "K2D flat tile layout",
+    hinge_graph: HingeGraph | None = None,
+) -> go.Figure:
+    fig = go.Figure()
+    tiles = layout.tile_top_vertices_3d
+    x: list[float] = []
+    y: list[float] = []
+    z: list[float] = []
+    i_idx: list[int] = []
+    j_idx: list[int] = []
+    k_idx: list[int] = []
+    edge_x: list[float | None] = []
+    edge_y: list[float | None] = []
+    edge_z: list[float | None] = []
+    for tile in tiles:
+        base = len(x)
+        x.extend(tile[:, 0].tolist())
+        y.extend(tile[:, 1].tolist())
+        z.extend(tile[:, 2].tolist())
+        i_idx.extend([base, base])
+        j_idx.extend([base + 1, base + 2])
+        k_idx.extend([base + 2, base + 3])
+        closed = np.vstack([tile, tile[0]])
+        edge_x.extend([*closed[:, 0].tolist(), None])
+        edge_y.extend([*closed[:, 1].tolist(), None])
+        edge_z.extend([*closed[:, 2].tolist(), None])
+    fig.add_trace(
+        go.Mesh3d(
+            x=x,
+            y=y,
+            z=z,
+            i=i_idx,
+            j=j_idx,
+            k=k_idx,
+            color="#2dd4bf",
+            opacity=0.78,
+            flatshading=True,
+            lighting=dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0),
+            name="K2D independent tile faces",
+        )
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=edge_x,
+            y=edge_y,
+            z=edge_z,
+            mode="lines",
+            line=dict(color="#111827", width=3),
+            name="tile gaps / edges",
+        )
+    )
+    if hinge_graph is not None:
+        add_hinge_markers(
+            fig,
+            TileAssembly(
+                vertices=np.concatenate([tiles, tiles], axis=1),
+                top_faces=np.asarray([[0, 1, 2, 3] for _ in range(len(tiles))], dtype=int),
+                bottom_faces=np.asarray([[4, 7, 6, 5] for _ in range(len(tiles))], dtype=int),
+                side_faces=np.asarray([[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]], dtype=int),
+                stage="K2D layout hinge overlay",
+            ),
+            hinge_graph,
+        )
+    if layout.gap_polygons:
+        centers = np.asarray([np.mean(poly, axis=0) for poly in layout.gap_polygons], dtype=float)
+        fig.add_trace(
+            go.Scatter3d(
+                x=centers[:, 0],
+                y=centers[:, 1],
+                z=np.full(len(centers), 0.035),
+                mode="markers",
+                marker=dict(size=4, color="#f97316"),
+                name="gap centers",
+            )
+        )
+    fig.update_layout(title=title)
+    _style_scene(fig)
+    return fig
+
+
+def figure_domain(state: OneStringDesignState) -> go.Figure:
+    fig = go.Figure()
+    boundary = state.conformal_domain.boundary
+    fig.add_trace(
+        go.Scatter(
+            x=boundary[:, 0],
+            y=boundary[:, 1],
+            mode="lines",
+            line=dict(color="#0f172a", width=3),
+            name="Omega boundary",
+        )
+    )
+    mesh = state.mesh_2d_initial
+    grid_x: list[float | None] = []
+    grid_y: list[float | None] = []
+    for face in mesh.faces:
+        pts = mesh.vertices[list(face) + [face[0]], :2]
+        grid_x.extend([*pts[:, 0].tolist(), None])
+        grid_y.extend([*pts[:, 1].tolist(), None])
+    fig.add_trace(
+        go.Scatter(
+            x=grid_x,
+            y=grid_y,
+            mode="lines",
+            line=dict(color="#14b8a6", width=1),
+            name="regular quad grid",
+            showlegend=False,
+        )
+    )
+    for axis, value in state.conformal_domain.split_lines:
+        if axis == "row":
+            fig.add_hline(y=value, line=dict(color="#ef4444", dash="dash"))
+        else:
+            fig.add_vline(x=value, line=dict(color="#ef4444", dash="dash"))
+    fig.update_layout(
+        title="Omega analytic planar domain",
+        height=520,
+        margin=dict(l=20, r=20, t=44, b=20),
+        xaxis_title="u",
+        yaxis_title="v",
+        yaxis=dict(scaleanchor="x", scaleratio=1),
+    )
+    return fig
+
+
+def figure_tile_assembly(
+    assembly: TileAssembly,
+    title: str | None = None,
+    gap_graph: GapGraph | None = None,
+    hinge_graph: HingeGraph | None = None,
+    string_path: StringPath | None = None,
+    lift_gap_ids: list[int] | None = None,
+) -> go.Figure:
+    fig = go.Figure()
+    add_tile_assembly(fig, assembly)
+    if hinge_graph is not None:
+        add_hinge_markers(fig, assembly, hinge_graph)
+    if gap_graph is not None:
+        add_gap_graph(fig, gap_graph, string_path=string_path, lift_gap_ids=lift_gap_ids)
+    fig.update_layout(title=title or assembly.stage)
+    _style_scene(fig)
+    return fig
+
+
+def figure_onestring_comparison(state: OneStringDesignState) -> go.Figure:
+    fig = go.Figure()
+    add_tile_assembly(fig, state.tiles_3d, color="#2563eb", opacity=0.32, name="T3D target")
+    if state.simulation_result is not None:
+        final = TileAssembly(
+            vertices=state.simulation_result.final_tiles,
+            top_faces=state.tiles_3d.top_faces,
+            bottom_faces=state.tiles_3d.bottom_faces,
+            side_faces=state.tiles_3d.side_faces,
+            stage="Final simulated deployed",
+        )
+        add_tile_assembly(fig, final, color="#f97316", opacity=0.7, name="final simulated")
+    _style_scene(fig)
+    return fig
+
+
+def add_tile_assembly(
+    fig: go.Figure,
+    assembly: TileAssembly,
+    color: str = "#2dd4bf",
+    opacity: float = 0.72,
+    name: str = "tiles",
+) -> None:
+    faces = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
+    x: list[float] = []
+    y: list[float] = []
+    z: list[float] = []
+    i_idx: list[int] = []
+    j_idx: list[int] = []
+    k_idx: list[int] = []
+    edge_x: list[float | None] = []
+    edge_y: list[float | None] = []
+    edge_z: list[float | None] = []
+    for tile in np.asarray(assembly.vertices, dtype=float):
+        for face in faces:
+            base = len(x)
+            pts = tile[list(face)]
+            x.extend(pts[:, 0].tolist())
+            y.extend(pts[:, 1].tolist())
+            z.extend(pts[:, 2].tolist())
+            i_idx.extend([base, base])
+            j_idx.extend([base + 1, base + 2])
+            k_idx.extend([base + 2, base + 3])
+        for edge in [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]:
+            pts = tile[list(edge)]
+            edge_x.extend([pts[0, 0], pts[1, 0], None])
+            edge_y.extend([pts[0, 1], pts[1, 1], None])
+            edge_z.extend([pts[0, 2], pts[1, 2], None])
+    fig.add_trace(
+        go.Mesh3d(
+            x=x,
+            y=y,
+            z=z,
+            i=i_idx,
+            j=j_idx,
+            k=k_idx,
+            color=color,
+            opacity=opacity,
+            flatshading=True,
+            lighting=lighting,
+            name=name,
+            showlegend=True,
+        )
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=edge_x,
+            y=edge_y,
+            z=edge_z,
+            mode="lines",
+            line=dict(color="#111827", width=2),
+            name="tile edges",
+            showlegend=False,
+        )
+    )
+
+
+def add_hinge_markers(fig: go.Figure, assembly: TileAssembly, hinge_graph: HingeGraph) -> None:
+    top_pts: list[np.ndarray] = []
+    bottom_pts: list[np.ndarray] = []
+    for hinge in hinge_graph.hinges:
+        p = 0.5 * (
+            assembly.vertices[hinge.tile_a, hinge.local_vertex_a]
+            + assembly.vertices[hinge.tile_b, hinge.local_vertex_b]
+        )
+        if hinge.surface == "top":
+            top_pts.append(p)
+        else:
+            bottom_pts.append(p)
+    for name, pts, color, symbol in [
+        ("top hinges", top_pts, "#2563eb", "circle"),
+        ("bottom hinges", bottom_pts, "#f97316", "diamond"),
+    ]:
+        if not pts:
+            continue
+        arr = np.asarray(pts)
+        fig.add_trace(
+            go.Scatter3d(
+                x=arr[:, 0],
+                y=arr[:, 1],
+                z=arr[:, 2],
+                mode="markers",
+                marker=dict(size=2.2, color=color, symbol=symbol, opacity=0.85),
+                name=name,
+            )
+        )
+
+
+def add_gap_graph(
+    fig: go.Figure,
+    gap_graph: GapGraph,
+    string_path: StringPath | None = None,
+    lift_gap_ids: list[int] | None = None,
+) -> None:
+    lift_gap_ids = lift_gap_ids or []
+    centroids = {gap.id: gap.centroid_2d for gap in gap_graph.gaps}
+    edge_x: list[float | None] = []
+    edge_y: list[float | None] = []
+    edge_z: list[float | None] = []
+    for a, b in gap_graph.edges:
+        pa = centroids[a]
+        pb = centroids[b]
+        edge_x.extend([pa[0], pb[0], None])
+        edge_y.extend([pa[1], pb[1], None])
+        edge_z.extend([pa[2] + 0.03, pb[2] + 0.03, None])
+    fig.add_trace(
+        go.Scatter3d(
+            x=edge_x,
+            y=edge_y,
+            z=edge_z,
+            mode="lines",
+            line=dict(color="#94a3b8", width=2),
+            name="gap graph",
+            showlegend=False,
+        )
+    )
+    gaps = gap_graph.gaps
+    colors = ["#ef4444" if gap.id in lift_gap_ids else ("#f97316" if gap.boundary else "#475569") for gap in gaps]
+    fig.add_trace(
+        go.Scatter3d(
+            x=[gap.centroid_2d[0] for gap in gaps],
+            y=[gap.centroid_2d[1] for gap in gaps],
+            z=[gap.centroid_2d[2] + 0.05 for gap in gaps],
+            mode="markers+text",
+            marker=dict(size=3, color=colors, opacity=0.85),
+            text=[str(gap.label) for gap in gaps],
+            textposition="top center",
+            name="gaps",
+        )
+    )
+    if string_path is not None and string_path.gap_ids:
+        pts = np.asarray([centroids[gap_id] for gap_id in string_path.gap_ids if gap_id in centroids], dtype=float)
+        if len(pts):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=pts[:, 0],
+                    y=pts[:, 1],
+                    z=pts[:, 2] + 0.09,
+                    mode="lines+markers",
+                    line=dict(color="#dc2626", width=5),
+                    marker=dict(size=2.5, color="#dc2626"),
+                    name="boundary-first string path",
+                )
+            )
+
+
+def _add_quad_mesh_surface(
+    fig: go.Figure,
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    color: str,
+    opacity: float,
+    name: str,
+) -> None:
+    lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
+    x: list[float] = []
+    y: list[float] = []
+    z: list[float] = []
+    i_idx: list[int] = []
+    j_idx: list[int] = []
+    k_idx: list[int] = []
+    edge_x: list[float | None] = []
+    edge_y: list[float | None] = []
+    edge_z: list[float | None] = []
+    for face in faces:
+        pts = vertices[list(face)]
+        base = len(x)
+        x.extend(pts[:, 0].tolist())
+        y.extend(pts[:, 1].tolist())
+        z.extend(pts[:, 2].tolist())
+        i_idx.extend([base, base])
+        j_idx.extend([base + 1, base + 2])
+        k_idx.extend([base + 2, base + 3])
+        closed = np.vstack([pts, pts[0]])
+        edge_x.extend([*closed[:, 0].tolist(), None])
+        edge_y.extend([*closed[:, 1].tolist(), None])
+        edge_z.extend([*closed[:, 2].tolist(), None])
+    fig.add_trace(
+        go.Mesh3d(
+            x=x,
+            y=y,
+            z=z,
+            i=i_idx,
+            j=j_idx,
+            k=k_idx,
+            color=color,
+            opacity=opacity,
+            flatshading=True,
+            lighting=lighting,
+            name=name,
+            showlegend=True,
+        )
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=edge_x,
+            y=edge_y,
+            z=edge_z,
+            mode="lines",
+            line=dict(color="#0f172a", width=2),
+            name=f"{name} edges",
+            showlegend=False,
+        )
+    )
+
+
+def _stage_hover_text(state: OneStringDesignState, label: str) -> str:
+    if label == "S":
+        return f"target surface<br>vertices: {len(state.target_surface.vertices)}<br>faces: {len(state.target_surface.faces)}"
+    if label == "Omega":
+        return f"{state.conformal_domain.method}<br>max CSF: {state.conformal_domain.max_csf:.3f}"
+    report_map = {
+        "M3D": "M2D -> M3D",
+        "K3D": "M3D -> K3D",
+        "T3D": "K3D -> T3D",
+        "K2D": "M2D -> K2D",
+        "T2D top hinge": "K2D -> T2D top hinge",
+        "T2D dual hinge": "T2D top hinge -> T2D dual hinge",
+    }
+    if label in report_map and report_map[label] in state.stage_reports:
+        report = state.stage_reports[report_map[label]]
+        return (
+            f"{report.objective}<br>before: {report.before_error:.4g}<br>"
+            f"after: {report.after_error:.4g}<br>violation: {report.constraint_violation:.4g}"
+        )
+    if label == "Lift Points":
+        return f"lift points: {len(state.lift_points)}<br>max GPE: {state.gap_graph.metrics.get('max_gpe', 0):.4g}"
+    if label == "String Path":
+        return f"route gaps: {len(state.string_path.gap_ids)}<br>turn angle: {state.string_path.turn_angle_total:.4g}"
+    if label == "Final" and state.simulation_result is not None:
+        return f"error to T3D: {state.simulation_result.metrics['final_deployment_error_to_T3D']:.4g}"
+    return label
 
 
 def add_tiles(
@@ -153,8 +678,11 @@ def _style_scene(fig: go.Figure) -> None:
     fig.update_layout(
         height=620,
         margin=dict(l=0, r=0, b=0, t=38),
+        uirevision="onestring-camera-preserved",
         scene=dict(
             aspectmode="data",
+            uirevision="onestring-camera-preserved",
+            dragmode="orbit",
             xaxis=dict(showbackground=False),
             yaxis=dict(showbackground=False),
             zaxis=dict(showbackground=False),

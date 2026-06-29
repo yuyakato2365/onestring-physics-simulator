@@ -13,6 +13,7 @@ class HeightField:
     kind: str
     parameters: dict[str, float] = field(default_factory=dict)
     points: np.ndarray | None = None
+    faces: np.ndarray | None = None
 
     def height(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=float)
@@ -31,14 +32,53 @@ class HeightField:
         if self.kind == "saddle":
             return amp * (x * x - y * y) / max(radius * radius, 1e-8)
         if self.kind == "wave":
-            return amp * np.sin(2.0 * np.pi * x / wavelength) * np.cos(
+            # The original built-in wave was too aggressive for the paper-style
+            # K2D/T2D pipeline.  Keep the same UI amplitude, but damp this
+            # target by default and use a longer wavelength unless overridden.
+            wave_scale = float(self.parameters.get("wave_amplitude_scale", 0.35))
+            return amp * wave_scale * np.sin(2.0 * np.pi * x / wavelength) * np.cos(
                 2.0 * np.pi * y / wavelength
             )
         if self.kind in {"gaussian", "gaussian bump", "gaussian_bump"}:
             return amp * np.exp(-(x * x + y * y) / max(2.0 * sigma * sigma, 1e-8))
+        if self.kind in {"half_gourd", "gourd_half", "hyotan_half", "hyoutan_half"}:
+            outline = self._half_gourd_outline(x, y)
+            yn = y / max(radius, 1e-8)
+            crown = np.sqrt(np.maximum(0.0, outline))
+            # Slight asymmetry makes the upper lobe visibly smaller, like a cut
+            # hyotan/gourd shell rather than a symmetric dumbbell.
+            asym = 0.92 + 0.08 * np.tanh(-0.8 * yn)
+            return amp * crown * asym
         if self.kind == "sampled" and self.points is not None:
             return self._nearest_height(x, y)
         raise ValueError(f"unknown height field kind: {self.kind}")
+
+    def support_mask(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Return the XY footprint of analytic targets.
+
+        Most built-in targets occupy the full rectangular sample domain.
+        half_gourd is intentionally non-rectangular so S->Omega and M2D crop
+        can exercise the paper-style boundary handling path.
+        """
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        if self.kind in {"half_gourd", "gourd_half", "hyotan_half", "hyoutan_half"}:
+            return self._half_gourd_outline(x, y) > 0.0
+        return np.ones_like(x, dtype=bool)
+
+    def _half_gourd_outline(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        radius = float(self.parameters.get("radius", 1.8))
+        yn = y / max(radius, 1e-8)
+        # Width profile: two lobes with a narrow waist.  This is a single
+        # height-field patch representing the cut half of a gourd/hyotan.
+        lower = 0.78 * np.exp(-((yn + 0.42) / 0.38) ** 2)
+        upper = 0.55 * np.exp(-((yn - 0.46) / 0.32) ** 2)
+        waist = 0.42 * np.exp(-(yn / 0.18) ** 2)
+        width_profile = np.clip(0.18 + lower + upper - waist, 0.16, 1.05)
+        half_width = max(radius, 1e-8) * 0.58 * width_profile
+        y_extent = 1.08
+        # Superellipse in y keeps both ends rounded while leaving a visible waist.
+        return 1.0 - (x / np.maximum(half_width, 1e-8)) ** 2 - (np.abs(yn) / y_extent) ** 4
 
     def sample_grid(self, nx: int, ny: int, tile_size: float) -> np.ndarray:
         xs = (np.arange(nx + 1) - nx / 2.0) * tile_size
@@ -61,5 +101,13 @@ def make_height_field(kind: str, parameters: dict[str, Any] | None = None) -> He
     aliases = {
         "gaussian_bump": "gaussian",
         "bump": "gaussian",
+        "half-gourd": "half_gourd",
+        "half gourd": "half_gourd",
+        "gourd": "half_gourd",
+        "gourd_half": "half_gourd",
+        "hyotan": "half_gourd",
+        "hyoutan": "half_gourd",
+        "hyotan_half": "half_gourd",
+        "hyoutan_half": "half_gourd",
     }
     return HeightField(aliases.get(normalized, normalized), dict(parameters or {}))

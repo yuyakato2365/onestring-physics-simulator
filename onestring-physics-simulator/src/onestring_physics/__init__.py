@@ -1,22 +1,58 @@
-"""Lightweight design and deployment tools for a OneString-inspired simulator."""
+"""Design and deployment tools for a OneString-inspired simulator."""
 
 from .design_optimizer import DesignParameters, DesignResult, optimize_design
 from .input_shape import create_builtin_shape, load_target_shape, normalize_shape, sample_target_surface
+from .onestring_pipeline import (
+    ComputeConfig,
+    DeploymentParameters,
+    DeploymentResult,
+    FlatTileLayout,
+    OneStringDesignState,
+    PipelineParameters,
+    SurfaceParameterization,
+    build_onestring_design,
+    complexity_metrics,
+    compute_backend_info,
+    gpu_self_test,
+    inverse_map_uv_to_surface,
+    nvidia_smi_probe,
+    paper_consistency_report,
+    run_simulator_gpu_benchmark,
+    safe_capstan_friction,
+    simulate_onestring_deployment,
+)
 from .physics_world import PhysicsParameters, PhysicsResult, PhysicsWorld, simulate_deployment
 from .quad_grid import QuadGrid, create_quad_grid
 
 __all__ = [
     "DesignParameters",
     "DesignResult",
+    "ComputeConfig",
+    "DeploymentParameters",
+    "DeploymentResult",
+    "FlatTileLayout",
+    "OneStringDesignState",
     "PhysicsParameters",
     "PhysicsResult",
     "PhysicsWorld",
+    "PipelineParameters",
     "QuadGrid",
+    "SurfaceParameterization",
+    "build_onestring_design",
+    "complexity_metrics",
+    "compute_backend_info",
     "create_builtin_shape",
     "create_quad_grid",
+    "gpu_self_test",
+    "inverse_map_uv_to_surface",
     "load_target_shape",
+    "nvidia_smi_probe",
+    "paper_consistency_report",
+    "run_simulator_gpu_benchmark",
     "normalize_shape",
     "optimize_design",
     "sample_target_surface",
+    "safe_capstan_friction",
+    "simulate_onestring_deployment",
     "simulate_deployment",
 ]
