@@ -4,6 +4,7 @@ import tempfile
 import time
 from pathlib import Path
 import sys
+import importlib
 
 import numpy as np
 import plotly.graph_objects as go
@@ -11,6 +12,10 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+import onestring_physics.onestring_pipeline as _onestring_pipeline
+
+_onestring_pipeline = importlib.reload(_onestring_pipeline)
 
 from onestring_physics.animation import assembly_progress_animation, assembly_progress_frame_figure, tile_assembly_animation
 from onestring_physics.input_shape import CLOSED_SHAPE_WARNING, create_builtin_shape, load_target_shape
@@ -1162,6 +1167,7 @@ elif view_stage == "Assembly Animation":
                     "selected_backend": backend_info.get("current_backend"),
                     "cuda_available": backend_info.get("cuda_available"),
                     "gpu_name": backend_info.get("gpu_name"),
+                    "use_gpu_for_simulation": bool(paper_params.compute.use_gpu_for_simulation),
                     "simulation_frames": int(paper_params.max_animation_frames),
                     "simulation_steps": int(paper_params.steps),
                     "solver_iterations": int(paper_params.solver_iterations),
