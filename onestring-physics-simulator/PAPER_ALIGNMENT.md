@@ -1,50 +1,37 @@
-# OneString paper-flow alignment notes
+# Side-face contact patch + free layout + UI/cache fixes
 
-This patch keeps the existing strict paper-flow pipeline and adds a deployment-only target contact guard.
+This ZIP keeps the old Copy-Item replacement workflow:
 
-## Change in this patch
+```powershell
+Expand-Archive .\onestring_sideface_contact_patch.zip -DestinationPath .\sideface_contact_tmp -Force
+Copy-Item .\sideface_contact_tmp\onestring_physics\* .\src\onestring_physics\ -Recurse -Force
+Copy-Item .\sideface_contact_tmp\app.py .\app.py -Force
+Copy-Item .\sideface_contact_tmp\PAPER_ALIGNMENT.md .\PAPER_ALIGNMENT.md -Force
+```
 
-The deployment simulation can still show green animated tiles visually passing through or sitting inside the translucent blue T3D target.  This is not a K3D design problem; it is a deployment projection issue.  Snap/lift/hinge constraints can pull individual vertices into the target volume before rigid projection catches up.
+## Geometry/layout changes kept
 
-This patch adds two projective-dynamics style constraints during actuation:
+- T3D uses shared-edge side-face/contact-aware mitered extrusion.
+- T2D avoids affine/shear top-to-bottom transforms and preserves rigid tile shape.
+- T2D/dual-hinge layout is more permissive: hard hinge closure, open voids/collision clearance, weak initial-layout anchor.
 
-1. Per-tile rigid target pose fit
-   - Each tile is rigidly fitted toward its corresponding T3D pose.
-   - The tile shape is not warped; a Kabsch rigid fit is used.
+## New UI changes
 
-2. One-sided T3D target contact guard
-   - Uses the designed T3D tile top-face normal.
-   - If the animated tile goes inside the corresponding T3D tile pose, the whole tile is pushed outward.
-   - A rigid projection immediately follows, so panels remain rigid.
+- All Plotly 3D charts preserve camera state with a stable `uirevision`.
+- Plotly config always exposes 3D pan/orbit/turntable/zoom/reset controls.
+- Middle-mouse drag is mapped to temporary Plotly 3D pan mode where the browser permits event forwarding.
+  - Left drag remains orbit/rotation.
+  - Mouse wheel remains zoom.
+  - Middle drag pans the camera center.
+- Plotly animation frame redraws now restore the current `scene.camera` after every frame, so Smooth play does not snap back to the initial view.
+- If the server-frame player recreates the chart, the last camera in the page is applied to the new chart before the frame is shown.
 
-These are applied in both CPU and CUDA deployment paths.
+## New animation cache
 
-## New controls
+- `simulate_onestring_deployment()` is wrapped with a Streamlit `st.session_state` cache.
+- Once an animation/simulation is generated for the same pipeline and deployment settings, returning to the same settings reuses the cached result instead of recomputing frames.
+- The cache keeps up to 8 recent simulation results.
 
-- target T3D fit guard
-- target penetration guard
-- target guard start progress
-- target clearance
-- target guard projection passes
+## Notes
 
-## New metrics
-
-- target_penetration_count
-- target_penetration_max
-- target_penetration_mean
-- target_contact_model
-
-## 2026-06-27 Top/bottom orientation guard
-
-The deployment contact guard now derives the per-tile outward normal from the actual tile thickness direction, bottom-center to top-center, rather than from the top-face winding with a z-positive flip.  This avoids false top/bottom inversions when a tile has inconsistent local winding or when a curved target has strong lateral normals.  Metrics now report target and animated tile top/bottom orientation diagnostics.
-
-## Smooth animation and orientation diagnostics patch
-
-- Adds a browser-side Plotly animation player for Paper PD frames. Frames are preloaded into Plotly and played in the browser, avoiding Streamlit reruns for every frame.
-- The Plotly scene uses `uirevision` and stable traces so users can rotate/zoom the camera during playback.
-- Adds a visible toggle for the blue T3D target mesh overlay in the physical animation view.
-- Adds an expander explaining the current extrusion convention:
-  - T3D: `bottom = top - thickness * quad_normal(K3D)`, where `_quad_normal` is flipped to have non-negative z.
-  - T2D: top face comes from K2D; bottom face uses the per-tile T3D top-to-bottom transform.
-  - Animation target contact normal uses `bottom_center -> top_center` rather than triangle winding.
-- Ensures Paper PD animation parameters include target guard settings in the simulation key and in DeploymentParameters.
+The middle-mouse pan helper is a browser-side compatibility layer around Plotly. If a browser blocks synthetic mouse event forwarding, the modebar `pan3d` button still provides the same camera-center movement.
