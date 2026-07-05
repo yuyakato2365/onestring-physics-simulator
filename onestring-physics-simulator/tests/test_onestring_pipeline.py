@@ -6,9 +6,11 @@ from onestring_physics.onestring_pipeline import (
     _detect_parameterization_reflection_symmetry,
     _m2d_connected_component_sizes,
     _mirror_csf_split_lines,
+    _orient_tile_normals_consistently,
     _parameterization_stretch_csf,
     _surface_peak_uvs,
     _split_m2d_along_existing_grid_line,
+    _weld_k3d_duplicate_reference_vertices,
     build_onestring_design,
     export_t2d_stl,
     inverse_map_uv_to_surface,
@@ -333,10 +335,46 @@ def test_k2d_not_identical_to_m2d_for_curved_targets():
     assert metrics["max_edge_length_error_after"] < metrics["max_edge_length_error_before"]
 
 
+def test_k3d_split_duplicate_vertices_remain_coincident_after_weld():
+    reference = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    optimized = reference.copy()
+    optimized[1] += np.asarray([0.0, 0.0, 0.2])
+    optimized[2] += np.asarray([0.0, 0.0, -0.2])
+
+    welded, metrics = _weld_k3d_duplicate_reference_vertices(reference, optimized)
+
+    assert metrics["k3d_split_duplicate_weld_applied"] is True
+    assert metrics["k3d_split_duplicate_weld_group_count"] == 1
+    assert np.allclose(welded[1], welded[2])
+
+
+def test_t3d_extrusion_normals_are_oriented_across_shared_edges():
+    raw_normals = np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]], dtype=float)
+    faces = np.asarray([[0, 1, 2, 3], [1, 4, 5, 2]], dtype=int)
+
+    oriented, metrics = _orient_tile_normals_consistently(raw_normals, faces)
+
+    assert np.dot(oriented[0], oriented[1]) > 0.0
+    assert metrics["t3d_extrusion_normal_flip_count"] == 1
+    assert metrics["t3d_extrusion_normal_inconsistent_edge_count"] == 0
+
+
 def test_t2d_uses_k2d_top_vertices_and_has_frumstum_geometry():
     target = create_builtin_shape("dome", {"amplitude": 0.6, "radius": 2.0})
     state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=8, max_2d_iterations=12))
     k2d_tiles = state.k2d_flat_layout.tile_top_vertices_3d
+
+    assert "t3d_extrusion_normal_flip_count" in state.tiles_3d.metrics
+    assert state.tiles_3d.metrics["t3d_extrusion_normal_inconsistent_edge_count"] == 0
+    assert state.tiles_3d.metrics["t3d_reversed_extrusion_vertex_count"] == 0
 
     top_to_k2d = np.max(np.abs(state.tiles_2d_top_hinge.vertices[:, :4, :2] - k2d_tiles[:, :, :2]))
     assert state.tiles_2d_top_hinge.metrics["top_vertices_match_k2d_max_error"] < 0.2

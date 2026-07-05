@@ -1930,12 +1930,69 @@ def _k3d_quality_reject_reason(metrics: dict[str, float], grid) -> str | None:
     return None
 
 
+def _weld_k3d_duplicate_reference_vertices(
+    reference_vertices: np.ndarray,
+    vertices: np.ndarray,
+    *,
+    tolerance: float = 1e-9,
+) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
+    reference = np.asarray(reference_vertices, dtype=float)
+    out = np.asarray(vertices, dtype=float).copy()
+    if len(reference) != len(out) or len(out) == 0:
+        return out, {
+            "k3d_split_duplicate_weld_applied": False,
+            "k3d_split_duplicate_weld_group_count": 0,
+            "k3d_split_duplicate_weld_vertex_count": 0,
+            "k3d_split_duplicate_weld_max_adjustment": 0.0,
+            "k3d_split_duplicate_weld_reason": "empty_or_mismatched_vertices",
+        }
+
+    scale = max(float(np.nanmax(np.ptp(reference, axis=0))), 1.0)
+    tol = max(float(tolerance), 1e-10 * scale)
+    buckets: dict[tuple[int, int, int], list[int]] = {}
+    for vertex_id, point in enumerate(reference):
+        key = tuple(int(round(float(coord) / tol)) for coord in point[:3])
+        buckets.setdefault(key, []).append(int(vertex_id))
+
+    group_count = 0
+    vertex_count = 0
+    max_adjustment = 0.0
+    for ids in buckets.values():
+        if len(ids) <= 1:
+            continue
+        pts = out[np.asarray(ids, dtype=int)]
+        mean = np.mean(pts, axis=0)
+        max_adjustment = max(max_adjustment, float(np.max(np.linalg.norm(pts - mean, axis=1))))
+        out[np.asarray(ids, dtype=int)] = mean
+        group_count += 1
+        vertex_count += len(ids)
+
+    return out, {
+        "k3d_split_duplicate_weld_applied": bool(group_count > 0),
+        "k3d_split_duplicate_weld_group_count": int(group_count),
+        "k3d_split_duplicate_weld_vertex_count": int(vertex_count),
+        "k3d_split_duplicate_weld_max_adjustment": float(max_adjustment),
+        "k3d_split_duplicate_weld_reason": "reference-coincident vertices kept coincident after K3D optimization",
+    }
+
+
 def _optimize_k3d(target, mesh, parameterization, params):
     out, report = _ORIGINAL_OPTIMIZE_K3D(target, mesh, parameterization, params)
+    welded_vertices, weld_metrics = _weld_k3d_duplicate_reference_vertices(mesh.vertices, out.vertices)
+    if bool(weld_metrics.get("k3d_split_duplicate_weld_applied", False)):
+        out = _original.QuadMesh(
+            welded_vertices,
+            np.asarray(out.faces, dtype=int).copy(),
+            out.grid,
+            out.stage,
+            dict(out.metrics),
+            list(getattr(out, "split_lines", [])),
+        )
     quality = _k3d_quality_metrics(mesh.vertices, out.vertices, mesh.faces)
     reject_reason = _k3d_quality_reject_reason(quality, mesh.grid)
     if reject_reason is None:
         out.metrics.update(quality)
+        out.metrics.update(weld_metrics)
         out.metrics.update(
             {
                 "k3d_solver_model": "numpy/scipy/torch least_squares_or_projective_approximation",
@@ -1954,6 +2011,7 @@ def _optimize_k3d(target, mesh, parameterization, params):
 
     metrics = dict(out.metrics)
     metrics.update(quality)
+    metrics.update(weld_metrics)
     metrics.update(
         {
             "k3d_quality_guard_rejected": True,
@@ -2034,9 +2092,60 @@ def _solve_bottom_vertex(
             return fallback, True
         if float(np.linalg.norm(out - fallback)) > max(10.0 * float(thickness), 1e-6):
             return fallback, True
+        signed_depth = float(np.dot(np.asarray(top[vertex_id], dtype=float) - out, face_normal))
+        if signed_depth <= max(0.05 * float(thickness), 1e-9):
+            return fallback, True
         return out, False
     except Exception:
         return fallback, True
+
+
+def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
+    normals = np.asarray(raw_normals, dtype=float).copy()
+    if len(normals) == 0:
+        return normals, {
+            "t3d_extrusion_normal_flip_count": 0,
+            "t3d_extrusion_normal_component_count": 0,
+            "t3d_extrusion_normal_inconsistent_edge_count": 0,
+        }
+
+    incidence = _build_edge_incidence(faces)
+    adjacency: list[list[tuple[int, bool]]] = [[] for _ in range(len(normals))]
+    for entries in incidence.values():
+        if len(entries) != 2:
+            continue
+        (tile_a, _edge_a), (tile_b, _edge_b) = entries
+        dot = float(np.dot(normals[tile_a], normals[tile_b]))
+        same_sign = dot >= 0.0
+        adjacency[tile_a].append((tile_b, same_sign))
+        adjacency[tile_b].append((tile_a, same_sign))
+
+    signs = np.zeros(len(normals), dtype=float)
+    component_count = 0
+    inconsistent = 0
+    for root in range(len(normals)):
+        if signs[root] != 0.0:
+            continue
+        component_count += 1
+        signs[root] = 1.0
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            for neighbor, same_sign in adjacency[current]:
+                wanted = signs[current] if same_sign else -signs[current]
+                if signs[neighbor] == 0.0:
+                    signs[neighbor] = wanted
+                    stack.append(neighbor)
+                elif signs[neighbor] != wanted:
+                    inconsistent += 1
+
+    signs[signs == 0.0] = 1.0
+    oriented = normals * signs[:, None]
+    return oriented, {
+        "t3d_extrusion_normal_flip_count": int(np.sum(signs < 0.0)),
+        "t3d_extrusion_normal_component_count": int(component_count),
+        "t3d_extrusion_normal_inconsistent_edge_count": int(inconsistent),
+    }
 
 
 def _extrude_tiles(mesh, thickness: float, stage: str):
@@ -2091,7 +2200,8 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
         )
         return assembly, report
 
-    normals = np.asarray([_original._quad_normal(top) for top in top_tiles], dtype=float)
+    raw_normals = np.asarray([_original._quad_normal(top) for top in top_tiles], dtype=float)
+    normals, normal_orientation_metrics = _orient_tile_normals_consistently(raw_normals, mesh.faces)
     raw_side_normals: list[list[np.ndarray]] = []
     for tile_id, top in enumerate(top_tiles):
         raw_side_normals.append([_edge_inward_normal(top, normals[tile_id], edge) for edge in local_edges])
@@ -2159,6 +2269,7 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
     face_planarity = _original._tile_face_planarity_by_group(vertices)
     signed_thickness = np.sum((vertices[:, :4] - vertices[:, 4:]) * normals[:, None, :], axis=2)
     thickness_error = signed_thickness - float(thickness)
+    reversed_extrusion_vertex_count = int(np.sum(signed_thickness <= 0.0))
     center_shift = np.mean(vertices[:, 4:], axis=1) - np.mean(vertices[:, :4], axis=1)
     normal_shift_error = np.linalg.norm(center_shift + float(thickness) * normals, axis=1)
 
@@ -2184,10 +2295,13 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
             "thickness_target": float(thickness),
             "thickness_error_rms": float(np.sqrt(np.mean(thickness_error * thickness_error))) if thickness_error.size else 0.0,
             "thickness_error_max": float(np.max(np.abs(thickness_error))) if thickness_error.size else 0.0,
+            "t3d_reversed_extrusion_vertex_count": int(reversed_extrusion_vertex_count),
+            "t3d_min_signed_thickness": float(np.min(signed_thickness)) if signed_thickness.size else 0.0,
             "normal_translation_center_shift_error_rms": float(np.sqrt(np.mean(normal_shift_error * normal_shift_error))) if normal_shift_error.size else 0.0,
             "internal_miter_edge_count": int(internal_miter_edge_count),
             "boundary_side_plane_count": int(boundary_side_plane_count),
             "nonmanifold_edge_count": int(nonmanifold_edge_count),
+            **normal_orientation_metrics,
             "bottom_vertex_solve_fallback_count": int(fallback_count),
             "t3d_bottom_vertex_solve_fallback_count": int(fallback_count),
             "t3d_max_bottom_vertex_jump": float(max_bottom_vertex_jump),
