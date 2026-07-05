@@ -2,8 +2,11 @@ from onestring_physics.input_shape import create_builtin_shape
 from onestring_physics.onestring_pipeline import (
     DeploymentParameters,
     PipelineParameters,
+    QuadMesh,
+    _canonicalize_faces_by_coincident_vertices,
     _csf_split_lines,
     _detect_parameterization_reflection_symmetry,
+    _extrude_tiles,
     _m2d_connected_component_sizes,
     _mirror_csf_split_lines,
     _orient_tile_normals_consistently,
@@ -392,6 +395,33 @@ def test_t3d_extrusion_normals_are_oriented_across_split_components():
     assert metrics["t3d_extrusion_normal_component_count"] == 2
     assert metrics["t3d_extrusion_normal_component_global_flip_count"] == 1
     assert np.all(oriented[:, 2] > 0.0)
+
+
+def test_split_coincident_edges_are_not_treated_as_open_outer_walls():
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=int)
+    mesh = QuadMesh(vertices, faces, None, "K3D")
+
+    canonical_faces, weld_metrics = _canonicalize_faces_by_coincident_vertices(vertices, faces)
+    assembly, _report = _extrude_tiles(mesh, 0.1, "T3D")
+
+    assert weld_metrics["split_virtual_weld_applied"] is True
+    assert len({int(v) for v in canonical_faces.reshape(-1)}) == 6
+    assert assembly.metrics["split_contact_miter_edge_count"] == 1
+    assert assembly.metrics["boundary_side_plane_count"] == 6
+    assert sorted(assembly.metrics["split_contact_side_edges"]) == [[0, 1], [1, 3]]
 
 
 def test_t2d_uses_k2d_top_vertices_and_has_frumstum_geometry():

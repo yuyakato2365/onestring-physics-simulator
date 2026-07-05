@@ -627,6 +627,11 @@ def add_tile_assembly(
     name: str = "tiles",
 ) -> None:
     faces = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    side_face_edges = [None, None, 0, 1, 2, 3]
+    hidden_side_edges = {
+        (int(tile_id), int(edge_id))
+        for tile_id, edge_id in getattr(assembly, "metrics", {}).get("split_contact_side_edges", [])
+    }
     lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
     x: list[float] = []
     y: list[float] = []
@@ -637,8 +642,11 @@ def add_tile_assembly(
     edge_x: list[float | None] = []
     edge_y: list[float | None] = []
     edge_z: list[float | None] = []
-    for tile in np.asarray(assembly.vertices, dtype=float):
-        for face in faces:
+    for tile_id, tile in enumerate(np.asarray(assembly.vertices, dtype=float)):
+        for face_id, face in enumerate(faces):
+            side_edge = side_face_edges[face_id]
+            if side_edge is not None and (int(tile_id), int(side_edge)) in hidden_side_edges:
+                continue
             base = len(x)
             pts = tile[list(face)]
             x.extend(pts[:, 0].tolist())
@@ -647,7 +655,14 @@ def add_tile_assembly(
             i_idx.extend([base, base])
             j_idx.extend([base + 1, base + 2])
             k_idx.extend([base + 2, base + 3])
-        for edge in [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]:
+        for edge_id, edge in enumerate([(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]):
+            local_side_edge = edge_id if edge_id < 4 else edge_id - 4 if edge_id < 8 else None
+            if local_side_edge is not None and edge_id >= 4 and (int(tile_id), int(local_side_edge)) in hidden_side_edges:
+                continue
+            if edge_id >= 8:
+                adjacent = {8: (0, 3), 9: (0, 1), 10: (1, 2), 11: (2, 3)}[edge_id]
+                if all((int(tile_id), int(e)) in hidden_side_edges for e in adjacent):
+                    continue
             pts = tile[list(edge)]
             edge_x.extend([pts[0, 0], pts[1, 0], None])
             edge_y.extend([pts[0, 1], pts[1, 1], None])

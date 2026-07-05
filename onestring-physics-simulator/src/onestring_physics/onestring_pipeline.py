@@ -112,6 +112,143 @@ def _build_edge_incidence(faces: np.ndarray) -> dict[tuple[int, int], list[tuple
     return incidence
 
 
+def _coincident_key(point: np.ndarray, tolerance: float) -> tuple[int, ...]:
+    scale = max(float(tolerance), 1e-12)
+    return tuple(np.round(np.asarray(point, dtype=float).reshape(-1) / scale).astype(np.int64).tolist())
+
+
+def _coincident_tolerance(vertices: np.ndarray) -> float:
+    pts = np.asarray(vertices, dtype=float)
+    if pts.size == 0:
+        return 1e-7
+    span = float(np.nanmax(pts) - np.nanmin(pts))
+    return max(1e-7, span * 1e-7)
+
+
+def _canonicalize_faces_by_coincident_vertices(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    tolerance: float | None = None,
+) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
+    """Weld reference-coincident split vertex ids for layout/connectivity only."""
+    faces_arr = np.asarray(faces, dtype=int)
+    verts = np.asarray(vertices, dtype=float)
+    if faces_arr.size == 0 or verts.size == 0:
+        return faces_arr.copy(), {
+            "split_virtual_weld_applied": False,
+            "split_virtual_weld_group_count": 0,
+            "split_virtual_weld_vertex_count": 0,
+        }
+    if int(np.max(faces_arr)) >= len(verts):
+        return faces_arr.copy(), {
+            "split_virtual_weld_applied": False,
+            "split_virtual_weld_group_count": 0,
+            "split_virtual_weld_vertex_count": 0,
+            "split_virtual_weld_reason": "face_index_outside_vertex_array",
+        }
+
+    tol = _coincident_tolerance(verts) if tolerance is None else float(tolerance)
+    groups: dict[tuple[int, ...], list[int]] = {}
+    used = sorted({int(v) for v in faces_arr.reshape(-1)})
+    for idx in used:
+        groups.setdefault(_coincident_key(verts[idx], tol), []).append(idx)
+
+    canonical = {idx: idx for idx in used}
+    group_count = 0
+    vertex_count = 0
+    for ids in groups.values():
+        if len(ids) <= 1:
+            continue
+        root = int(min(ids))
+        group_count += 1
+        vertex_count += len(ids)
+        for idx in ids:
+            canonical[int(idx)] = root
+
+    if group_count == 0:
+        return faces_arr.copy(), {
+            "split_virtual_weld_applied": False,
+            "split_virtual_weld_group_count": 0,
+            "split_virtual_weld_vertex_count": 0,
+        }
+
+    welded = faces_arr.copy()
+    for old, new in canonical.items():
+        if old != new:
+            welded[welded == old] = new
+    return welded, {
+        "split_virtual_weld_applied": True,
+        "split_virtual_weld_group_count": int(group_count),
+        "split_virtual_weld_vertex_count": int(vertex_count),
+        "split_virtual_weld_tolerance": float(tol),
+        "split_virtual_weld_reason": "reference-coincident split vertices treated as connected for layout/contact constraints",
+    }
+
+
+def _canonicalize_faces_by_coincident_tile_tops(
+    top_tiles: np.ndarray,
+    faces: np.ndarray,
+    *,
+    tolerance: float | None = None,
+) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
+    faces_arr = np.asarray(faces, dtype=int)
+    tops = np.asarray(top_tiles, dtype=float)
+    if faces_arr.size == 0 or tops.size == 0 or len(tops) != len(faces_arr):
+        return faces_arr.copy(), {
+            "split_virtual_weld_applied": False,
+            "split_virtual_weld_group_count": 0,
+            "split_virtual_weld_vertex_count": 0,
+            "split_virtual_weld_reason": "empty_or_mismatched_tile_tops",
+        }
+
+    coords_by_vertex: dict[int, list[np.ndarray]] = {}
+    for tile_id, face in enumerate(faces_arr):
+        for local_id, vertex_id in enumerate(face):
+            coords_by_vertex.setdefault(int(vertex_id), []).append(np.asarray(tops[tile_id, local_id], dtype=float))
+    if not coords_by_vertex:
+        return faces_arr.copy(), {
+            "split_virtual_weld_applied": False,
+            "split_virtual_weld_group_count": 0,
+            "split_virtual_weld_vertex_count": 0,
+        }
+
+    max_id = max(coords_by_vertex)
+    vertices = np.zeros((max_id + 1, tops.shape[-1]), dtype=float)
+    for vertex_id, coords in coords_by_vertex.items():
+        vertices[int(vertex_id)] = np.mean(np.asarray(coords, dtype=float), axis=0)
+    return _canonicalize_faces_by_coincident_vertices(vertices, faces_arr, tolerance=tolerance)
+
+
+def _coincident_boundary_edge_pairs(
+    top_tiles: np.ndarray,
+    faces: np.ndarray,
+    *,
+    tolerance: float | None = None,
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Pair split boundary edges that occupy the same geometric segment."""
+    local_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    tops = np.asarray(top_tiles, dtype=float)
+    incidence = _build_edge_incidence(faces)
+    if tops.size == 0:
+        return []
+    tol = _coincident_tolerance(tops.reshape(-1, tops.shape[-1])) if tolerance is None else float(tolerance)
+    buckets: dict[tuple[tuple[int, ...], tuple[int, ...]], list[tuple[int, int]]] = {}
+    for entries in incidence.values():
+        if len(entries) != 1:
+            continue
+        tile_id, edge_id = entries[0]
+        a, b = local_edges[int(edge_id)]
+        key = tuple(sorted((_coincident_key(tops[tile_id, a], tol), _coincident_key(tops[tile_id, b], tol))))
+        buckets.setdefault(key, []).append((int(tile_id), int(edge_id)))
+
+    pairs: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    for entries in buckets.values():
+        if len(entries) == 2 and entries[0][0] != entries[1][0]:
+            pairs.append((entries[0], entries[1]))
+    return pairs
+
+
 def _parameterization_stretch_csf(parameterization) -> np.ndarray:
     """Estimate per-UV-vertex conformal stretch from paired 3D/UV mesh edges."""
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
@@ -2234,12 +2371,17 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
 
     side_normals: list[list[np.ndarray]] = [[raw_side_normals[i][e].copy() for e in range(4)] for i in range(tile_count)]
     incidence = _build_edge_incidence(mesh.faces)
+    split_edge_pairs = _coincident_boundary_edge_pairs(top_tiles, mesh.faces)
+    split_edge_entries = {entry for pair in split_edge_pairs for entry in pair}
     internal_miter_edge_count = 0
+    split_contact_miter_edge_count = 0
     boundary_side_plane_count = 0
     nonmanifold_edge_count = 0
 
     for entries in incidence.values():
         if len(entries) == 1:
+            if entries[0] in split_edge_entries:
+                continue
             boundary_side_plane_count += 1
             continue
         if len(entries) != 2:
@@ -2254,6 +2396,16 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
         side_normals[tile_a][edge_a] = miter
         side_normals[tile_b][edge_b] = -miter
         internal_miter_edge_count += 1
+
+    for (tile_a, edge_a), (tile_b, edge_b) in split_edge_pairs:
+        q_a = raw_side_normals[tile_a][edge_a]
+        q_b = raw_side_normals[tile_b][edge_b]
+        miter = _normalize(q_a - q_b, q_a)
+        if float(np.linalg.norm(miter)) <= 1e-12:
+            miter = q_a
+        side_normals[tile_a][edge_a] = miter
+        side_normals[tile_b][edge_b] = -miter
+        split_contact_miter_edge_count += 1
 
     fallback_count = 0
     max_bottom_vertex_jump = 0.0
@@ -2325,6 +2477,9 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
             "t3d_min_signed_thickness": float(np.min(signed_thickness)) if signed_thickness.size else 0.0,
             "normal_translation_center_shift_error_rms": float(np.sqrt(np.mean(normal_shift_error * normal_shift_error))) if normal_shift_error.size else 0.0,
             "internal_miter_edge_count": int(internal_miter_edge_count),
+            "split_contact_miter_edge_count": int(split_contact_miter_edge_count),
+            "split_contact_side_edges": [[int(tile_id), int(edge_id)] for tile_id, edge_id in sorted(split_edge_entries)],
+            "split_contact_side_face_hidden_in_viewer": bool(split_contact_miter_edge_count > 0),
             "boundary_side_plane_count": int(boundary_side_plane_count),
             "nonmanifold_edge_count": int(nonmanifold_edge_count),
             **normal_orientation_metrics,
@@ -2359,6 +2514,7 @@ _ORIGINAL_MAKE_T2D_FROM_TRANSFORMS = _original._make_t2d_from_transforms
 
 _ORIGINAL_OPTIMIZE_T2D_FOOTPRINT_LAYOUT = _original._optimize_t2d_footprint_layout
 _ORIGINAL_OPTIMIZE_RIGID_ASSEMBLY_HINGE_LAYOUT_2D = _original._optimize_rigid_assembly_hinge_layout_2d
+_ORIGINAL_OPTIMIZE_DUAL_HINGES = _original._optimize_dual_hinges
 
 
 def _grid_with_layout_gap(grid, minimum_gap: float):
@@ -2688,6 +2844,20 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
     except Exception:
         mesh_2d = original_mesh_2d
 
+    layout_faces, layout_weld_metrics = _canonicalize_faces_by_coincident_vertices(
+        np.asarray(mesh_3d.vertices, dtype=float),
+        np.asarray(mesh_2d.faces, dtype=int),
+    )
+    if bool(layout_weld_metrics.get("split_virtual_weld_applied", False)):
+        mesh_2d = _original.QuadMesh(
+            np.asarray(mesh_2d.vertices, dtype=float).copy(),
+            layout_faces,
+            mesh_2d.grid,
+            mesh_2d.stage,
+            dict(mesh_2d.metrics),
+            list(getattr(mesh_2d, "split_lines", [])),
+        )
+
     base_assembly, base_report = _ORIGINAL_MAKE_T2D_FROM_TRANSFORMS(
         mesh_2d,
         flat_layout,
@@ -2752,6 +2922,10 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
             "top_face_planarity_error": face_planarity["top"],
             "bottom_face_planarity_error": face_planarity["bottom"],
             "side_face_planarity_error": face_planarity["side"],
+            "t2d_split_virtual_weld_applied": bool(layout_weld_metrics.get("split_virtual_weld_applied", False)),
+            "t2d_split_virtual_weld_group_count": int(layout_weld_metrics.get("split_virtual_weld_group_count", 0)),
+            "t2d_split_virtual_weld_vertex_count": int(layout_weld_metrics.get("split_virtual_weld_vertex_count", 0)),
+            "t2d_split_virtual_weld_reason": str(layout_weld_metrics.get("split_virtual_weld_reason", "")),
             **_original._tile_orientation_metrics(placed_vertices, "t2d"),
         }
     )
@@ -2775,6 +2949,31 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
         counts=_original._assembly_counts(repaired),
     )
     return repaired, report
+
+
+def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_callback=None):
+    hinge_faces, hinge_weld_metrics = _canonicalize_faces_by_coincident_tile_tops(
+        np.asarray(t3d.vertices, dtype=float)[:, :4, :],
+        np.asarray(mesh_faces, dtype=int),
+    )
+    out, hinge_graph, report = _ORIGINAL_OPTIMIZE_DUAL_HINGES(
+        grid,
+        hinge_faces,
+        t2d,
+        t3d,
+        params,
+        progress_callback,
+    )
+    metrics = {
+        "dual_hinge_split_virtual_weld_applied": bool(hinge_weld_metrics.get("split_virtual_weld_applied", False)),
+        "dual_hinge_split_virtual_weld_group_count": int(hinge_weld_metrics.get("split_virtual_weld_group_count", 0)),
+        "dual_hinge_split_virtual_weld_vertex_count": int(hinge_weld_metrics.get("split_virtual_weld_vertex_count", 0)),
+        "dual_hinge_split_virtual_weld_reason": str(hinge_weld_metrics.get("split_virtual_weld_reason", "")),
+        "dual_hinge_constraint_faces": "split-coincident vertex ids are welded for hinge connectivity only",
+    }
+    out.metrics.update(metrics)
+    hinge_graph.metrics.update(metrics)
+    return out, hinge_graph, report
 
 
 def _resolve_t2d_assembly(source, stage: str = "dual_hinge"):
@@ -2955,6 +3154,7 @@ _original._make_flat_tile_layout = _make_flat_tile_layout
 _original._optimize_t2d_footprint_layout = _optimize_t2d_footprint_layout
 _original._optimize_rigid_assembly_hinge_layout_2d = _optimize_rigid_assembly_hinge_layout_2d
 _original._make_t2d_from_transforms = _make_t2d_from_transforms
+_original._optimize_dual_hinges = _optimize_dual_hinges
 
 # Re-export the original module's API from this wrapper.
 for _name, _value in _original.__dict__.items():
@@ -2972,6 +3172,7 @@ for _name, _value in _original.__dict__.items():
         "_lift_m2d_to_m3d",
         "_optimize_k3d",
         "_make_flat_tile_layout",
+        "_optimize_dual_hinges",
         "PipelineParameters",
     }:
         continue
@@ -2988,6 +3189,7 @@ globals()["_make_flat_tile_layout"] = _make_flat_tile_layout
 globals()["_optimize_t2d_footprint_layout"] = _optimize_t2d_footprint_layout
 globals()["_optimize_rigid_assembly_hinge_layout_2d"] = _optimize_rigid_assembly_hinge_layout_2d
 globals()["_make_t2d_from_transforms"] = _make_t2d_from_transforms
+globals()["_optimize_dual_hinges"] = _optimize_dual_hinges
 globals()["export_t2d_stl"] = export_t2d_stl
 globals()["SIDEFACE_CONTACT_PATCH_ACTIVE"] = True
 globals()["SIDEFACE_CONTACT_PATCH_ORIGINAL_PATH"] = str(_ORIGINAL_PATH)
