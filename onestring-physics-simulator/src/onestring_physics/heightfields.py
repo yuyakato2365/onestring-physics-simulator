@@ -49,6 +49,14 @@ class HeightField:
             # hyotan/gourd shell rather than a symmetric dumbbell.
             asym = 0.92 + 0.08 * np.tanh(-0.8 * yn)
             return amp * crown * asym
+        if self.kind == "snowman_half":
+            outline = self._snowman_half_outline(x, y)
+            return amp * np.sqrt(np.maximum(0.0, outline))
+        if self.kind == "snowman_full":
+            left = self._snowman_lobe_outline(x, y, center_y=-0.46, scale=1.0)
+            right = self._snowman_lobe_outline(x, y, center_y=0.46, scale=0.78)
+            neck = self._snowman_neck_outline(x, y)
+            return amp * np.sqrt(np.maximum(0.0, np.maximum.reduce([left, right, 0.55 * neck])))
         if self.kind == "sampled" and self.points is not None:
             return self._nearest_height(x, y)
         raise ValueError(f"unknown height field kind: {self.kind}")
@@ -64,6 +72,13 @@ class HeightField:
         y = np.asarray(y, dtype=float)
         if self.kind in {"half_gourd", "gourd_half", "hyotan_half", "hyoutan_half"}:
             return self._half_gourd_outline(x, y) > 0.0
+        if self.kind == "snowman_half":
+            return self._snowman_half_outline(x, y) > 0.0
+        if self.kind == "snowman_full":
+            left = self._snowman_lobe_outline(x, y, center_y=-0.46, scale=1.0)
+            right = self._snowman_lobe_outline(x, y, center_y=0.46, scale=0.78)
+            neck = self._snowman_neck_outline(x, y)
+            return np.maximum.reduce([left, right, neck]) > 0.0
         return np.ones_like(x, dtype=bool)
 
     def _half_gourd_outline(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -79,6 +94,25 @@ class HeightField:
         y_extent = 1.08
         # Superellipse in y keeps both ends rounded while leaving a visible waist.
         return 1.0 - (x / np.maximum(half_width, 1e-8)) ** 2 - (np.abs(yn) / y_extent) ** 4
+
+    def _snowman_lobe_outline(self, x: np.ndarray, y: np.ndarray, *, center_y: float, scale: float) -> np.ndarray:
+        radius = float(self.parameters.get("radius", 1.8))
+        yn = y / max(radius, 1e-8)
+        xn = x / max(radius, 1e-8)
+        rx = 0.48 * float(scale)
+        ry = 0.42 * float(scale)
+        return 1.0 - (xn / max(rx, 1e-8)) ** 2 - ((yn - float(center_y)) / max(ry, 1e-8)) ** 2
+
+    def _snowman_neck_outline(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        radius = float(self.parameters.get("radius", 1.8))
+        yn = y / max(radius, 1e-8)
+        xn = x / max(radius, 1e-8)
+        return 1.0 - (xn / 0.24) ** 2 - (yn / 0.34) ** 4
+
+    def _snowman_half_outline(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        lobe = self._snowman_lobe_outline(x, y, center_y=-0.15, scale=1.0)
+        skirt = 0.65 * self._snowman_neck_outline(x, y)
+        return np.maximum(lobe, skirt)
 
     def sample_grid(self, nx: int, ny: int, tile_size: float) -> np.ndarray:
         xs = (np.arange(nx + 1) - nx / 2.0) * tile_size
@@ -109,5 +143,11 @@ def make_height_field(kind: str, parameters: dict[str, Any] | None = None) -> He
         "hyoutan": "half_gourd",
         "hyotan_half": "half_gourd",
         "hyoutan_half": "half_gourd",
+        "snowman": "snowman_full",
+        "two_dome_with_neck": "snowman_full",
+        "two-dome-with-neck": "snowman_full",
+        "snowman-full": "snowman_full",
+        "snowman half": "snowman_half",
+        "snowman-half": "snowman_half",
     }
     return HeightField(aliases.get(normalized, normalized), dict(parameters or {}))

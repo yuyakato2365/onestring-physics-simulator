@@ -1,0 +1,37 @@
+# Paper Compliance Audit
+
+This file is intentionally strict.  It should prevent the simulator from calling
+debug, approximation, heuristic, fallback, or experimental behavior
+"paper-compliant" just because it runs.
+
+| Stage | Paper expectation | Current implementation | Function/file | Status | Risk of contradiction | Metrics added | Next correction target |
+|---|---|---|---|---|---|---|---|
+| S input surface | Target surface mesh is the design surface. | Built-in height fields, sampled meshes, and debug snowman variants are supported. | `heightfields.py`, `input_shape.py` | Approximation | Built-in analytic surfaces may hide mesh/topology issues. | `surface_vertex_count`, `surface_triangle_count` | Keep real mesh inputs separate from analytic debug shapes. |
+| S -> Omega parameterization | Paper uses a conformal/BFF-style surface parameterization. | Default is `pca_debug` with `shape_preserving_experimental`; rectangular mode is `rectangular_debug`; `paper_default` is unimplemented and stops. | `_build_surface_parameterization` in `onestring_pipeline.py` | Experimental / Unimplemented | PCA projection is not conformal and must not be called paper-like. | `parameterization_method`, `parameterization_exactness_label`, `parameterization_warning` | Implement real LSCM/BFF/ARAP path or keep paper mode disabled. |
+| Omega boundary | Boundary should come from the paper parameterization, not arbitrary square forcing. | `shape_preserving_experimental` preserves projected outline; `rectangular_debug` is explicitly debug. | `_shape_preserving_projected_uv` | Experimental / Debug | Boundary preservation by PCA may self-overlap or distort necks. | `omega_boundary_mode`, `omega_boundary_forced_rectangle`, `boundary_self_intersection_count` | Add polygon-aware, conformal parameterization with robust boundary. |
+| CSF computation | Paper uses conformal scale factor from its parameterization. | Current CSF is an edge-stretch proxy from 3D/UV edge ratios. | `_parameterization_stretch_csf` | Approximation | Edge proxy may over/under detect valleys and necks. | `csf_model=edge_stretch_proxy`, `csf_median`, `csf_p95`, `csf_max` | Compute CSF from real conformal map once implemented. |
+| CSF split placement | Paper splits high stretch regions. | Peak-guided, mirror, and grid-line snapped split are heuristics. | `_csf_split_lines`, `_split_m2d_along_existing_grid_line` | Heuristic | Split can impose symmetry/path choices not derived from paper solver. | `csf_split_exactness_label`, `split_locations`, `m2d_*_after_split` | Implement paper split criterion on true CSF field. |
+| M2D grid generation | Overlay grid on Omega and crop according to the planar domain. | Current selection is original cell-center/strict-vertices policy, not polygon-area clipping. | `_build_m2d` | Approximation | Non-rectangular Omega can retain or remove wrong cells. | `m2d_selection_model`, `m2d_boundary_clipping_used`, `m2d_cell_center_only_selection_used` | Add polygon-aware clipping or area-threshold selection. |
+| M2D -> M3D inverse map | Map Omega samples back to S through the stored parameterization. | UV triangle lookup and barycentric inverse map; failures are counted. | `_lift_m2d_to_m3d`, `inverse_map_uv_to_surface` | Approximation | Depends on non-paper Omega quality; nearest fallback can hide errors. | `m3d_uv_lookup_failure_count`, `m3d_outside_uv_triangle_count`, `m3d_nearest_fallback_count` | Remove fallback after robust parameterization/lookup. |
+| K3D optimization | Paper uses projection stack with `E_Planar + E_Square + E_Surface`. | Lightweight NumPy/SciPy/PyTorch residual solve with quality guard. | `_optimize_k3d` | Approximation / Fallback | Fallback to M3D can be mistaken for K3D success. | `k3d_solver_model`, `k3d_objective_terms`, `k3d_quality_rejected`, `k3d_fallback_used` | Implement or bind actual ShapeOp/libigl-style solver. |
+| T3D extrusion | Fabrication thickness and side geometry should be physically meaningful. | Miter/contact-plane extrusion is experimental with fallback guards. | `_extrude_tiles`, `_solve_bottom_vertex` | Experimental / Fallback | Plane intersections can jump far for poor K3D topology. | `t3d_extrusion_model`, `t3d_bottom_vertex_solve_fallback_count`, `t3d_max_bottom_vertex_jump` | Add robust contact-plane solve and reject invalid solids. |
+| K2D | Flat shared mesh should match K3D edge lengths. | Current K2D uses local/global/least-squares approximations. | original `_optimize_k2d` and wrapper helpers | Approximation | Edge matching may pass while tile layout remains poor. | existing edge error metrics | Keep K2D separate from T2D fabrication layout quality. |
+| T2D | Flat fabrication linkage with rigid tiles and hinges. | Current T2D is original flat layout plus rigid placement repair of mitered T3D tiles. | `_make_t2d_from_transforms` | Approximation | Repair can preserve geometry while not matching paper hinge optimization exactly. | existing T2D shape/hinge metrics plus STL export metrics | Replace with paper E_Hinge solver if exactness is required. |
+| T2D STL export | Export manufacturable flat layout. | Current export writes T2D layout as thin-plate STL with fixed panel size `0.1`. | `export_t2d_stl` | Fabrication export | STL output does not certify upstream paper compliance. | `t2d_tile_count`, `t2d_vertex_count`, `t2d_face_count`, `t2d_export_panel_size`, `t2d_nonmanifold_edge_count` | Add per-tile metadata and manufacturing tolerances. |
+| String path / actuation simulation | Paper-specific string routing and actuation behavior. | Projective-dynamics-style snap/lift/rigid/collision constraints. | `simulate_onestring_deployment`, `animation.py` | Approximation | Visual deployment may look plausible while not matching paper dynamics. | existing deployment metrics | Separate visual demo from paper solver claims. |
+
+## Current Rule
+
+Do not label the following as paper-like without a real implementation:
+
+- PCA projection
+- height-field shortcut
+- cell-center grid crop
+- peak-guided split
+- mirror split
+- grid-line split snapping
+- K3D quality fallback to M3D
+- T3D miter/contact-plane fallback
+
+If one of these paths is used, it must appear in metrics as debug,
+approximation, heuristic, fallback, or experimental.

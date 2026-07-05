@@ -2,7 +2,7 @@
 
 A Python research prototype inspired by **One String to Pull Them All: Fast Assembly of Curved Structures from Flat Auxetic Linkages**.
 
-This simulator implements a paper-faithful approximation of the OneString pipeline. It is not a direct morphing animation to the target surface. The design pipeline explicitly stores `S`, `Omega`, `M2D`, `M3D`, `K2D`, `K3D`, `T2D`, and `T3D`. The actuation simulation follows a Projective-Dynamics-style constraint formulation using rigid tiles, hinge constraints, collision constraints, snap constraints, and lift constraints.
+This simulator is a paper-audited OneString research prototype, not a complete paper implementation. It is not a direct morphing animation to the target surface. The design pipeline explicitly stores `S`, `Omega`, `M2D`, `M3D`, `K2D`, `K3D`, `T2D`, and `T3D`, but several stages are marked as debug, approximation, heuristic, fallback, or experimental in metrics. In particular, PCA projection, height-field shortcuts, grid crop, heuristic split, and fallback behavior must not be treated as paper-compliant substitutes.
 
 The default Streamlit workflow is:
 
@@ -15,6 +15,269 @@ S -> Omega -> M2D / M3D -> K2D / K3D -> T2D / T3D
 ```
 
 The deployed physical error is evaluated against the designed assembled tile configuration `T3D`, not against the raw target surface `S`.
+
+## 論文の流れと、この実装の流れ
+
+このリポジトリは、OneString 論文の処理順と物理的な意図を観察するための **paper-audited prototype** です。論文と同じ概念的パイプラインを追いますが、論文の ShapeOp / libigl / fabrication solver を完全移植したものではありません。PCA projection、height-field shortcut、grid crop、heuristic split、fallback は paper-like とは扱わず、debug / approximation / heuristic / fallback / experimental として metrics に残します。
+
+### 論文側の大きな流れ
+
+論文の全体像は、目標曲面 `S` から、平面製造可能な auxetic linkage と、それを紐で引いたときの組み立て挙動を作る流れです。
+
+```text
+S
+-> Omega
+-> M2D
+-> M3D
+-> K3D
+-> T3D
+
+M2D
+-> K2D
+-> T2D
+-> lift point / string path
+-> string-driven actuation simulation
+```
+
+各段階の意味は次の通りです。
+
+- `S`: 入力の目標曲面。
+- `Omega`: `S` を平面に写したパラメータ領域。論文では BFF/LSCM 系の曲面パラメータ化を使う。
+- `M2D`: `Omega` 上に敷いた初期 quad mesh。
+- `M3D`: `M2D` を逆写像 `c^{-1}: Omega -> S` で曲面上に戻した mesh。
+- `K3D`: planarity、square、surface fit を満たすように最適化した 3D mesh。
+- `T3D`: `K3D` を厚みのある tile assembly にした、設計上の組み立て後形状。
+- `K2D`: `K3D` の edge length に合うように作る平面 mesh。
+- `T2D`: 製造時の flat tile linkage。hinge、gap、string channel を持つ。
+
+論文の assembled configuration は、おおまかに次のエネルギーを最小化します。
+
+$$
+E_{\mathrm{Assembled}}(x)
+= \omega_1 E_{\mathrm{Planar}}(x)
++ \omega_2 E_{\mathrm{Square}}(x)
++ \omega_3 E_{\mathrm{Surface}}(x)
+$$
+
+ここで `E_Planar` は quad が平面であること、`E_Square` は quad が正方形的な形を保つこと、`E_Surface` は目標曲面 `S` に沿うことを表します。読みやすく書けば、planarity は次のような「各 quad を best-fit plane に投影したときのずれ」です。
+
+$$
+E_{\mathrm{Planar}}
+= \sum_{q}
+\left\|
+V_q - P_{\mathrm{plane}}(V_q)
+\right\|_F^2
+$$
+
+平面側の `K2D` は、`K3D` の edge length を保ちながら、製造可能な gap と衝突しない配置を探します。
+
+$$
+E_{\mathrm{Flat}}(x)
+= \omega_1 E_{\mathrm{Edge}}(x)
++ \omega_2 E_{\mathrm{Collision}}(x)
++ \omega_3 E_{\mathrm{Fab}}(x)
+$$
+
+その後、`T2D` の hinge layout では、tile が剛体であること、tile 同士が衝突しないこと、hinge connection が閉じることを同時に扱います。
+
+$$
+E_{\mathrm{Hinge}}(x)
+= \omega_1 E_{\mathrm{Rigid}}(x)
++ \omega_2 E_{\mathrm{Collision}}(x)
++ \omega_3 E_{\mathrm{Conn}}(x)
+$$
+
+最後に、lift point と string path を決め、紐を引いたときにどの gap が閉じ、どの場所が持ち上がるかをシミュレーションします。概念的には actuation energy は snap と lift に分かれます。
+
+$$
+E_{\mathrm{Simulation}}(x)
+= \omega_1 E_{\mathrm{Rigid}}(x)
++ \omega_2 E_{\mathrm{Collision}}(x)
++ \omega_3 E_{\mathrm{Actuation}}(x)
+$$
+
+$$
+E_{\mathrm{Actuation}}
+= E_{\mathrm{Snap}} + E_{\mathrm{Lift}}
+$$
+
+snap は、string path 上の向かい合う side-face midpoint を閉じる制約です。
+
+$$
+E_{\mathrm{Snap}}
+= \sum_{(a,b) \in R}
+\left\|
+m_a(x) - m_b(x)
+\right\|_2^2
+$$
+
+lift は、選ばれた lift gap 周辺を prescribed 3D target に近づける制約です。
+
+$$
+E_{\mathrm{Lift}}
+= \sum_{\ell \in L}
+\left\|
+c_\ell(x) - p_\ell^{\mathrm{target}}
+\right\|_2^2
+$$
+
+### この実装側の大きな流れ
+
+この実装の実際の入口は `build_onestring_design(...)` と `simulate_onestring_deployment(...)` です。アプリの通常経路では、以下の順番で `OneStringDesignState` を作ります。
+
+```text
+target surface S
+-> shape-preserving projected Omega
+-> oversized Omega grid + crop -> M2D
+-> UV triangle lookup / barycentric inverse map -> M3D
+-> K3D optimization
+-> T3D extrusion
+-> K2D edge-length optimization
+-> independent K2D tile layout
+-> T2D top hinge
+-> T2D dual hinge
+-> gap graph
+-> GPE threshold lift points
+-> boundary-first string path
+-> Projective-Dynamics-style snap/lift deployment
+```
+
+実装では、`S -> Omega` は BFF/LSCM の完全実装ではなく、入力曲面 `S` の境界形状を2D投影で保つ lightweight parameterization です。以前のように境界を単純な四角へ固定せず、雪だるま型やくびれを持つ入力では `Omega` もその外形に近い境界を持ちます。`M2D -> M3D` は、`M2D` の UV 点を `Omega` 上の三角形に探し、barycentric coordinates で `S` 上の点へ戻します。
+
+$$
+p_{3D}
+= \lambda_1 s_1 + \lambda_2 s_2 + \lambda_3 s_3,
+\quad
+\lambda_1+\lambda_2+\lambda_3=1
+$$
+
+`K3D` では、論文の `E_Assembled` と同じ目的を保ちつつ、実装上は planarity / square / surface residual を NumPy / SciPy / PyTorch で解きます。大きく破綻して平らにつぶれる結果は downstream に流さず、guard で拒否します。
+
+`K2D` では、`K3D` と edge length が合うことをまず優先します。中規模以上の grid では、重い collision relaxation を `K2D` 内で無理に回さず、collision-aware な配置を後段の independent tile layout / dual hinge layout に寄せています。
+
+`T2D` では、shared mesh としての `K2D` をそのまま製造形状とは見なしません。`K2D` の各 face を独立 tile として扱い、pairwise hinge と gap を持つ flat linkage に変換します。さらに dual hinge layout で、各 tile を rigid SE(2) pose として動かしながら、
+
+- `E_Rigid`: tile shape を保つ
+- `E_Conn`: hinge vertex pair を近づける
+- `E_Collision`: tile overlap を避ける
+
+を local/global projection 的に解きます。
+
+### Actuation / animation の違い
+
+**一番大事な違い:** 論文は「実物の flat linkage を一本の紐で引くと、どのように組み上がるか」を扱っています。この実装のアニメーションは、その現象をそのまま厳密に再現するのではなく、「紐で起きるはずの効果」をいくつかの制約に置き換えて、タイルがどう動くかを近似的に見せています。
+
+もう少し具体的にいうと、論文のアニメーション的な考え方は次のようなものです。
+
+```text
+実物の紐を引く
+-> 紐が channel を通る
+-> channel / gap に力が伝わる
+-> 必要な場所が閉じる
+-> lift point が持ち上がる
+-> 剛体タイルがヒンジまわりに動いて 3D 形状になる
+```
+
+この実装では、紐そのものは粒子やワイヤとしてシミュレーションしていません。代わりに、次のように置き換えています。
+
+```text
+string path を先に計算する
+-> その path 上の gap に snap constraint をかける
+-> lift point に lift constraint をかける
+-> hinge constraint で接続を保つ
+-> rigid projection で各 tile の形を保つ
+-> collision projection で大きな重なりを避ける
+-> その途中経過を frame として保存して再生する
+```
+
+つまり、画面で見えている動きは **「紐の物理そのもの」ではなく、「紐が作るはずの効果を制約として入れたタイル運動」** です。ここが一番の違いです。
+
+アニメーションを理解するときは、次の3段階に分けると分かりやすいです。
+
+1. `T2D dual hinge` が出発点です。
+   これは製造前の平らなタイル配置です。アニメーションはここから始まります。
+
+2. `string path` が「どの gap を動かすか」を決めます。
+   ただし、紐のたるみ、張力波、接触摩擦、実際の曲げは直接解いていません。path 上の gap に「閉じる方向の制約」を与えます。
+
+3. solver が snap / lift / hinge / rigid / collision を何度も投影します。
+   その結果、タイルが少しずつ `T3D` に近づきます。この途中結果が `DeploymentResult.frames` で、アプリはそれを再生しています。
+
+比較表でいうと、こうです。
+
+| 観点 | 論文・実物で起きること | この実装でやっていること |
+| --- | --- | --- |
+| 紐 | 実際に channel を通って引かれる | 紐そのものは解かず、先に `string_path` を決める |
+| 張力 | 紐の張力が gap や lift point に伝わる | snap / lift の位置制約として代用する |
+| gap が閉じる動き | 紐に引かれて channel/gap が閉じる | side-face midpoint pair を目標距離へ近づける |
+| 持ち上がり | lift point が構造を起こす | lift gap 周辺 tile center を 3D target へ近づける |
+| タイル | 剛体パネルとしてヒンジまわりに動く | Kabsch/SVD projection で各 tile を剛体形状に戻す |
+| ヒンジ | 隣のタイルと接続されたまま回転する | hinge vertex pair を近づける constraint をかける |
+| 衝突 | 実物同士が接触して押し合う | 軽量な AABB / bounded projection で重なりを減らす |
+| アニメーション | 物理現象の観察・検証 | 近似 solver の保存 frame を再生 |
+
+したがって、このアニメーションは次のどちらでもありません。
+
+- 単なる見た目の補間: `T2D` と `T3D` を直線的に混ぜているだけではありません。
+- 完全な実物物理: 紐の張力、摩擦、接触、慣性を厳密に解いているわけでもありません。
+
+いちばん正確な言い方は、**「OneString の紐駆動で起きる主要な効果を、snap / lift / hinge / rigid / collision 制約として近似し、その solver の途中経過を再生している」** です。
+
+各 simulation step では、進行度 `alpha` を 0 から 1 に上げながら、以下の投影を反復します。
+
+```text
+velocity / damping update
+-> lift projection
+-> snap projection
+-> hinge projection
+-> rigid tile projection
+-> collision projection
+-> target pose/contact guard
+-> optional final rigid projection
+```
+
+snap projection は、現在の side-face midpoint `p_a, p_b` を見て、string path 上の gap を目標 separation に近づけます。
+
+$$
+p_{\mathrm{mid}} = \frac{p_a + p_b}{2}
+$$
+
+$$
+d_{\mathrm{desired}}(\alpha)
+= (1-\alpha)d_{\mathrm{rest}} + \alpha d_{\mathrm{target}}
+$$
+
+$$
+p_a^\* = p_{\mathrm{mid}} + \frac{1}{2}d_{\mathrm{desired}},
+\quad
+p_b^\* = p_{\mathrm{mid}} - \frac{1}{2}d_{\mathrm{desired}}
+$$
+
+lift projection は、lift gap の周辺 tile center を、2D lift point から 3D lift target へ移動する target に近づけます。
+
+$$
+p_{\ell}(\alpha)
+= (1-\alpha)p_{\ell}^{2D} + \alpha p_{\ell}^{3D}
+$$
+
+rigid projection は、各 tile について rest shape から current shape への best rigid transform を Kabsch/SVD で求め、変形した tile を剛体形状へ戻します。このため、snap/lift が強くても tile 自体がゴムのように伸びるのではなく、剛体 panel として動くように寄せています。
+
+### 論文と実装の主な違い
+
+| 項目 | 論文の考え方 | この実装 |
+| --- | --- | --- |
+| `S -> Omega` | BFF/LSCM 系の曲面パラメータ化 | boundary-shape-preserving projected UV parameterization |
+| `M2D -> M3D` | `c^{-1}: Omega -> S` による曲面への lift | UV triangle lookup + barycentric interpolation |
+| `K3D` | ShapeOp/libigl 的な projection stack | NumPy/SciPy/PyTorch residual solve + flattening guard |
+| `K2D` | `K3D` edge length と fabrication/collision を同時考慮 | edge matching 優先。重い collision は後段へ寄せる |
+| `T2D` | 製造可能な hinge linkage | independent tile layout + top hinge + dual hinge layout |
+| lift point | Morse-Smale segmentation / peak coupling | GPE-like score + `lift_tau` threshold |
+| string routing | channel energy と friction を考慮した routing | gap graph 上の boundary-first route + Capstan-style turn cost |
+| actuation | string-driven deployment | snap/lift positional constraints |
+| collision | より厳密な tile collision | 通常経路では軽量 AABB / bounded projection |
+| animation | 物理 deployment の可視化 | PD-style constraint simulation frames の再生 |
+
+結論として、この実装は「論文と同じ物理現象を目指した軽量な近似シミュレータ」です。論文の数値結果や solver 実装を完全再現するものではありませんが、`T2D` の flat linkage が string path に沿った snap/lift 制約で `T3D` に近づく、という OneString の機構的な流れを確認するための実装です。
 
 ## Quick Start
 
@@ -39,7 +302,7 @@ The default demo uses:
 
 - target: dome
 - grid: 3x3
-- paper-like surface parameterization to `Omega`
+- explicit debug/experimental surface parameterization to `Omega`; paper-default conformal parameterization is not implemented
 - inverse parameterization lift `c^-1` from `M2D` in `Omega` back to `M3D` on `S`
 - 3D optimization for `K3D` with planarity, square, and surface objectives
 - 2D edge matching for `K2D`
@@ -116,7 +379,7 @@ The default demo uses:
 
 ## Removed From Default Actuation
 
-The paper-faithful mode does not use these as the default actuator:
+The audited default mode does not use these as the default actuator:
 
 - central tendon
 - debug goal attraction
@@ -127,10 +390,11 @@ Legacy rope/tendon code remains in the package for compatibility with earlier te
 
 ## Current Approximations
 
-- The default M3D construction is a paper-like inverse map: M2D vertices live in `Omega`, then each UV point is mapped back to `S` using UV triangle lookup and barycentric interpolation on the corresponding surface triangle.
-- Direct height-field lifting `[u, v, z=f(u,v)]` is available only through the explicit `analytic_scaled_heightfield_debug` M3D construction mode and is not the default paper-like path.
-- The current default parameterization solves a simple uniform-Laplacian harmonic map with the mesh boundary fixed to a rectangle. It is not BFF/LSCM, and the UI reports it as `harmonic` only because the Laplacian solve is actually performed.
-- CSF estimation and split placement are simplified.
+- The default M3D construction uses the stored `Omega` map: M2D vertices live in `Omega`, then each UV point is mapped back to `S` using UV triangle lookup and barycentric interpolation on the corresponding surface triangle. This depends on the current non-paper `Omega` parameterization and is tracked as an approximation.
+- Direct height-field lifting `[u, v, z=f(u,v)]` is available only through the explicit `analytic_scaled_heightfield_debug` M3D construction mode and is tracked as a debug shortcut.
+- The current default parameterization is `omega_parameterization_mode="pca_debug"` with `omega_boundary_mode="shape_preserving_experimental"`. It deliberately does not force the mesh boundary to a rectangle, so non-rectangular inputs such as two-lobed or necked surfaces keep a closer Omega outline. It is not BFF/LSCM/ARAP and is not paper-like.
+- CSF estimation uses local 3D/UV edge-stretch ratios. Regions whose normalized stretch exceeds `2.0` generate a coarse Omega split line. The implementation detects simple reflection symmetry in both `S` and `Omega`; when symmetry is detected, M2D crop results and CSF split lines are mirrored across the detected axis before the split is applied. The split is snapped to an existing M2D grid line and duplicates the vertices on one side of the line, so the topology is cut without deleting neighboring quads. This is still a lightweight approximation of the paper's split strategy, not a full BFF/CSF segmentation implementation.
+- When a dominant surface peak is detected, the Omega overlay grid is shifted so the peak's UV position lands on an M2D grid vertex. This makes the corresponding K3D peak occur at a shared corner where four panels can meet; CSF split lines are allowed to pass through that vertex.
 - `K3D` optimization uses a compact least-squares height-field approximation rather than the full projection stack from the paper.
 - `K3D` optimization rejects invalid flattened results and falls back to `M3D` rather than passing a collapsed assembled state downstream.
 - `K2D` edge matching uses a simplified optimizer/relaxation model. The stored mesh remains planar with `z = 0`, and the app renders an independent per-tile top-face layout with visible gaps instead of a continuous terrain-like quad surface.
@@ -177,16 +441,19 @@ from onestring_physics.onestring_pipeline import (
     DeploymentParameters,
     PipelineParameters,
     build_onestring_design,
+    export_t2d_stl,
     simulate_onestring_deployment,
 )
 
 target = create_builtin_shape("dome", {"amplitude": 0.75, "radius": 2.2})
 state = build_onestring_design(target, PipelineParameters(nx=3))
+stl_bytes, export_metrics = export_t2d_stl(state, "onestring_t2d_dual_hinge.stl", panel_size=0.1)
 state.simulation_result = simulate_onestring_deployment(
     state,
     DeploymentParameters(steps=32, solver_iterations=12),
 )
 print(state.simulation_result.metrics)
+print(export_metrics)
 ```
 
 ## Repository Layout
@@ -204,4 +471,4 @@ onestring-physics-simulator/
   docs/
 ```
 
-See `docs/physics_model.md`, `docs/limitations.md`, and `docs/roadmap.md` for older v0.1 notes. The Streamlit app and `onestring_pipeline.py` are now the canonical entry points for the paper-faithful approximation.
+See `PAPER_COMPLIANCE_AUDIT.md`, `docs/physics_model.md`, `docs/limitations.md`, and `docs/roadmap.md` for notes. The Streamlit app and `onestring_pipeline.py` are now the canonical entry points for the audited prototype.

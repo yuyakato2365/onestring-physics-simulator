@@ -2,9 +2,20 @@ from __future__ import annotations
 
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from .design_optimizer import DesignResult
-from .onestring_pipeline import FlatTileLayout, GapGraph, HingeGraph, OneStringDesignState, QuadMesh, StringPath, SurfaceMesh, TileAssembly
+from .onestring_pipeline import (
+    FlatTileLayout,
+    GapGraph,
+    HingeGraph,
+    OneStringDesignState,
+    QuadMesh,
+    StringPath,
+    SurfaceMesh,
+    TileAssembly,
+    _surface_peak_uvs,
+)
 
 
 def figure_target(design: DesignResult) -> go.Figure:
@@ -147,6 +158,260 @@ def figure_surface_mesh(surface: SurfaceMesh, title: str = "S target surface") -
     _add_quad_mesh_surface(fig, surface.vertices, surface.faces, color="#7c3aed", opacity=0.55, name="S")
     fig.update_layout(title=title)
     _style_scene(fig)
+    return fig
+
+
+def _split_lines_for_display(state: OneStringDesignState) -> list[tuple[str, float]]:
+    lines = list(getattr(state.mesh_2d_initial, "split_lines", []) or [])
+    if lines:
+        return lines
+    return list(getattr(state.conformal_domain, "split_lines", []) or [])
+
+
+def _split_samples_on_parameterization(state: OneStringDesignState) -> tuple[np.ndarray, np.ndarray]:
+    parameterization = state.surface_parameterization
+    uv_vertices = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    surface_vertices = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    uv_faces = np.asarray(parameterization.uv_faces, dtype=int)
+    surface_faces = np.asarray(parameterization.surface_faces, dtype=int)
+    lines = _split_lines_for_display(state)
+    if not lines or len(uv_vertices) == 0 or len(surface_vertices) == 0:
+        return np.zeros((0, 2), dtype=float), np.zeros((0, 3), dtype=float)
+
+    samples_uv: list[np.ndarray] = []
+    samples_s: list[np.ndarray] = []
+    for axis, value in lines:
+        coord = 1 if axis == "row" else 0
+        for uv_face, surface_face in zip(uv_faces, surface_faces):
+            tri_uv = uv_vertices[np.asarray(uv_face, dtype=int)]
+            tri_s = surface_vertices[np.asarray(surface_face, dtype=int)]
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                va = float(tri_uv[a, coord] - value)
+                vb = float(tri_uv[b, coord] - value)
+                if abs(va) <= 1e-12 and abs(vb) <= 1e-12:
+                    for t in (0.0, 1.0):
+                        samples_uv.append((1.0 - t) * tri_uv[a] + t * tri_uv[b])
+                        samples_s.append((1.0 - t) * tri_s[a] + t * tri_s[b])
+                    continue
+                if va * vb > 0.0:
+                    continue
+                denom = va - vb
+                if abs(denom) <= 1e-12:
+                    continue
+                t = float(np.clip(va / denom, 0.0, 1.0))
+                samples_uv.append((1.0 - t) * tri_uv[a] + t * tri_uv[b])
+                samples_s.append((1.0 - t) * tri_s[a] + t * tri_s[b])
+
+    if not samples_uv:
+        return np.zeros((0, 2), dtype=float), np.zeros((0, 3), dtype=float)
+    uv = np.asarray(samples_uv, dtype=float)
+    xyz = np.asarray(samples_s, dtype=float)
+    rounded = np.round(uv, 8)
+    _, unique_idx = np.unique(rounded, axis=0, return_index=True)
+    unique_idx = np.sort(unique_idx)
+    return uv[unique_idx], xyz[unique_idx]
+
+
+def _high_csf_vertices(state: OneStringDesignState) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    parameterization = state.surface_parameterization
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    csf = np.asarray(getattr(state.conformal_domain, "csf_values", np.zeros(0)), dtype=float)
+    threshold = float(state.mesh_2d_initial.metrics.get("csf_split_threshold", 2.0))
+    if len(uv) == 0 or len(xyz) == 0 or len(csf) != len(uv):
+        return np.zeros((0, 2), dtype=float), np.zeros((0, 3), dtype=float), np.zeros(0, dtype=float)
+    mask = csf > threshold
+    return uv[mask], xyz[mask], csf[mask]
+
+
+def _surface_peak_markers(state: OneStringDesignState) -> tuple[np.ndarray, np.ndarray]:
+    parameterization = state.surface_parameterization
+    peak_uv = _surface_peak_uvs(parameterization)
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    if len(peak_uv) == 0 or len(uv) == 0 or len(xyz) != len(uv):
+        return np.zeros((0, 2), dtype=float), np.zeros((0, 3), dtype=float)
+    peak_xyz = []
+    for point in peak_uv:
+        idx = int(np.argmin(np.linalg.norm(uv - point, axis=1)))
+        peak_xyz.append(xyz[idx])
+    return peak_uv, np.asarray(peak_xyz, dtype=float)
+
+
+def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
+    """Show where CSF-based splitting is detected on S and how it maps to Omega."""
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        specs=[[{"type": "scene"}, {"type": "xy"}]],
+        subplot_titles=("S: high-stretch region and mapped cut", "Omega: mapped cut line"),
+        horizontal_spacing=0.06,
+    )
+
+    surface = state.target_surface
+    _add_quad_mesh_surface(
+        fig,
+        surface.vertices,
+        surface.faces,
+        color="#94a3b8",
+        opacity=0.32,
+        name="S",
+        row=1,
+        col=1,
+    )
+
+    high_uv, high_s, high_csf = _high_csf_vertices(state)
+    peak_uv, peak_s = _surface_peak_markers(state)
+    if len(high_s):
+        fig.add_trace(
+            go.Scatter3d(
+                x=high_s[:, 0],
+                y=high_s[:, 1],
+                z=high_s[:, 2],
+                mode="markers",
+                marker=dict(size=5, color=high_csf, colorscale="Inferno", colorbar=dict(title="CSF")),
+                name="S vertices with CSF > threshold",
+            ),
+            row=1,
+            col=1,
+        )
+
+    cut_uv, cut_s = _split_samples_on_parameterization(state)
+    if len(cut_s):
+        fig.add_trace(
+            go.Scatter3d(
+                x=cut_s[:, 0],
+                y=cut_s[:, 1],
+                z=cut_s[:, 2],
+                mode="markers",
+                marker=dict(size=5, color="#ef4444"),
+                name="S mapped split samples",
+            ),
+            row=1,
+            col=1,
+        )
+    if len(peak_s):
+        fig.add_trace(
+            go.Scatter3d(
+                x=peak_s[:, 0],
+                y=peak_s[:, 1],
+                z=peak_s[:, 2],
+                mode="markers",
+                marker=dict(size=8, color="#facc15", symbol="diamond"),
+                name="S detected peaks",
+            ),
+            row=1,
+            col=1,
+        )
+
+    boundary = state.conformal_domain.boundary
+    fig.add_trace(
+        go.Scatter(
+            x=boundary[:, 0],
+            y=boundary[:, 1],
+            mode="lines",
+            line=dict(color="#0f172a", width=3),
+            name="Omega boundary",
+        ),
+        row=1,
+        col=2,
+    )
+
+    mesh = state.mesh_2d_initial
+    grid_x: list[float | None] = []
+    grid_y: list[float | None] = []
+    for face in mesh.faces:
+        pts = mesh.vertices[list(face) + [face[0]], :2]
+        grid_x.extend([*pts[:, 0].tolist(), None])
+        grid_y.extend([*pts[:, 1].tolist(), None])
+    fig.add_trace(
+        go.Scatter(
+            x=grid_x,
+            y=grid_y,
+            mode="lines",
+            line=dict(color="#14b8a6", width=1),
+            name="M2D grid in Omega",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+    if len(high_uv):
+        fig.add_trace(
+            go.Scatter(
+                x=high_uv[:, 0],
+                y=high_uv[:, 1],
+                mode="markers",
+                marker=dict(size=7, color=high_csf, colorscale="Inferno", showscale=False),
+                name="Omega vertices with CSF > threshold",
+            ),
+            row=1,
+            col=2,
+        )
+    if len(cut_uv):
+        fig.add_trace(
+            go.Scatter(
+                x=cut_uv[:, 0],
+                y=cut_uv[:, 1],
+                mode="markers",
+                marker=dict(size=6, color="#ef4444"),
+                name="Omega split samples",
+            ),
+            row=1,
+            col=2,
+        )
+    if len(peak_uv):
+        fig.add_trace(
+            go.Scatter(
+                x=peak_uv[:, 0],
+                y=peak_uv[:, 1],
+                mode="markers",
+                marker=dict(size=10, color="#facc15", symbol="diamond"),
+                name="Omega detected peaks",
+            ),
+            row=1,
+            col=2,
+        )
+
+    omega_min = np.nanmin(boundary, axis=0) if len(boundary) else np.array([0.0, 0.0])
+    omega_max = np.nanmax(boundary, axis=0) if len(boundary) else np.array([1.0, 1.0])
+    for axis, value in _split_lines_for_display(state):
+        if axis == "row":
+            fig.add_trace(
+                go.Scatter(
+                    x=[float(omega_min[0]), float(omega_max[0])],
+                    y=[float(value), float(value)],
+                    mode="lines",
+                    line=dict(color="#ef4444", dash="dash", width=2),
+                    name="Omega split line",
+                    showlegend=False,
+                ),
+                row=1,
+                col=2,
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=[float(value), float(value)],
+                    y=[float(omega_min[1]), float(omega_max[1])],
+                    mode="lines",
+                    line=dict(color="#ef4444", dash="dash", width=2),
+                    name="Omega split line",
+                    showlegend=False,
+                ),
+                row=1,
+                col=2,
+            )
+
+    fig.update_layout(
+        title="CSF split correspondence: S -> Omega -> M2D",
+        height=620,
+        margin=dict(l=20, r=20, t=70, b=20),
+        scene=dict(aspectmode="data"),
+        xaxis_title="u",
+        yaxis_title="v",
+        yaxis=dict(scaleanchor="x", scaleratio=1),
+    )
     return fig
 
 
@@ -512,6 +777,8 @@ def _add_quad_mesh_surface(
     color: str,
     opacity: float,
     name: str,
+    row: int | None = None,
+    col: int | None = None,
 ) -> None:
     lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
     x: list[float] = []
@@ -536,33 +803,35 @@ def _add_quad_mesh_surface(
         edge_x.extend([*closed[:, 0].tolist(), None])
         edge_y.extend([*closed[:, 1].tolist(), None])
         edge_z.extend([*closed[:, 2].tolist(), None])
-    fig.add_trace(
-        go.Mesh3d(
-            x=x,
-            y=y,
-            z=z,
-            i=i_idx,
-            j=j_idx,
-            k=k_idx,
-            color=color,
-            opacity=opacity,
-            flatshading=True,
-            lighting=lighting,
-            name=name,
-            showlegend=True,
-        )
+    mesh_trace = go.Mesh3d(
+        x=x,
+        y=y,
+        z=z,
+        i=i_idx,
+        j=j_idx,
+        k=k_idx,
+        color=color,
+        opacity=opacity,
+        flatshading=True,
+        lighting=lighting,
+        name=name,
+        showlegend=True,
     )
-    fig.add_trace(
-        go.Scatter3d(
-            x=edge_x,
-            y=edge_y,
-            z=edge_z,
-            mode="lines",
-            line=dict(color="#0f172a", width=2),
-            name=f"{name} edges",
-            showlegend=False,
-        )
+    edge_trace = go.Scatter3d(
+        x=edge_x,
+        y=edge_y,
+        z=edge_z,
+        mode="lines",
+        line=dict(color="#0f172a", width=2),
+        name=f"{name} edges",
+        showlegend=False,
     )
+    if row is None or col is None:
+        fig.add_trace(mesh_trace)
+        fig.add_trace(edge_trace)
+    else:
+        fig.add_trace(mesh_trace, row=row, col=col)
+        fig.add_trace(edge_trace, row=row, col=col)
 
 
 def _stage_hover_text(state: OneStringDesignState, label: str) -> str:

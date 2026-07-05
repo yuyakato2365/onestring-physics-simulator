@@ -2,7 +2,15 @@ from onestring_physics.input_shape import create_builtin_shape
 from onestring_physics.onestring_pipeline import (
     DeploymentParameters,
     PipelineParameters,
+    _csf_split_lines,
+    _detect_parameterization_reflection_symmetry,
+    _m2d_connected_component_sizes,
+    _mirror_csf_split_lines,
+    _parameterization_stretch_csf,
+    _surface_peak_uvs,
+    _split_m2d_along_existing_grid_line,
     build_onestring_design,
+    export_t2d_stl,
     inverse_map_uv_to_surface,
     safe_capstan_friction,
     simulate_onestring_deployment,
@@ -10,6 +18,7 @@ from onestring_physics.onestring_pipeline import (
 from onestring_physics.animation import assembly_progress_animation
 from onestring_physics.visualization import figure_flat_tile_layout, figure_tile_assembly
 import numpy as np
+from types import SimpleNamespace
 
 
 def test_onestring_pipeline_stores_paper_intermediates():
@@ -20,7 +29,8 @@ def test_onestring_pipeline_stores_paper_intermediates():
     )
 
     assert state.target_surface.vertices.shape[1] == 3
-    assert state.surface_parameterization.method == "harmonic"
+    assert state.surface_parameterization.method == "pca_debug"
+    assert state.surface_parameterization.metrics["parameterization_exactness_label"] == "experimental"
     assert "surface parameterization" in state.conformal_domain.method
     assert state.mesh_2d_initial.stage == "M2D"
     assert state.mesh_3d_initial.stage == "M3D"
@@ -81,8 +91,9 @@ def test_m3d_uses_inverse_parameterization_not_xy_height_lift():
     assert metrics["m3d_used_height_field_shortcut"] is False
     assert metrics["m3d_uv_triangle_lookup_fail_count"] == 0
     assert metrics["m3d_outside_omega_count"] >= 0
-    assert state.surface_parameterization.metrics["harmonic_solve_performed"] is True
-    assert state.surface_parameterization.method == "harmonic"
+    assert state.surface_parameterization.metrics["harmonic_solve_performed"] is False
+    assert state.surface_parameterization.metrics["omega_boundary_shape_preserved"] is True
+    assert state.surface_parameterization.method == "pca_debug"
 
 
 def test_m3d_vertices_lie_on_target_surface_and_match_m2d_connectivity():
@@ -96,6 +107,171 @@ def test_m3d_vertices_lie_on_target_surface_and_match_m2d_connectivity():
     assert metrics["m3d_surface_distance_max"] < 1e-9
     assert metrics["m3d_vertex_count"] == state.mesh_2d_initial.vertices.shape[0]
     assert metrics["m3d_quad_count"] == state.mesh_2d_initial.faces.shape[0]
+
+
+def test_csf_split_detects_local_stretch_above_two():
+    param = SimpleNamespace(
+        uv_vertices_2d=np.asarray(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [2.0, 1.0],
+            ],
+            dtype=float,
+        ),
+        surface_vertices_3d=np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [6.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [6.0, 1.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        uv_faces=np.asarray([[0, 1, 4], [0, 4, 3], [1, 2, 5], [1, 5, 4]], dtype=int),
+        surface_faces=np.asarray([[0, 1, 4], [0, 4, 3], [1, 2, 5], [1, 5, 4]], dtype=int),
+    )
+
+    csf = _parameterization_stretch_csf(param)
+    lines = _csf_split_lines(param, csf, threshold=2.0, max_splits=2)
+
+    assert np.max(csf) > 2.0
+    assert lines
+
+
+def test_csf_split_prefers_symmetric_peak_path_over_high_csf_centroid():
+    param = SimpleNamespace(
+        uv_vertices_2d=np.asarray(
+            [
+                [-0.6, 0.0],
+                [0.6, 0.0],
+                [-0.9, 0.45],
+                [-0.3, 0.45],
+                [0.3, 0.45],
+                [0.9, 0.45],
+                [-0.9, -0.45],
+                [-0.3, -0.45],
+                [0.3, -0.45],
+                [0.9, -0.45],
+            ],
+            dtype=float,
+        ),
+        surface_vertices_3d=np.asarray(
+            [
+                [-0.6, 0.0, 2.0],
+                [0.6, 0.0, 2.0],
+                [-0.9, 0.45, 0.0],
+                [-0.3, 0.45, 0.0],
+                [0.3, 0.45, 0.0],
+                [0.9, 0.45, 0.0],
+                [-0.9, -0.45, 0.0],
+                [-0.3, -0.45, 0.0],
+                [0.3, -0.45, 0.0],
+                [0.9, -0.45, 0.0],
+            ],
+            dtype=float,
+        ),
+        uv_faces=np.asarray([[0, 2, 3], [0, 3, 7], [0, 7, 6], [1, 4, 5], [1, 9, 8], [1, 8, 4]], dtype=int),
+        surface_faces=np.asarray([[0, 2, 3], [0, 3, 7], [0, 7, 6], [1, 4, 5], [1, 9, 8], [1, 8, 4]], dtype=int),
+    )
+    csf = np.ones(10, dtype=float)
+    csf[[2, 3, 4, 5]] = 2.5
+
+    peaks = _surface_peak_uvs(param)
+    lines = _csf_split_lines(param, csf, threshold=2.0, max_splits=1)
+
+    assert len(peaks) == 2
+    assert lines == [("row", 0.0)]
+
+
+def test_csf_split_duplicates_grid_vertices_without_deleting_quads():
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 4, 3], [1, 2, 5, 4]], dtype=int)
+
+    split_vertices, split_faces, duplicate_count = _split_m2d_along_existing_grid_line(vertices, faces, ("col", 1.0))
+
+    assert split_faces.shape == faces.shape
+    assert duplicate_count == 2
+    assert split_vertices.shape[0] == vertices.shape[0] + 2
+    assert _m2d_connected_component_sizes(split_faces) == [1, 1]
+
+
+def test_detected_symmetry_mirrors_csf_split_lines():
+    param = SimpleNamespace(
+        surface_vertices_3d=np.asarray(
+            [
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        uv_vertices_2d=np.asarray(
+            [
+                [-1.0, -1.0],
+                [1.0, -1.0],
+                [-1.0, 1.0],
+                [1.0, 1.0],
+            ],
+            dtype=float,
+        ),
+    )
+
+    symmetry = _detect_parameterization_reflection_symmetry(param)
+    mirrored = _mirror_csf_split_lines([("col", 0.35)], symmetry["axes"], symmetry["centers"], param.uv_vertices_2d)
+
+    assert 0 in symmetry["axes"]
+    assert ("col", 0.35) in mirrored
+    assert any(axis == "col" and np.isclose(value, -0.35) for axis, value in mirrored)
+
+
+def test_m2d_grid_aligns_surface_peak_to_shared_quad_vertex():
+    target = create_builtin_shape("dome", {"amplitude": 0.45, "radius": 2.0})
+    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=2, max_2d_iterations=2))
+    metrics = state.mesh_2d_initial.metrics
+    peak_uv = np.asarray(metrics["m2d_peak_uv_target"], dtype=float)
+    uv_vertices = state.mesh_2d_initial.vertices[:, :2]
+
+    assert metrics["m2d_grid_aligned_to_peak_vertex"] is True
+    assert np.min(np.linalg.norm(uv_vertices - peak_uv, axis=1)) < 1e-9
+    peak_vertex = int(np.argmax(state.mesh_3d_optimized.vertices[:, 2]))
+    incident_faces = sum(1 for face in state.mesh_3d_optimized.faces if peak_vertex in set(map(int, face)))
+    assert incident_faces >= 4
+
+
+def test_omega_boundary_preserves_nonrectangular_surface_shape():
+    target = create_builtin_shape("half_gourd", {"amplitude": 0.55, "radius": 2.0})
+    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=2, max_2d_iterations=2))
+    boundary = state.surface_parameterization.omega_boundary[:-1]
+    lo = np.min(boundary, axis=0)
+    hi = np.max(boundary, axis=0)
+    on_box = (
+        np.isclose(boundary[:, 0], lo[0], atol=1e-6)
+        | np.isclose(boundary[:, 0], hi[0], atol=1e-6)
+        | np.isclose(boundary[:, 1], lo[1], atol=1e-6)
+        | np.isclose(boundary[:, 1], hi[1], atol=1e-6)
+    )
+
+    assert state.surface_parameterization.metrics["omega_boundary_shape_preserved"] is True
+    assert state.surface_parameterization.metrics["omega_boundary_forced_rectangle"] is False
+    assert state.surface_parameterization.metrics["parameterization_exactness_label"] == "experimental"
+    assert float(np.mean(on_box)) < 0.95
 
 
 def test_m3d_analytic_scaled_heightfield_debug_mode_is_explicit_shortcut():
@@ -197,3 +373,70 @@ def test_assembly_progress_animation_has_frames():
 def test_safe_capstan_friction_does_not_overflow():
     assert np.isinf(safe_capstan_friction(1.0, 1000.0))
     assert safe_capstan_friction(0.2, 2.0) > 0.0
+
+
+def test_export_t2d_stl_combined_records_metrics():
+    target = create_builtin_shape("dome", {"amplitude": 0.4, "radius": 2.0})
+    state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=3, max_2d_iterations=3))
+
+    data, metrics = export_t2d_stl(state, stage="dual_hinge", panel_size=0.1)
+
+    assert data.startswith(b"solid onestring_t2d")
+    assert b"facet normal" in data
+    assert metrics["t2d_tile_count"] == state.tiles_2d_dual_hinge.tile_count
+    assert metrics["t2d_export_panel_size"] == 0.1
+    assert metrics["t2d_vertex_count"] == state.tiles_2d_dual_hinge.tile_count * 8
+    assert metrics["t2d_face_count"] == state.tiles_2d_dual_hinge.tile_count * 12
+    assert metrics["t2d_nonmanifold_edge_count"] == 0
+
+
+def test_export_t2d_stl_can_return_per_tile_files():
+    target = create_builtin_shape("dome", {"amplitude": 0.3, "radius": 2.0})
+    state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
+
+    files, metrics = export_t2d_stl(state.tiles_2d_top_hinge, separate_tiles=True, panel_size=0.1)
+
+    assert len(files) == state.tiles_2d_top_hinge.tile_count
+    assert all(name.endswith(".stl") for name in files)
+    assert metrics["t2d_tile_count"] == state.tiles_2d_top_hinge.tile_count
+
+
+def test_omega_rectangular_debug_and_paper_default_are_explicit():
+    target = create_builtin_shape("dome", {"amplitude": 0.35, "radius": 2.0})
+    rectangular = build_onestring_design(
+        target,
+        PipelineParameters(
+            nx=2,
+            max_3d_iterations=2,
+            max_2d_iterations=2,
+            omega_boundary_mode="rectangular_debug",
+            omega_parameterization_mode="pca_debug",
+        ),
+    )
+
+    assert rectangular.surface_parameterization.metrics["omega_boundary_mode"] == "rectangular_debug"
+    assert rectangular.surface_parameterization.metrics["parameterization_exactness_label"] == "debug"
+    assert rectangular.surface_parameterization.metrics["omega_boundary_forced_rectangle"] is True
+
+    try:
+        build_onestring_design(
+            target,
+            PipelineParameters(
+                nx=2,
+                max_3d_iterations=2,
+                max_2d_iterations=2,
+                omega_boundary_mode="paper_default",
+            ),
+        )
+    except NotImplementedError as exc:
+        assert "Paper-default S->Omega parameterization is not implemented" in str(exc)
+    else:
+        raise AssertionError("paper_default must not silently fallback to PCA")
+
+
+def test_snowman_half_and_full_builtin_shapes_are_available():
+    for kind in ["snowman_half", "snowman_full"]:
+        target = create_builtin_shape(kind, {"amplitude": 0.5, "radius": 2.0})
+        state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
+        assert state.target_surface.vertices.shape[0] > 0
+        assert state.surface_parameterization.metrics["parameterization_method"] == "pca_debug"
