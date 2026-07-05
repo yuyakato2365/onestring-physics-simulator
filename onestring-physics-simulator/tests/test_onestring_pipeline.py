@@ -415,13 +415,23 @@ def test_omega_rectangular_debug_and_paper_default_are_explicit():
     target = create_builtin_shape("dome", {"amplitude": 0.35, "radius": 2.0})
     default_state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
     assert default_state.surface_parameterization.method == "bff"
-    assert default_state.surface_parameterization.metrics["omega_boundary_forced_rectangle"] is False
-    assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == "bff_boundary_from_3d_edge_lengths_and_boundary_turning_angles"
-    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "bff_local_discrete"
+    assert default_state.surface_parameterization.metrics["omega_boundary_forced_rectangle"] is True
+    assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == "bff_boundary_rectangularized_by_3d_boundary_arclength"
+    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "bff_rectangular_boundary_corrected"
     assert default_state.surface_parameterization.metrics["bff_implemented"] is True
-    assert default_state.surface_parameterization.metrics["bff_boundary_closure_correction_applied"] is False
-    assert default_state.surface_parameterization.metrics["bff_boundary_closure_drift"] >= 0.0
-    assert np.isfinite(default_state.surface_parameterization.metrics["bff_boundary_max_relative_length_error_after_similarity"])
+    assert default_state.surface_parameterization.metrics["bff_boundary_rectangular_correction_applied"] is True
+    assert default_state.surface_parameterization.metrics["bff_boundary_closure_correction_applied"] is True
+    assert default_state.surface_parameterization.metrics["bff_boundary_closure_drift_after_rectangularization"] == 0.0
+    boundary = default_state.surface_parameterization.omega_boundary[:-1]
+    lo = np.min(boundary, axis=0)
+    hi = np.max(boundary, axis=0)
+    on_rect = (
+        np.isclose(boundary[:, 0], lo[0], atol=1e-8)
+        | np.isclose(boundary[:, 0], hi[0], atol=1e-8)
+        | np.isclose(boundary[:, 1], lo[1], atol=1e-8)
+        | np.isclose(boundary[:, 1], hi[1], atol=1e-8)
+    )
+    assert np.all(on_rect)
 
     try:
         build_onestring_design(

@@ -762,6 +762,77 @@ def _bff_boundary_polygon(
     return boundary_uv, metrics
 
 
+def _point_on_centered_rectangle(distance: float, width: float, height: float) -> np.ndarray:
+    perimeter = max(2.0 * (width + height), 1e-12)
+    s = float(distance % perimeter)
+    half_w = 0.5 * width
+    half_h = 0.5 * height
+    if s <= width:
+        return np.asarray([-half_w + s, -half_h], dtype=float)
+    s -= width
+    if s <= height:
+        return np.asarray([half_w, -half_h + s], dtype=float)
+    s -= height
+    if s <= width:
+        return np.asarray([half_w - s, half_h], dtype=float)
+    s -= width
+    return np.asarray([-half_w, half_h - s], dtype=float)
+
+
+def _rectangularize_boundary_by_arclength(
+    boundary_uv: np.ndarray,
+    edge_lengths: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    source = np.asarray(boundary_uv, dtype=float)
+    lengths = np.asarray(edge_lengths, dtype=float)
+    n = len(source)
+    if n < 3 or len(lengths) != n:
+        return source.copy(), {
+            "bff_boundary_rectangular_correction_applied": False,
+            "bff_boundary_rectangularization_reason": "invalid_boundary",
+        }
+
+    perimeter = float(np.sum(lengths))
+    if perimeter <= 1e-12:
+        return source.copy(), {
+            "bff_boundary_rectangular_correction_applied": False,
+            "bff_boundary_rectangularization_reason": "degenerate_perimeter",
+        }
+
+    span = np.nanmax(source, axis=0) - np.nanmin(source, axis=0)
+    aspect = float(span[0] / max(span[1], 1e-12))
+    if not np.isfinite(aspect) or aspect <= 1e-6:
+        aspect = 1.0
+    aspect = float(np.clip(aspect, 0.2, 5.0))
+    height = perimeter / (2.0 * (aspect + 1.0))
+    width = aspect * height
+
+    cumulative = np.concatenate([[0.0], np.cumsum(lengths[:-1])])
+    rect = np.asarray([_point_on_centered_rectangle(s, width, height) for s in cumulative], dtype=float)
+    rect_lengths = np.asarray([np.linalg.norm(rect[(i + 1) % n] - rect[i]) for i in range(n)], dtype=float)
+    rel_error = np.abs(rect_lengths - lengths) / np.maximum(lengths, 1e-12)
+    on_edge = np.logical_or.reduce(
+        [
+            np.isclose(rect[:, 0], -0.5 * width, atol=1e-8),
+            np.isclose(rect[:, 0], 0.5 * width, atol=1e-8),
+            np.isclose(rect[:, 1], -0.5 * height, atol=1e-8),
+            np.isclose(rect[:, 1], 0.5 * height, atol=1e-8),
+        ]
+    )
+    return rect, {
+        "bff_boundary_rectangular_correction_applied": True,
+        "bff_boundary_closure_correction_applied": True,
+        "bff_boundary_closure_drift_after_rectangularization": 0.0,
+        "bff_boundary_rectangularization_reason": "forced_rectangle_by_3d_boundary_arclength",
+        "bff_boundary_rect_width": float(width),
+        "bff_boundary_rect_height": float(height),
+        "bff_boundary_rect_aspect": float(aspect),
+        "bff_boundary_rect_vertex_on_edge_fraction": float(np.mean(on_edge)) if len(on_edge) else 0.0,
+        "bff_boundary_rect_max_relative_length_error": float(np.max(rel_error)) if len(rel_error) else 0.0,
+        "bff_boundary_rect_mean_relative_length_error": float(np.mean(rel_error)) if len(rel_error) else 0.0,
+    }
+
+
 def _bff_boundary_first_uv(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -776,6 +847,11 @@ def _bff_boundary_first_uv(
     tris = np.asarray(faces, dtype=int)[:, :3]
     n_vertices = int(len(pts))
     boundary_uv, boundary_metrics = _bff_boundary_polygon(pts, tris, boundary_loop)
+    boundary_edge_lengths = np.asarray(
+        [np.linalg.norm(pts[boundary_loop[(i + 1) % len(boundary_loop)]] - pts[boundary_loop[i]]) for i in range(len(boundary_loop))],
+        dtype=float,
+    )
+    boundary_uv, rect_metrics = _rectangularize_boundary_by_arclength(boundary_uv, boundary_edge_lengths)
     uv = np.zeros((n_vertices, 2), dtype=float)
     boundary_ids = np.asarray(boundary_loop, dtype=int)
     uv[boundary_ids] = boundary_uv
@@ -797,16 +873,17 @@ def _bff_boundary_first_uv(
 
     return uv, {
         "omega_parameterization_solver": "boundary_first_flattening_cotan_harmonic",
-        "omega_boundary_constraint_model": "bff_boundary_from_3d_edge_lengths_and_boundary_turning_angles",
-        "omega_boundary_forced_rectangle": False,
+        "omega_boundary_constraint_model": "bff_boundary_rectangularized_by_3d_boundary_arclength",
+        "omega_boundary_forced_rectangle": True,
         "omega_boundary_shape_preserved": False,
-        "omega_boundary_model": "BFF-style boundary-first flattening; no square/circle/projected-outline forcing and no closure-drift correction",
+        "omega_boundary_model": "BFF-style boundary-first flattening with rectangular Omega boundary correction by 3D boundary arclength",
         "bff_implemented": True,
-        "bff_variant": "discrete_boundary_lengths_turning_angles_no_boundary_correction_plus_cotan_harmonic_extension",
+        "bff_variant": "discrete_boundary_lengths_turning_angles_rectangular_boundary_correction_plus_cotan_harmonic_extension",
         "bff_reference_library": "local implementation; libigl/geometry-central BFF binding not available",
         "bff_cotangent_negative_weight_count": int(negative_weight_count),
         "bff_interior_vertex_count": int(len(interior_ids)),
         **boundary_metrics,
+        **rect_metrics,
     }
 
 
@@ -983,8 +1060,8 @@ def _build_surface_parameterization(surface, target, grid, params):
         metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
         metrics: dict[str, float | int | str | bool] = {
             "parameterization_method": "bff",
-            "parameterization_exactness_label": "bff_local_discrete",
-            "parameterization_warning": "BFF path is implemented locally as boundary-first flattening with 3D boundary lengths/turning angles and cotangent harmonic interior extension; no boundary closure correction is applied; it is not a libigl reference binding.",
+            "parameterization_exactness_label": "bff_rectangular_boundary_corrected",
+            "parameterization_warning": "BFF path is implemented locally as boundary-first flattening with 3D boundary lengths/turning angles, rectangular Omega boundary correction, and cotangent harmonic interior extension; it is not a libigl reference binding.",
             "omega_boundary_mode": "paper_default",
             "omega_parameterization_mode": "bff",
             "surface_vertex_count": int(len(surface_vertices)),
@@ -997,9 +1074,9 @@ def _build_surface_parameterization(surface, target, grid, params):
             "omega_corresponds_to_S": True,
             "omega_correspondence_model": "BFF boundary-first map c:S->Omega, inverse by UV triangle lookup",
             "lscm_implemented": True,
-            "paper_flow_stage": "S -> Omega by BFF-style boundary-first flattening; boundary is not forced to a rectangle/projected outline and closure drift is not corrected",
+            "paper_flow_stage": "S -> Omega by BFF-style boundary-first flattening with rectangular Omega boundary correction",
             "paper_exactness_warning": "Local discrete BFF path is active; compare bff_* metrics against the paper/reference implementation before claiming numerical equivalence.",
-            "omega_warning": "Boundary-first BFF path; no boundary fitting or closure-drift correction is applied.",
+            "omega_warning": "Boundary-first BFF path with rectangular Omega boundary correction applied.",
             **bff_metrics,
         }
         out = _original.SurfaceParameterization(
@@ -1015,8 +1092,8 @@ def _build_surface_parameterization(surface, target, grid, params):
         return _mark_parameterization_mode(
             out,
             method="bff",
-            exactness="bff_local_discrete",
-            warning="Local BFF-style boundary-first flattening is active with no boundary correction; reference BFF numerical equivalence is not guaranteed.",
+            exactness="bff_rectangular_boundary_corrected",
+            warning="Local BFF-style boundary-first flattening is active with rectangular Omega boundary correction; reference BFF numerical equivalence is not guaranteed.",
         )
 
     if parameterization_mode == "lscm_paper_like":
