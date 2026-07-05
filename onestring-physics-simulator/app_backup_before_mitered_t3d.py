@@ -273,7 +273,7 @@ with st.sidebar:
         lambda: st.selectbox(
             "M2D crop policy",
             ["center", "strict_vertices"],
-            index=0,
+            index=1,
             help="center keeps boundary-crossing quads whose centers lie inside Ω. strict_vertices keeps only quads fully inside Ω.",
         ),
     )

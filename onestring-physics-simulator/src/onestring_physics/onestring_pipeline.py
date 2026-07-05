@@ -1322,6 +1322,8 @@ def _flatten_to_domain(parameterization, grid, params=None):
     domain.peak_uv_target = peak_uv  # type: ignore[attr-defined]
     domain.peak_uv_targets = peak_uvs  # type: ignore[attr-defined]
     domain.peak_grid_alignment = dict(peak_alignment)  # type: ignore[attr-defined]
+    domain.omega_boundary_forced_rectangle = bool(parameterization.metrics.get("omega_boundary_forced_rectangle", False))  # type: ignore[attr-defined]
+    domain.omega_boundary_constraint_model = str(parameterization.metrics.get("omega_boundary_constraint_model", ""))  # type: ignore[attr-defined]
     return domain
 
 
@@ -1466,6 +1468,83 @@ def _m2d_audit_metrics(vertices: np.ndarray, faces: np.ndarray, *, suffix: str =
     return out
 
 
+def _point_in_polygon_or_on_boundary(point: np.ndarray, polygon: np.ndarray, *, tol: float = 1e-9) -> bool:
+    p = np.asarray(point, dtype=float)[:2]
+    pts = np.asarray(polygon, dtype=float)
+    if len(pts) < 3:
+        return False
+    if np.linalg.norm(pts[0] - pts[-1]) <= tol:
+        pts = pts[:-1]
+    x, y = float(p[0]), float(p[1])
+    inside = False
+    n = len(pts)
+    for i in range(n):
+        a = pts[i]
+        b = pts[(i + 1) % n]
+        ab = b - a
+        ap = p - a
+        edge_len2 = float(np.dot(ab, ab))
+        if edge_len2 > tol * tol:
+            t = float(np.clip(np.dot(ap, ab) / edge_len2, 0.0, 1.0))
+            closest = a + t * ab
+            if float(np.linalg.norm(p - closest)) <= tol:
+                return True
+        x0, y0 = float(a[0]), float(a[1])
+        x1, y1 = float(b[0]), float(b[1])
+        if (y0 > y) != (y1 > y):
+            x_cross = (x1 - x0) * (y - y0) / (y1 - y0) + x0
+            if x <= x_cross + tol:
+                inside = not inside
+    return bool(inside)
+
+
+def _clip_m2d_faces_to_omega_boundary(mesh, domain, params=None):
+    boundary = np.asarray(getattr(domain, "boundary", np.zeros((0, 2))), dtype=float)
+    if len(boundary) >= 2 and np.linalg.norm(boundary[0] - boundary[-1]) <= 1e-9:
+        boundary_open = boundary[:-1]
+    else:
+        boundary_open = boundary
+    if len(boundary_open) < 3 or len(mesh.faces) == 0:
+        return np.asarray(mesh.faces, dtype=int).copy(), {
+            "m2d_boundary_clipping_used": False,
+            "m2d_boundary_clip_reason": "missing_boundary_or_faces",
+            "m2d_boundary_clip_removed_quad_count": 0,
+        }
+
+    requested_policy = str(getattr(params, "m2d_crop_policy", "center")) if params is not None else "center"
+    boundary_forced_rect = bool(getattr(domain, "omega_boundary_forced_rectangle", False))
+    effective_policy = "strict_vertices" if boundary_forced_rect else requested_policy
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    kept: list[np.ndarray] = []
+    removed = 0
+    center_only_would_keep = 0
+    for face in np.asarray(mesh.faces, dtype=int):
+        pts = vertices[np.asarray(face, dtype=int), :2]
+        center = np.mean(pts, axis=0)
+        center_inside = _point_in_polygon_or_on_boundary(center, boundary_open)
+        vertices_inside = all(_point_in_polygon_or_on_boundary(pt, boundary_open) for pt in pts)
+        if center_inside and not vertices_inside:
+            center_only_would_keep += 1
+        inside = vertices_inside and center_inside if effective_policy == "strict_vertices" else center_inside
+        if inside:
+            kept.append(np.asarray(face, dtype=int).copy())
+        else:
+            removed += 1
+    if not kept:
+        raise RuntimeError("M2D Omega boundary clipping removed all quads.")
+
+    return np.asarray(kept, dtype=int), {
+        "m2d_boundary_clipping_used": True,
+        "m2d_boundary_clip_policy_requested": requested_policy,
+        "m2d_boundary_clip_policy_effective": effective_policy,
+        "m2d_boundary_clip_forced_strict_for_rectangular_omega": bool(boundary_forced_rect and requested_policy != "strict_vertices"),
+        "m2d_boundary_clip_removed_quad_count": int(removed),
+        "m2d_boundary_clip_input_quad_count": int(len(mesh.faces)),
+        "m2d_boundary_clip_kept_quad_count": int(len(kept)),
+        "m2d_boundary_clip_center_only_would_keep_outside_quad_count": int(center_only_would_keep),
+    }
+
+
 def _symmetrize_m2d_faces(mesh, domain) -> tuple[np.ndarray, int]:
     axes = [int(axis) for axis in list(getattr(domain, "detected_symmetry_axes", []) or [])]
     centers_by_axis = dict(getattr(domain, "detected_symmetry_centers", {}) or {})
@@ -1549,7 +1628,29 @@ def _build_m2d(grid, domain, params=None):
             mesh.metrics["m2d_peak_uv_targets"] = [[float(x) for x in row[:2]] for row in np.asarray(peak_uvs, dtype=float).reshape(-1, 2)]
         for key, value in dict(getattr(domain, "detected_symmetry_details", {}) or {}).items():
             mesh.metrics[f"symmetry_{key}"] = value
+    clipped_faces, clip_metrics = _clip_m2d_faces_to_omega_boundary(mesh, domain, params)
+    if len(clipped_faces) != len(mesh.faces):
+        metrics = dict(mesh.metrics)
+        metrics.update(clip_metrics)
+        overlay_total = int(metrics.get("m2d_overlay_total_quad_count", len(mesh.faces)))
+        metrics.update(
+            {
+                "m2d_kept_quad_count": int(len(clipped_faces)),
+                "m2d_cropped_quad_count": int(max(0, overlay_total - len(clipped_faces))),
+            }
+        )
+        mesh = _original.QuadMesh(mesh.vertices.copy(), clipped_faces, mesh.grid, mesh.stage, metrics, list(getattr(mesh, "split_lines", [])))
+    else:
+        mesh.metrics.update(clip_metrics)
     mesh.metrics.update(_m2d_audit_metrics(mesh.vertices, mesh.faces))
+    mesh.metrics.update(clip_metrics)
+    overlay_total = int(mesh.metrics.get("m2d_overlay_total_quad_count", len(mesh.faces)))
+    mesh.metrics.update(
+        {
+            "m2d_kept_quad_count": int(len(mesh.faces)),
+            "m2d_cropped_quad_count": int(max(0, overlay_total - len(mesh.faces))),
+        }
+    )
     mesh.metrics.update(
         {
             "csf_model": str(getattr(domain, "csf_model", "edge_stretch_proxy")),

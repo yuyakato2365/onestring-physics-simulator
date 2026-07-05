@@ -432,6 +432,14 @@ def test_omega_rectangular_debug_and_paper_default_are_explicit():
         | np.isclose(boundary[:, 1], hi[1], atol=1e-8)
     )
     assert np.all(on_rect)
+    m2d_metrics = default_state.mesh_2d_initial.metrics
+    assert m2d_metrics["m2d_boundary_clipping_used"] is True
+    assert m2d_metrics["m2d_boundary_clip_policy_effective"] == "strict_vertices"
+    m2d_points = default_state.mesh_2d_initial.vertices[default_state.mesh_2d_initial.faces][:, :, :2].reshape(-1, 2)
+    assert np.all(m2d_points[:, 0] >= lo[0] - 1e-8)
+    assert np.all(m2d_points[:, 0] <= hi[0] + 1e-8)
+    assert np.all(m2d_points[:, 1] >= lo[1] - 1e-8)
+    assert np.all(m2d_points[:, 1] <= hi[1] + 1e-8)
 
     try:
         build_onestring_design(
