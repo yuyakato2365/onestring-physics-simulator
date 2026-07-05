@@ -368,11 +368,12 @@ _ORIGINAL_OPTIMIZE_K3D = _original._optimize_k3d
 class PipelineParameters(_original.PipelineParameters):
     omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "paper_default"
     omega_parameterization_mode: Literal[
+        "bff",
         "pca_debug",
         "lscm_paper_like",
         "arap_paper_like",
         "paper_like_unimplemented",
-    ] = "lscm_paper_like"
+    ] = "bff"
     allow_experimental_pipeline: bool = False
     enable_heuristic_csf_split: bool = True
     enable_peak_guided_split: bool = True
@@ -601,6 +602,215 @@ def _farthest_boundary_pin_pair(vertices: np.ndarray, boundary_loop: list[int]) 
     return int(loop[i]), int(loop[j]), distance
 
 
+def _cotangent_value(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    u = np.asarray(b, dtype=float) - np.asarray(a, dtype=float)
+    v = np.asarray(c, dtype=float) - np.asarray(a, dtype=float)
+    cross_norm = float(np.linalg.norm(np.cross(u, v)))
+    if cross_norm <= 1e-14:
+        return 0.0
+    value = float(np.dot(u, v) / cross_norm)
+    if not np.isfinite(value):
+        return 0.0
+    return value
+
+
+def _vertex_normals_from_faces(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    normals = np.zeros_like(pts, dtype=float)
+    for face in tris:
+        tri = pts[face]
+        n = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+        for vertex_id in face:
+            normals[int(vertex_id)] += n
+    lengths = np.linalg.norm(normals, axis=1)
+    valid = lengths > 1e-14
+    normals[valid] /= lengths[valid, None]
+    normals[~valid] = np.asarray([0.0, 0.0, 1.0])
+    return normals
+
+
+def _cotangent_laplacian(vertices: np.ndarray, faces: np.ndarray):
+    try:
+        from scipy import sparse
+    except Exception as exc:  # pragma: no cover - depends on optional env
+        raise RuntimeError("scipy sparse is required for bff parameterization") from exc
+
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    n_vertices = int(len(pts))
+    weights: dict[tuple[int, int], float] = {}
+    negative_weight_count = 0
+    for face in tris:
+        i, j, k = [int(v) for v in face]
+        cot_i = _cotangent_value(pts[i], pts[j], pts[k])
+        cot_j = _cotangent_value(pts[j], pts[k], pts[i])
+        cot_k = _cotangent_value(pts[k], pts[i], pts[j])
+        for a, b, cot in ((j, k, cot_i), (k, i, cot_j), (i, j, cot_k)):
+            if cot < -1e-12:
+                negative_weight_count += 1
+            key = (min(a, b), max(a, b))
+            weights[key] = weights.get(key, 0.0) + 0.5 * cot
+
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    diag = np.zeros(n_vertices, dtype=float)
+    for (a, b), weight in weights.items():
+        if abs(weight) <= 1e-14 or not np.isfinite(weight):
+            continue
+        diag[a] += weight
+        diag[b] += weight
+        rows.extend([a, b])
+        cols.extend([b, a])
+        data.extend([-weight, -weight])
+    for vertex_id, value in enumerate(diag):
+        rows.append(vertex_id)
+        cols.append(vertex_id)
+        data.append(float(value) + 1e-10)
+    return sparse.coo_matrix((data, (rows, cols)), shape=(n_vertices, n_vertices)).tocsr(), negative_weight_count
+
+
+def _bff_boundary_polygon(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    boundary_loop: list[int],
+) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    pts = np.asarray(vertices, dtype=float)
+    loop = list(boundary_loop)
+    n = len(loop)
+    if n < 3:
+        raise RuntimeError("BFF parameterization requires a boundary loop with at least three vertices.")
+
+    normals = _vertex_normals_from_faces(pts, faces)
+    edge_lengths = np.asarray(
+        [np.linalg.norm(pts[loop[(i + 1) % n]] - pts[loop[i]]) for i in range(n)],
+        dtype=float,
+    )
+    perimeter = float(np.sum(edge_lengths))
+    if perimeter <= 1e-12:
+        raise RuntimeError("BFF boundary perimeter is degenerate.")
+
+    turns = np.zeros(n, dtype=float)
+    for i in range(n):
+        prev_id = loop[(i - 1) % n]
+        curr_id = loop[i]
+        next_id = loop[(i + 1) % n]
+        incoming = pts[curr_id] - pts[prev_id]
+        outgoing = pts[next_id] - pts[curr_id]
+        in_len = float(np.linalg.norm(incoming))
+        out_len = float(np.linalg.norm(outgoing))
+        if in_len <= 1e-12 or out_len <= 1e-12:
+            continue
+        incoming /= in_len
+        outgoing /= out_len
+        normal = normals[curr_id]
+        cross = np.cross(incoming, outgoing)
+        turns[i] = float(np.arctan2(np.dot(normal, cross), np.dot(incoming, outgoing)))
+
+    turn_sum = float(np.sum(turns))
+    if abs(turn_sum) <= 1e-8:
+        # Fallback for inconsistent triangle orientation: keep the unsigned
+        # boundary angles, then normalize the total turn to one closed loop.
+        for i in range(n):
+            prev_id = loop[(i - 1) % n]
+            curr_id = loop[i]
+            next_id = loop[(i + 1) % n]
+            a = pts[prev_id] - pts[curr_id]
+            b = pts[next_id] - pts[curr_id]
+            denom = max(float(np.linalg.norm(a) * np.linalg.norm(b)), 1e-12)
+            angle = float(np.arccos(np.clip(np.dot(a, b) / denom, -1.0, 1.0)))
+            turns[i] = np.pi - angle
+        turn_sum = float(np.sum(turns))
+    if turn_sum < 0.0:
+        turns *= -1.0
+        turn_sum = -turn_sum
+
+    corrected_turns = turns + (2.0 * np.pi - turn_sum) / n
+    positions = np.zeros((n + 1, 2), dtype=float)
+    theta = 0.0
+    for i in range(n):
+        positions[i + 1] = positions[i] + edge_lengths[i] * np.asarray([np.cos(theta), np.sin(theta)])
+        theta += corrected_turns[(i + 1) % n]
+
+    closure_drift = positions[-1] - positions[0]
+    cumulative = np.concatenate([[0.0], np.cumsum(edge_lengths[:-1])])
+    boundary_uv = positions[:-1] - (cumulative[:, None] / perimeter) * closure_drift
+    boundary_uv -= np.mean(boundary_uv, axis=0)
+    area = 0.5 * float(
+        np.sum(boundary_uv[:, 0] * np.roll(boundary_uv[:, 1], -1) - np.roll(boundary_uv[:, 0], -1) * boundary_uv[:, 1])
+    )
+    if area < 0.0:
+        boundary_uv[:, 1] *= -1.0
+        area = -area
+
+    flat_lengths = np.asarray(
+        [np.linalg.norm(boundary_uv[(i + 1) % n] - boundary_uv[i]) for i in range(n)],
+        dtype=float,
+    )
+    scale = float(np.dot(flat_lengths, edge_lengths) / max(np.dot(flat_lengths, flat_lengths), 1e-12))
+    rel_error = np.abs(scale * flat_lengths - edge_lengths) / np.maximum(edge_lengths, 1e-12)
+    metrics = {
+        "bff_boundary_vertex_count": int(n),
+        "bff_boundary_perimeter_3d": float(perimeter),
+        "bff_boundary_turning_angle_sum_raw": float(turn_sum),
+        "bff_boundary_turning_angle_sum_corrected": float(np.sum(corrected_turns)),
+        "bff_boundary_closure_drift_before_correction": float(np.linalg.norm(closure_drift)),
+        "bff_boundary_max_relative_length_error_after_similarity": float(np.max(rel_error)) if len(rel_error) else 0.0,
+        "bff_boundary_mean_relative_length_error_after_similarity": float(np.mean(rel_error)) if len(rel_error) else 0.0,
+        "bff_boundary_area_2d": float(area),
+    }
+    return boundary_uv, metrics
+
+
+def _bff_boundary_first_uv(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    boundary_loop: list[int],
+) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    try:
+        from scipy.sparse import linalg as sparse_linalg
+    except Exception as exc:  # pragma: no cover - depends on optional env
+        raise RuntimeError("scipy sparse is required for bff parameterization") from exc
+
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    n_vertices = int(len(pts))
+    boundary_uv, boundary_metrics = _bff_boundary_polygon(pts, tris, boundary_loop)
+    uv = np.zeros((n_vertices, 2), dtype=float)
+    boundary_ids = np.asarray(boundary_loop, dtype=int)
+    uv[boundary_ids] = boundary_uv
+    boundary_set = set(int(v) for v in boundary_ids)
+    interior_ids = np.asarray([i for i in range(n_vertices) if i not in boundary_set], dtype=int)
+
+    laplacian, negative_weight_count = _cotangent_laplacian(pts, tris)
+    if len(interior_ids):
+        l_ii = laplacian[interior_ids[:, None], interior_ids]
+        l_ib = laplacian[interior_ids[:, None], boundary_ids]
+        rhs = -l_ib @ boundary_uv
+        uv[interior_ids, 0] = sparse_linalg.spsolve(l_ii, rhs[:, 0])
+        uv[interior_ids, 1] = sparse_linalg.spsolve(l_ii, rhs[:, 1])
+
+    uv = uv - np.mean(uv, axis=0)
+    span = np.nanmax(uv, axis=0) - np.nanmin(uv, axis=0)
+    scale = max(float(np.nanmax(span)) * 0.5, 1e-12)
+    uv = uv / scale
+
+    return uv, {
+        "omega_parameterization_solver": "boundary_first_flattening_cotan_harmonic",
+        "omega_boundary_constraint_model": "bff_boundary_from_3d_edge_lengths_and_boundary_turning_angles",
+        "omega_boundary_forced_rectangle": False,
+        "omega_boundary_shape_preserved": False,
+        "omega_boundary_model": "BFF-style boundary-first flattening; boundary is not forced to a square, circle, or projected outline",
+        "bff_implemented": True,
+        "bff_variant": "discrete_boundary_lengths_turning_angles_plus_cotan_harmonic_extension",
+        "bff_reference_library": "local implementation; libigl/geometry-central BFF binding not available",
+        "bff_cotangent_negative_weight_count": int(negative_weight_count),
+        "bff_interior_vertex_count": int(len(interior_ids)),
+        **boundary_metrics,
+    }
+
+
 def _lscm_free_boundary_uv(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -751,7 +961,7 @@ def _build_surface_parameterization(surface, target, grid, params):
         )
 
     boundary_mode = str(getattr(params, "omega_boundary_mode", "paper_default"))
-    parameterization_mode = str(getattr(params, "omega_parameterization_mode", "lscm_paper_like"))
+    parameterization_mode = str(getattr(params, "omega_parameterization_mode", "bff"))
     allow_experimental = bool(getattr(params, "allow_experimental_pipeline", False))
 
     surface_vertices = np.asarray(surface.vertices, dtype=float)
@@ -762,8 +972,52 @@ def _build_surface_parameterization(surface, target, grid, params):
 
     if parameterization_mode in {"arap_paper_like", "paper_like_unimplemented"}:
         raise NotImplementedError(
-            f"{parameterization_mode} is not implemented. Use lscm_paper_like for the current conformal S->Omega path, "
+            f"{parameterization_mode} is not implemented. Use bff for the current boundary-first conformal S->Omega path, "
             "or explicitly enable pca_debug as an experimental non-paper path."
+        )
+
+    if parameterization_mode == "bff":
+        if boundary_mode != "paper_default":
+            raise ValueError("bff uses its own boundary-first solve and only supports omega_boundary_mode='paper_default'.")
+        uv_vertices, bff_metrics = _bff_boundary_first_uv(surface_vertices, surface_faces, boundary_loop)
+        boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
+        metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
+        metrics: dict[str, float | int | str | bool] = {
+            "parameterization_method": "bff",
+            "parameterization_exactness_label": "bff_local_discrete",
+            "parameterization_warning": "BFF path is implemented locally as boundary-first flattening with 3D boundary lengths/turning angles and cotangent harmonic interior extension; it is not a libigl reference binding.",
+            "omega_boundary_mode": "paper_default",
+            "omega_parameterization_mode": "bff",
+            "surface_vertex_count": int(len(surface_vertices)),
+            "surface_triangle_count": int(len(surface_faces)),
+            "boundary_vertex_count": int(len(boundary_loop)),
+            "mean_slope": metric["mean_slope"],
+            "max_slope": metric["max_slope"],
+            "harmonic_solve_performed": True,
+            "height_field_shortcut_used": False,
+            "omega_corresponds_to_S": True,
+            "omega_correspondence_model": "BFF boundary-first map c:S->Omega, inverse by UV triangle lookup",
+            "lscm_implemented": True,
+            "paper_flow_stage": "S -> Omega by BFF-style boundary-first flattening; boundary is not forced to a rectangle or projected outline",
+            "paper_exactness_warning": "Local discrete BFF path is active; compare bff_* metrics against the paper/reference implementation before claiming numerical equivalence.",
+            "omega_warning": "Boundary-first BFF path; no full-boundary fitting correction is applied.",
+            **bff_metrics,
+        }
+        out = _original.SurfaceParameterization(
+            method="bff",
+            surface_vertices_3d=surface_vertices,
+            surface_faces=surface_faces,
+            uv_vertices_2d=uv_vertices,
+            uv_faces=surface_faces.copy(),
+            omega_boundary=boundary,
+            triangle_acceleration=None,
+            metrics=metrics,
+        )
+        return _mark_parameterization_mode(
+            out,
+            method="bff",
+            exactness="bff_local_discrete",
+            warning="Local BFF-style boundary-first flattening is active; reference BFF numerical equivalence is not guaranteed.",
         )
 
     if parameterization_mode == "lscm_paper_like":

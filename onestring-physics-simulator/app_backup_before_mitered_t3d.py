@@ -290,9 +290,9 @@ with st.sidebar:
         "S→Omega のパラメータ化。PCA は debug/experimental であり paper-like ではない。",
         lambda: st.selectbox(
             "Omega parameterization mode",
-            ["lscm_paper_like", "paper_like_unimplemented", "pca_debug", "arap_paper_like"],
+            ["bff", "lscm_paper_like", "paper_like_unimplemented", "pca_debug", "arap_paper_like"],
             index=0,
-            help="lscm_paper_like solves a free-boundary conformal map. PCA/debug modes require explicit opt-in.",
+            help="bff uses the local boundary-first conformal solve. PCA/debug modes require explicit opt-in.",
         ),
     )
     allow_experimental_pipeline = _param_row(

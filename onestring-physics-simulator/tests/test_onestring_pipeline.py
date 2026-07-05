@@ -414,10 +414,12 @@ def test_export_t2d_stl_can_return_per_tile_files():
 def test_omega_rectangular_debug_and_paper_default_are_explicit():
     target = create_builtin_shape("dome", {"amplitude": 0.35, "radius": 2.0})
     default_state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
-    assert default_state.surface_parameterization.method == "lscm_paper_like"
+    assert default_state.surface_parameterization.method == "bff"
     assert default_state.surface_parameterization.metrics["omega_boundary_forced_rectangle"] is False
-    assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == "free_boundary_two_pinned_vertices_only"
-    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "conformal_approximation"
+    assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == "bff_boundary_from_3d_edge_lengths_and_boundary_turning_angles"
+    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "bff_local_discrete"
+    assert default_state.surface_parameterization.metrics["bff_implemented"] is True
+    assert default_state.surface_parameterization.metrics["bff_boundary_max_relative_length_error_after_similarity"] < 0.25
 
     try:
         build_onestring_design(
