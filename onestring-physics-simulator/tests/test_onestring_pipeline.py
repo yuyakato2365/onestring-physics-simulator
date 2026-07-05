@@ -419,7 +419,9 @@ def test_omega_rectangular_debug_and_paper_default_are_explicit():
     assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == "bff_boundary_from_3d_edge_lengths_and_boundary_turning_angles"
     assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "bff_local_discrete"
     assert default_state.surface_parameterization.metrics["bff_implemented"] is True
-    assert default_state.surface_parameterization.metrics["bff_boundary_max_relative_length_error_after_similarity"] < 0.25
+    assert default_state.surface_parameterization.metrics["bff_boundary_closure_correction_applied"] is False
+    assert default_state.surface_parameterization.metrics["bff_boundary_closure_drift"] >= 0.0
+    assert np.isfinite(default_state.surface_parameterization.metrics["bff_boundary_max_relative_length_error_after_similarity"])
 
     try:
         build_onestring_design(

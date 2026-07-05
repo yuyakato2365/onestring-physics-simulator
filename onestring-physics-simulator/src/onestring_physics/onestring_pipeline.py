@@ -726,16 +726,14 @@ def _bff_boundary_polygon(
         turns *= -1.0
         turn_sum = -turn_sum
 
-    corrected_turns = turns + (2.0 * np.pi - turn_sum) / n
     positions = np.zeros((n + 1, 2), dtype=float)
     theta = 0.0
     for i in range(n):
         positions[i + 1] = positions[i] + edge_lengths[i] * np.asarray([np.cos(theta), np.sin(theta)])
-        theta += corrected_turns[(i + 1) % n]
+        theta += turns[(i + 1) % n]
 
     closure_drift = positions[-1] - positions[0]
-    cumulative = np.concatenate([[0.0], np.cumsum(edge_lengths[:-1])])
-    boundary_uv = positions[:-1] - (cumulative[:, None] / perimeter) * closure_drift
+    boundary_uv = positions[:-1].copy()
     boundary_uv -= np.mean(boundary_uv, axis=0)
     area = 0.5 * float(
         np.sum(boundary_uv[:, 0] * np.roll(boundary_uv[:, 1], -1) - np.roll(boundary_uv[:, 0], -1) * boundary_uv[:, 1])
@@ -754,8 +752,9 @@ def _bff_boundary_polygon(
         "bff_boundary_vertex_count": int(n),
         "bff_boundary_perimeter_3d": float(perimeter),
         "bff_boundary_turning_angle_sum_raw": float(turn_sum),
-        "bff_boundary_turning_angle_sum_corrected": float(np.sum(corrected_turns)),
-        "bff_boundary_closure_drift_before_correction": float(np.linalg.norm(closure_drift)),
+        "bff_boundary_turning_angle_sum_used": float(np.sum(turns)),
+        "bff_boundary_closure_correction_applied": False,
+        "bff_boundary_closure_drift": float(np.linalg.norm(closure_drift)),
         "bff_boundary_max_relative_length_error_after_similarity": float(np.max(rel_error)) if len(rel_error) else 0.0,
         "bff_boundary_mean_relative_length_error_after_similarity": float(np.mean(rel_error)) if len(rel_error) else 0.0,
         "bff_boundary_area_2d": float(area),
@@ -801,9 +800,9 @@ def _bff_boundary_first_uv(
         "omega_boundary_constraint_model": "bff_boundary_from_3d_edge_lengths_and_boundary_turning_angles",
         "omega_boundary_forced_rectangle": False,
         "omega_boundary_shape_preserved": False,
-        "omega_boundary_model": "BFF-style boundary-first flattening; boundary is not forced to a square, circle, or projected outline",
+        "omega_boundary_model": "BFF-style boundary-first flattening; no square/circle/projected-outline forcing and no closure-drift correction",
         "bff_implemented": True,
-        "bff_variant": "discrete_boundary_lengths_turning_angles_plus_cotan_harmonic_extension",
+        "bff_variant": "discrete_boundary_lengths_turning_angles_no_boundary_correction_plus_cotan_harmonic_extension",
         "bff_reference_library": "local implementation; libigl/geometry-central BFF binding not available",
         "bff_cotangent_negative_weight_count": int(negative_weight_count),
         "bff_interior_vertex_count": int(len(interior_ids)),
@@ -985,7 +984,7 @@ def _build_surface_parameterization(surface, target, grid, params):
         metrics: dict[str, float | int | str | bool] = {
             "parameterization_method": "bff",
             "parameterization_exactness_label": "bff_local_discrete",
-            "parameterization_warning": "BFF path is implemented locally as boundary-first flattening with 3D boundary lengths/turning angles and cotangent harmonic interior extension; it is not a libigl reference binding.",
+            "parameterization_warning": "BFF path is implemented locally as boundary-first flattening with 3D boundary lengths/turning angles and cotangent harmonic interior extension; no boundary closure correction is applied; it is not a libigl reference binding.",
             "omega_boundary_mode": "paper_default",
             "omega_parameterization_mode": "bff",
             "surface_vertex_count": int(len(surface_vertices)),
@@ -998,9 +997,9 @@ def _build_surface_parameterization(surface, target, grid, params):
             "omega_corresponds_to_S": True,
             "omega_correspondence_model": "BFF boundary-first map c:S->Omega, inverse by UV triangle lookup",
             "lscm_implemented": True,
-            "paper_flow_stage": "S -> Omega by BFF-style boundary-first flattening; boundary is not forced to a rectangle or projected outline",
+            "paper_flow_stage": "S -> Omega by BFF-style boundary-first flattening; boundary is not forced to a rectangle/projected outline and closure drift is not corrected",
             "paper_exactness_warning": "Local discrete BFF path is active; compare bff_* metrics against the paper/reference implementation before claiming numerical equivalence.",
-            "omega_warning": "Boundary-first BFF path; no full-boundary fitting correction is applied.",
+            "omega_warning": "Boundary-first BFF path; no boundary fitting or closure-drift correction is applied.",
             **bff_metrics,
         }
         out = _original.SurfaceParameterization(
@@ -1017,7 +1016,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             out,
             method="bff",
             exactness="bff_local_discrete",
-            warning="Local BFF-style boundary-first flattening is active; reference BFF numerical equivalence is not guaranteed.",
+            warning="Local BFF-style boundary-first flattening is active with no boundary correction; reference BFF numerical equivalence is not guaranteed.",
         )
 
     if parameterization_mode == "lscm_paper_like":
