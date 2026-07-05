@@ -2,7 +2,7 @@
 
 A Python research prototype inspired by **One String to Pull Them All: Fast Assembly of Curved Structures from Flat Auxetic Linkages**.
 
-This simulator is a paper-audited OneString research prototype, not a complete paper implementation. It is not a direct morphing animation to the target surface. The design pipeline explicitly stores `S`, `Omega`, `M2D`, `M3D`, `K2D`, `K3D`, `T2D`, and `T3D`, but several stages are marked as debug, approximation, heuristic, fallback, or experimental in metrics. In particular, PCA projection, height-field shortcuts, grid crop, heuristic split, and fallback behavior must not be treated as paper-compliant substitutes.
+This simulator is a paper-audited OneString research prototype, not a complete paper implementation. The default `PipelineParameters()` path now uses a free-boundary LSCM `S -> Omega` map instead of silently running PCA or boundary-shape fitting. PCA remains available only as an explicit debug/experimental path with `allow_experimental_pipeline=True`.
 
 The default Streamlit workflow is:
 
@@ -18,7 +18,7 @@ The deployed physical error is evaluated against the designed assembled tile con
 
 ## 論文の流れと、この実装の流れ
 
-このリポジトリは、OneString 論文の処理順と物理的な意図を観察するための **paper-audited prototype** です。論文と同じ概念的パイプラインを追いますが、論文の ShapeOp / libigl / fabrication solver を完全移植したものではありません。PCA projection、height-field shortcut、grid crop、heuristic split、fallback は paper-like とは扱わず、debug / approximation / heuristic / fallback / experimental として metrics に残します。
+このリポジトリは、OneString 論文の処理順と物理的な意図を観察するための **paper-audited prototype** です。論文と同じ概念的パイプラインを追いますが、論文の ShapeOp / libigl / fabrication solver を完全移植したものではありません。現在は `PipelineParameters()` のデフォルトで、境界を四角や投影輪郭へ無理に合わせない free-boundary LSCM による `S -> Omega` を使います。PCA projection、height-field shortcut、grid crop、heuristic split、fallback を使うには、明示的に `allow_experimental_pipeline=True` と debug / experimental mode を指定する必要があります。
 
 ### 論文側の大きな流れ
 
@@ -392,7 +392,7 @@ Legacy rope/tendon code remains in the package for compatibility with earlier te
 
 - The default M3D construction uses the stored `Omega` map: M2D vertices live in `Omega`, then each UV point is mapped back to `S` using UV triangle lookup and barycentric interpolation on the corresponding surface triangle. This depends on the current non-paper `Omega` parameterization and is tracked as an approximation.
 - Direct height-field lifting `[u, v, z=f(u,v)]` is available only through the explicit `analytic_scaled_heightfield_debug` M3D construction mode and is tracked as a debug shortcut.
-- The current default parameterization is `omega_parameterization_mode="pca_debug"` with `omega_boundary_mode="shape_preserving_experimental"`. It deliberately does not force the mesh boundary to a rectangle, so non-rectangular inputs such as two-lobed or necked surfaces keep a closer Omega outline. It is not BFF/LSCM/ARAP and is not paper-like.
+- The default parameterization is `omega_parameterization_mode="lscm_paper_like"` with `omega_boundary_mode="paper_default"`. It solves a free-boundary LSCM problem and pins only two boundary vertices to remove similarity nullspace. It does not force the whole boundary to a square, circle, or projected outline. This is a conformal-map implementation, but BFF remains unimplemented and is reported separately.
 - CSF estimation uses local 3D/UV edge-stretch ratios. Regions whose normalized stretch exceeds `2.0` generate a coarse Omega split line. The implementation detects simple reflection symmetry in both `S` and `Omega`; when symmetry is detected, M2D crop results and CSF split lines are mirrored across the detected axis before the split is applied. The split is snapped to an existing M2D grid line and duplicates the vertices on one side of the line, so the topology is cut without deleting neighboring quads. This is still a lightweight approximation of the paper's split strategy, not a full BFF/CSF segmentation implementation.
 - When a dominant surface peak is detected, the Omega overlay grid is shifted so the peak's UV position lands on an M2D grid vertex. This makes the corresponding K3D peak occur at a shared corner where four panels can meet; CSF split lines are allowed to pass through that vertex.
 - `K3D` optimization uses a compact least-squares height-field approximation rather than the full projection stack from the paper.
@@ -446,7 +446,14 @@ from onestring_physics.onestring_pipeline import (
 )
 
 target = create_builtin_shape("dome", {"amplitude": 0.75, "radius": 2.2})
-state = build_onestring_design(target, PipelineParameters(nx=3))
+state = build_onestring_design(
+    target,
+    PipelineParameters(
+        nx=3,
+        omega_parameterization_mode="lscm_paper_like",
+        omega_boundary_mode="paper_default",
+    ),
+)
 stl_bytes, export_metrics = export_t2d_stl(state, "onestring_t2d_dual_hinge.stl", panel_size=0.1)
 state.simulation_result = simulate_onestring_deployment(
     state,

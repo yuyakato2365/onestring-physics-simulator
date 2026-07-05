@@ -366,13 +366,14 @@ _ORIGINAL_OPTIMIZE_K3D = _original._optimize_k3d
 
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
-    omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "shape_preserving_experimental"
+    omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "paper_default"
     omega_parameterization_mode: Literal[
         "pca_debug",
         "lscm_paper_like",
         "arap_paper_like",
         "paper_like_unimplemented",
-    ] = "pca_debug"
+    ] = "lscm_paper_like"
+    allow_experimental_pipeline: bool = False
     enable_heuristic_csf_split: bool = True
     enable_peak_guided_split: bool = True
     enable_mirror_split: bool = True
@@ -569,6 +570,154 @@ def _shape_preserving_projected_uv(vertices: np.ndarray, boundary_loop: list[int
     return uv, metrics
 
 
+def _triangle_local_coordinates(tri: np.ndarray) -> np.ndarray:
+    p0, p1, p2 = np.asarray(tri, dtype=float)
+    e1 = p1 - p0
+    len_e1 = float(np.linalg.norm(e1))
+    if len_e1 <= 1e-12:
+        return np.zeros((3, 2), dtype=float)
+    x_axis = e1 / len_e1
+    n = np.cross(e1, p2 - p0)
+    n_norm = float(np.linalg.norm(n))
+    if n_norm <= 1e-12:
+        return np.zeros((3, 2), dtype=float)
+    y_axis = np.cross(n / n_norm, x_axis)
+    rel = np.asarray([p0 - p0, p1 - p0, p2 - p0], dtype=float)
+    return np.column_stack([rel @ x_axis, rel @ y_axis])
+
+
+def _farthest_boundary_pin_pair(vertices: np.ndarray, boundary_loop: list[int]) -> tuple[int, int, float]:
+    pts = np.asarray(vertices, dtype=float)
+    loop = list(boundary_loop)
+    if len(loop) < 2:
+        raise RuntimeError("LSCM requires at least two boundary vertices for pinning.")
+    boundary = pts[loop]
+    diffs = boundary[:, None, :] - boundary[None, :, :]
+    dist2 = np.sum(diffs * diffs, axis=2)
+    i, j = np.unravel_index(int(np.argmax(dist2)), dist2.shape)
+    distance = float(np.sqrt(max(dist2[i, j], 0.0)))
+    if distance <= 1e-12:
+        raise RuntimeError("LSCM boundary pin pair is degenerate.")
+    return int(loop[i]), int(loop[j]), distance
+
+
+def _lscm_free_boundary_uv(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    boundary_loop: list[int],
+) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    """Least-squares conformal map with free boundary and two pinned vertices.
+
+    This solves a Cauchy-Riemann residual per triangle.  The boundary is not
+    forced to a square, circle, or projected outline; two boundary vertices are
+    pinned only to remove translation/rotation/scale nullspace.
+    """
+    try:
+        from scipy import sparse
+        from scipy.sparse import linalg as sparse_linalg
+    except Exception as exc:  # pragma: no cover - depends on optional env
+        raise RuntimeError("scipy sparse is required for lscm_paper_like parameterization") from exc
+
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    n_vertices = int(len(pts))
+    if n_vertices == 0 or len(tris) == 0:
+        return np.zeros((0, 2), dtype=float), {"omega_parameterization_solver": "lscm_empty"}
+
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    rhs: list[float] = []
+    row = 0
+    used_triangles = 0
+    skipped_triangles = 0
+    for face in tris:
+        local = _triangle_local_coordinates(pts[face])
+        signed_area = float(_triangle_signed_area_2d(local.reshape(1, 3, 2))[0])
+        area = abs(signed_area)
+        if area <= 1e-14 or not np.isfinite(area):
+            skipped_triangles += 1
+            continue
+        x = local[:, 0]
+        y = local[:, 1]
+        denom = 2.0 * signed_area
+        if abs(denom) <= 1e-14:
+            skipped_triangles += 1
+            continue
+        grad = np.asarray(
+            [
+                [(y[1] - y[2]) / denom, (x[2] - x[1]) / denom],
+                [(y[2] - y[0]) / denom, (x[0] - x[2]) / denom],
+                [(y[0] - y[1]) / denom, (x[1] - x[0]) / denom],
+            ],
+            dtype=float,
+        )
+        weight = float(np.sqrt(area))
+        for local_id, vertex_id in enumerate(face):
+            gx, gy = float(grad[local_id, 0]), float(grad[local_id, 1])
+            # du/dx - dv/dy = 0
+            rows.extend([row, row])
+            cols.extend([int(vertex_id), n_vertices + int(vertex_id)])
+            data.extend([weight * gx, -weight * gy])
+            # du/dy + dv/dx = 0
+            rows.extend([row + 1, row + 1])
+            cols.extend([int(vertex_id), n_vertices + int(vertex_id)])
+            data.extend([weight * gy, weight * gx])
+        rhs.extend([0.0, 0.0])
+        row += 2
+        used_triangles += 1
+
+    pin_a, pin_b, pin_distance = _farthest_boundary_pin_pair(pts, boundary_loop)
+    pin_weight = max(1000.0, 100.0 * np.sqrt(max(used_triangles, 1)))
+    pins = [
+        (pin_a, 0.0, 0.0),
+        (pin_b, pin_distance, 0.0),
+    ]
+    for vertex_id, u_value, v_value in pins:
+        rows.append(row)
+        cols.append(int(vertex_id))
+        data.append(pin_weight)
+        rhs.append(pin_weight * float(u_value))
+        row += 1
+        rows.append(row)
+        cols.append(n_vertices + int(vertex_id))
+        data.append(pin_weight)
+        rhs.append(pin_weight * float(v_value))
+        row += 1
+
+    matrix = sparse.coo_matrix((data, (rows, cols)), shape=(row, 2 * n_vertices)).tocsr()
+    solution = sparse_linalg.lsqr(matrix, np.asarray(rhs, dtype=float), atol=1e-10, btol=1e-10, iter_lim=max(2000, 20 * n_vertices))
+    x = np.asarray(solution[0], dtype=float)
+    uv = np.column_stack([x[:n_vertices], x[n_vertices:]])
+
+    # Similarity normalization for display and numeric conditioning.  This does
+    # not constrain the boundary shape.
+    uv = uv - np.mean(uv, axis=0)
+    span = np.nanmax(uv, axis=0) - np.nanmin(uv, axis=0)
+    scale = max(float(np.nanmax(span)) * 0.5, 1e-12)
+    uv = uv / scale
+    if boundary_loop:
+        boundary = uv[boundary_loop]
+        area = 0.5 * float(np.sum(boundary[:, 0] * np.roll(boundary[:, 1], -1) - np.roll(boundary[:, 0], -1) * boundary[:, 1]))
+        if area < 0.0:
+            uv[:, 1] *= -1.0
+
+    return uv, {
+        "omega_parameterization_solver": "free_boundary_lscm_two_pin",
+        "omega_boundary_constraint_model": "free_boundary_two_pinned_vertices_only",
+        "omega_boundary_forced_rectangle": False,
+        "omega_boundary_shape_preserved": False,
+        "omega_boundary_model": "LSCM free boundary; no square/circle/projected-outline boundary forcing",
+        "lscm_used_triangle_count": int(used_triangles),
+        "lscm_skipped_degenerate_triangle_count": int(skipped_triangles),
+        "lscm_pin_vertex_a": int(pin_a),
+        "lscm_pin_vertex_b": int(pin_b),
+        "lscm_pin_distance_3d": float(pin_distance),
+        "lscm_lsqr_iterations": int(solution[2]),
+        "lscm_lsqr_residual_norm": float(solution[3]),
+    }
+
+
 def _mark_parameterization_mode(parameterization, *, method: str, exactness: str, warning: str, extra: dict | None = None):
     parameterization.metrics.update(
         {
@@ -601,18 +750,75 @@ def _build_surface_parameterization(surface, target, grid, params):
             extra={"height_field_shortcut_used": True},
         )
 
-    boundary_mode = str(getattr(params, "omega_boundary_mode", "shape_preserving_experimental"))
-    parameterization_mode = str(getattr(params, "omega_parameterization_mode", "pca_debug"))
+    boundary_mode = str(getattr(params, "omega_boundary_mode", "paper_default"))
+    parameterization_mode = str(getattr(params, "omega_parameterization_mode", "lscm_paper_like"))
+    allow_experimental = bool(getattr(params, "allow_experimental_pipeline", False))
 
-    if parameterization_mode in {"lscm_paper_like", "arap_paper_like", "paper_like_unimplemented"} or boundary_mode == "paper_default":
+    surface_vertices = np.asarray(surface.vertices, dtype=float)
+    surface_faces = np.asarray(surface.faces[:, :3], dtype=int)
+    boundary_loop = _original._mesh_boundary_loop(surface_faces)
+    if len(boundary_loop) < 3:
+        raise RuntimeError("S->Omega parameterization requires an open target mesh with a boundary; only explicit debug heightfield mode is available for this surface.")
+
+    if parameterization_mode in {"arap_paper_like", "paper_like_unimplemented"}:
         raise NotImplementedError(
-            "Paper-default S->Omega parameterization is not implemented in this simulator. "
-            "Use omega_parameterization_mode='pca_debug' with omega_boundary_mode='rectangular_debug' "
-            "or 'shape_preserving_experimental' for explicit non-paper debug/experimental runs."
+            f"{parameterization_mode} is not implemented. Use lscm_paper_like for the current conformal S->Omega path, "
+            "or explicitly enable pca_debug as an experimental non-paper path."
+        )
+
+    if parameterization_mode == "lscm_paper_like":
+        if boundary_mode not in {"paper_default", "shape_preserving_experimental"}:
+            raise ValueError("lscm_paper_like uses a free boundary and does not support rectangular_debug boundary forcing.")
+        uv_vertices, lscm_metrics = _lscm_free_boundary_uv(surface_vertices, surface_faces, boundary_loop)
+        boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
+        metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
+        metrics: dict[str, float | int | str | bool] = {
+            "parameterization_method": "lscm_paper_like",
+            "parameterization_exactness_label": "conformal_approximation",
+            "parameterization_warning": "Free-boundary LSCM is implemented for conformal S->Omega mapping, but it is not Boundary First Flattening unless the paper path specifically accepts LSCM.",
+            "omega_boundary_mode": "paper_default" if boundary_mode == "paper_default" else boundary_mode,
+            "omega_parameterization_mode": "lscm_paper_like",
+            "surface_vertex_count": int(len(surface_vertices)),
+            "surface_triangle_count": int(len(surface_faces)),
+            "boundary_vertex_count": int(len(boundary_loop)),
+            "mean_slope": metric["mean_slope"],
+            "max_slope": metric["max_slope"],
+            "harmonic_solve_performed": False,
+            "height_field_shortcut_used": False,
+            "omega_corresponds_to_S": True,
+            "omega_correspondence_model": "free-boundary LSCM map c:S->Omega, inverse by UV triangle lookup",
+            "bff_implemented": False,
+            "lscm_implemented": True,
+            "paper_flow_stage": "S -> Omega by free-boundary LSCM; boundary is not forced to a rectangle or projected outline",
+            "paper_exactness_warning": "BFF is not implemented; current conformal path is LSCM with two pinned vertices.",
+            "omega_warning": "Conformal LSCM path; no full-boundary fitting correction is applied.",
+            **lscm_metrics,
+        }
+        out = _original.SurfaceParameterization(
+            method="lscm_paper_like",
+            surface_vertices_3d=surface_vertices,
+            surface_faces=surface_faces,
+            uv_vertices_2d=uv_vertices,
+            uv_faces=surface_faces.copy(),
+            omega_boundary=boundary,
+            triangle_acceleration=None,
+            metrics=metrics,
+        )
+        return _mark_parameterization_mode(
+            out,
+            method="lscm_paper_like",
+            exactness="conformal_approximation",
+            warning="Free-boundary LSCM is implemented; BFF remains unimplemented.",
         )
 
     if parameterization_mode != "pca_debug":
         raise ValueError(f"unknown omega_parameterization_mode: {parameterization_mode}")
+
+    if not allow_experimental:
+        raise RuntimeError(
+            "Non-paper S->Omega path requested without allow_experimental_pipeline=True. "
+            "This prevents PCA/debug parameterization from being mistaken for the paper implementation."
+        )
 
     if boundary_mode == "rectangular_debug":
         out = _ORIGINAL_BUILD_SURFACE_PARAMETERIZATION(surface, target, grid, params)
@@ -634,14 +840,11 @@ def _build_surface_parameterization(surface, target, grid, params):
             warning="Rectangular Omega boundary is a debug substitute, not paper-default parameterization.",
         )
 
+    if boundary_mode == "paper_default":
+        raise RuntimeError("pca_debug cannot be used with omega_boundary_mode='paper_default'. Select an explicit debug/experimental boundary mode.")
+
     if boundary_mode != "shape_preserving_experimental":
         raise ValueError(f"unknown omega_boundary_mode: {boundary_mode}")
-
-    surface_vertices = np.asarray(surface.vertices, dtype=float)
-    surface_faces = np.asarray(surface.faces[:, :3], dtype=int)
-    boundary_loop = _original._mesh_boundary_loop(surface_faces)
-    if len(boundary_loop) < 3:
-        raise RuntimeError("Paper mode requires an open target mesh with a boundary; only debug heightfield mode is available for this surface.")
 
     uv_vertices, projection_metrics = _shape_preserving_projected_uv(surface_vertices, boundary_loop)
     boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]

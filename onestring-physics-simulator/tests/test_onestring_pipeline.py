@@ -21,11 +21,21 @@ import numpy as np
 from types import SimpleNamespace
 
 
+def experimental_params(**kwargs):
+    values = {
+        "omega_boundary_mode": "shape_preserving_experimental",
+        "omega_parameterization_mode": "pca_debug",
+        "allow_experimental_pipeline": True,
+    }
+    values.update(kwargs)
+    return PipelineParameters(**values)
+
+
 def test_onestring_pipeline_stores_paper_intermediates():
     target = create_builtin_shape("dome", {"amplitude": 0.45, "radius": 2.0})
     state = build_onestring_design(
         target,
-        PipelineParameters(nx=3, max_3d_iterations=6, max_2d_iterations=6),
+        experimental_params(nx=3, max_3d_iterations=6, max_2d_iterations=6),
     )
 
     assert state.target_surface.vertices.shape[1] == 3
@@ -51,7 +61,7 @@ def test_onestring_actuation_reports_t3d_error_and_constraints():
     target = create_builtin_shape("saddle", {"amplitude": 0.35, "radius": 2.0})
     state = build_onestring_design(
         target,
-        PipelineParameters(nx=3, max_3d_iterations=5, max_2d_iterations=5),
+        experimental_params(nx=3, max_3d_iterations=5, max_2d_iterations=5),
     )
     result = simulate_onestring_deployment(
         state,
@@ -72,7 +82,7 @@ def test_k3d_does_not_collapse_for_curved_targets():
         target = create_builtin_shape(kind, {"amplitude": 0.6, "radius": 2.0, "sigma": 0.9, "wavelength": 2.5})
         state = build_onestring_design(
             target,
-            PipelineParameters(nx=3, max_3d_iterations=8, max_2d_iterations=4),
+            experimental_params(nx=3, max_3d_iterations=8, max_2d_iterations=4),
         )
         metrics = state.mesh_3d_optimized.metrics
         assert metrics["z_range_ratio"] >= 0.3
@@ -82,7 +92,7 @@ def test_k3d_does_not_collapse_for_curved_targets():
 
 def test_m3d_uses_inverse_parameterization_not_xy_height_lift():
     target = create_builtin_shape("dome", {"amplitude": 0.65, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=5, max_2d_iterations=5))
+    state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=5, max_2d_iterations=5))
     metrics = state.mesh_3d_initial.metrics
     direct = state.mesh_2d_initial.vertices.copy()
     direct[:, 2] = target.height(direct[:, 0], direct[:, 1])
@@ -98,7 +108,7 @@ def test_m3d_uses_inverse_parameterization_not_xy_height_lift():
 
 def test_m3d_vertices_lie_on_target_surface_and_match_m2d_connectivity():
     target = create_builtin_shape("gaussian", {"amplitude": 0.7, "radius": 2.0, "sigma": 0.8})
-    state = build_onestring_design(target, PipelineParameters(nx=4, max_3d_iterations=5, max_2d_iterations=5))
+    state = build_onestring_design(target, experimental_params(nx=4, max_3d_iterations=5, max_2d_iterations=5))
     metrics = state.mesh_3d_initial.metrics
 
     assert state.mesh_3d_initial.vertices.shape[0] == state.mesh_2d_initial.vertices.shape[0]
@@ -243,7 +253,7 @@ def test_detected_symmetry_mirrors_csf_split_lines():
 
 def test_m2d_grid_aligns_surface_peak_to_shared_quad_vertex():
     target = create_builtin_shape("dome", {"amplitude": 0.45, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=2, max_2d_iterations=2))
+    state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=2, max_2d_iterations=2))
     metrics = state.mesh_2d_initial.metrics
     peak_uv = np.asarray(metrics["m2d_peak_uv_target"], dtype=float)
     uv_vertices = state.mesh_2d_initial.vertices[:, :2]
@@ -257,7 +267,7 @@ def test_m2d_grid_aligns_surface_peak_to_shared_quad_vertex():
 
 def test_omega_boundary_preserves_nonrectangular_surface_shape():
     target = create_builtin_shape("half_gourd", {"amplitude": 0.55, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=2, max_2d_iterations=2))
+    state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=2, max_2d_iterations=2))
     boundary = state.surface_parameterization.omega_boundary[:-1]
     lo = np.min(boundary, axis=0)
     hi = np.max(boundary, axis=0)
@@ -278,7 +288,7 @@ def test_m3d_analytic_scaled_heightfield_debug_mode_is_explicit_shortcut():
     target = create_builtin_shape("wave", {"amplitude": 0.5, "radius": 2.0, "wavelength": 2.5})
     state = build_onestring_design(
         target,
-        PipelineParameters(
+        experimental_params(
             nx=3,
             max_3d_iterations=5,
             max_2d_iterations=5,
@@ -293,7 +303,7 @@ def test_m3d_analytic_scaled_heightfield_debug_mode_is_explicit_shortcut():
 
 def test_inverse_map_works_for_rotated_non_axis_aligned_surface():
     target = create_builtin_shape("dome", {"amplitude": 0.55, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=5, max_2d_iterations=5))
+    state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=5, max_2d_iterations=5))
     param = state.surface_parameterization
     angle = np.deg2rad(27.0)
     rotation = np.asarray(
@@ -314,7 +324,7 @@ def test_inverse_map_works_for_rotated_non_axis_aligned_surface():
 
 def test_k2d_not_identical_to_m2d_for_curved_targets():
     target = create_builtin_shape("gaussian", {"amplitude": 0.7, "radius": 2.0, "sigma": 0.85})
-    state = build_onestring_design(target, PipelineParameters(nx=4, max_3d_iterations=8, max_2d_iterations=12))
+    state = build_onestring_design(target, experimental_params(nx=4, max_3d_iterations=8, max_2d_iterations=12))
     metrics = state.mesh_2d_optimized.metrics
 
     assert metrics["k2d_z_abs_max"] < 1e-8
@@ -325,7 +335,7 @@ def test_k2d_not_identical_to_m2d_for_curved_targets():
 
 def test_t2d_uses_k2d_top_vertices_and_has_frumstum_geometry():
     target = create_builtin_shape("dome", {"amplitude": 0.6, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=8, max_2d_iterations=12))
+    state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=8, max_2d_iterations=12))
     k2d_tiles = state.k2d_flat_layout.tile_top_vertices_3d
 
     top_to_k2d = np.max(np.abs(state.tiles_2d_top_hinge.vertices[:, :4, :2] - k2d_tiles[:, :, :2]))
@@ -340,7 +350,7 @@ def test_t2d_uses_k2d_top_vertices_and_has_frumstum_geometry():
 
 def test_k2d_flat_layout_rendering_has_independent_tile_gaps():
     target = create_builtin_shape("gaussian", {"amplitude": 0.7, "radius": 2.0, "sigma": 0.85})
-    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=8, max_2d_iterations=12))
+    state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=8, max_2d_iterations=12))
     fig = figure_flat_tile_layout(state.k2d_flat_layout, hinge_graph=state.hinge_graph)
     trace_names = {getattr(trace, "name", "") for trace in fig.data}
 
@@ -351,7 +361,7 @@ def test_k2d_flat_layout_rendering_has_independent_tile_gaps():
 
 def test_t2d_rendering_includes_tile_mesh_edges_and_hinge_markers():
     target = create_builtin_shape("dome", {"amplitude": 0.5, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=6, max_2d_iterations=8))
+    state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=6, max_2d_iterations=8))
     fig = figure_tile_assembly(state.tiles_2d_dual_hinge, hinge_graph=state.hinge_graph)
     trace_names = {getattr(trace, "name", "") for trace in fig.data}
 
@@ -363,7 +373,7 @@ def test_t2d_rendering_includes_tile_mesh_edges_and_hinge_markers():
 
 def test_assembly_progress_animation_has_frames():
     target = create_builtin_shape("dome", {"amplitude": 0.5, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=3, max_3d_iterations=4, max_2d_iterations=4))
+    state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=4, max_2d_iterations=4))
     fig = assembly_progress_animation(state, frame_count=12)
 
     assert len(fig.frames) == 12
@@ -377,7 +387,7 @@ def test_safe_capstan_friction_does_not_overflow():
 
 def test_export_t2d_stl_combined_records_metrics():
     target = create_builtin_shape("dome", {"amplitude": 0.4, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=3, max_2d_iterations=3))
+    state = build_onestring_design(target, experimental_params(nx=2, max_3d_iterations=3, max_2d_iterations=3))
 
     data, metrics = export_t2d_stl(state, stage="dual_hinge", panel_size=0.1)
 
@@ -392,7 +402,7 @@ def test_export_t2d_stl_combined_records_metrics():
 
 def test_export_t2d_stl_can_return_per_tile_files():
     target = create_builtin_shape("dome", {"amplitude": 0.3, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
+    state = build_onestring_design(target, experimental_params(nx=2, max_3d_iterations=2, max_2d_iterations=2))
 
     files, metrics = export_t2d_stl(state.tiles_2d_top_hinge, separate_tiles=True, panel_size=0.1)
 
@@ -403,9 +413,31 @@ def test_export_t2d_stl_can_return_per_tile_files():
 
 def test_omega_rectangular_debug_and_paper_default_are_explicit():
     target = create_builtin_shape("dome", {"amplitude": 0.35, "radius": 2.0})
+    default_state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
+    assert default_state.surface_parameterization.method == "lscm_paper_like"
+    assert default_state.surface_parameterization.metrics["omega_boundary_forced_rectangle"] is False
+    assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == "free_boundary_two_pinned_vertices_only"
+    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "conformal_approximation"
+
+    try:
+        build_onestring_design(
+            target,
+            PipelineParameters(
+                nx=2,
+                max_3d_iterations=2,
+                max_2d_iterations=2,
+                omega_boundary_mode="shape_preserving_experimental",
+                omega_parameterization_mode="pca_debug",
+            ),
+        )
+    except RuntimeError as exc:
+        assert "allow_experimental_pipeline=True" in str(exc)
+    else:
+        raise AssertionError("experimental PCA path must require explicit opt-in")
+
     rectangular = build_onestring_design(
         target,
-        PipelineParameters(
+        experimental_params(
             nx=2,
             max_3d_iterations=2,
             max_2d_iterations=2,
@@ -425,18 +457,18 @@ def test_omega_rectangular_debug_and_paper_default_are_explicit():
                 nx=2,
                 max_3d_iterations=2,
                 max_2d_iterations=2,
-                omega_boundary_mode="paper_default",
+                omega_parameterization_mode="paper_like_unimplemented",
             ),
         )
     except NotImplementedError as exc:
-        assert "Paper-default S->Omega parameterization is not implemented" in str(exc)
+        assert "paper_like_unimplemented is not implemented" in str(exc)
     else:
-        raise AssertionError("paper_default must not silently fallback to PCA")
+        raise AssertionError("unimplemented paper mode must not silently fallback")
 
 
 def test_snowman_half_and_full_builtin_shapes_are_available():
     for kind in ["snowman_half", "snowman_full"]:
         target = create_builtin_shape(kind, {"amplitude": 0.5, "radius": 2.0})
-        state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
+        state = build_onestring_design(target, experimental_params(nx=2, max_3d_iterations=2, max_2d_iterations=2))
         assert state.target_surface.vertices.shape[0] > 0
         assert state.surface_parameterization.metrics["parameterization_method"] == "pca_debug"
