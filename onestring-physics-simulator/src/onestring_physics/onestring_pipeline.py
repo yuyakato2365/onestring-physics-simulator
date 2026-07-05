@@ -2106,6 +2106,7 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
         return normals, {
             "t3d_extrusion_normal_flip_count": 0,
             "t3d_extrusion_normal_component_count": 0,
+            "t3d_extrusion_normal_component_global_flip_count": 0,
             "t3d_extrusion_normal_inconsistent_edge_count": 0,
         }
 
@@ -2122,6 +2123,7 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
 
     signs = np.zeros(len(normals), dtype=float)
     component_count = 0
+    components: list[list[int]] = []
     inconsistent = 0
     for root in range(len(normals)):
         if signs[root] != 0.0:
@@ -2129,8 +2131,10 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
         component_count += 1
         signs[root] = 1.0
         stack = [root]
+        component_ids: list[int] = []
         while stack:
             current = stack.pop()
+            component_ids.append(int(current))
             for neighbor, same_sign in adjacency[current]:
                 wanted = signs[current] if same_sign else -signs[current]
                 if signs[neighbor] == 0.0:
@@ -2138,12 +2142,34 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
                     stack.append(neighbor)
                 elif signs[neighbor] != wanted:
                     inconsistent += 1
+        components.append(component_ids)
 
     signs[signs == 0.0] = 1.0
+    component_means: list[np.ndarray] = []
+    for ids in components:
+        component_normal = np.mean(normals[np.asarray(ids, dtype=int)] * signs[np.asarray(ids, dtype=int), None], axis=0)
+        component_means.append(_normalize(component_normal, np.asarray([0.0, 0.0, 1.0])))
+    if component_means:
+        global_reference = component_means[int(np.argmax([len(ids) for ids in components]))].copy()
+        for mean in component_means:
+            if float(np.dot(mean, global_reference)) < 0.0:
+                global_reference -= mean
+            else:
+                global_reference += mean
+        global_reference = _normalize(global_reference, component_means[0])
+    else:
+        global_reference = np.asarray([0.0, 0.0, 1.0])
+    component_global_flip_count = 0
+    for ids, mean in zip(components, component_means):
+        if float(np.dot(mean, global_reference)) < 0.0:
+            signs[np.asarray(ids, dtype=int)] *= -1.0
+            component_global_flip_count += 1
+
     oriented = normals * signs[:, None]
     return oriented, {
         "t3d_extrusion_normal_flip_count": int(np.sum(signs < 0.0)),
         "t3d_extrusion_normal_component_count": int(component_count),
+        "t3d_extrusion_normal_component_global_flip_count": int(component_global_flip_count),
         "t3d_extrusion_normal_inconsistent_edge_count": int(inconsistent),
     }
 

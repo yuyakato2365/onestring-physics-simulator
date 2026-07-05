@@ -367,6 +367,33 @@ def test_t3d_extrusion_normals_are_oriented_across_shared_edges():
     assert metrics["t3d_extrusion_normal_inconsistent_edge_count"] == 0
 
 
+def test_t3d_extrusion_normals_are_oriented_across_split_components():
+    raw_normals = np.asarray(
+        [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, -1.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray(
+        [
+            [0, 1, 2, 3],
+            [1, 4, 5, 2],
+            [6, 7, 8, 9],
+            [7, 10, 11, 8],
+        ],
+        dtype=int,
+    )
+
+    oriented, metrics = _orient_tile_normals_consistently(raw_normals, faces)
+
+    assert metrics["t3d_extrusion_normal_component_count"] == 2
+    assert metrics["t3d_extrusion_normal_component_global_flip_count"] == 1
+    assert np.all(oriented[:, 2] > 0.0)
+
+
 def test_t2d_uses_k2d_top_vertices_and_has_frumstum_geometry():
     target = create_builtin_shape("dome", {"amplitude": 0.6, "radius": 2.0})
     state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=8, max_2d_iterations=12))
