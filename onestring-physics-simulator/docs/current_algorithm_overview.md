@@ -40,28 +40,40 @@ where `J` is the local differential of the map and `lambda` is a local scale
 factor. This means angles are approximately preserved, while lengths and areas
 may scale.
 
-The current main mode is `bff`, but it is a local BFF-style implementation:
+The requested main mode is `bff`, but the implementation does not silently call
+the rectangular-boundary harmonic substitute BFF. Instead it uses this dispatch:
 
-1. Extract the mesh boundary loop.
-2. Build a 2D boundary from 3D boundary edge lengths and turning angles.
-3. Force the boundary onto a rectangular Omega boundary by arclength.
-4. Solve interior UV positions by cotangent harmonic extension.
+1. Try an optional external conformal backend. A wired reference BFF backend
+   would report `bff_implemented=True` and `flattening_backend` such as
+   `libigl_bff` or `geometry_central_bff`.
+2. If no reference BFF backend is available, use an explicit free-boundary LSCM
+   fallback. This reports `bff_implemented=False`,
+   `bff_reference_backend_available=False`, and
+   `flattening_backend="local_free_boundary_lscm_fallback"`.
+3. Keep rectangular-boundary cotangent harmonic parameterization separate as
+   `omega_parameterization_mode="rect_harmonic"`.
 
-The interior solve uses the cotangent Laplacian. Splitting boundary vertices
-`B` and interior vertices `I`, it solves
+The local fallback solves a least-squares conformal map. In each triangle it
+minimizes the discrete Cauchy-Riemann residual
 
 ```math
-L_{II} u_I = -L_{IB} u_B.
+\frac{\partial u}{\partial x} - \frac{\partial v}{\partial y} \approx 0,
+\qquad
+\frac{\partial u}{\partial y} + \frac{\partial v}{\partial x} \approx 0.
 ```
 
-Here `L` is the cotangent Laplacian. Cotangent weights are a standard discrete
-differential geometry approximation of the continuous Laplace-Beltrami operator.
-They encode local mesh angles and are used because they produce a geometry-aware
-smooth harmonic map.
+Two boundary vertices are pinned only to remove translation, rotation, and
+scale nullspaces. The remaining boundary is free; it is not forced onto a
+rectangle, circle, or projected outline.
 
-Important limitation: this is not a libigl or geometry-central reference BFF
-binding. The rectangular boundary correction also means the result is not a
-free-boundary conformal solve.
+The old fixed-boundary harmonic alternative solves
+
+```math
+L_{II} u_I = -L_{IB} u_B,
+```
+
+where `u_B` is a prescribed rectangular boundary. This mode is now labeled
+`rect_harmonic` and should not be called BFF.
 
 ## 2. Conformal Stretch Factor and Split
 

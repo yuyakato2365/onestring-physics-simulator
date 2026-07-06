@@ -296,58 +296,40 @@ def _canonicalize_faces_by_coincident_vertices(
     *,
     tolerance: float | None = None,
 ) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
-    """Weld reference-coincident split vertex ids for layout/connectivity only."""
+    """Do not weld coincident vertices created by CSF split cuts.
+
+    A CSF split intentionally duplicates M2D vertices at the same coordinates so
+    neighboring panels can separate across the cut.  Earlier compatibility code
+    re-canonicalized coincident ids for layout/dual-hinge/gap-graph constraints,
+    which effectively re-welded the split boundary and pulled side components
+    into dense bundles.  Keep the topology encoded by face vertex ids unchanged.
+    """
     faces_arr = np.asarray(faces, dtype=int)
     verts = np.asarray(vertices, dtype=float)
-    if faces_arr.size == 0 or verts.size == 0:
-        return faces_arr.copy(), {
-            "split_virtual_weld_applied": False,
-            "split_virtual_weld_group_count": 0,
-            "split_virtual_weld_vertex_count": 0,
-        }
-    if int(np.max(faces_arr)) >= len(verts):
-        return faces_arr.copy(), {
-            "split_virtual_weld_applied": False,
-            "split_virtual_weld_group_count": 0,
-            "split_virtual_weld_vertex_count": 0,
-            "split_virtual_weld_reason": "face_index_outside_vertex_array",
-        }
-
-    tol = _coincident_tolerance(verts) if tolerance is None else float(tolerance)
-    groups: dict[tuple[int, ...], list[int]] = {}
-    used = sorted({int(v) for v in faces_arr.reshape(-1)})
-    for idx in used:
-        groups.setdefault(_coincident_key(verts[idx], tol), []).append(idx)
-
-    canonical = {idx: idx for idx in used}
-    group_count = 0
-    vertex_count = 0
-    for ids in groups.values():
-        if len(ids) <= 1:
-            continue
-        root = int(min(ids))
-        group_count += 1
-        vertex_count += len(ids)
-        for idx in ids:
-            canonical[int(idx)] = root
-
-    if group_count == 0:
-        return faces_arr.copy(), {
-            "split_virtual_weld_applied": False,
-            "split_virtual_weld_group_count": 0,
-            "split_virtual_weld_vertex_count": 0,
-        }
-
-    welded = faces_arr.copy()
-    for old, new in canonical.items():
-        if old != new:
-            welded[welded == old] = new
-    return welded, {
-        "split_virtual_weld_applied": True,
-        "split_virtual_weld_group_count": int(group_count),
-        "split_virtual_weld_vertex_count": int(vertex_count),
+    tol = _coincident_tolerance(verts) if tolerance is None and verts.size else (float(tolerance) if tolerance is not None else 1e-7)
+    candidate_group_count = 0
+    candidate_vertex_count = 0
+    try:
+        if faces_arr.size and verts.size and int(np.max(faces_arr)) < len(verts):
+            groups: dict[tuple[int, ...], list[int]] = {}
+            used = sorted({int(v) for v in faces_arr.reshape(-1)})
+            for idx in used:
+                groups.setdefault(_coincident_key(verts[idx], tol), []).append(idx)
+            duplicate_groups = [ids for ids in groups.values() if len(ids) > 1]
+            candidate_group_count = len(duplicate_groups)
+            candidate_vertex_count = int(sum(len(ids) for ids in duplicate_groups))
+    except Exception:
+        candidate_group_count = 0
+        candidate_vertex_count = 0
+    return faces_arr.copy(), {
+        "split_virtual_weld_applied": False,
+        "split_virtual_weld_group_count": 0,
+        "split_virtual_weld_vertex_count": 0,
+        "split_virtual_weld_candidate_group_count": int(candidate_group_count),
+        "split_virtual_weld_candidate_vertex_count": int(candidate_vertex_count),
         "split_virtual_weld_tolerance": float(tol),
-        "split_virtual_weld_reason": "reference-coincident split vertices treated as connected for layout/contact constraints",
+        "split_virtual_weld_reason": "disabled: preserve intentional CSF split duplicate vertices as real cut boundaries",
+        "split_boundary_topology_preserved": True,
     }
 
 
@@ -357,6 +339,7 @@ def _canonicalize_faces_by_coincident_tile_tops(
     *,
     tolerance: float | None = None,
 ) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
+    """Do not weld coincident tile-top vertices across split boundaries."""
     faces_arr = np.asarray(faces, dtype=int)
     tops = np.asarray(top_tiles, dtype=float)
     if faces_arr.size == 0 or tops.size == 0 or len(tops) != len(faces_arr):
@@ -364,25 +347,27 @@ def _canonicalize_faces_by_coincident_tile_tops(
             "split_virtual_weld_applied": False,
             "split_virtual_weld_group_count": 0,
             "split_virtual_weld_vertex_count": 0,
-            "split_virtual_weld_reason": "empty_or_mismatched_tile_tops",
+            "split_virtual_weld_reason": "disabled_or_empty: preserve split topology",
+            "split_boundary_topology_preserved": True,
         }
 
-    coords_by_vertex: dict[int, list[np.ndarray]] = {}
+    tol = _coincident_tolerance(tops.reshape(-1, tops.shape[-1])) if tolerance is None else float(tolerance)
+    buckets: dict[tuple[int, ...], set[int]] = {}
     for tile_id, face in enumerate(faces_arr):
         for local_id, vertex_id in enumerate(face):
-            coords_by_vertex.setdefault(int(vertex_id), []).append(np.asarray(tops[tile_id, local_id], dtype=float))
-    if not coords_by_vertex:
-        return faces_arr.copy(), {
-            "split_virtual_weld_applied": False,
-            "split_virtual_weld_group_count": 0,
-            "split_virtual_weld_vertex_count": 0,
-        }
-
-    max_id = max(coords_by_vertex)
-    vertices = np.zeros((max_id + 1, tops.shape[-1]), dtype=float)
-    for vertex_id, coords in coords_by_vertex.items():
-        vertices[int(vertex_id)] = np.mean(np.asarray(coords, dtype=float), axis=0)
-    return _canonicalize_faces_by_coincident_vertices(vertices, faces_arr, tolerance=tolerance)
+            key = _coincident_key(tops[tile_id, local_id], tol)
+            buckets.setdefault(key, set()).add(int(vertex_id))
+    duplicate_groups = [ids for ids in buckets.values() if len(ids) > 1]
+    return faces_arr.copy(), {
+        "split_virtual_weld_applied": False,
+        "split_virtual_weld_group_count": 0,
+        "split_virtual_weld_vertex_count": 0,
+        "split_virtual_weld_candidate_group_count": int(len(duplicate_groups)),
+        "split_virtual_weld_candidate_vertex_count": int(sum(len(ids) for ids in duplicate_groups)),
+        "split_virtual_weld_tolerance": float(tol),
+        "split_virtual_weld_reason": "disabled: do not re-connect coincident split tile tops",
+        "split_boundary_topology_preserved": True,
+    }
 
 
 def _coincident_boundary_edge_pairs(
@@ -565,71 +550,295 @@ def _surface_peak_uvs(parameterization, max_peaks: int = 8) -> np.ndarray:
     return np.asarray(kept, dtype=float)
 
 
-def _csf_split_lines_from_high_stretch(uv: np.ndarray, high: np.ndarray, max_splits: int) -> list[tuple[str, float]]:
-    lo = np.nanmin(uv, axis=0)
-    hi = np.nanmax(uv, axis=0)
-    span = np.maximum(hi - lo, 1e-12)
-    margin = 0.08 * span
-    spread = np.nanmax(high, axis=0) - np.nanmin(high, axis=0) if len(high) > 1 else np.zeros(2)
-    candidates: list[tuple[str, float, float]] = []
-    # A high-stretch band extended in x is cut by a horizontal row split; a band
-    # extended in y is cut by a vertical column split.
-    candidates.append(("row", float(np.median(high[:, 1])), float(spread[0])))
-    candidates.append(("col", float(np.median(high[:, 0])), float(spread[1])))
-    candidates.sort(key=lambda item: item[2], reverse=True)
+def _split_line_axis_value(split_line) -> tuple[str, float]:
+    axis = str(split_line[0])
+    value = float(split_line[1])
+    return axis, value
 
+
+def _split_line_segment_bounds(split_line) -> tuple[float, float] | None:
+    if len(split_line) >= 4:
+        lo = float(split_line[2])
+        hi = float(split_line[3])
+        if np.isfinite(lo) and np.isfinite(hi):
+            return (min(lo, hi), max(lo, hi))
+    return None
+
+
+def _split_line_as_metric(line) -> list[float | str]:
+    axis, value = _split_line_axis_value(line)
+    segment = _split_line_segment_bounds(line)
+    if segment is None:
+        return [axis, float(value)]
+    return [axis, float(value), float(segment[0]), float(segment[1])]
+
+
+def _localized_csf_split_segments(
+    parameterization,
+    csf: np.ndarray,
+    threshold: float,
+    split_lines: list[tuple[str, float]],
+    params=None,
+) -> list[tuple]:
+    """Convert full grid-line CSF split candidates into local cut segments.
+
+    The original coarse heuristic split an entire row/column, which divides the
+    rectangular Omega into thin full-width bands.  For necked/two-lobe shapes this
+    makes side parts overconstrained and dense in T2D.  This routine restricts
+    each split to the high-CSF connected interval(s) along the orthogonal axis.
+    """
+    if not split_lines:
+        return []
+    localize = bool(getattr(params, "localize_csf_splits", True)) if params is not None else True
+    if not localize:
+        return [tuple(line) for line in split_lines]
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    values = np.asarray(csf, dtype=float)
+    if len(uv) == 0 or len(values) != len(uv):
+        return [tuple(line) for line in split_lines]
+    high_mask = np.isfinite(values) & (values > float(threshold))
+    if not np.any(high_mask):
+        return [tuple(line) for line in split_lines]
+
+    max_segments_per_line = max(1, int(getattr(params, "csf_split_max_local_segments_per_line", 2)) if params is not None else 2)
+    band_fraction = float(getattr(params, "csf_split_local_band_fraction", 0.08)) if params is not None else 0.08
+    margin_fraction = float(getattr(params, "csf_split_local_margin_fraction", 0.08)) if params is not None else 0.08
+    cluster_gap_fraction = float(getattr(params, "csf_split_local_cluster_gap_fraction", 0.16)) if params is not None else 0.16
+    max_length_fraction = float(getattr(params, "csf_split_local_max_length_fraction", 0.62)) if params is not None else 0.62
+
+    result: list[tuple] = []
+    min_uv = np.nanmin(uv, axis=0)
+    max_uv = np.nanmax(uv, axis=0)
+    span = np.maximum(max_uv - min_uv, 1e-9)
+    high_uv = uv[high_mask]
+    high_values = values[high_mask]
+
+    for raw_line in split_lines:
+        axis, value = _split_line_axis_value(raw_line)
+        coord = _split_line_coord(axis)
+        other = 1 - coord
+        band = max(float(band_fraction) * float(span[coord]), 1e-9)
+        near = high_mask & (np.abs(uv[:, coord] - float(value)) <= band)
+
+        # If the split line came from a peak but no high vertices fall exactly
+        # within the narrow band, use the nearest high-CSF vertices to localize
+        # rather than falling back to a full-width cut.
+        if int(np.count_nonzero(near)) < 2:
+            distances = np.abs(high_uv[:, coord] - float(value))
+            order = np.argsort(distances)
+            take = order[: min(len(order), max(4, 12 * max_segments_per_line))]
+            near_points = high_uv[take]
+            near_values = high_values[take]
+        else:
+            near_points = uv[near]
+            near_values = values[near]
+
+        if len(near_points) == 0:
+            result.append((axis, float(value)))
+            continue
+
+        order = np.argsort(near_points[:, other])
+        sorted_points = near_points[order]
+        sorted_values = near_values[order]
+        other_values = sorted_points[:, other]
+        gaps = np.diff(other_values)
+        gap_limit = max(float(cluster_gap_fraction) * float(span[other]), 1e-9)
+        cut_indices = np.flatnonzero(gaps > gap_limit) + 1
+        clusters = np.split(np.arange(len(sorted_points)), cut_indices)
+
+        scored: list[tuple[float, float, float, float]] = []
+        for ids in clusters:
+            if len(ids) == 0:
+                continue
+            vals = sorted_values[ids]
+            pts = sorted_points[ids]
+            lo = float(np.min(pts[:, other]))
+            hi = float(np.max(pts[:, other]))
+            score = float(np.sum(np.maximum(vals - float(threshold), 0.0)) + 0.05 * len(ids))
+            center = float(np.average(pts[:, other], weights=np.maximum(vals - float(threshold), 1e-6)))
+            scored.append((score, lo, hi, center))
+
+        if not scored:
+            result.append((axis, float(value)))
+            continue
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        for _score, lo, hi, center in scored[:max_segments_per_line]:
+            margin = max(float(margin_fraction) * float(span[other]), 1e-9)
+            seg_lo = max(float(min_uv[other]), lo - margin)
+            seg_hi = min(float(max_uv[other]), hi + margin)
+            max_len = max(float(max_length_fraction) * float(span[other]), 2.0 * margin)
+            if seg_hi - seg_lo > max_len:
+                seg_lo = max(float(min_uv[other]), center - 0.5 * max_len)
+                seg_hi = min(float(max_uv[other]), center + 0.5 * max_len)
+            if seg_hi <= seg_lo + 1e-10:
+                continue
+            result.append((axis, float(value), float(seg_lo), float(seg_hi)))
+
+    # Remove near-duplicate localized segments.
+    unique: list[tuple] = []
+    for line in result:
+        axis, value = _split_line_axis_value(line)
+        segment = _split_line_segment_bounds(line)
+        duplicate = False
+        for old in unique:
+            old_axis, old_value = _split_line_axis_value(old)
+            old_segment = _split_line_segment_bounds(old)
+            if axis != old_axis or abs(value - old_value) > 1e-8:
+                continue
+            if segment is None or old_segment is None:
+                duplicate = True
+            elif max(abs(segment[0] - old_segment[0]), abs(segment[1] - old_segment[1])) <= 1e-8:
+                duplicate = True
+            if duplicate:
+                break
+        if not duplicate:
+            unique.append(tuple(line))
+    return unique
+
+
+def _split_line_coord(axis: str) -> int:
+    return 1 if str(axis) == "row" else 0
+
+
+def _split_line_band_mask(uv: np.ndarray, split_line: tuple[str, float], band_fraction: float = 0.045) -> np.ndarray:
+    points = np.asarray(uv, dtype=float)
+    if points.size == 0:
+        return np.zeros(0, dtype=bool)
+    lo = np.nanmin(points, axis=0)
+    hi = np.nanmax(points, axis=0)
+    span = np.maximum(hi - lo, 1e-12)
+    axis, value = _split_line_axis_value(split_line)
+    coord = _split_line_coord(axis)
+    band = max(float(band_fraction) * float(span[coord]), 1e-12)
+    return np.abs(points[:, coord] - float(value)) <= band
+
+
+def _append_unique_split_line(
+    lines: list[tuple[str, float]],
+    line: tuple[str, float],
+    uv: np.ndarray,
+    max_splits: int,
+) -> bool:
+    if len(lines) >= max(0, int(max_splits)):
+        return False
+    points = np.asarray(uv, dtype=float)
+    if points.size == 0:
+        return False
+    lo = np.nanmin(points, axis=0)
+    hi = np.nanmax(points, axis=0)
+    span = np.maximum(hi - lo, 1e-12)
+    axis, value = str(line[0]), float(line[1])
+    if axis not in {"row", "col"}:
+        return False
+    coord = _split_line_coord(axis)
+    margin = 0.08 * float(span[coord])
+    if value <= float(lo[coord]) + margin or value >= float(hi[coord]) - margin:
+        return False
+    duplicate_tol = 0.03 * float(span[coord])
+    if any(existing_axis == axis and abs(float(existing_value) - value) < duplicate_tol for existing_axis, existing_value in lines):
+        return False
+    lines.append((axis, value))
+    return True
+
+
+def _residual_high_points_after_split_lines(uv: np.ndarray, high: np.ndarray, lines: list[tuple[str, float]]) -> np.ndarray:
+    residual = np.asarray(high, dtype=float)
+    if residual.size == 0 or not lines:
+        return residual.reshape((-1, 2)) if residual.size else np.zeros((0, 2), dtype=float)
+    keep = np.ones(len(residual), dtype=bool)
+    for line in lines:
+        keep &= ~_split_line_band_mask(residual, line, band_fraction=0.055)
+    return residual[keep]
+
+
+def _csf_split_lines_from_high_stretch(uv: np.ndarray, high: np.ndarray, max_splits: int) -> list[tuple[str, float]]:
+    """Return multiple axis-aligned split candidates for residual high-CSF bands.
+
+    Earlier versions returned at most one row and one column, and the peak-guided
+    path often short-circuited to exactly one split.  The paper-style intent is
+    to keep inserting splits while residual conformal-scale-factor violations
+    remain, subject to a practical cap.  This lightweight implementation mirrors
+    that behavior by repeatedly choosing a split through the remaining high-CSF
+    band and masking vertices close to already chosen split lines.
+    """
+    points = np.asarray(uv, dtype=float)
+    residual = np.asarray(high, dtype=float)
+    if points.size == 0 or residual.size == 0 or int(max_splits) <= 0:
+        return []
+    residual = residual.reshape((-1, 2))
     lines: list[tuple[str, float]] = []
-    for axis, value, score in candidates:
-        if len(lines) >= max_splits or score <= 1e-12:
+
+    for _ in range(max(0, int(max_splits))):
+        residual = _residual_high_points_after_split_lines(points, residual, lines)
+        if len(residual) == 0:
             break
-        coord = 1 if axis == "row" else 0
-        if value <= lo[coord] + margin[coord] or value >= hi[coord] - margin[coord]:
-            continue
-        if any(existing_axis == axis and abs(existing_value - value) < 0.03 * span[coord] for existing_axis, existing_value in lines):
-            continue
-        lines.append((axis, value))
+        spread = np.nanmax(residual, axis=0) - np.nanmin(residual, axis=0) if len(residual) > 1 else np.zeros(2)
+        # A high-stretch band extended in x is cut by a horizontal row split; a
+        # band extended in y is cut by a vertical column split.  Try both axes so
+        # that a second/third residual region can still receive a split.
+        candidates: list[tuple[str, float, float]] = [
+            ("row", float(np.median(residual[:, 1])), float(spread[0])),
+            ("col", float(np.median(residual[:, 0])), float(spread[1])),
+        ]
+        candidates.sort(key=lambda item: item[2], reverse=True)
+        added = False
+        for axis, value, score in candidates:
+            if score <= 1e-12:
+                continue
+            if _append_unique_split_line(lines, (axis, value), points, max_splits):
+                added = True
+                break
+        if not added:
+            break
     return lines
 
 
 def _peak_guided_csf_split_lines(parameterization, csf: np.ndarray, threshold: float, max_splits: int) -> list[tuple[str, float]]:
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
-    if len(uv) == 0 or np.max(np.asarray(csf, dtype=float)) <= float(threshold):
+    values = np.asarray(csf, dtype=float)
+    if len(uv) == 0 or values.size == 0 or np.max(values) <= float(threshold) or int(max_splits) <= 0:
         return []
-    peaks = _surface_peak_uvs(parameterization)
+    peaks = _surface_peak_uvs(parameterization, max_peaks=max(1, int(max_splits)))
     if len(peaks) == 0:
         return []
 
-    lo = np.nanmin(uv, axis=0)
-    hi = np.nanmax(uv, axis=0)
-    span = np.maximum(hi - lo, 1e-12)
-    margin = 0.08 * span
-    spread = np.nanmax(peaks, axis=0) - np.nanmin(peaks, axis=0) if len(peaks) > 1 else np.zeros(2)
-    high = uv[np.asarray(csf, dtype=float) > float(threshold)]
-    high_spread = np.nanmax(high, axis=0) - np.nanmin(high, axis=0) if len(high) > 1 else np.zeros(2)
-
-    if len(peaks) >= 2:
-        axis = "row" if spread[0] >= spread[1] else "col"
-    else:
-        axis = "row" if high_spread[0] >= high_spread[1] else "col"
-    coord = 1 if axis == "row" else 0
-    value = float(np.median(peaks[:, coord]))
-    if value <= lo[coord] + margin[coord] or value >= hi[coord] - margin[coord]:
-        return []
-    return [(axis, value)][: max(1, int(max_splits))]
-
-
-def _csf_split_lines(parameterization, csf: np.ndarray, threshold: float = 2.0, max_splits: int = 1) -> list[tuple[str, float]]:
-    """Choose coarse Omega split lines, preferring paths through surface peaks."""
-    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
-    if uv.size == 0 or csf.size == 0:
-        return []
-    high = uv[np.asarray(csf, dtype=float) > float(threshold)]
+    high = uv[values > float(threshold)]
     if len(high) == 0:
         return []
-    peak_guided = _peak_guided_csf_split_lines(parameterization, csf, threshold, max_splits)
-    if peak_guided:
-        return peak_guided
-    return _csf_split_lines_from_high_stretch(uv, high, max_splits)
+    high_spread = np.nanmax(high, axis=0) - np.nanmin(high, axis=0) if len(high) > 1 else np.zeros(2)
+    # Cut perpendicular to the direction in which the high-CSF region spreads.
+    preferred_axis = "row" if high_spread[0] >= high_spread[1] else "col"
+    secondary_axis = "col" if preferred_axis == "row" else "row"
+    lines: list[tuple[str, float]] = []
+    for peak in peaks:
+        for axis in (preferred_axis, secondary_axis):
+            coord = _split_line_coord(axis)
+            if _append_unique_split_line(lines, (axis, float(peak[coord])), uv, max_splits):
+                break
+        if len(lines) >= max(1, int(max_splits)):
+            break
+    return lines
+
+
+def _csf_split_lines(parameterization, csf: np.ndarray, threshold: float = 1.9, max_splits: int = 4) -> list[tuple[str, float]]:
+    """Choose coarse Omega split lines, allowing multiple residual CSF splits."""
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    values = np.asarray(csf, dtype=float)
+    if uv.size == 0 or values.size == 0 or int(max_splits) <= 0:
+        return []
+    high = uv[values > float(threshold)]
+    if len(high) == 0:
+        return []
+
+    lines: list[tuple[str, float]] = []
+    for line in _peak_guided_csf_split_lines(parameterization, values, threshold, max_splits):
+        _append_unique_split_line(lines, line, uv, max_splits)
+
+    residual = _residual_high_points_after_split_lines(uv, high, lines)
+    for line in _csf_split_lines_from_high_stretch(uv, residual, max(0, int(max_splits) - len(lines))):
+        _append_unique_split_line(lines, line, uv, max_splits)
+    return lines[: max(0, int(max_splits))]
 
 
 def _mirror_csf_split_lines(
@@ -674,15 +883,27 @@ class PipelineParameters(_original.PipelineParameters):
     omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "paper_default"
     omega_parameterization_mode: Literal[
         "bff",
+        "rect_harmonic",
+        "harmonic",
+        "fallback",
         "pca_debug",
         "lscm_paper_like",
         "arap_paper_like",
         "paper_like_unimplemented",
     ] = "bff"
     allow_experimental_pipeline: bool = False
+    enable_csf_splits: bool = True
     enable_heuristic_csf_split: bool = True
     enable_peak_guided_split: bool = True
     enable_mirror_split: bool = True
+    csf_split_threshold: float = 1.9
+    max_csf_splits: int = 4
+    localize_csf_splits: bool = True
+    csf_split_max_local_segments_per_line: int = 2
+    csf_split_local_band_fraction: float = 0.08
+    csf_split_local_margin_fraction: float = 0.08
+    csf_split_local_cluster_gap_fraction: float = 0.16
+    csf_split_local_max_length_fraction: float = 0.62
     hinge_layout_connection_weight: float = 8.0
     hinge_layout_collision_weight: float = 4.0
     hinge_layout_anchor_weight: float = 0.0
@@ -705,6 +926,53 @@ def _triangle_signed_area_2d(points: np.ndarray) -> np.ndarray:
         (tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1])
         - (tri[:, 1, 1] - tri[:, 0, 1]) * (tri[:, 2, 0] - tri[:, 0, 0])
     )
+
+
+def _triangle_angles(points: np.ndarray) -> np.ndarray:
+    tri = np.asarray(points, dtype=float)
+    if tri.size == 0:
+        return np.zeros((0, 3), dtype=float)
+    out = np.zeros((len(tri), 3), dtype=float)
+    pairs = [(1, 2), (2, 0), (0, 1)]
+    for corner, (a_id, b_id) in enumerate(pairs):
+        a = tri[:, a_id] - tri[:, corner]
+        b = tri[:, b_id] - tri[:, corner]
+        denom = np.maximum(np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1), 1e-12)
+        cos_value = np.sum(a * b, axis=1) / denom
+        out[:, corner] = np.arccos(np.clip(cos_value, -1.0, 1.0))
+    return out
+
+
+def _boundary_distortion_metrics(parameterization) -> dict[str, float | int]:
+    boundary = list(getattr(parameterization, "metrics", {}).get("boundary_loop", []) or [])
+    if not boundary:
+        faces = np.asarray(parameterization.surface_faces, dtype=int)
+        boundary = _original._mesh_boundary_loop(faces)
+    if len(boundary) < 3:
+        return {
+            "boundary_edge_stretch_min": 0.0,
+            "boundary_edge_stretch_max": 0.0,
+            "boundary_edge_stretch_median": 0.0,
+            "boundary_edge_stretch_p95": 0.0,
+            "boundary_fixed_shape": 0,
+        }
+    xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    ratios: list[float] = []
+    for i, a in enumerate(boundary):
+        b = boundary[(i + 1) % len(boundary)]
+        xyz_len = float(np.linalg.norm(xyz[int(b)] - xyz[int(a)]))
+        uv_len = float(np.linalg.norm(uv[int(b)] - uv[int(a)]))
+        if xyz_len > 1e-12 and uv_len > 1e-12:
+            ratios.append(uv_len / xyz_len)
+    arr = np.asarray(ratios, dtype=float)
+    return {
+        "boundary_edge_stretch_min": float(np.min(arr)) if len(arr) else 0.0,
+        "boundary_edge_stretch_max": float(np.max(arr)) if len(arr) else 0.0,
+        "boundary_edge_stretch_median": float(np.median(arr)) if len(arr) else 0.0,
+        "boundary_edge_stretch_p95": float(np.percentile(arr, 95)) if len(arr) else 0.0,
+        "boundary_fixed_shape": int(bool(getattr(parameterization, "metrics", {}).get("omega_boundary_fixed", False))),
+    }
 
 
 def _segments_intersect_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> bool:
@@ -799,11 +1067,15 @@ def _omega_quality_metrics(parameterization) -> dict[str, float | int | str]:
     uv_tri = uv[faces[:, :3]]
     signed = _triangle_signed_area_2d(uv_tri)
     uv_area = np.abs(signed)
-    xyz_area = _triangle_area_3d(xyz[surface_faces[:, :3]]) if len(surface_faces) == len(faces) else np.zeros_like(uv_area)
+    xyz_tri = xyz[surface_faces[:, :3]] if len(surface_faces) == len(faces) else np.zeros((len(uv_tri), 3, 3), dtype=float)
+    xyz_area = _triangle_area_3d(xyz_tri) if len(surface_faces) == len(faces) else np.zeros_like(uv_area)
     positive = uv_area > 1e-12
     ratios = xyz_area[positive] / np.maximum(uv_area[positive], 1e-12) if np.any(positive) else np.zeros(0, dtype=float)
     stretch = _edge_stretch_values(xyz, uv, faces)
     csf = _parameterization_stretch_csf(parameterization)
+    uv_angles = _triangle_angles(uv_tri)
+    xyz_angles = _triangle_angles(xyz_tri)
+    angle_delta = np.abs(uv_angles - xyz_angles)
     metrics: dict[str, float | int | str] = {
         "uv_triangle_flip_count": int(np.sum(signed < -1e-12)),
         "uv_min_triangle_area": float(np.min(uv_area)) if len(uv_area) else 0.0,
@@ -817,7 +1089,12 @@ def _omega_quality_metrics(parameterization) -> dict[str, float | int | str]:
         "csf_max": float(np.max(csf)) if len(csf) else 1.0,
         "boundary_self_intersection_count": _boundary_self_intersection_count(np.asarray(parameterization.omega_boundary, dtype=float)),
         "uv_degenerate_triangle_count": int(np.sum(uv_area <= 1e-12)),
+        "angle_distortion_mean_rad": float(np.mean(angle_delta)) if angle_delta.size else 0.0,
+        "angle_distortion_max_rad": float(np.max(angle_delta)) if angle_delta.size else 0.0,
+        "angle_distortion_mean_deg": float(np.degrees(np.mean(angle_delta))) if angle_delta.size else 0.0,
+        "angle_distortion_max_deg": float(np.degrees(np.max(angle_delta))) if angle_delta.size else 0.0,
     }
+    metrics.update(_boundary_distortion_metrics(parameterization))
     warnings: list[str] = []
     if metrics["uv_triangle_flip_count"]:
         warnings.append("UV triangle flips detected")
@@ -981,11 +1258,19 @@ def _cotangent_laplacian(vertices: np.ndarray, faces: np.ndarray):
     return sparse.coo_matrix((data, (rows, cols)), shape=(n_vertices, n_vertices)).tocsr(), negative_weight_count
 
 
+
 def _bff_boundary_polygon(
     vertices: np.ndarray,
     faces: np.ndarray,
     boundary_loop: list[int],
 ) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    """Construct a BFF-style natural boundary candidate from 3D boundary data.
+
+    This is not the final target boundary used by the default pipeline.  It
+    estimates the natural planar turning/scale information first, then the
+    default BFF path prescribes a tile-compatible rectangular target boundary
+    with a comparable aspect ratio.
+    """
     pts = np.asarray(vertices, dtype=float)
     loop = list(boundary_loop)
     n = len(loop)
@@ -1058,7 +1343,7 @@ def _bff_boundary_polygon(
     )
     scale = float(np.dot(flat_lengths, edge_lengths) / max(np.dot(flat_lengths, flat_lengths), 1e-12))
     rel_error = np.abs(scale * flat_lengths - edge_lengths) / np.maximum(edge_lengths, 1e-12)
-    metrics = {
+    return boundary_uv, {
         "bff_boundary_vertex_count": int(n),
         "bff_boundary_perimeter_3d": float(perimeter),
         "bff_boundary_turning_angle_sum_raw": float(turn_sum),
@@ -1069,7 +1354,6 @@ def _bff_boundary_polygon(
         "bff_boundary_mean_relative_length_error_after_similarity": float(np.mean(rel_error)) if len(rel_error) else 0.0,
         "bff_boundary_area_2d": float(area),
     }
-    return boundary_uv, metrics
 
 
 def _point_on_centered_rectangle(distance: float, width: float, height: float) -> np.ndarray:
@@ -1093,6 +1377,7 @@ def _rectangularize_boundary_by_arclength(
     boundary_uv: np.ndarray,
     edge_lengths: np.ndarray,
 ) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    """Map the existing boundary vertices to a prescribed rectangle by 3D arclength."""
     source = np.asarray(boundary_uv, dtype=float)
     lengths = np.asarray(edge_lengths, dtype=float)
     n = len(source)
@@ -1133,7 +1418,7 @@ def _rectangularize_boundary_by_arclength(
         "bff_boundary_rectangular_correction_applied": True,
         "bff_boundary_closure_correction_applied": True,
         "bff_boundary_closure_drift_after_rectangularization": 0.0,
-        "bff_boundary_rectangularization_reason": "forced_rectangle_by_3d_boundary_arclength",
+        "bff_boundary_rectangularization_reason": "prescribed_rectangle_by_3d_boundary_arclength",
         "bff_boundary_rect_width": float(width),
         "bff_boundary_rect_height": float(height),
         "bff_boundary_rect_aspect": float(aspect),
@@ -1148,6 +1433,13 @@ def _bff_boundary_first_uv(
     faces: np.ndarray,
     boundary_loop: list[int],
 ) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    """Local boundary-first flattening with a rectangular prescribed boundary.
+
+    This keeps the tile-compatible rectangular Omega constraint in the boundary
+    condition itself, then solves the interior with the cotangent Laplacian.  It
+    is BFF-style and boundary-first, but still reports that no reference BFF
+    library binding is active.
+    """
     try:
         from scipy.sparse import linalg as sparse_linalg
     except Exception as exc:  # pragma: no cover - depends on optional env
@@ -1162,6 +1454,7 @@ def _bff_boundary_first_uv(
         dtype=float,
     )
     boundary_uv, rect_metrics = _rectangularize_boundary_by_arclength(boundary_uv, boundary_edge_lengths)
+
     uv = np.zeros((n_vertices, 2), dtype=float)
     boundary_ids = np.asarray(boundary_loop, dtype=int)
     uv[boundary_ids] = boundary_uv
@@ -1169,12 +1462,21 @@ def _bff_boundary_first_uv(
     interior_ids = np.asarray([i for i in range(n_vertices) if i not in boundary_set], dtype=int)
 
     laplacian, negative_weight_count = _cotangent_laplacian(pts, tris)
+    solve_status = "no_interior_vertices"
     if len(interior_ids):
         l_ii = laplacian[interior_ids[:, None], interior_ids]
         l_ib = laplacian[interior_ids[:, None], boundary_ids]
         rhs = -l_ib @ boundary_uv
-        uv[interior_ids, 0] = sparse_linalg.spsolve(l_ii, rhs[:, 0])
-        uv[interior_ids, 1] = sparse_linalg.spsolve(l_ii, rhs[:, 1])
+        try:
+            uv[interior_ids, 0] = sparse_linalg.spsolve(l_ii, rhs[:, 0])
+            uv[interior_ids, 1] = sparse_linalg.spsolve(l_ii, rhs[:, 1])
+            solve_status = "spsolve"
+        except Exception:
+            # Degenerate meshes can make the cotangent submatrix singular.  Use
+            # least-squares instead of falling back to a non-rectangular domain.
+            uv[interior_ids, 0] = sparse_linalg.lsqr(l_ii, rhs[:, 0], atol=1e-10, btol=1e-10, iter_lim=max(2000, 20 * n_vertices))[0]
+            uv[interior_ids, 1] = sparse_linalg.lsqr(l_ii, rhs[:, 1], atol=1e-10, btol=1e-10, iter_lim=max(2000, 20 * n_vertices))[0]
+            solve_status = "lsqr_singular_fallback"
 
     uv = uv - np.mean(uv, axis=0)
     span = np.nanmax(uv, axis=0) - np.nanmin(uv, axis=0)
@@ -1182,14 +1484,22 @@ def _bff_boundary_first_uv(
     uv = uv / scale
 
     return uv, {
+        "flattening_backend": "local_bff_rectangular_boundary_cotan_harmonic",
         "omega_parameterization_solver": "boundary_first_flattening_cotan_harmonic",
-        "omega_boundary_constraint_model": "bff_boundary_rectangularized_by_3d_boundary_arclength",
+        "omega_boundary_constraint_model": "bff_prescribed_rectangular_boundary_by_3d_arclength",
         "omega_boundary_forced_rectangle": True,
+        "omega_boundary_fixed": True,
+        "omega_boundary_shape": "rectangular",
         "omega_boundary_shape_preserved": False,
-        "omega_boundary_model": "BFF-style boundary-first flattening with rectangular Omega boundary correction by 3D boundary arclength",
+        "omega_boundary_model": "BFF-style prescribed rectangular Omega boundary by 3D boundary arclength plus cotangent harmonic interior solve",
         "bff_implemented": True,
-        "bff_variant": "discrete_boundary_lengths_turning_angles_rectangular_boundary_correction_plus_cotan_harmonic_extension",
-        "bff_reference_library": "local implementation; libigl/geometry-central BFF binding not available",
+        "bff_backend_used": "local_bff_rectangular_boundary_cotan_harmonic",
+        "bff_reference_backend_available": False,
+        "bff_reference_backend_error": "No wired libigl/geometry-central BFF reference backend; using local boundary-first rectangular target solve.",
+        "bff_reference_library": "local implementation; libigl/geometry-central BFF binding not active",
+        "bff_variant": "prescribed_rectangular_boundary_by_3d_arclength_plus_cotan_harmonic_extension",
+        "bff_boundary_condition_type": "prescribed_rectangular_target_boundary",
+        "bff_interior_solver_status": solve_status,
         "bff_cotangent_negative_weight_count": int(negative_weight_count),
         "bff_interior_vertex_count": int(len(interior_ids)),
         **boundary_metrics,
@@ -1314,6 +1624,82 @@ def _lscm_free_boundary_uv(
     }
 
 
+def _try_external_conformal_backend(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    boundary_loop: list[int],
+) -> tuple[np.ndarray, dict[str, float | int | str | bool]] | tuple[None, dict[str, str | bool]]:
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    reasons: list[str] = []
+
+    try:
+        import igl  # type: ignore
+    except Exception as exc:
+        reasons.append(f"libigl_unavailable:{type(exc).__name__}")
+    else:
+        bff_symbols = [name for name in dir(igl) if "bff" in name.lower() or "boundary_first" in name.lower()]
+        if bff_symbols:
+            reasons.append(f"libigl_bff_symbols_present_but_unhandled:{','.join(bff_symbols[:5])}")
+        if hasattr(igl, "lscm"):
+            try:
+                pin_a, pin_b, pin_distance = _farthest_boundary_pin_pair(pts, boundary_loop)
+                pinned = np.asarray([pin_a, pin_b], dtype=np.int32)
+                pinned_uv = np.asarray([[0.0, 0.0], [pin_distance, 0.0]], dtype=float)
+                result = igl.lscm(pts, tris, pinned, pinned_uv)
+                if isinstance(result, tuple):
+                    uv_candidate = np.asarray(result[-1], dtype=float)
+                    success = bool(result[0]) if isinstance(result[0], (bool, np.bool_)) else True
+                else:
+                    uv_candidate = np.asarray(result, dtype=float)
+                    success = True
+                if success and uv_candidate.shape == (len(pts), 2):
+                    uv_candidate = uv_candidate - np.mean(uv_candidate, axis=0)
+                    span = np.nanmax(uv_candidate, axis=0) - np.nanmin(uv_candidate, axis=0)
+                    uv_candidate = uv_candidate / max(float(np.nanmax(span)) * 0.5, 1e-12)
+                    if boundary_loop:
+                        boundary = uv_candidate[boundary_loop]
+                        area = 0.5 * float(
+                            np.sum(boundary[:, 0] * np.roll(boundary[:, 1], -1) - np.roll(boundary[:, 0], -1) * boundary[:, 1])
+                        )
+                        if area < 0.0:
+                            uv_candidate[:, 1] *= -1.0
+                    return uv_candidate, {
+                        "flattening_backend": "libigl_lscm_free_boundary",
+                        "bff_backend_used": "libigl_lscm_free_boundary",
+                        "bff_reference_backend_available": False,
+                        "bff_reference_backend_error": "libigl Python binding exposes LSCM but not a handled BFF API",
+                        "bff_implemented": False,
+                        "lscm_implemented": True,
+                        "omega_parameterization_solver": "libigl_lscm_two_pin",
+                        "omega_boundary_constraint_model": "free_boundary_two_pinned_vertices_only",
+                        "omega_boundary_forced_rectangle": False,
+                        "omega_boundary_model": "libigl LSCM free boundary fallback; no rectangular boundary forcing",
+                        "lscm_pin_vertex_a": int(pin_a),
+                        "lscm_pin_vertex_b": int(pin_b),
+                        "lscm_pin_distance_3d": float(pin_distance),
+                    }
+                reasons.append("libigl_lscm_returned_invalid_uv")
+            except Exception as exc:
+                reasons.append(f"libigl_lscm_failed:{type(exc).__name__}:{exc}")
+        else:
+            reasons.append("libigl_has_no_lscm")
+
+    try:
+        import geometrycentral  # type: ignore  # noqa: F401
+    except Exception as exc:
+        reasons.append(f"geometry_central_unavailable:{type(exc).__name__}")
+    else:
+        reasons.append("geometry_central_python_backend_present_but_no_wired_bff_solver")
+
+    return None, {
+        "flattening_backend": "local_free_boundary_lscm_fallback",
+        "bff_backend_used": "none",
+        "bff_reference_backend_available": False,
+        "bff_reference_backend_error": "; ".join(reasons),
+    }
+
+
 def _mark_parameterization_mode(parameterization, *, method: str, exactness: str, warning: str, extra: dict | None = None):
     parameterization.metrics.update(
         {
@@ -1358,36 +1744,40 @@ def _build_surface_parameterization(surface, target, grid, params):
 
     if parameterization_mode in {"arap_paper_like", "paper_like_unimplemented"}:
         raise NotImplementedError(
-            f"{parameterization_mode} is not implemented. Use bff for the current boundary-first conformal S->Omega path, "
+            f"{parameterization_mode} is not implemented. Use bff to request a reference/free-boundary conformal S->Omega backend, "
             "or explicitly enable pca_debug as an experimental non-paper path."
         )
 
     if parameterization_mode == "bff":
         if boundary_mode != "paper_default":
-            raise ValueError("bff uses its own boundary-first solve and only supports omega_boundary_mode='paper_default'.")
-        uv_vertices, bff_metrics = _bff_boundary_first_uv(surface_vertices, surface_faces, boundary_loop)
-        boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
+            raise ValueError("bff rectangular-target solve only supports omega_boundary_mode='paper_default'.")
         metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
+        uv_vertices, backend_metrics = _bff_boundary_first_uv(surface_vertices, surface_faces, boundary_loop)
+        boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
         metrics: dict[str, float | int | str | bool] = {
             "parameterization_method": "bff",
-            "parameterization_exactness_label": "bff_rectangular_boundary_corrected",
-            "parameterization_warning": "BFF path is implemented locally as boundary-first flattening with 3D boundary lengths/turning angles, rectangular Omega boundary correction, and cotangent harmonic interior extension; it is not a libigl reference binding.",
+            "parameterization_exactness_label": "bff_rectangular_boundary_local",
+            "parameterization_warning": (
+                "Local BFF-style rectangular target boundary is active. The boundary condition is prescribed as a rectangle "
+                "before the interior cotangent harmonic solve; no reference libigl/geometry-central BFF backend is wired."
+            ),
             "omega_boundary_mode": "paper_default",
             "omega_parameterization_mode": "bff",
+            "requested_omega_parameterization_mode": "bff",
             "surface_vertex_count": int(len(surface_vertices)),
             "surface_triangle_count": int(len(surface_faces)),
             "boundary_vertex_count": int(len(boundary_loop)),
+            "boundary_loop": [int(v) for v in boundary_loop],
             "mean_slope": metric["mean_slope"],
             "max_slope": metric["max_slope"],
             "harmonic_solve_performed": True,
             "height_field_shortcut_used": False,
             "omega_corresponds_to_S": True,
-            "omega_correspondence_model": "BFF boundary-first map c:S->Omega, inverse by UV triangle lookup",
-            "lscm_implemented": True,
-            "paper_flow_stage": "S -> Omega by BFF-style boundary-first flattening with rectangular Omega boundary correction",
-            "paper_exactness_warning": "Local discrete BFF path is active; compare bff_* metrics against the paper/reference implementation before claiming numerical equivalence.",
-            "omega_warning": "Boundary-first BFF path with rectangular Omega boundary correction applied.",
-            **bff_metrics,
+            "omega_correspondence_model": "BFF-style prescribed rectangular-boundary UV map c:S->Omega, inverse by UV triangle lookup",
+            "paper_flow_stage": "S -> Omega by boundary-first rectangular target domain and cotangent harmonic extension",
+            "paper_exactness_warning": "This is a local discrete BFF-style rectangular target solve, not a reference BFF library binding.",
+            "omega_warning": "Rectangular target-domain boundary is prescribed for downstream tile compatibility; free-boundary LSCM is available only as lscm_paper_like diagnostic mode.",
+            **backend_metrics,
         }
         out = _original.SurfaceParameterization(
             method="bff",
@@ -1402,8 +1792,42 @@ def _build_surface_parameterization(surface, target, grid, params):
         return _mark_parameterization_mode(
             out,
             method="bff",
-            exactness="bff_rectangular_boundary_corrected",
-            warning="Local BFF-style boundary-first flattening is active with rectangular Omega boundary correction; reference BFF numerical equivalence is not guaranteed.",
+            exactness="bff_rectangular_boundary_local",
+            warning=str(metrics["parameterization_warning"]),
+        )
+
+    if parameterization_mode in {"rect_harmonic", "harmonic", "fallback"}:
+        out = _ORIGINAL_BUILD_SURFACE_PARAMETERIZATION(surface, target, grid, params)
+        out.method = "rect_harmonic"
+        out.metrics.update(
+            {
+                "parameterization_method": "rect_harmonic",
+                "parameterization_exactness_label": "rectangular_boundary_harmonic",
+                "omega_parameterization_mode": parameterization_mode,
+                "requested_omega_parameterization_mode": parameterization_mode,
+                "omega_boundary_mode": "rectangular_debug" if boundary_mode == "rectangular_debug" else boundary_mode,
+                "flattening_backend": "rect_harmonic_fallback" if parameterization_mode == "fallback" else "rect_harmonic",
+                "omega_boundary_fixed": True,
+                "omega_boundary_shape": "rectangular",
+                "omega_boundary_forced_rectangle": True,
+                "omega_boundary_model": "Rectangular-boundary cotangent harmonic parameterization",
+                "omega_boundary_constraint_model": "fixed_rectangular_dirichlet_boundary",
+                "omega_correspondence_model": "fixed rectangular-boundary harmonic UV map c:S->Omega, inverse by UV triangle lookup",
+                "harmonic_solve_performed": True,
+                "bff_implemented": False,
+                "bff_backend_used": "none",
+                "bff_reference_backend_available": False,
+                "bff_boundary_rectangular_correction_applied": True,
+                "paper_flow_stage": "S -> Omega by rect_harmonic alternative mode; not BFF",
+                "paper_exactness_warning": "This is rectangular-boundary harmonic parameterization and must not be described as BFF.",
+                "omega_warning": "Rectangular-boundary harmonic parameterization is active; this is not BFF/free-boundary conformal flattening.",
+            }
+        )
+        return _mark_parameterization_mode(
+            out,
+            method="rect_harmonic",
+            exactness="rectangular_boundary_harmonic",
+            warning="Rectangular-boundary harmonic parameterization is active; this is not BFF.",
         )
 
     if parameterization_mode == "lscm_paper_like":
@@ -1585,17 +2009,64 @@ def _align_domain_grid_to_uv_point(domain, target_uv: np.ndarray | None) -> dict
     return _align_domain_grid_to_uv_points(domain, np.asarray(target_uv, dtype=float).reshape(1, 2))
 
 
+def _rebuild_domain_overlay_for_general_omega(domain, parameterization, grid, params=None) -> dict[str, float | int | bool | str]:
+    boundary = np.asarray(parameterization.omega_boundary, dtype=float)
+    if len(boundary) >= 2 and np.linalg.norm(boundary[0] - boundary[-1]) <= 1e-9:
+        boundary_open = boundary[:-1]
+    else:
+        boundary_open = boundary
+    if len(boundary_open) < 3:
+        return {"m2d_general_omega_overlay_rebuilt": False, "m2d_general_omega_overlay_reason": "missing_boundary"}
+
+    forced_rect = bool(parameterization.metrics.get("omega_boundary_forced_rectangle", False))
+    free_boundary = str(parameterization.metrics.get("omega_boundary_shape", "")) == "free"
+    if forced_rect or not free_boundary:
+        return {"m2d_general_omega_overlay_rebuilt": False, "m2d_general_omega_overlay_reason": "not_free_boundary"}
+
+    min_u, min_v = np.min(boundary_open, axis=0)
+    max_u, max_v = np.max(boundary_open, axis=0)
+    span_u = max(float(max_u - min_u), 1e-8)
+    span_v = max(float(max_v - min_v), 1e-8)
+    margin_tiles = int(max(0, getattr(params, "omega_overlay_margin", 1))) if params is not None else 1
+    effective_nx = max(int(grid.nx) * 2, int(grid.nx) + 2, 2)
+    effective_ny = max(int(grid.ny) * 2, int(grid.ny) + 2, 2)
+    overlay_nx = int(effective_nx + 2 * margin_tiles)
+    overlay_ny = int(effective_ny + 2 * margin_tiles)
+    step_u = span_u / max(effective_nx, 1)
+    step_v = span_v / max(effective_ny, 1)
+    xs = min_u - margin_tiles * step_u + np.arange(overlay_nx + 1, dtype=float) * step_u
+    ys = min_v - margin_tiles * step_v + np.arange(overlay_ny + 1, dtype=float) * step_v
+    uu, vv = np.meshgrid(xs, ys, indexing="xy")
+    domain.uv_vertices = np.stack([uu, vv], axis=-1).reshape(-1, 2)
+    domain.overlay_nx = overlay_nx  # type: ignore[attr-defined]
+    domain.overlay_ny = overlay_ny  # type: ignore[attr-defined]
+    domain.overlay_margin_tiles = margin_tiles  # type: ignore[attr-defined]
+    domain.overlay_step_u = float(step_u)  # type: ignore[attr-defined]
+    domain.overlay_step_v = float(step_v)  # type: ignore[attr-defined]
+    domain.original_requested_nx = int(grid.nx)  # type: ignore[attr-defined]
+    domain.original_requested_ny = int(grid.ny)  # type: ignore[attr-defined]
+    return {
+        "m2d_general_omega_overlay_rebuilt": True,
+        "m2d_general_omega_overlay_reason": "free_boundary_nonrectangular_omega",
+        "m2d_general_omega_effective_nx": int(effective_nx),
+        "m2d_general_omega_effective_ny": int(effective_ny),
+        "m2d_general_omega_step_u": float(step_u),
+        "m2d_general_omega_step_v": float(step_v),
+    }
+
+
 def _flatten_to_domain(parameterization, grid, params=None):
     domain = _ORIGINAL_FLATTEN_TO_DOMAIN(parameterization, grid, params)
-    threshold = float(getattr(params, "csf_split_threshold", 2.0)) if params is not None else 2.0
+    threshold = float(getattr(params, "csf_split_threshold", 1.9)) if params is not None else 1.9
     enabled = bool(getattr(params, "enable_csf_splits", True)) if params is not None else True
     enabled = enabled and bool(getattr(params, "enable_heuristic_csf_split", True)) if params is not None else enabled
-    max_splits = int(getattr(params, "max_csf_splits", 1)) if params is not None else 1
+    max_splits = int(getattr(params, "max_csf_splits", 4)) if params is not None else 4
     symmetry_enabled = bool(getattr(params, "preserve_detected_symmetry", True)) if params is not None else True
     symmetry_enabled = symmetry_enabled and bool(getattr(params, "enable_mirror_split", True)) if params is not None else symmetry_enabled
     symmetry = _detect_parameterization_reflection_symmetry(parameterization) if symmetry_enabled else {"axes": [], "centers": {}, "details": {}, "tolerance": 0.0}
     csf = _parameterization_stretch_csf(parameterization)
     peak_enabled = bool(getattr(params, "enable_peak_guided_split", True)) if params is not None else True
+    overlay_metrics = _rebuild_domain_overlay_for_general_omega(domain, parameterization, grid, params)
     if enabled:
         if peak_enabled:
             split_lines = _csf_split_lines(parameterization, csf, threshold=threshold, max_splits=max_splits)
@@ -1612,41 +2083,46 @@ def _flatten_to_domain(parameterization, grid, params=None):
             dict(symmetry.get("centers", {})),
             np.asarray(parameterization.uv_vertices_2d, dtype=float),
         )
+    localized_split_segments = _localized_csf_split_segments(parameterization, csf, threshold, split_lines, params) if split_lines else []
     peak_uvs = _surface_peak_uvs(parameterization)
     peak_uv = np.mean(peak_uvs, axis=0) if len(peak_uvs) else None
     peak_alignment = _align_domain_grid_to_uv_points(domain, peak_uvs if len(peak_uvs) else None)
     domain.csf_values = csf
     domain.split_lines = split_lines
+    domain.localized_split_segments = localized_split_segments  # type: ignore[attr-defined]
     domain.parameterization = parameterization  # type: ignore[attr-defined]
     domain.csf_before = float(np.max(csf)) if csf.size else 1.0  # type: ignore[attr-defined]
     domain.csf_after_split = min(float(domain.csf_before), float(threshold)) if split_lines else float(domain.csf_before)  # type: ignore[attr-defined]
     domain.csf_split_threshold = float(threshold)  # type: ignore[attr-defined]
+    domain.max_csf_splits = int(max_splits)  # type: ignore[attr-defined]
     domain.csf_split_enabled = bool(enabled)  # type: ignore[attr-defined]
     domain.csf_model = "edge_stretch_proxy"  # type: ignore[attr-defined]
     domain.csf_split_exactness_label = "heuristic"  # type: ignore[attr-defined]
     domain.peak_guided_split_enabled = bool(peak_enabled)  # type: ignore[attr-defined]
     domain.mirror_split_enabled = bool(symmetry_enabled)  # type: ignore[attr-defined]
+    domain.localize_csf_splits = bool(getattr(params, "localize_csf_splits", True)) if params is not None else True  # type: ignore[attr-defined]
+    domain.localized_split_segment_count = int(len(localized_split_segments))  # type: ignore[attr-defined]
     domain.detected_symmetry_axes = list(symmetry.get("axes", []))  # type: ignore[attr-defined]
     domain.detected_symmetry_centers = dict(symmetry.get("centers", {}))  # type: ignore[attr-defined]
     domain.detected_symmetry_tolerance = float(symmetry.get("tolerance", 0.0))  # type: ignore[attr-defined]
     domain.detected_symmetry_details = dict(symmetry.get("details", {}))  # type: ignore[attr-defined]
     domain.peak_uv_target = peak_uv  # type: ignore[attr-defined]
     domain.peak_uv_targets = peak_uvs  # type: ignore[attr-defined]
-    domain.peak_grid_alignment = dict(peak_alignment)  # type: ignore[attr-defined]
+    domain.peak_grid_alignment = {**dict(overlay_metrics), **dict(peak_alignment)}  # type: ignore[attr-defined]
     domain.omega_boundary_forced_rectangle = bool(parameterization.metrics.get("omega_boundary_forced_rectangle", False))  # type: ignore[attr-defined]
     domain.omega_boundary_constraint_model = str(parameterization.metrics.get("omega_boundary_constraint_model", ""))  # type: ignore[attr-defined]
     return domain
 
 
 def _face_crosses_split(vertices: np.ndarray, face: np.ndarray, split_line: tuple[str, float]) -> bool:
-    axis, value = split_line
+    axis, value = _split_line_axis_value(split_line)
     coord = 1 if axis == "row" else 0
     vals = vertices[np.asarray(face, dtype=int), coord]
     return bool(float(np.nanmin(vals)) < value < float(np.nanmax(vals)))
 
 
-def _snap_split_line_to_mesh(vertices: np.ndarray, split_line: tuple[str, float]) -> tuple[str, float] | None:
-    axis, value = split_line
+def _snap_split_line_to_mesh(vertices: np.ndarray, split_line) -> tuple | None:
+    axis, value = _split_line_axis_value(split_line)
     coord = 1 if axis == "row" else 0
     vals = np.asarray(vertices, dtype=float)[:, coord]
     unique = np.unique(np.round(vals[np.isfinite(vals)], 12))
@@ -1654,22 +2130,30 @@ def _snap_split_line_to_mesh(vertices: np.ndarray, split_line: tuple[str, float]
         return None
     internal = unique[1:-1]
     snapped = float(internal[int(np.argmin(np.abs(internal - float(value))))])
-    return axis, snapped
+    segment = _split_line_segment_bounds(split_line)
+    if segment is None:
+        return axis, snapped
+    return axis, snapped, float(segment[0]), float(segment[1])
 
 
 def _split_m2d_along_existing_grid_line(
     vertices: np.ndarray,
     faces: np.ndarray,
-    split_line: tuple[str, float],
+    split_line,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     snapped = _snap_split_line_to_mesh(vertices, split_line)
     if snapped is None:
         return vertices.copy(), faces.copy(), 0
-    axis, value = snapped
+    axis, value = _split_line_axis_value(snapped)
+    segment = _split_line_segment_bounds(snapped)
     coord = 1 if axis == "row" else 0
+    other = 1 - coord
     out_vertices = np.asarray(vertices, dtype=float).copy()
     out_faces = np.asarray(faces, dtype=int).copy()
     on_line = np.isclose(out_vertices[:, coord], value, rtol=0.0, atol=1e-9)
+    if segment is not None:
+        lo, hi = segment
+        on_line &= (out_vertices[:, other] >= lo - 1e-9) & (out_vertices[:, other] <= hi + 1e-9)
     if not np.any(on_line):
         return out_vertices, out_faces, 0
 
@@ -1677,6 +2161,14 @@ def _split_m2d_along_existing_grid_line(
     centroids = np.mean(out_vertices[out_faces][:, :, coord], axis=1)
     positive_side_faces = np.flatnonzero(centroids > value)
     for face_idx in positive_side_faces:
+        # For local split segments, only cut faces whose centroid lies inside
+        # the segment in the orthogonal direction. This prevents a local high-CSF
+        # cut from becoming a full-width band split.
+        if segment is not None:
+            lo, hi = segment
+            face_other = float(np.mean(out_vertices[out_faces[face_idx], other]))
+            if face_other < lo - 1e-9 or face_other > hi + 1e-9:
+                continue
         for local_idx, vertex_id in enumerate(out_faces[face_idx]):
             vertex_id = int(vertex_id)
             if not on_line[vertex_id]:
@@ -1758,7 +2250,8 @@ def _csf_residual_split_step_analysis(
 
     covered = np.zeros(len(uv), dtype=bool)
     rows: list[dict[str, object]] = []
-    for step, (axis, raw_value) in enumerate(split_lines, start=1):
+    for step, split_line in enumerate(split_lines, start=1):
+        axis, raw_value = _split_line_axis_value(split_line)
         coord = 1 if axis == "row" else 0
         value = float(raw_value)
         band = float(bands[coord])
@@ -1990,6 +2483,24 @@ def _symmetrize_m2d_faces(mesh, domain) -> tuple[np.ndarray, int]:
 
 def _build_m2d(grid, domain, params=None):
     mesh = _ORIGINAL_BUILD_M2D(grid, domain, params)
+    all_overlay_faces = np.asarray([tile.vertex_ids for tile in (mesh.grid.tiles or [])], dtype=int)
+    if len(all_overlay_faces):
+        metrics = dict(mesh.metrics)
+        metrics.update(
+            {
+                "m2d_preclip_source": "full_overlay_grid_reclipped_against_omega_boundary",
+                "m2d_original_build_kept_quad_count_before_reclip": int(len(mesh.faces)),
+                "m2d_original_build_point_in_polygon_replaced": True,
+            }
+        )
+        mesh = _original.QuadMesh(
+            mesh.vertices.copy(),
+            all_overlay_faces,
+            mesh.grid,
+            mesh.stage,
+            metrics,
+            list(getattr(mesh, "split_lines", [])),
+        )
     faces, symmetry_added_count = _symmetrize_m2d_faces(mesh, domain)
     if symmetry_added_count:
         metrics = dict(mesh.metrics)
@@ -2062,13 +2573,14 @@ def _build_m2d(grid, domain, params=None):
     )
 
     split_lines = list(getattr(domain, "split_lines", []) or [])
-    if not split_lines or len(mesh.faces) == 0:
+    split_segments = list(getattr(domain, "localized_split_segments", []) or split_lines)
+    if not split_segments or len(mesh.faces) == 0:
         mesh.metrics.update(
             {
                 "csf_split_step_analysis": [],
                 "csf_split_step_analysis_model": "not run: no split lines or no M2D faces",
                 "csf_split_step_count": 0,
-                "csf_split_residual_high_vertex_count_after_all": int(np.count_nonzero(np.asarray(getattr(domain, "csf_values", np.zeros(0)), dtype=float) > float(getattr(domain, "csf_split_threshold", 2.0)))),
+                "csf_split_residual_high_vertex_count_after_all": int(np.count_nonzero(np.asarray(getattr(domain, "csf_values", np.zeros(0)), dtype=float) > float(getattr(domain, "csf_split_threshold", 1.9)))),
                 "csf_split_residual_max_after_all": float(getattr(domain, "csf_before", getattr(domain, "max_csf", 1.0))),
             }
         )
@@ -2079,7 +2591,7 @@ def _build_m2d(grid, domain, params=None):
     faces = np.asarray(mesh.faces, dtype=int).copy()
     snapped_lines: list[tuple[str, float]] = []
     duplicate_count = 0
-    for line in split_lines:
+    for line in split_segments:
         snapped = _snap_split_line_to_mesh(vertices, line)
         if snapped is None:
             continue
@@ -2093,11 +2605,13 @@ def _build_m2d(grid, domain, params=None):
             {
                 "csf_split_applied": False,
                 "csf_split_rejected_reason": "no_internal_grid_line_to_split",
-                "csf_split_candidate_lines": split_lines,
+                "csf_split_candidate_lines": [_split_line_as_metric(line) for line in split_lines],
+                "csf_split_localized_segments": [_split_line_as_metric(line) for line in split_segments],
+                "csf_split_localized_segment_count": int(len(split_segments)),
                 "csf_split_step_analysis": [],
                 "csf_split_step_analysis_model": "not run: no candidate split snapped to an internal M2D grid line",
                 "csf_split_step_count": 0,
-                "csf_split_residual_high_vertex_count_after_all": int(np.count_nonzero(np.asarray(getattr(domain, "csf_values", np.zeros(0)), dtype=float) > float(getattr(domain, "csf_split_threshold", 2.0)))),
+                "csf_split_residual_high_vertex_count_after_all": int(np.count_nonzero(np.asarray(getattr(domain, "csf_values", np.zeros(0)), dtype=float) > float(getattr(domain, "csf_split_threshold", 1.9)))),
                 "csf_split_residual_max_after_all": float(getattr(domain, "csf_before", getattr(domain, "max_csf", 1.0))),
             }
         )
@@ -2109,7 +2623,7 @@ def _build_m2d(grid, domain, params=None):
     step_analysis, step_summary = _csf_residual_split_step_analysis(
         domain.parameterization,
         np.asarray(getattr(domain, "csf_values", np.zeros(0)), dtype=float),
-        float(getattr(domain, "csf_split_threshold", 2.0)),
+        float(getattr(domain, "csf_split_threshold", 1.9)),
         snapped_lines,
         vertices,
     )
@@ -2118,7 +2632,11 @@ def _build_m2d(grid, domain, params=None):
             "max_csf_before_split": float(getattr(domain, "csf_before", domain.max_csf)),
             "max_csf_after_split": float(step_summary.get("csf_split_residual_max_after_all", getattr(domain, "csf_after_split", domain.max_csf))),
             "number_of_splits": len(snapped_lines),
-            "split_locations": snapped_lines,
+            "split_locations": [_split_line_as_metric(line) for line in snapped_lines],
+            "raw_split_locations": [_split_line_as_metric(line) for line in split_lines],
+            "csf_split_localized_segments": [_split_line_as_metric(line) for line in split_segments],
+            "csf_split_localized_segment_count": int(len(split_segments)),
+            "csf_split_localization_enabled": bool(getattr(domain, "localize_csf_splits", True)),
             "csf_split_applied": True,
             "csf_split_step_analysis": step_analysis,
             "csf_split_removed_quad_count": 0,
@@ -2130,13 +2648,21 @@ def _build_m2d(grid, domain, params=None):
             "m2d_connected_component_count_after_split": int(len(component_sizes)),
             "m2d_largest_component_quad_count_after_split": int(component_sizes[0]) if component_sizes else 0,
             "m2d_smallest_component_quad_count_after_split": int(component_sizes[-1]) if component_sizes else 0,
-            "csf_split_model": "duplicate M2D vertices along an existing grid line; no quads removed",
-            "csf_split_threshold": float(getattr(domain, "csf_split_threshold", 2.0)),
+            "csf_split_model": "duplicate M2D vertices along localized existing grid-line segments; no quads removed",
+            "csf_split_threshold": float(getattr(domain, "csf_split_threshold", 1.9)),
+            "max_csf_splits": int(getattr(domain, "max_csf_splits", 4)),
         }
     )
     metrics.update(step_summary)
     metrics.update(_m2d_audit_metrics(vertices, faces, suffix="after_split"))
-    return _original.QuadMesh(vertices, faces, mesh.grid, mesh.stage, metrics, snapped_lines)
+
+    # Keep QuadMesh.split_lines backward-compatible for visualization.py and
+    # older UI code, which iterate as ``for axis, value in lines``.  Localized
+    # cut extents remain available in metrics["split_locations"] and
+    # metrics["csf_split_localized_segments"], but the public split_lines field
+    # must remain a list of 2-tuples.
+    display_split_lines = [_split_line_axis_value(line) for line in snapped_lines]
+    return _original.QuadMesh(vertices, faces, mesh.grid, mesh.stage, metrics, display_split_lines)
 
 
 def _lift_m2d_to_m3d(target, mesh, parameterization, params):
@@ -2378,7 +2904,7 @@ def _make_flat_tile_layout(mesh, params=None):
 
     original_start = time.perf_counter()
     previous_se2_layout = _original._paper_local_global_se2_layout
-    _original._paper_local_global_se2_layout = _paper_local_global_se2_layout
+    _original._paper_local_global_se2_layout = _ORIGINAL_PAPER_LOCAL_GLOBAL_SE2_LAYOUT
     try:
         layout = _ORIGINAL_MAKE_FLAT_TILE_LAYOUT(mesh, params)
     finally:
@@ -2416,7 +2942,7 @@ def _make_flat_tile_layout(mesh, params=None):
 
     retry_start = time.perf_counter()
     previous_se2_layout = _original._paper_local_global_se2_layout
-    _original._paper_local_global_se2_layout = _paper_local_global_se2_layout
+    _original._paper_local_global_se2_layout = _ORIGINAL_PAPER_LOCAL_GLOBAL_SE2_LAYOUT
     try:
         retry = _ORIGINAL_MAKE_FLAT_TILE_LAYOUT(mesh, retry_params)
     finally:
@@ -2852,6 +3378,81 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
     }
 
 
+def _orient_tile_normals_to_outward_reference(
+    normals: np.ndarray,
+    top_tiles: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    """Stabilize extrusion normals for an open top-surface target.
+
+    The previous patch used only ``tile_center - global_centroid`` as an
+    outward reference.  That is unsafe for dome/snowman half surfaces: side
+    components can legitimately have centers on the opposite side of the global
+    centroid, so the centroid vector can flip an otherwise correct +z-facing
+    panel into a -z-facing panel.  For the current OneString prototype, T3D is
+    an open upper target surface and the extrusion convention is
+    ``bottom = top - thickness * normal``.  Therefore, whenever a tile normal
+    has a clear z component, the physically consistent choice is non-negative z.
+
+    Only near-vertical/ambiguous normals fall back to the centroid-radial
+    reference.  This prevents isolated split components from being extruded in
+    the opposite direction while retaining a fallback for nearly vertical side
+    faces.
+    """
+    n = np.asarray(normals, dtype=float).copy()
+    tiles = np.asarray(top_tiles, dtype=float)
+    if len(n) == 0 or tiles.size == 0:
+        return n, {
+            "t3d_surface_reference_normal_orientation_applied": False,
+            "t3d_surface_reference_normal_flip_count": 0,
+            "t3d_surface_reference_normal_reason": "empty",
+        }
+
+    original = n.copy()
+    z = n[:, 2]
+    z_scale = max(float(np.nanmax(np.abs(z))) if z.size else 0.0, 1.0)
+    z_eps = max(1e-6, 1e-4 * z_scale)
+    z_clear = np.isfinite(z) & (np.abs(z) > z_eps)
+    flip_z = z_clear & (z < 0.0)
+    n[flip_z] *= -1.0
+
+    # Fallback only for z-ambiguous normals.  This is deliberately secondary to
+    # the +z convention so snowman/dome side split components are not inverted.
+    centers = np.mean(tiles, axis=1)
+    centroid = np.mean(centers, axis=0)
+    refs = centers - centroid[None, :]
+    ref_norms = np.linalg.norm(refs, axis=1)
+    ref_valid = ref_norms > max(float(np.nanmax(ref_norms)) * 1e-4, 1e-10)
+    refs[ref_valid] = refs[ref_valid] / ref_norms[ref_valid, None]
+    dots = np.sum(n * refs, axis=1)
+    ambiguous = ~z_clear
+    clear_radial = ambiguous & ref_valid & np.isfinite(dots) & (np.abs(dots) > 1e-4)
+    flip_radial = clear_radial & (dots < 0.0)
+    n[flip_radial] *= -1.0
+
+    # Final guard: after any fallback, enforce non-negative z for all normals
+    # that have become clearly z-oriented.  This catches numerical/component
+    # artifacts and directly targets the reported inverted-panel symptom.
+    z_after = n[:, 2]
+    final_z_clear = np.isfinite(z_after) & (np.abs(z_after) > z_eps)
+    flip_final = final_z_clear & (z_after < 0.0)
+    n[flip_final] *= -1.0
+
+    dots_before_z = original[:, 2]
+    dots_after_z = n[:, 2]
+    flip_any = np.linalg.norm(n - original, axis=1) > 1e-12
+    return n, {
+        "t3d_surface_reference_normal_orientation_applied": True,
+        "t3d_surface_reference_normal_model": "positive_z_open_surface_with_centroid_fallback_for_z_ambiguous_normals",
+        "t3d_surface_reference_normal_flip_count": int(np.count_nonzero(flip_any)),
+        "t3d_positive_z_normal_flip_count": int(np.count_nonzero(flip_z | flip_final)),
+        "t3d_centroid_fallback_normal_flip_count": int(np.count_nonzero(flip_radial)),
+        "t3d_surface_reference_normal_valid_tile_count": int(len(n)),
+        "t3d_surface_reference_normal_min_dot_before": float(np.min(dots_before_z)) if dots_before_z.size else 0.0,
+        "t3d_surface_reference_normal_min_dot_after": float(np.min(dots_after_z)) if dots_after_z.size else 0.0,
+        "t3d_min_normal_z_after_orientation": float(np.min(dots_after_z)) if dots_after_z.size else 0.0,
+        "t3d_negative_normal_z_count_after_orientation": int(np.count_nonzero(dots_after_z < -z_eps)),
+    }
+
 def _extrude_tiles(mesh, thickness: float, stage: str):
     """Extrude K3D tiles using shared-edge miter/contact planes.
 
@@ -2906,6 +3507,7 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
 
     raw_normals = np.asarray([_original._quad_normal(top) for top in top_tiles], dtype=float)
     normals, normal_orientation_metrics = _orient_tile_normals_consistently(raw_normals, mesh.faces)
+    normals, surface_reference_normal_metrics = _orient_tile_normals_to_outward_reference(normals, top_tiles)
     raw_side_normals: list[list[np.ndarray]] = []
     for tile_id, top in enumerate(top_tiles):
         raw_side_normals.append([_edge_inward_normal(top, normals[tile_id], edge) for edge in local_edges])
@@ -2950,11 +3552,28 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
 
     fallback_count = 0
     max_bottom_vertex_jump = 0.0
+    tile_translation_guard_count = 0
+    tile_translation_guard_reasons: dict[str, int] = {}
+    max_tile_signed_thickness_error_before_guard = 0.0
+    min_tile_signed_thickness_before_guard = float("inf")
+    # The miter/contact-plane solve is useful only if it preserves the primary
+    # extrusion invariant: every bottom vertex must lie below the top face by
+    # approximately +thickness along the chosen top normal.  On split-heavy
+    # snowman/neck geometries, the side-plane intersection can be ill-conditioned
+    # and can produce small inverted tabs.  Such tiles poison T2D layout, so use
+    # a hard per-tile safety guard and fall back to a simple normal-translation
+    # prism whenever the miter candidate is suspicious.
+    guard_jump_limit = max(0.75 * float(thickness), 1e-8)
+    guard_min_depth = max(0.25 * float(thickness), 1e-9)
+    guard_max_depth_error = max(0.75 * float(thickness), 1e-8)
     for tile_id, top in enumerate(top_tiles):
         normal = normals[tile_id]
         bottom = np.zeros((4, 3), dtype=float)
+        fallback_bottom = np.asarray(top, dtype=float) - float(thickness) * normal[None, :]
+        tile_used_solver_fallback = 0
+        tile_max_jump = 0.0
         for vertex_id in range(4):
-            fallback_vertex = np.asarray(top[vertex_id], dtype=float) - float(thickness) * normal
+            fallback_vertex = fallback_bottom[vertex_id]
             bottom[vertex_id], used_fallback = _solve_bottom_vertex(
                 top,
                 normal,
@@ -2962,8 +3581,40 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
                 side_normals[tile_id],
                 vertex_id,
             )
+            tile_used_solver_fallback += int(used_fallback)
+            jump = float(np.linalg.norm(bottom[vertex_id] - fallback_vertex))
+            tile_max_jump = max(tile_max_jump, jump)
+            max_bottom_vertex_jump = max(max_bottom_vertex_jump, jump)
             fallback_count += int(used_fallback)
-            max_bottom_vertex_jump = max(max_bottom_vertex_jump, float(np.linalg.norm(bottom[vertex_id] - fallback_vertex)))
+
+        candidate_depths = np.sum((np.asarray(top, dtype=float) - bottom) * normal[None, :], axis=1)
+        candidate_depth_error = np.abs(candidate_depths - float(thickness))
+        if candidate_depths.size:
+            min_tile_signed_thickness_before_guard = min(
+                min_tile_signed_thickness_before_guard,
+                float(np.min(candidate_depths)),
+            )
+            max_tile_signed_thickness_error_before_guard = max(
+                max_tile_signed_thickness_error_before_guard,
+                float(np.max(candidate_depth_error)),
+            )
+
+        guard_reason = ""
+        if tile_used_solver_fallback > 0:
+            guard_reason = "solver_vertex_fallback"
+        elif bool(np.any(~np.isfinite(bottom))):
+            guard_reason = "nonfinite_bottom"
+        elif bool(np.any(candidate_depths <= guard_min_depth)):
+            guard_reason = "inverted_or_too_thin"
+        elif bool(np.any(candidate_depth_error > guard_max_depth_error)):
+            guard_reason = "thickness_error"
+        elif tile_max_jump > guard_jump_limit:
+            guard_reason = "large_miter_jump"
+
+        if guard_reason:
+            bottom = fallback_bottom
+            tile_translation_guard_count += 1
+            tile_translation_guard_reasons[guard_reason] = tile_translation_guard_reasons.get(guard_reason, 0) + 1
 
         vertices[tile_id, :4] = top
         vertices[tile_id, 4:] = bottom
@@ -3017,6 +3668,12 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
             "t3d_reversed_extrusion_vertex_count": int(reversed_extrusion_vertex_count),
             "t3d_min_signed_thickness": float(np.min(signed_thickness)) if signed_thickness.size else 0.0,
             "normal_translation_center_shift_error_rms": float(np.sqrt(np.mean(normal_shift_error * normal_shift_error))) if normal_shift_error.size else 0.0,
+            "t3d_miter_candidate_min_signed_thickness_before_guard": float(min_tile_signed_thickness_before_guard) if np.isfinite(min_tile_signed_thickness_before_guard) else 0.0,
+            "t3d_miter_candidate_max_thickness_error_before_guard": float(max_tile_signed_thickness_error_before_guard),
+            "t3d_normal_translation_guard_applied": bool(tile_translation_guard_count > 0),
+            "t3d_normal_translation_guard_tile_count": int(tile_translation_guard_count),
+            "t3d_normal_translation_guard_reasons": dict(tile_translation_guard_reasons),
+            "t3d_extrusion_hard_validity_guard": "fallback_mitered_tile_to_normal_translation_prism",
             "internal_miter_edge_count": int(internal_miter_edge_count),
             "split_contact_miter_edge_count": int(split_contact_miter_edge_count),
             "split_contact_side_edges": [[int(tile_id), int(edge_id)] for tile_id, edge_id in sorted(split_edge_entries)],
@@ -3024,6 +3681,7 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
             "boundary_side_plane_count": int(boundary_side_plane_count),
             "nonmanifold_edge_count": int(nonmanifold_edge_count),
             **normal_orientation_metrics,
+            **surface_reference_normal_metrics,
             "bottom_vertex_solve_fallback_count": int(fallback_count),
             "t3d_bottom_vertex_solve_fallback_count": int(fallback_count),
             "t3d_max_bottom_vertex_jump": float(max_bottom_vertex_jump),
@@ -3207,29 +3865,41 @@ def _optimize_t2d_footprint_layout(
     # Hinge polish: make the hinge term even harder.  Because this can close some
     # holes, keep the polished result only if collision/clearance does not regress
     # too far compared with the free-layout solution.
-    polished, polish_metrics = _original._paper_local_global_se2_layout(
-        rest,
-        constraints,
-        footprint_builder=footprint_builder,
-        initial_xy=solved,
-        iterations=max(80, int(iterations)),
-        connection_weight=float(free["connection_weight"]) * 2.0,
-        collision_weight=max(2.0, float(free["collision_weight"]) * 0.75),
-        anchor_weight=float(free["anchor_weight"]) * 0.5,
-        clearance=float(free["clearance"]) * 0.75,
-        stage_name="T2D Top Hinge hard-hinge polish",
-        time_budget_sec=max(4.0, float(time_budget_sec) * 0.5),
-        max_candidate_pairs=int(max_candidate_pairs),
-        collision_sweeps_per_iteration=max(1, int(collision_sweeps_per_iteration)),
-        initial_expansion=1.0,
-        max_center_drift_tiles=float(free["max_center_drift_tiles"]),
-        progress_callback=None,
+    polish_metrics: dict[str, float | int | str | bool] = {
+        "paper_layout_optimizer": "skipped",
+        "paper_layout_skip_reason": "free layout already meets hinge/collision guard",
+    }
+    after_polish = after_free
+    accept_polish = False
+    polish_skip_hinge_tol = max(float(free["clearance"]) * 0.20, float(getattr(grid, "tile_size", 1.0)) * 0.015)
+    run_polish = not (
+        float(after_free["hinge_error"]) <= polish_skip_hinge_tol
+        and int(after_free["collision_count"]) == 0
     )
-    after_polish = _layout_quality_for_top_xy(polished, transforms, faces, free_grid, constraints)
-    accept_polish = (
-        after_polish["hinge_error"] <= after_free["hinge_error"] * 0.85 + 1e-8
-        and after_polish["collision_count"] <= after_free["collision_count"] + max(1, int(len(rest) * 0.03))
-    )
+    if run_polish:
+        polished, polish_metrics = _original._paper_local_global_se2_layout(
+            rest,
+            constraints,
+            footprint_builder=footprint_builder,
+            initial_xy=solved,
+            iterations=max(80, int(iterations)),
+            connection_weight=float(free["connection_weight"]) * 2.0,
+            collision_weight=max(2.0, float(free["collision_weight"]) * 0.75),
+            anchor_weight=float(free["anchor_weight"]) * 0.5,
+            clearance=float(free["clearance"]) * 0.75,
+            stage_name="T2D Top Hinge hard-hinge polish",
+            time_budget_sec=max(4.0, float(time_budget_sec) * 0.5),
+            max_candidate_pairs=int(max_candidate_pairs),
+            collision_sweeps_per_iteration=max(1, int(collision_sweeps_per_iteration)),
+            initial_expansion=1.0,
+            max_center_drift_tiles=float(free["max_center_drift_tiles"]),
+            progress_callback=None,
+        )
+        after_polish = _layout_quality_for_top_xy(polished, transforms, faces, free_grid, constraints)
+        accept_polish = (
+            after_polish["hinge_error"] <= after_free["hinge_error"] * 0.85 + 1e-8
+            and after_polish["collision_count"] <= after_free["collision_count"] + max(1, int(len(rest) * 0.03))
+        )
     if accept_polish:
         solved = polished
         final = after_polish
@@ -3305,6 +3975,8 @@ def _optimize_t2d_footprint_layout(
         "t2d_free_layout_max_center_drift_tiles": float(free["max_center_drift_tiles"]),
         "t2d_free_layout_gap_size_used_for_clearance": float(free["layout_gap"]),
         "t2d_free_layout_clearance": float(free["clearance"]),
+        "t2d_hard_hinge_polish_ran": bool(run_polish),
+        "t2d_hard_hinge_polish_skip_hinge_tolerance": float(polish_skip_hinge_tol),
         "t2d_hard_hinge_polish_accepted": bool(accept_polish),
         **hinge_close_metrics,
         "t2d_footprint_collision_checked_on": "top+bottom projected footprint with SAT, enlarged optimization-only clearance",
@@ -3469,7 +4141,7 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
         )
 
     tile_count = int(len(np.asarray(mesh_2d.faces, dtype=int)))
-    fast_t2d = bool(getattr(flat_layout, "metrics", {}).get("k2d_independent_fast_large_layout", False)) or tile_count > 150
+    fast_t2d = False
     if fast_t2d:
         flat_layout_tops = np.asarray(flat_layout.tile_top_vertices_3d, dtype=float)
         count = min(len(flat_layout_tops), len(tiles_3d.vertices))
@@ -3742,7 +4414,7 @@ def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_call
         "dual_hinge_split_virtual_weld_group_count": int(hinge_weld_metrics.get("split_virtual_weld_group_count", 0)),
         "dual_hinge_split_virtual_weld_vertex_count": int(hinge_weld_metrics.get("split_virtual_weld_vertex_count", 0)),
         "dual_hinge_split_virtual_weld_reason": str(hinge_weld_metrics.get("split_virtual_weld_reason", "")),
-        "dual_hinge_constraint_faces": "split-coincident vertex ids are welded for hinge connectivity only",
+        "dual_hinge_constraint_faces": "split topology preserved; coincident split vertex ids are not re-welded",
     }
     out.metrics.update(metrics)
     hinge_graph.metrics.update(metrics)
@@ -3761,7 +4433,7 @@ def _build_gap_graph(mesh_faces, t2d, t3d):
             "gap_graph_split_virtual_weld_group_count": int(gap_weld_metrics.get("split_virtual_weld_group_count", 0)),
             "gap_graph_split_virtual_weld_vertex_count": int(gap_weld_metrics.get("split_virtual_weld_vertex_count", 0)),
             "gap_graph_split_virtual_weld_reason": str(gap_weld_metrics.get("split_virtual_weld_reason", "")),
-            "gap_graph_constraint_faces": "split-coincident vertex ids are welded for lift/string gap topology only",
+            "gap_graph_constraint_faces": "split topology preserved; coincident split vertex ids are not re-welded",
         }
     )
     return graph
@@ -4362,7 +5034,7 @@ def export_t2d_stl(
 
 
 def _spatial_candidate_pairs_for_tiles(tiles_xy: np.ndarray, pad: float = 0.0) -> list[tuple[int, int]]:
-    """Broad-phase tile pair search using padded AABB cell occupancy."""
+    """Broad-phase tile pair search using KDTree centers plus padded AABBs."""
     tiles = np.asarray(tiles_xy, dtype=float)
     n = int(len(tiles))
     if n <= 1:
@@ -4372,7 +5044,30 @@ def _spatial_candidate_pairs_for_tiles(tiles_xy: np.ndarray, pad: float = 0.0) -
     spans = np.maximum(bmax - bmin, 1e-8)
     pad = max(float(pad), 0.0)
     finite = np.all(np.isfinite(spans), axis=1)
-    max_spans = np.max(spans[finite], axis=1) if np.any(finite) else np.asarray([1.0])
+    if not np.any(finite):
+        return []
+    centers = 0.5 * (bmin + bmax)
+    radii = 0.5 * np.linalg.norm(spans, axis=1)
+    max_radius = float(np.max(radii[finite])) if np.any(finite) else 0.0
+    query_radius = max(2.0 * max_radius + pad, 1e-9)
+    try:
+        from scipy.spatial import cKDTree
+
+        tree = cKDTree(centers[finite])
+        finite_ids = np.flatnonzero(finite)
+        raw_pairs = tree.query_pairs(query_radius, output_type="set")
+        pairs: set[tuple[int, int]] = set()
+        for a_local, b_local in raw_pairs:
+            a = int(finite_ids[int(a_local)])
+            b = int(finite_ids[int(b_local)])
+            sep = np.maximum(np.maximum(bmin[b] - bmax[a], bmin[a] - bmax[b]), 0.0)
+            if float(np.linalg.norm(sep)) <= pad:
+                pairs.add((a, b) if a < b else (b, a))
+        return sorted(pairs)
+    except Exception:
+        pass
+
+    max_spans = np.max(spans[finite], axis=1)
     cell = max(float(np.median(max_spans)) + pad, 1e-6)
 
     lo = np.floor((bmin - pad) / cell).astype(int)
@@ -4812,6 +5507,9 @@ def _paper_local_global_se2_layout(
     fine_iterations = 0
     max_collision_count = 0
     last_pair_count = 0
+    full_energy_evaluations = 0
+    active_energy_evaluations = 0
+    skipped_full_energy_evaluations = 0
 
     def _cap_pairs(fp: np.ndarray, pairs: list[tuple[int, int]], limit: int) -> list[tuple[int, int]]:
         if len(pairs) <= limit:
@@ -4882,8 +5580,23 @@ def _paper_local_global_se2_layout(
         active_pairs = [(i, j) for i, j in pairs if int(i) in grown or int(j) in grown]
         return grown, active_hinges, active_pairs
 
-    def _energy(layout: np.ndarray, it: int, phase_clearance: float, limit: int, update_interval: int, force_pairs: bool = False):
-        fp, pairs = _candidate_pairs(layout, it, max(phase_clearance * 8.0, tile_scale * 0.08, 1e-4), limit, update_interval, force=force_pairs)
+    def _energy(
+        layout: np.ndarray,
+        it: int,
+        phase_clearance: float,
+        limit: int,
+        update_interval: int,
+        force_pairs: bool = False,
+        pair_override: list[tuple[int, int]] | None = None,
+    ):
+        nonlocal full_energy_evaluations, active_energy_evaluations
+        if pair_override is None:
+            fp, pairs = _candidate_pairs(layout, it, max(phase_clearance * 8.0, tile_scale * 0.08, 1e-4), limit, update_interval, force=force_pairs)
+            full_energy_evaluations += 1
+        else:
+            fp = np.asarray(footprint_builder(layout), dtype=float)
+            pairs = pair_override
+            active_energy_evaluations += 1
         penetration_sq = 0.0
         collision_count = 0
         min_clear = float("inf")
@@ -5020,9 +5733,25 @@ def _paper_local_global_se2_layout(
         proposal -= np.mean(np.mean(proposal, axis=1), axis=0) - np.mean(np.mean(anchor_layout, axis=1), axis=0)
 
         accepted = False
-        for alpha in (1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125):
+        alpha_values = (1.0, 0.5, 0.25) if coarse else (1.0, 0.5, 0.25, 0.125)
+        for alpha in alpha_values:
             trial = current + alpha * (proposal - current)
             trial = _clamp_step(current, trial)
+            cheap_pairs = active_pairs if active_pairs else pairs
+            cheap_energy, cheap_stats = _energy(
+                trial,
+                it,
+                phase_clearance,
+                phase_limit,
+                update_interval,
+                pair_override=cheap_pairs,
+            )
+            cheap_hinge_improves = float(cheap_stats["hinge_rms"]) <= float(current_stats["hinge_rms"]) * 0.985
+            cheap_collision_improves = int(cheap_stats["collision_count"]) <= int(current_stats["collision_count"])
+            cheap_energy_improves = cheap_energy <= current_energy * 1.04
+            if not (cheap_energy_improves or cheap_collision_improves or cheap_hinge_improves):
+                skipped_full_energy_evaluations += 1
+                continue
             trial_energy, trial_stats = _energy(trial, it, phase_clearance, phase_limit, update_interval)
             hinge_improves = float(trial_stats["hinge_rms"]) <= float(current_stats["hinge_rms"]) * 0.98
             collision_improves = int(trial_stats["collision_count"]) < int(current_stats["collision_count"])
@@ -5116,10 +5845,14 @@ def _paper_local_global_se2_layout(
         "paper_layout_candidate_pair_cache_hits": int(pair_cache["hit"]),
         "paper_layout_candidate_pair_cache_misses": int(pair_cache["miss"]),
         "paper_layout_candidate_pair_update_policy": "force on start/final/rejection, otherwise every 8 coarse or 4 fine iterations",
-        "paper_layout_spatial_hash_model": "padded AABB occupancy cells with precise padded AABB broad-phase filter",
+        "paper_layout_spatial_hash_model": "cKDTree center-radius candidates with padded AABB filter; cell occupancy fallback",
         "paper_layout_active_set_enabled": True,
         "paper_layout_active_tile_count_mean": float(np.mean(active_tile_counts)) if active_tile_counts else float(len(current)),
         "paper_layout_active_pair_count_mean": float(np.mean(active_pair_counts)) if active_pair_counts else float(last_pair_count),
+        "paper_layout_full_energy_evaluations": int(full_energy_evaluations),
+        "paper_layout_active_energy_evaluations": int(active_energy_evaluations),
+        "paper_layout_skipped_full_energy_evaluations": int(skipped_full_energy_evaluations),
+        "paper_layout_line_search_mode": "active-pair precheck before full SAT energy",
         "paper_layout_coarse_to_fine_enabled": True,
         "paper_layout_coarse_iterations": int(coarse_iterations),
         "paper_layout_fine_iterations": int(fine_iterations),
@@ -5149,8 +5882,8 @@ _original._lift_m2d_to_m3d = _lift_m2d_to_m3d
 _original._optimize_k2d = _optimize_k2d
 _original._optimize_k3d = _optimize_k3d
 _original._make_flat_tile_layout = _make_flat_tile_layout
-_original._optimize_t2d_footprint_layout = _optimize_t2d_footprint_layout
-_original._optimize_rigid_assembly_hinge_layout_2d = _optimize_rigid_assembly_hinge_layout_2d
+_original._optimize_t2d_footprint_layout = _ORIGINAL_OPTIMIZE_T2D_FOOTPRINT_LAYOUT
+_original._optimize_rigid_assembly_hinge_layout_2d = _ORIGINAL_OPTIMIZE_RIGID_ASSEMBLY_HINGE_LAYOUT_2D
 _original._make_t2d_from_transforms = _make_t2d_from_transforms
 _original._optimize_dual_hinges = _optimize_dual_hinges
 _original._build_gap_graph = _build_gap_graph

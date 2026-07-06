@@ -290,9 +290,9 @@ with st.sidebar:
         "S→Omega のパラメータ化。PCA は debug/experimental であり paper-like ではない。",
         lambda: st.selectbox(
             "Omega parameterization mode",
-            ["bff", "lscm_paper_like", "paper_like_unimplemented", "pca_debug", "arap_paper_like"],
+            ["bff", "lscm_paper_like", "rect_harmonic", "fallback", "paper_like_unimplemented", "pca_debug", "arap_paper_like"],
             index=0,
-            help="bff uses the local boundary-first conformal solve. PCA/debug modes require explicit opt-in.",
+            help="bff tries a reference/free-boundary conformal backend and reports the actual backend. rect_harmonic is fixed rectangular-boundary harmonic, not BFF.",
         ),
     )
     allow_experimental_pipeline = _param_row(
@@ -1032,7 +1032,15 @@ elif view_stage == "Omega":
         "height_field_shortcut_used": state.mesh_3d_initial.metrics.get("m3d_used_height_field_shortcut", False),
         "omega_corresponds_to_S": state.surface_parameterization.metrics.get("omega_corresponds_to_S", False),
         "omega_correspondence_model": state.surface_parameterization.metrics.get("omega_correspondence_model", ""),
+        "flattening_backend": state.surface_parameterization.metrics.get("flattening_backend", ""),
+        "bff_backend_used": state.surface_parameterization.metrics.get("bff_backend_used", ""),
+        "bff_reference_backend_available": state.surface_parameterization.metrics.get("bff_reference_backend_available", False),
         "bff_implemented": state.surface_parameterization.metrics.get("bff_implemented", False),
+        "omega_boundary_shape": state.surface_parameterization.metrics.get("omega_boundary_shape", ""),
+        "omega_boundary_forced_rectangle": state.surface_parameterization.metrics.get("omega_boundary_forced_rectangle", False),
+        "uv_triangle_flip_count": state.surface_parameterization.metrics.get("uv_triangle_flip_count", 0),
+        "angle_distortion_mean_deg": state.surface_parameterization.metrics.get("angle_distortion_mean_deg", 0.0),
+        "edge_stretch_max": state.surface_parameterization.metrics.get("edge_stretch_max", 0.0),
         "omega_warning": state.surface_parameterization.metrics.get("omega_warning", ""),
         "m3d_uv_triangle_lookup_fail_count": state.mesh_3d_initial.metrics.get("m3d_uv_triangle_lookup_fail_count", 0),
         "m3d_outside_omega_count": state.mesh_3d_initial.metrics.get("m3d_outside_omega_count", 0),
@@ -1046,7 +1054,7 @@ elif view_stage == "Omega":
     if not omega_info["omega_corresponds_to_S"]:
         st.error("Ω is not a paper conformal parameterization in this run. It is debug/experimental unless a real paper parameterization is implemented.")
     elif not omega_info["bff_implemented"]:
-        st.warning("Ω is only approximate: this implementation uses harmonic UV, not Boundary First Flattening.")
+        st.warning("Omega uses the reported fallback backend, not a reference Boundary First Flattening implementation.")
     st.write(omega_info)
 elif view_stage in {"M2D", "K3D"}:
     mesh = {"M2D": state.mesh_2d_initial, "M3D": state.mesh_3d_initial, "K3D": state.mesh_3d_optimized}[view_stage]
