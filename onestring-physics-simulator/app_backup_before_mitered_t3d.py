@@ -392,23 +392,23 @@ with st.sidebar:
     )
     hinge_layout_connection_weight = _param_row(
         "ヒンジ点を一致させる重み。高いほど接続は保つが、衝突回避の自由度は減る。",
-        lambda: st.slider("hinge connection weight", 0.1, 8.0, 3.0, 0.1, help="Weight for E_Conn: pairwise hinge vertex coincidence."),
+        lambda: st.slider("hinge connection weight", 0.1, 20.0, 8.0, 0.1, help="Weight for E_Conn: pairwise hinge vertex coincidence."),
     )
     hinge_layout_collision_weight = _param_row(
         "厚み付きタイル footprint の非衝突重み。高すぎるとタイルが散り、低すぎると重なりが残る。",
-        lambda: st.slider("hinge collision weight", 0.0, 4.0, 1.0, 0.05, help="Weight for E_Collision: separating overlapping T2D footprints."),
+        lambda: st.slider("hinge collision weight", 0.0, 4.0, 4.0, 0.05, help="Weight for E_Collision: separating overlapping T2D footprints."),
     )
     hinge_layout_anchor_weight = _param_row(
         "初期展開配置に留める重み。高いほど散らばりにくいが、衝突から逃げにくくなる。",
-        lambda: st.slider("hinge layout anchor weight", 0.0, 0.5, 0.05, 0.005, help="Anchor/trust weight toward the initial fabrication layout."),
+        lambda: st.slider("hinge layout anchor weight", 0.0, 0.5, 0.0, 0.005, help="Anchor/trust weight toward the initial fabrication layout."),
     )
     hinge_layout_initial_expansion = _param_row(
         "最適化前にタイル中心を少し外へ逃がす量。1.03〜1.10程度が通常。大きいと空洞が広がりすぎる。",
         lambda: st.slider(
             "hinge layout initial expansion",
             1.0,
+            10.0,
             1.6,
-            1.08,
             0.01,
             help="Bounded additive tile-center expansion before E_Hinge. Use 1.03-1.12 normally; large values create oversized voids.",
         ),
@@ -419,7 +419,7 @@ with st.sidebar:
             "hinge layout max center drift / tile",
             0.25,
             5.0,
-            2.0,
+            5.0,
             0.25,
             help="Trust-region radius measured in tile-size units around the expanded layout.",
         ),
@@ -1003,6 +1003,10 @@ elif view_stage == "Split Map":
             "meaning": "Red samples show the Omega split line mapped back onto S through the stored S->Omega parameterization.",
             "csf_split_threshold": state.mesh_2d_initial.metrics.get("csf_split_threshold"),
             "max_csf_before_split": state.mesh_2d_initial.metrics.get("max_csf_before_split"),
+            "max_csf_after_split": state.mesh_2d_initial.metrics.get("max_csf_after_split"),
+            "csf_split_step_analysis_model": state.mesh_2d_initial.metrics.get("csf_split_step_analysis_model"),
+            "csf_split_residual_high_vertex_count_after_all": state.mesh_2d_initial.metrics.get("csf_split_residual_high_vertex_count_after_all"),
+            "csf_split_additional_split_recommended_after_all": state.mesh_2d_initial.metrics.get("csf_split_additional_split_recommended_after_all"),
             "number_of_splits": state.mesh_2d_initial.metrics.get("number_of_splits"),
             "split_locations": state.mesh_2d_initial.metrics.get("split_locations"),
             "csf_split_model": state.mesh_2d_initial.metrics.get("csf_split_model"),
@@ -1010,6 +1014,15 @@ elif view_stage == "Split Map":
             "csf_split_duplicated_vertex_count": state.mesh_2d_initial.metrics.get("csf_split_duplicated_vertex_count"),
         }
     )
+    split_steps = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
+    if split_steps:
+        st.caption("CSF residual analysis after each Split step")
+        display_steps = []
+        for row in split_steps:
+            clean = dict(row)
+            clean["next_recommended_split"] = str(clean.get("next_recommended_split", []))
+            display_steps.append(clean)
+        st.dataframe(display_steps, width="stretch")
 elif view_stage == "Omega":
     st.plotly_chart(figure_domain(state), width="stretch", key="omega_domain")
     omega_info = {
@@ -1098,7 +1111,7 @@ elif view_stage in {"Lift Points", "String Path"}:
     st.plotly_chart(
         figure_tile_assembly(
             state.tiles_2d_dual_hinge,
-            title="T2D with gap graph, lift points, and boundary-first string path",
+            title="T2D with gap graph, paper-style lift points, and string path",
             gap_graph=state.gap_graph,
             hinge_graph=state.hinge_graph,
             string_path=state.string_path,
@@ -1113,10 +1126,26 @@ elif view_stage in {"Lift Points", "String Path"}:
     c3.metric("turn angle", f"{state.string_path.turn_angle_total:.3f}")
     c4.metric("channel friction", f"{state.string_path.estimated_channel_friction:.3f}")
     st.write({"gap_graph": state.gap_graph.metrics, "string_path": state.string_path.metrics})
-    st.dataframe(
-        [{"gap_id": lift.gap_id, "gpe": lift.gpe, "cluster_id": lift.cluster_id} for lift in state.lift_points],
-        width="stretch",
-    )
+    lift_rows = state.gap_graph.metrics.get("lift_point_rows")
+    if not lift_rows:
+        lift_rows = [
+            {
+                "gap_id": int(lift.gap_id),
+                "gpe": float(lift.gpe),
+                "cluster_id": int(lift.cluster_id),
+                "selection_reason": str(getattr(lift, "selection_reason", "")),
+                "position_2d": [float(x) for x in np.asarray(lift.position_2d, dtype=float).reshape(-1)[:3]],
+                "position_3d": [float(x) for x in np.asarray(lift.position_3d, dtype=float).reshape(-1)[:3]],
+            }
+            for lift in state.lift_points
+        ]
+
+    def _display_lift_value(value):
+        if isinstance(value, (list, tuple, np.ndarray)):
+            return ", ".join(f"{float(x):.5g}" for x in np.asarray(value, dtype=float).reshape(-1))
+        return value
+
+    st.dataframe([{k: _display_lift_value(v) for k, v in row.items()} for row in lift_rows], width="stretch")
 elif view_stage == "Assembly Animation":
     st.subheader("Assembly Animation")
     total_tiles = int(state.tiles_2d_dual_hinge.tile_count)
@@ -1127,15 +1156,19 @@ elif view_stage == "Assembly Animation":
 
     frame_count = st.slider("animation frames", 8, 96, 40, 4)
     preview_default = min(total_tiles, 900)
-    preview_upper = max(50, min(total_tiles, 3000))
-    preview_tiles = st.slider(
-        "preview tile limit",
-        min_value=50,
-        max_value=preview_upper,
-        value=max(50, preview_default),
-        step=50,
-        help="This only limits the displayed tiles. The simulation itself still uses the full linkage.",
-    )
+    preview_upper = min(max(total_tiles, 0), 3000)
+    if preview_upper <= 50:
+        preview_tiles = total_tiles
+        st.caption(f"preview tile limit: {preview_tiles} (all tiles)")
+    else:
+        preview_tiles = st.slider(
+            "preview tile limit",
+            min_value=50,
+            max_value=preview_upper,
+            value=min(max(50, preview_default), preview_upper),
+            step=50,
+            help="This only limits the displayed tiles. The simulation itself still uses the full linkage.",
+        )
     if preview_tiles < total_tiles:
         st.warning(f"Animation preview is downsampled to about {preview_tiles} / {total_tiles} tiles. The simulation still used all tiles.")
 

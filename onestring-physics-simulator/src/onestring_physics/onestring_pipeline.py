@@ -15,6 +15,8 @@ from __future__ import annotations
 import importlib.util
 import copy
 from dataclasses import dataclass
+import heapq
+import math
 import sys
 import time
 from pathlib import Path
@@ -110,6 +112,169 @@ def _build_edge_incidence(faces: np.ndarray) -> dict[tuple[int, int], list[tuple
             key = tuple(sorted((int(face[a]), int(face[b]))))
             incidence.setdefault(key, []).append((int(tile_id), int(edge_id)))
     return incidence
+
+
+def _query_kdtree_indices(tree, points: np.ndarray, k: int, n_items: int) -> np.ndarray:
+    if n_items <= 0:
+        return np.asarray([], dtype=int).reshape(len(np.asarray(points).reshape(-1, points.shape[-1])), 0)
+    kk = max(1, min(int(k), int(n_items)))
+    _dist, idx = tree.query(points, k=kk)
+    idx_arr = np.asarray(idx, dtype=int)
+    if idx_arr.ndim == 1:
+        idx_arr = idx_arr[:, None] if np.asarray(points).ndim > 1 else idx_arr.reshape(1, 1)
+    idx_arr = np.clip(idx_arr, 0, n_items - 1)
+    return idx_arr
+
+
+def _uv_triangle_kdtree(parameterization):
+    cache = getattr(parameterization, "_onestring_uv_triangle_kdtree_cache", None)
+    uv_faces = np.asarray(parameterization.uv_faces, dtype=int)
+    uv_vertices = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    if isinstance(cache, dict) and cache.get("face_count") == len(uv_faces) and cache.get("vertex_count") == len(uv_vertices):
+        return cache
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        return None
+    if len(uv_faces) == 0 or len(uv_vertices) == 0:
+        return None
+    triangles = uv_vertices[uv_faces]
+    centers = np.mean(triangles, axis=1)
+    radii = np.max(np.linalg.norm(triangles - centers[:, None, :], axis=2), axis=1)
+    cache = {
+        "tree": cKDTree(centers),
+        "centers": centers,
+        "radii": radii,
+        "face_count": int(len(uv_faces)),
+        "vertex_count": int(len(uv_vertices)),
+    }
+    try:
+        setattr(parameterization, "_onestring_uv_triangle_kdtree_cache", cache)
+    except Exception:
+        pass
+    return cache
+
+
+def inverse_map_uv_to_surface(
+    uv_point: np.ndarray,
+    parameterization,
+) -> tuple[np.ndarray, int, bool]:
+    accelerated = _original._inverse_map_uv_to_surface_regular(uv_point, parameterization)
+    if accelerated is not None:
+        return accelerated
+
+    uv = np.asarray(uv_point, dtype=float)
+    uv_faces = np.asarray(parameterization.uv_faces, dtype=int)
+    uv_vertices = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    surface_vertices = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    if len(uv_faces) == 0 or len(uv_vertices) == 0:
+        return np.zeros(3, dtype=float), -1, True
+
+    cache = _uv_triangle_kdtree(parameterization)
+    candidate_ids: list[int] = []
+    if cache is not None:
+        tree = cache["tree"]
+        n_faces = int(len(uv_faces))
+        for k in (8, 24, 64, 160, 384):
+            idx = _query_kdtree_indices(tree, uv.reshape(1, 2), k, n_faces).reshape(-1)
+            candidate_ids = [int(i) for i in idx]
+            for tri_id in candidate_ids:
+                face = uv_faces[tri_id]
+                bary = _original._barycentric_2d(uv, uv_vertices[face])
+                if bary is None:
+                    continue
+                if float(np.min(bary)) >= -1e-9:
+                    surface_tri = surface_vertices[np.asarray(parameterization.surface_faces, dtype=int)[tri_id]]
+                    return bary @ surface_tri, int(tri_id), False
+            if k >= n_faces:
+                break
+    else:
+        candidate_ids = list(range(len(uv_faces)))
+
+    best_tri = -1
+    best_bary: np.ndarray | None = None
+    best_score = float("inf")
+    seen: set[int] = set()
+    for tri_id in candidate_ids:
+        if tri_id in seen:
+            continue
+        seen.add(int(tri_id))
+        face = uv_faces[int(tri_id)]
+        bary = _original._barycentric_2d(uv, uv_vertices[face])
+        if bary is None:
+            continue
+        score = abs(float(np.min(bary)))
+        if score < best_score:
+            best_score = score
+            best_tri = int(tri_id)
+            best_bary = bary
+
+    if best_tri < 0 or best_bary is None:
+        try:
+            from scipy.spatial import cKDTree
+            vertex_cache = getattr(parameterization, "_onestring_uv_vertex_kdtree_cache", None)
+            if not isinstance(vertex_cache, dict) or vertex_cache.get("vertex_count") != len(uv_vertices):
+                vertex_cache = {"tree": cKDTree(uv_vertices), "vertex_count": int(len(uv_vertices))}
+                setattr(parameterization, "_onestring_uv_vertex_kdtree_cache", vertex_cache)
+            _dist, nearest = vertex_cache["tree"].query(uv, k=1)
+            nearest_idx = int(nearest)
+        except Exception:
+            nearest_idx = int(np.argmin(np.linalg.norm(uv_vertices - uv, axis=1)))
+        return surface_vertices[nearest_idx].copy(), -1, True
+
+    clipped = np.clip(best_bary, 0.0, 1.0)
+    total = float(np.sum(clipped))
+    clipped = clipped / total if total > 1e-12 else np.asarray([1.0, 0.0, 0.0])
+    surface_tri = surface_vertices[np.asarray(parameterization.surface_faces, dtype=int)[best_tri]]
+    return clipped @ surface_tri, best_tri, True
+
+
+def _surface_triangle_kdtree(surface_vertices: np.ndarray, surface_faces: np.ndarray):
+    triangles = np.asarray(surface_vertices, dtype=float)[np.asarray(surface_faces, dtype=int)]
+    if len(triangles) == 0:
+        return None
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        return None
+    centers = np.mean(triangles, axis=1)
+    radii = np.max(np.linalg.norm(triangles - centers[:, None, :], axis=2), axis=1)
+    return {"tree": cKDTree(centers), "triangles": triangles, "radii": radii}
+
+
+def _closest_points_on_surface_mesh(points: np.ndarray, surface_vertices: np.ndarray, surface_faces: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points, dtype=float)
+    triangles = np.asarray(surface_vertices, dtype=float)[np.asarray(surface_faces, dtype=int)]
+    if len(pts) == 0:
+        return np.zeros((0, 3), dtype=float)
+    if len(triangles) == 0:
+        return pts.copy()
+    accel = _surface_triangle_kdtree(surface_vertices, surface_faces)
+    if accel is None:
+        return _original._closest_points_on_surface_mesh(points, surface_vertices, surface_faces)
+
+    tree = accel["tree"]
+    n_triangles = int(len(triangles))
+    candidate_count = min(96, n_triangles)
+    ids = _query_kdtree_indices(tree, pts, candidate_count, n_triangles)
+    values: list[np.ndarray] = []
+    for point, candidates in zip(pts, ids):
+        best = float("inf")
+        best_point = triangles[int(candidates[0]), 0]
+        for tri_id in candidates:
+            tri = triangles[int(tri_id)]
+            closest = _original._closest_point_on_triangle(point, tri[0], tri[1], tri[2])
+            dist = float(np.linalg.norm(point - closest))
+            if dist < best:
+                best = dist
+                best_point = closest
+        values.append(best_point)
+    return np.asarray(values, dtype=float)
+
+
+def _distances_to_surface_mesh(points: np.ndarray, surface_vertices: np.ndarray, surface_faces: np.ndarray) -> np.ndarray:
+    closest = _closest_points_on_surface_mesh(points, surface_vertices, surface_faces)
+    return np.linalg.norm(np.asarray(points, dtype=float) - closest, axis=1)
 
 
 def _coincident_key(point: np.ndarray, tolerance: float) -> tuple[int, ...]:
@@ -498,7 +663,10 @@ _ORIGINAL_BUILD_M2D = _original._build_m2d
 _ORIGINAL_BUILD_SURFACE_PARAMETERIZATION = _original._build_surface_parameterization
 _ORIGINAL_LIFT_M2D_TO_M3D = _original._lift_m2d_to_m3d
 _ORIGINAL_MAKE_FLAT_TILE_LAYOUT = _original._make_flat_tile_layout
+_ORIGINAL_OPTIMIZE_K2D = _original._optimize_k2d
 _ORIGINAL_OPTIMIZE_K3D = _original._optimize_k3d
+_ORIGINAL_PAPER_LOCAL_GLOBAL_SE2_LAYOUT = _original._paper_local_global_se2_layout
+_ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs_for_tiles
 
 
 @dataclass
@@ -515,6 +683,11 @@ class PipelineParameters(_original.PipelineParameters):
     enable_heuristic_csf_split: bool = True
     enable_peak_guided_split: bool = True
     enable_mirror_split: bool = True
+    hinge_layout_connection_weight: float = 8.0
+    hinge_layout_collision_weight: float = 4.0
+    hinge_layout_anchor_weight: float = 0.0
+    hinge_layout_initial_expansion: float = 1.6
+    hinge_layout_max_center_drift_tiles: float = 5.0
 
 
 def _triangle_area_3d(points: np.ndarray) -> np.ndarray:
@@ -1444,6 +1617,7 @@ def _flatten_to_domain(parameterization, grid, params=None):
     peak_alignment = _align_domain_grid_to_uv_points(domain, peak_uvs if len(peak_uvs) else None)
     domain.csf_values = csf
     domain.split_lines = split_lines
+    domain.parameterization = parameterization  # type: ignore[attr-defined]
     domain.csf_before = float(np.max(csf)) if csf.size else 1.0  # type: ignore[attr-defined]
     domain.csf_after_split = min(float(domain.csf_before), float(threshold)) if split_lines else float(domain.csf_before)  # type: ignore[attr-defined]
     domain.csf_split_threshold = float(threshold)  # type: ignore[attr-defined]
@@ -1541,6 +1715,96 @@ def _m2d_connected_component_sizes(faces: np.ndarray) -> list[int]:
         sizes.append(size)
     sizes.sort(reverse=True)
     return sizes
+
+
+def _csf_residual_split_step_analysis(
+    parameterization,
+    csf: np.ndarray,
+    threshold: float,
+    split_lines: list[tuple[str, float]],
+    vertices_2d: np.ndarray,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    values = np.asarray(csf, dtype=float)
+    if len(uv) == 0 or len(values) != len(uv):
+        return [], {
+            "csf_split_step_analysis_model": "unavailable",
+            "csf_split_step_count": 0,
+            "csf_split_residual_high_vertex_count_after_all": 0,
+            "csf_split_residual_max_after_all": 1.0,
+        }
+
+    high = np.isfinite(values) & (values > float(threshold))
+    vertices = np.asarray(vertices_2d, dtype=float)
+    bands: dict[int, float] = {}
+    for coord in (0, 1):
+        source = vertices[:, coord] if len(vertices) else uv[:, coord]
+        unique = np.unique(np.round(source[np.isfinite(source)], 12))
+        diffs = np.diff(unique)
+        diffs = diffs[diffs > 1e-12]
+        if len(diffs):
+            bands[coord] = float(np.median(diffs) * 0.55)
+        else:
+            span = float(np.nanmax(uv[:, coord]) - np.nanmin(uv[:, coord])) if len(uv) else 1.0
+            bands[coord] = max(span * 0.01, 1e-9)
+
+    def _stats(mask: np.ndarray) -> dict[str, float | int]:
+        vals = values[mask]
+        return {
+            "count": int(np.count_nonzero(mask)),
+            "max": float(np.max(vals)) if len(vals) else 1.0,
+            "p95": float(np.percentile(vals, 95)) if len(vals) else 1.0,
+        }
+
+    covered = np.zeros(len(uv), dtype=bool)
+    rows: list[dict[str, object]] = []
+    for step, (axis, raw_value) in enumerate(split_lines, start=1):
+        coord = 1 if axis == "row" else 0
+        value = float(raw_value)
+        band = float(bands[coord])
+        before_mask = high & ~covered
+        before = _stats(before_mask)
+        near_line = np.abs(uv[:, coord] - value) <= band
+        newly_covered = before_mask & near_line
+        covered |= near_line
+        after_mask = high & ~covered
+        after = _stats(after_mask)
+        recommendation: list[tuple[str, float]] = []
+        if int(after["count"]) > 0:
+            recommendation = _csf_split_lines_from_high_stretch(uv, uv[after_mask], 1)
+        rows.append(
+            {
+                "step": int(step),
+                "applied_split_axis": str(axis),
+                "applied_split_value": float(value),
+                "split_band_width": float(band),
+                "high_vertices_before_step": int(before["count"]),
+                "max_csf_before_step": float(before["max"]),
+                "p95_csf_before_step": float(before["p95"]),
+                "high_vertices_covered_by_step": int(np.count_nonzero(newly_covered)),
+                "high_vertices_after_step": int(after["count"]),
+                "max_csf_after_step": float(after["max"]),
+                "p95_csf_after_step": float(after["p95"]),
+                "additional_split_recommended": bool(int(after["count"]) > 0 and float(after["max"]) > float(threshold)),
+                "next_recommended_split": [[str(a), float(v)] for a, v in recommendation],
+            }
+        )
+
+    final_mask = high & ~covered
+    final = _stats(final_mask)
+    summary = {
+        "csf_split_step_analysis_model": (
+            "residual high-CSF diagnostic: does not recompute S->Omega after each cut; "
+            "vertices within one grid-line band of applied cuts are treated as relieved"
+        ),
+        "csf_split_step_count": int(len(rows)),
+        "csf_split_residual_high_vertex_count_after_all": int(final["count"]),
+        "csf_split_residual_max_after_all": float(final["max"]),
+        "csf_split_residual_p95_after_all": float(final["p95"]),
+        "csf_split_additional_split_recommended_after_all": bool(int(final["count"]) > 0 and float(final["max"]) > float(threshold)),
+        "csf_split_residual_high_vertex_indices_after_all": [int(i) for i in np.flatnonzero(final_mask)[:500]],
+    }
+    return rows, summary
 
 
 def _quad_area_2d(vertices: np.ndarray, face: np.ndarray) -> float:
@@ -1799,6 +2063,15 @@ def _build_m2d(grid, domain, params=None):
 
     split_lines = list(getattr(domain, "split_lines", []) or [])
     if not split_lines or len(mesh.faces) == 0:
+        mesh.metrics.update(
+            {
+                "csf_split_step_analysis": [],
+                "csf_split_step_analysis_model": "not run: no split lines or no M2D faces",
+                "csf_split_step_count": 0,
+                "csf_split_residual_high_vertex_count_after_all": int(np.count_nonzero(np.asarray(getattr(domain, "csf_values", np.zeros(0)), dtype=float) > float(getattr(domain, "csf_split_threshold", 2.0)))),
+                "csf_split_residual_max_after_all": float(getattr(domain, "csf_before", getattr(domain, "max_csf", 1.0))),
+            }
+        )
         mesh.metrics.update(_m2d_audit_metrics(mesh.vertices, mesh.faces, suffix="after_split"))
         return mesh
 
@@ -1821,6 +2094,11 @@ def _build_m2d(grid, domain, params=None):
                 "csf_split_applied": False,
                 "csf_split_rejected_reason": "no_internal_grid_line_to_split",
                 "csf_split_candidate_lines": split_lines,
+                "csf_split_step_analysis": [],
+                "csf_split_step_analysis_model": "not run: no candidate split snapped to an internal M2D grid line",
+                "csf_split_step_count": 0,
+                "csf_split_residual_high_vertex_count_after_all": int(np.count_nonzero(np.asarray(getattr(domain, "csf_values", np.zeros(0)), dtype=float) > float(getattr(domain, "csf_split_threshold", 2.0)))),
+                "csf_split_residual_max_after_all": float(getattr(domain, "csf_before", getattr(domain, "max_csf", 1.0))),
             }
         )
         mesh.metrics.update(_m2d_audit_metrics(mesh.vertices, mesh.faces, suffix="after_split"))
@@ -1828,13 +2106,21 @@ def _build_m2d(grid, domain, params=None):
 
     metrics = dict(mesh.metrics)
     component_sizes = _m2d_connected_component_sizes(faces)
+    step_analysis, step_summary = _csf_residual_split_step_analysis(
+        domain.parameterization,
+        np.asarray(getattr(domain, "csf_values", np.zeros(0)), dtype=float),
+        float(getattr(domain, "csf_split_threshold", 2.0)),
+        snapped_lines,
+        vertices,
+    )
     metrics.update(
         {
             "max_csf_before_split": float(getattr(domain, "csf_before", domain.max_csf)),
-            "max_csf_after_split": float(getattr(domain, "csf_after_split", domain.max_csf)),
+            "max_csf_after_split": float(step_summary.get("csf_split_residual_max_after_all", getattr(domain, "csf_after_split", domain.max_csf))),
             "number_of_splits": len(snapped_lines),
             "split_locations": snapped_lines,
             "csf_split_applied": True,
+            "csf_split_step_analysis": step_analysis,
             "csf_split_removed_quad_count": 0,
             "csf_split_duplicated_vertex_count": int(duplicate_count),
             "m2d_quad_count_after_csf_split": int(len(faces)),
@@ -1848,6 +2134,7 @@ def _build_m2d(grid, domain, params=None):
             "csf_split_threshold": float(getattr(domain, "csf_split_threshold", 2.0)),
         }
     )
+    metrics.update(step_summary)
     metrics.update(_m2d_audit_metrics(vertices, faces, suffix="after_split"))
     return _original.QuadMesh(vertices, faces, mesh.grid, mesh.stage, metrics, snapped_lines)
 
@@ -1863,7 +2150,9 @@ def _lift_m2d_to_m3d(target, mesh, parameterization, params):
             "m3d_outside_uv_triangle_count": outside,
             "m3d_negative_barycentric_count": int(out.metrics.get("m3d_negative_barycentric_count", 0)),
             "m3d_nearest_fallback_count": lookup_fail,
-            "m3d_surface_projection_model": "analytic_heightfield_debug" if used_shortcut else "uv_triangle_lookup_barycentric",
+            "m3d_surface_projection_model": "analytic_heightfield_debug" if used_shortcut else "uv_triangle_lookup_barycentric_kdtree_candidates",
+            "m3d_uv_triangle_lookup_acceleration": "regular-grid shortcut or cKDTree nearest triangle candidates",
+            "m3d_surface_distance_acceleration": "cKDTree nearest surface triangle candidates",
             "m3d_exactness_label": "debug" if used_shortcut else "approximation",
             "m3d_parameterization_warning": (
                 "Height-field shortcut is not paper inverse parameterization."
@@ -1875,10 +2164,242 @@ def _lift_m2d_to_m3d(target, mesh, parameterization, params):
     return out, report
 
 
+def _connected_tile_components_from_faces(faces: np.ndarray, tile_count: int) -> list[list[int]]:
+    parent = list(range(tile_count))
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def union(a: int, b: int) -> None:
+        ra = find(int(a))
+        rb = find(int(b))
+        if ra != rb:
+            parent[rb] = ra
+
+    try:
+        specs = _original._vertex_hinge_specs_from_faces(np.asarray(faces, dtype=int))
+    except Exception:
+        specs = []
+    for spec in specs:
+        if 0 <= int(spec.tile_a) < tile_count and 0 <= int(spec.tile_b) < tile_count:
+            union(int(spec.tile_a), int(spec.tile_b))
+
+    groups: dict[int, list[int]] = {}
+    for tile_id in range(tile_count):
+        groups.setdefault(find(tile_id), []).append(tile_id)
+    return list(groups.values())
+
+
+def _spread_fast_k2d_components(
+    flat_tiles: np.ndarray,
+    faces: np.ndarray,
+    grid,
+    params=None,
+) -> tuple[np.ndarray, dict[str, float | int | bool]]:
+    tiles = np.asarray(flat_tiles, dtype=float).copy()
+    if len(tiles) == 0:
+        return tiles, {"k2d_fast_component_spread_applied": False}
+    components = _connected_tile_components_from_faces(faces, len(tiles))
+    if len(components) <= 1:
+        return tiles, {
+            "k2d_fast_component_spread_applied": False,
+            "k2d_fast_component_count": int(len(components)),
+            "k2d_fast_component_spread_reason": "single hinge-connected component",
+        }
+    centers = np.mean(tiles, axis=1)
+    component_centers = np.asarray([np.mean(centers[component], axis=0) for component in components], dtype=float)
+    global_center = np.mean(component_centers, axis=0)
+    tile_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-9)
+    factor = float(getattr(params, "hinge_layout_initial_expansion", 1.6)) if params is not None else 1.6
+    factor = max(1.0, min(factor, 10.0))
+    component_delta = (component_centers - global_center) * (factor - 1.0) * 1.5
+    layout_extent = float(np.linalg.norm(np.ptp(tiles.reshape(-1, 2), axis=0)))
+    drift_limit_tiles = float(getattr(params, "hinge_layout_max_center_drift_tiles", 5.0)) if params is not None else 5.0
+    # Split separation is allowed to be much larger than per-tile local drift;
+    # otherwise the cut opens only slightly and the thick panels still crowd.
+    expansion_drift = tile_size * max(0.0, factor - 1.0) * 1.5
+    drift_limit = max(tile_size * max(drift_limit_tiles, 12.0), layout_extent * 0.35, tile_size * 6.0, expansion_drift)
+    norms = np.linalg.norm(component_delta, axis=1)
+    active = norms > drift_limit
+    if np.any(active):
+        component_delta[active] *= (drift_limit / np.maximum(norms[active], 1e-12))[:, None]
+    for component_id, component in enumerate(components):
+        tiles[component] += component_delta[component_id][None, None, :]
+    moved = np.linalg.norm(component_delta, axis=1)
+    return tiles, {
+        "k2d_fast_component_spread_applied": True,
+        "k2d_fast_component_count": int(len(components)),
+        "k2d_fast_component_spread_initial_expansion": float(factor),
+        "k2d_fast_component_spread_expansion_drift": float(expansion_drift),
+        "k2d_fast_component_spread_drift_limit": float(drift_limit),
+        "k2d_fast_component_spread_move_mean": float(np.mean(moved)) if moved.size else 0.0,
+        "k2d_fast_component_spread_move_max": float(np.max(moved)) if moved.size else 0.0,
+    }
+
+
+def _separate_fast_k2d_components(
+    flat_tiles: np.ndarray,
+    faces: np.ndarray,
+    grid,
+) -> tuple[np.ndarray, dict[str, float | int | bool]]:
+    tiles = np.asarray(flat_tiles, dtype=float).copy()
+    components = _connected_tile_components_from_faces(faces, len(tiles))
+    if len(tiles) == 0 or len(components) <= 1:
+        tiles_3d = np.dstack([tiles, np.zeros(tiles.shape[:2])]) if len(tiles) else np.zeros((0, 4, 3), dtype=float)
+        return tiles, {
+            "k2d_component_separation_applied": False,
+            "k2d_component_separation_iterations": 0,
+            "tile_overlap_count": int(_original._count_2d_tile_collisions(tiles_3d)) if len(tiles) else 0,
+            "min_clearance": float(_original._min_aabb_clearance_2d(tiles_3d)) if len(tiles) else 0.0,
+        }
+
+    tile_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-9)
+    desired_clearance = max(float(getattr(grid, "gap_size", 0.08)) * 8.0, tile_size * 3.0)
+    component_ids = [np.asarray(component, dtype=int) for component in components]
+    iterations = 0
+    for _ in range(80):
+        bounds: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        for ids in component_ids:
+            pts = tiles[ids].reshape(-1, 2)
+            bounds.append((np.min(pts, axis=0), np.max(pts, axis=0), np.mean(pts, axis=0)))
+        shifts = np.zeros((len(component_ids), 2), dtype=float)
+        active_count = 0
+        for i in range(len(bounds)):
+            min_i, max_i, center_i = bounds[i]
+            for j in range(i + 1, len(bounds)):
+                min_j, max_j, center_j = bounds[j]
+                overlap = np.minimum(max_i, max_j) - np.maximum(min_i, min_j)
+                if not np.all(overlap > -desired_clearance):
+                    continue
+                axis = int(np.argmin(overlap))
+                sign = 1.0 if center_i[axis] >= center_j[axis] else -1.0
+                amount = max(0.0, float(overlap[axis]) + desired_clearance) * 0.55
+                if amount <= 1e-12:
+                    continue
+                delta = np.zeros(2, dtype=float)
+                delta[axis] = sign * amount
+                shifts[i] += delta
+                shifts[j] -= delta
+                active_count += 1
+        if active_count == 0:
+            break
+        max_step = tile_size * 4.0
+        norms = np.linalg.norm(shifts, axis=1)
+        too_large = norms > max_step
+        if np.any(too_large):
+            shifts[too_large] *= (max_step / np.maximum(norms[too_large], 1e-12))[:, None]
+        for component_id, ids in enumerate(component_ids):
+            tiles[ids] += shifts[component_id][None, None, :]
+        iterations += 1
+        if float(np.max(np.linalg.norm(shifts, axis=1))) <= tile_size * 1e-4:
+            break
+
+    tiles_3d = np.dstack([tiles, np.zeros(tiles.shape[:2])])
+    return tiles, {
+        "k2d_component_separation_applied": True,
+        "k2d_component_separation_iterations": int(iterations),
+        "k2d_component_separation_target_clearance": float(desired_clearance),
+        "tile_overlap_count": int(_original._count_2d_tile_collisions(tiles_3d)),
+        "min_clearance": float(_original._min_aabb_clearance_2d(tiles_3d)),
+    }
+
+
 def _make_flat_tile_layout(mesh, params=None):
-    layout = _ORIGINAL_MAKE_FLAT_TILE_LAYOUT(mesh, params)
+    start = time.perf_counter()
+    timings: dict[str, float] = {}
+    tile_count = int(len(np.asarray(mesh.faces, dtype=int)))
+    fast_threshold = int(getattr(params, "k2d_independent_fast_tile_threshold", 150)) if params is not None else 150
+    if tile_count > fast_threshold:
+        fast_start = time.perf_counter()
+        raw_tiles_xy = _tiles_from_mesh_vertices(mesh.vertices, mesh.faces)[:, :, :2]
+        initial = raw_tiles_xy.copy()
+        init_metrics = {
+            "rhombus_void_initializer_enabled": False,
+            "rhombus_void_initializer": "disabled in fast path to preserve non-split hinge coincidence",
+            "k2d_fast_layout_hinge_preservation_mode": "keep original K2D tile-corner positions inside each split component",
+        }
+        initial, spread_metrics = _spread_fast_k2d_components(initial, mesh.faces, mesh.grid, params)
+        initial, separation_metrics = _separate_fast_k2d_components(initial, mesh.faces, mesh.grid)
+        fast_sec = float(time.perf_counter() - fast_start)
+        shape_error = _original._tile_shape_distance_error(
+            np.dstack([initial, np.zeros(initial.shape[:2])]),
+            np.dstack([raw_tiles_xy, np.zeros(raw_tiles_xy.shape[:2])]),
+        )
+        shape_error_max = _original._tile_shape_distance_error(
+            np.dstack([initial, np.zeros(initial.shape[:2])]),
+            np.dstack([raw_tiles_xy, np.zeros(raw_tiles_xy.shape[:2])]),
+            use_max=True,
+        )
+        if "k2d_gap_count" in mesh.metrics:
+            gap_count = int(mesh.metrics["k2d_gap_count"])
+        else:
+            gap_count = max(0, 4 * tile_count - int(len(_original._unique_mesh_edges(mesh.faces))))
+        metrics = {
+            "layout_type": "independent rigid K2D tile linkage layout",
+            "k2d_shared_mesh_role": "abstract edge-length mesh only; tile vertices are duplicated for fabrication",
+            "t2d_uses_independent_tile_vertices": True,
+            "tile_vertices_are_duplicated_from_k2d_faces": True,
+            "shared_edge_gluing_disabled": True,
+            "paper_layout_correction": True,
+            "hinge_layout_stage": "K2D shared mesh to T2D Top Hinge independent linkage",
+            "hinge_layout_optimizer": "fast split-component layout; non-split hinge coincidence preserved",
+            "hinge_layout_deferred_to_dual_hinge": True,
+            "k2d_independent_fast_large_layout": True,
+            "k2d_independent_fast_tile_threshold": int(fast_threshold),
+            "k2d_independent_fast_initializer_sec": float(fast_sec),
+            "k2d_independent_layout_wrapper_total_sec": float(time.perf_counter() - start),
+            "k2d_independent_layout_slowest_substep": "fast_rhombus_void_initializer",
+            "k2d_independent_retry_skipped_for_speed": True,
+            "k2d_independent_retry_skip_reason": "large tile count; residual collision/clearance optimization is deferred to T2D/Dual Hinge",
+            "tile_shape_preserved_from_K2D": bool(shape_error_max < 1e-8),
+            "k2d_tile_shape_rms_error_after_layout": float(shape_error),
+            "k2d_tile_shape_max_error_after_layout": float(shape_error_max),
+            "tile_count": int(tile_count),
+            "vertices_per_tile": 4,
+            "k2d_gap_count": int(gap_count),
+            "hinge_pair_count": int(gap_count),
+            "tile_overlap_count": int(mesh.metrics.get("k2d_tile_overlap_count", 0)),
+            "min_clearance": float(mesh.metrics.get("k2d_min_clearance", 0.0)),
+            "gap_opening_model": "split components may be separated widely; hinges inside each component stay coincident",
+            **init_metrics,
+            **spread_metrics,
+            **separation_metrics,
+        }
+        return _original.FlatTileLayout(
+            tile_top_vertices_2d=initial,
+            tile_ids=list(range(tile_count)),
+            hinge_pairs=[],
+            gap_polygons=[],
+            metrics=metrics,
+        )
+
+    original_start = time.perf_counter()
+    previous_se2_layout = _original._paper_local_global_se2_layout
+    _original._paper_local_global_se2_layout = _paper_local_global_se2_layout
+    try:
+        layout = _ORIGINAL_MAKE_FLAT_TILE_LAYOUT(mesh, params)
+    finally:
+        _original._paper_local_global_se2_layout = previous_se2_layout
+    timings["k2d_independent_original_layout_sec"] = float(time.perf_counter() - original_start)
+    layout.metrics["k2d_independent_fast_se2_patch_applied"] = True
+    layout.metrics["k2d_independent_fast_se2_patch_scope"] = "K2D independent tile layout only"
     min_clearance = float(layout.metrics.get("min_clearance", 0.0))
     if min_clearance >= -1e-9 or params is None:
+        layout.metrics.update(timings)
+        layout.metrics["k2d_independent_layout_wrapper_total_sec"] = float(time.perf_counter() - start)
+        layout.metrics["k2d_independent_layout_slowest_substep"] = "original_layout"
+        return layout
+
+    tile_count = int(getattr(layout, "tile_top_vertices_2d", np.zeros((0,))).shape[0])
+    if tile_count > 1200:
+        layout.metrics.update(timings)
+        layout.metrics["k2d_independent_retry_skipped_for_speed"] = True
+        layout.metrics["k2d_independent_retry_skip_reason"] = "large tile count; defer residual clearance cleanup to T2D/Dual Hinge footprint stages"
+        layout.metrics["k2d_independent_layout_wrapper_total_sec"] = float(time.perf_counter() - start)
+        layout.metrics["k2d_independent_layout_slowest_substep"] = max(timings, key=timings.get)
         return layout
 
     retry_params = copy.copy(params)
@@ -1893,7 +2414,16 @@ def _make_flat_tile_layout(mesh, params=None):
     )
     retry_params.hinge_layout_time_budget_sec = max(float(getattr(params, "hinge_layout_time_budget_sec", 8.0)), 12.0)
 
-    retry = _ORIGINAL_MAKE_FLAT_TILE_LAYOUT(mesh, retry_params)
+    retry_start = time.perf_counter()
+    previous_se2_layout = _original._paper_local_global_se2_layout
+    _original._paper_local_global_se2_layout = _paper_local_global_se2_layout
+    try:
+        retry = _ORIGINAL_MAKE_FLAT_TILE_LAYOUT(mesh, retry_params)
+    finally:
+        _original._paper_local_global_se2_layout = previous_se2_layout
+    timings["k2d_independent_retry_layout_sec"] = float(time.perf_counter() - retry_start)
+    retry.metrics["k2d_independent_fast_se2_patch_applied"] = True
+    retry.metrics["k2d_independent_fast_se2_patch_scope"] = "K2D independent tile layout retry only"
     retry_clearance = float(retry.metrics.get("min_clearance", min_clearance))
     if retry_clearance > min_clearance:
         before_retry_clearance = min_clearance
@@ -1903,13 +2433,24 @@ def _make_flat_tile_layout(mesh, params=None):
         layout.metrics["k2d_layout_min_clearance_before_retry"] = float(before_retry_clearance)
 
     if min_clearance >= -1e-9:
+        layout.metrics.update(timings)
+        layout.metrics["k2d_independent_layout_wrapper_total_sec"] = float(time.perf_counter() - start)
+        layout.metrics["k2d_independent_layout_slowest_substep"] = max(timings, key=timings.get)
         return layout
 
+    separation_start = time.perf_counter()
     separated, separation_metrics = _separate_independent_flat_tiles(layout.tile_top_vertices_2d, mesh.grid)
+    timings["k2d_independent_post_separation_sec"] = float(time.perf_counter() - separation_start)
     separated_layout = _rebuild_flat_tile_layout_with_vertices(layout, separated, mesh)
     separated_layout.metrics.update(separation_metrics)
+    separated_layout.metrics.update(timings)
+    separated_layout.metrics["k2d_independent_layout_wrapper_total_sec"] = float(time.perf_counter() - start)
+    separated_layout.metrics["k2d_independent_layout_slowest_substep"] = max(timings, key=timings.get)
     if float(separated_layout.metrics.get("min_clearance", min_clearance)) > min_clearance:
         return separated_layout
+    layout.metrics.update(timings)
+    layout.metrics["k2d_independent_layout_wrapper_total_sec"] = float(time.perf_counter() - start)
+    layout.metrics["k2d_independent_layout_slowest_substep"] = max(timings, key=timings.get)
     return layout
 
 
@@ -2515,6 +3056,7 @@ _ORIGINAL_MAKE_T2D_FROM_TRANSFORMS = _original._make_t2d_from_transforms
 _ORIGINAL_OPTIMIZE_T2D_FOOTPRINT_LAYOUT = _original._optimize_t2d_footprint_layout
 _ORIGINAL_OPTIMIZE_RIGID_ASSEMBLY_HINGE_LAYOUT_2D = _original._optimize_rigid_assembly_hinge_layout_2d
 _ORIGINAL_OPTIMIZE_DUAL_HINGES = _original._optimize_dual_hinges
+_ORIGINAL_BUILD_GAP_GRAPH = _original._build_gap_graph
 
 
 def _grid_with_layout_gap(grid, minimum_gap: float):
@@ -2548,11 +3090,11 @@ def _free_layout_parameters(
     layout_gap = max(requested_gap * 1.75, tile_size * 0.10)
     return {
         "iterations": int(max(240, int(iterations) * 3)),
-        "connection_weight": float(max(40.0, float(connection_weight) * 12.0)),
-        "collision_weight": float(max(3.0, float(collision_weight) * 3.0)),
+        "connection_weight": float(max(1.0, float(connection_weight)) * 12.0),
+        "collision_weight": float(max(0.0, float(collision_weight)) * 3.0),
         # Keep the initial pose as a weak prior, not as a cage.  The old values
         # were too anchor-heavy for mitered solids and could collapse the holes.
-        "anchor_weight": float(max(0.003, min(0.025, float(anchor_weight) * 0.25))),
+        "anchor_weight": float(max(0.0, min(0.025, float(anchor_weight) * 0.25))),
         "initial_expansion": float(max(1.22, float(initial_expansion))),
         "max_center_drift_tiles": float(max(4.0, float(max_center_drift_tiles))),
         "layout_gap": float(layout_gap),
@@ -2560,11 +3102,14 @@ def _free_layout_parameters(
     }
 
 
+_T2D_THICK_FOOTPRINT_TILES: np.ndarray | None = None
+
+
 def _layout_quality_for_top_xy(layout: np.ndarray, transforms: np.ndarray, faces: np.ndarray, grid, constraints) -> dict[str, float | int]:
     layout = np.asarray(layout, dtype=float)
     if layout.size == 0:
         return {"hinge_error": 0.0, "collision_count": 0, "min_clearance": 0.0}
-    footprints = _original._apply_t2d_transforms_to_top_xy(layout, transforms)[:, :, :2]
+    footprints = _t2d_collision_footprints_from_top_layout(layout, transforms)
     pad = max(float(getattr(grid, "gap_size", 0.08)) * 8.0, float(getattr(grid, "tile_size", 1.0)) * 0.25)
     pairs = _original._spatial_candidate_pairs_for_tiles(footprints, pad=pad)
     specs = _original._vertex_hinge_specs_from_faces(faces)
@@ -2573,6 +3118,20 @@ def _layout_quality_for_top_xy(layout: np.ndarray, transforms: np.ndarray, faces
         "collision_count": int(_original._count_2d_footprint_collisions_from_pairs(footprints, pairs)),
         "min_clearance": float(_original._min_footprint_clearance_2d_from_pairs(footprints, pairs)),
     }
+
+
+def _t2d_collision_footprints_from_top_layout(layout: np.ndarray, transforms: np.ndarray) -> np.ndarray:
+    layout = np.asarray(layout, dtype=float)
+    thick_tiles = _T2D_THICK_FOOTPRINT_TILES
+    if thick_tiles is None or len(thick_tiles) != len(layout):
+        return _original._apply_t2d_transforms_to_top_xy(layout, transforms)[:, :, :2]
+    flat_tops = np.concatenate([layout, np.zeros((len(layout), 4, 1), dtype=float)], axis=2)
+    footprints = np.zeros((len(layout), 8, 2), dtype=float)
+    for tile_id in range(len(layout)):
+        placed, _transform = _original._rigidly_place_t3d_tile_in_flat_layout(thick_tiles[tile_id], flat_tops[tile_id])
+        placed[:4] = flat_tops[tile_id]
+        footprints[tile_id] = placed[:, :2]
+    return footprints
 
 
 def _optimize_t2d_footprint_layout(
@@ -2611,7 +3170,7 @@ def _optimize_t2d_footprint_layout(
     constraints = _original._hinge_constraint_tuples_from_specs(specs)
 
     def footprint_builder(layout: np.ndarray) -> np.ndarray:
-        return _original._apply_t2d_transforms_to_top_xy(layout, transforms)[:, :, :2]
+        return _t2d_collision_footprints_from_top_layout(layout, transforms)
 
     free = _free_layout_parameters(
         grid,
@@ -2654,9 +3213,9 @@ def _optimize_t2d_footprint_layout(
         footprint_builder=footprint_builder,
         initial_xy=solved,
         iterations=max(80, int(iterations)),
-        connection_weight=max(120.0, float(free["connection_weight"]) * 2.0),
+        connection_weight=float(free["connection_weight"]) * 2.0,
         collision_weight=max(2.0, float(free["collision_weight"]) * 0.75),
-        anchor_weight=max(0.002, float(free["anchor_weight"]) * 0.5),
+        anchor_weight=float(free["anchor_weight"]) * 0.5,
         clearance=float(free["clearance"]) * 0.75,
         stage_name="T2D Top Hinge hard-hinge polish",
         time_budget_sec=max(4.0, float(time_budget_sec) * 0.5),
@@ -2676,6 +3235,54 @@ def _optimize_t2d_footprint_layout(
         final = after_polish
     else:
         final = after_free
+
+    hinge_closed = solved
+    hinge_close_metrics: dict[str, float | int | bool] = {
+        "t2d_hard_hinge_closure_applied": False,
+        "t2d_hard_hinge_closure_accepted": False,
+    }
+    if constraints:
+        hinge_start = time.perf_counter()
+        hinge_rest = np.dstack([rest, np.zeros(rest.shape[:2], dtype=float)])
+        hinge_closed_3d = np.dstack([solved, np.zeros(solved.shape[:2], dtype=float)])
+        hinge_objects = [
+            _original.Hinge(int(ia), int(ib), int(ca), int(cb), "top", np.zeros(2, dtype=float), np.zeros(3, dtype=float))
+            for ia, ca, ib, cb in constraints
+            if 0 <= int(ia) < len(solved)
+            and 0 <= int(ib) < len(solved)
+            and 0 <= int(ca) < solved.shape[1]
+            and 0 <= int(cb) < solved.shape[1]
+        ]
+        closure_iterations = int(max(8, min(40, round(max(1.0, float(connection_weight)) * 2.0))))
+        for _ in range(closure_iterations):
+            _original._project_hinge_tile_translations(hinge_closed_3d, hinge_objects, 1.0)
+            _original._project_rigid_tiles(hinge_closed_3d, hinge_rest, 1.0)
+        candidate = hinge_closed_3d[:, :, :2].copy()
+        candidate_quality = _layout_quality_for_top_xy(candidate, transforms, faces, free_grid, constraints)
+        candidate_hinge = float(candidate_quality["hinge_error"])
+        current_hinge = float(final["hinge_error"])
+        candidate_collisions = int(candidate_quality["collision_count"])
+        current_collisions = int(final["collision_count"])
+        collision_allowance = max(2, int(len(rest) * (0.05 + min(max(float(connection_weight), 0.0), 20.0) * 0.005)))
+        accept_hinge_closure = (
+            candidate_hinge <= current_hinge * 0.80 + 1e-9
+            and candidate_collisions <= current_collisions + collision_allowance
+        )
+        if accept_hinge_closure:
+            hinge_closed = candidate
+            solved = hinge_closed
+            final = candidate_quality
+        hinge_close_metrics = {
+            "t2d_hard_hinge_closure_applied": True,
+            "t2d_hard_hinge_closure_accepted": bool(accept_hinge_closure),
+            "t2d_hard_hinge_closure_iterations": int(closure_iterations),
+            "t2d_hard_hinge_closure_elapsed_sec": float(time.perf_counter() - hinge_start),
+            "t2d_hard_hinge_closure_hinge_before": float(current_hinge),
+            "t2d_hard_hinge_closure_hinge_after": float(candidate_hinge),
+            "t2d_hard_hinge_closure_collision_before": int(current_collisions),
+            "t2d_hard_hinge_closure_collision_after": int(candidate_collisions),
+            "t2d_hard_hinge_closure_collision_allowance": int(collision_allowance),
+        }
 
     shape_rms = _original._tile_shape_distance_error(
         np.dstack([solved, np.zeros(solved.shape[:2])]),
@@ -2699,7 +3306,9 @@ def _optimize_t2d_footprint_layout(
         "t2d_free_layout_gap_size_used_for_clearance": float(free["layout_gap"]),
         "t2d_free_layout_clearance": float(free["clearance"]),
         "t2d_hard_hinge_polish_accepted": bool(accept_polish),
+        **hinge_close_metrics,
         "t2d_footprint_collision_checked_on": "top+bottom projected footprint with SAT, enlarged optimization-only clearance",
+        "t2d_footprint_uses_full_mitered_tile_shape": bool(_T2D_THICK_FOOTPRINT_TILES is not None),
         "t2d_footprint_hinge_error_before": float(before["hinge_error"]),
         "t2d_footprint_hinge_error_after": float(final["hinge_error"]),
         "t2d_footprint_collision_count_before": int(before["collision_count"]),
@@ -2752,8 +3361,8 @@ def _optimize_rigid_assembly_hinge_layout_2d(
         hinges=hinges,
         grid=free_grid,
         iterations=int(free["iterations"]),
-        connection_weight=max(60.0, float(free["connection_weight"])),
-        collision_weight=max(3.5, float(free["collision_weight"])),
+        connection_weight=float(free["connection_weight"]),
+        collision_weight=max(0.0, float(free["collision_weight"])),
         anchor_weight=float(free["anchor_weight"]),
         time_budget_sec=max(float(time_budget_sec), 12.0),
         max_candidate_pairs=int(max_candidate_pairs),
@@ -2825,6 +3434,7 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
     important physical invariant for deployment: each T2D tile and its T3D target
     are the same rigid 8-vertex solid up to rotation/translation.
     """
+    global _T2D_THICK_FOOTPRINT_TILES
     start = time.perf_counter()
     original_mesh_2d = mesh_2d
     try:
@@ -2858,14 +3468,181 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
             list(getattr(mesh_2d, "split_lines", [])),
         )
 
-    base_assembly, base_report = _ORIGINAL_MAKE_T2D_FROM_TRANSFORMS(
-        mesh_2d,
-        flat_layout,
-        mesh_3d,
-        tiles_3d,
-        stage,
-        params,
-    )
+    tile_count = int(len(np.asarray(mesh_2d.faces, dtype=int)))
+    fast_t2d = bool(getattr(flat_layout, "metrics", {}).get("k2d_independent_fast_large_layout", False)) or tile_count > 150
+    if fast_t2d:
+        flat_layout_tops = np.asarray(flat_layout.tile_top_vertices_3d, dtype=float)
+        count = min(len(flat_layout_tops), len(tiles_3d.vertices))
+        optimization_metrics: dict[str, float | int | str | bool] = {
+            "t2d_fast_top_hinge_optimization_applied": False,
+            "t2d_fast_top_hinge_optimization_reason": "not_enough_tiles",
+        }
+        if count > 1:
+            opt_start = time.perf_counter()
+            previous_thick_footprint_tiles = _T2D_THICK_FOOTPRINT_TILES
+            try:
+                _T2D_THICK_FOOTPRINT_TILES = np.asarray(tiles_3d.vertices[:count], dtype=float)
+                opt_faces = np.asarray(mesh_2d.faces, dtype=int)[:count]
+                opt_constraints = _original._hinge_constraint_tuples_from_specs(_original._vertex_hinge_specs_from_faces(opt_faces))
+                opt_grid = _grid_with_layout_gap(mesh_2d.grid, float(getattr(mesh_2d.grid, "gap_size", 0.08)))
+                before_quality = _layout_quality_for_top_xy(
+                    flat_layout_tops[:count, :, :2],
+                    np.zeros((count, 4, 4), dtype=float),
+                    opt_faces,
+                    opt_grid,
+                    opt_constraints,
+                )
+                before_hinge = float(before_quality.get("hinge_error", 0.0))
+                before_collisions = int(before_quality.get("collision_count", 0))
+                tile_scale = max(float(getattr(mesh_2d.grid, "tile_size", 1.0)), 1e-9)
+                preserve_component_hinges = (
+                    str(getattr(flat_layout, "metrics", {}).get("k2d_fast_layout_hinge_preservation_mode", ""))
+                    == "keep original K2D tile-corner positions inside each split component"
+                )
+                if before_hinge <= tile_scale * 0.025 and before_collisions == 0:
+                    optimization_metrics = {
+                        "t2d_fast_top_hinge_optimization_applied": False,
+                        "t2d_fast_top_hinge_optimization_accepted": False,
+                        "t2d_fast_top_hinge_optimization_elapsed_sec": float(time.perf_counter() - opt_start),
+                        "t2d_fast_top_hinge_optimization_reason": "initial fast T2D layout already satisfies hinge/collision guard",
+                        "t2d_fast_top_hinge_quality_hinge_before": float(before_hinge),
+                        "t2d_fast_top_hinge_quality_hinge_after": float(before_hinge),
+                        "t2d_fast_top_hinge_quality_collision_before": int(before_collisions),
+                        "t2d_fast_top_hinge_quality_collision_after": int(before_collisions),
+                        "t2d_fast_top_hinge_preserve_component_hinges": bool(preserve_component_hinges),
+                    }
+                else:
+                    optimized_xy, optimization_metrics = _optimize_t2d_footprint_layout(
+                        flat_layout_tops[:count, :, :2],
+                        np.zeros((count, 4, 4), dtype=float),
+                        opt_faces,
+                        mesh_2d.grid,
+                        iterations=max(40, int(getattr(params, "hinge_layout_iterations", 120))) if params is not None else 120,
+                        connection_weight=float(getattr(params, "hinge_layout_connection_weight", 8.0)) if params is not None else 8.0,
+                        collision_weight=float(getattr(params, "hinge_layout_collision_weight", 4.0)) if params is not None else 4.0,
+                        anchor_weight=float(getattr(params, "hinge_layout_anchor_weight", 0.0)) if params is not None else 0.0,
+                        time_budget_sec=float(getattr(params, "hinge_layout_time_budget_sec", 8.0)) if params is not None else 8.0,
+                        max_candidate_pairs=int(getattr(params, "hinge_layout_max_candidate_pairs", 3000)) if params is not None else 3000,
+                        collision_sweeps_per_iteration=int(getattr(params, "hinge_layout_collision_sweeps_per_iteration", 2)) if params is not None else 2,
+                        initial_expansion=float(getattr(params, "hinge_layout_initial_expansion", 1.6)) if params is not None else 1.6,
+                        max_center_drift_tiles=float(getattr(params, "hinge_layout_max_center_drift_tiles", 5.0)) if params is not None else 5.0,
+                        progress_callback=None,
+                    )
+                    after_quality = _layout_quality_for_top_xy(
+                        optimized_xy,
+                        np.zeros((count, 4, 4), dtype=float),
+                        opt_faces,
+                        opt_grid,
+                        opt_constraints,
+                    )
+                    after_hinge = float(after_quality.get("hinge_error", before_hinge))
+                    after_collisions = int(after_quality.get("collision_count", before_collisions))
+                    hinge_tolerance = tile_scale * (0.035 if preserve_component_hinges else 0.025)
+                    hinge_ok = after_hinge <= max(before_hinge * 1.05 + 1e-9, hinge_tolerance)
+                    collision_ok = after_collisions <= before_collisions + max(1, int(count * 0.02))
+                    improved = after_collisions < before_collisions or after_hinge < before_hinge * 0.98
+                    accept_optimized = bool(hinge_ok and collision_ok and improved)
+                    if accept_optimized:
+                        flat_layout_tops = flat_layout_tops.copy()
+                        flat_layout_tops[:count, :, :2] = optimized_xy
+                    optimization_metrics = dict(optimization_metrics)
+                    optimization_metrics.update(
+                        {
+                            "t2d_fast_top_hinge_optimization_applied": True,
+                            "t2d_fast_top_hinge_optimization_accepted": bool(accept_optimized),
+                            "t2d_fast_top_hinge_optimization_elapsed_sec": float(time.perf_counter() - opt_start),
+                            "t2d_fast_top_hinge_optimization_reason": "large fast K2D layout repaired by bounded T2D footprint solve",
+                            "t2d_fast_top_hinge_quality_hinge_before": float(before_hinge),
+                            "t2d_fast_top_hinge_quality_hinge_after": float(after_hinge),
+                            "t2d_fast_top_hinge_quality_collision_before": int(before_collisions),
+                            "t2d_fast_top_hinge_quality_collision_after": int(after_collisions),
+                            "t2d_fast_top_hinge_preserve_component_hinges": bool(preserve_component_hinges),
+                            "t2d_fast_top_hinge_acceptance_hinge_tolerance": float(hinge_tolerance),
+                            "t2d_fast_top_hinge_requested_connection_weight": float(getattr(params, "hinge_layout_connection_weight", 8.0)) if params is not None else 8.0,
+                            "t2d_fast_top_hinge_effective_connection_weight": float(optimization_metrics.get("t2d_free_layout_connection_weight", 0.0)),
+                            "t2d_fast_top_hinge_acceptance_rule": "accept only when hinge stays within tolerance and collision/hinge metric improves",
+                        }
+                    )
+            finally:
+                _T2D_THICK_FOOTPRINT_TILES = previous_thick_footprint_tiles
+        flat_layout_tops, alignment_metrics = _align_flat_tops_to_target_xy(flat_layout_tops, np.asarray(tiles_3d.vertices, dtype=float)[:, :4, :])
+        placed_vertices = np.zeros((count, 8, 3), dtype=float)
+        rigid_transforms = np.zeros((count, 4, 4), dtype=float)
+        top_errors = []
+        for tile_id in range(count):
+            placed, transform = _original._rigidly_place_t3d_tile_in_flat_layout(
+                tiles_3d.vertices[tile_id],
+                flat_layout_tops[tile_id],
+            )
+            placed_vertices[tile_id] = placed
+            rigid_transforms[tile_id] = transform
+            top_errors.append(np.linalg.norm(placed[:4, :2] - flat_layout_tops[tile_id, :, :2], axis=1))
+
+        top_errors_arr = np.asarray(top_errors, dtype=float).reshape(-1) if top_errors else np.zeros(0)
+        face_planarity = _original._tile_face_planarity_by_group(placed_vertices)
+        full_shape_rms = _original._tile_shape_distance_error(placed_vertices, tiles_3d.vertices[:count])
+        full_shape_max = _original._tile_shape_distance_error(placed_vertices, tiles_3d.vertices[:count], use_max=True)
+        top_shape_rms = _original._tile_shape_distance_error(placed_vertices[:, :4, :], tiles_3d.vertices[:count, :4, :])
+        top_shape_max = _original._tile_shape_distance_error(placed_vertices[:, :4, :], tiles_3d.vertices[:count, :4, :], use_max=True)
+        metrics = {
+            "objective": "Fast T2D top-hinge construction: rigidly place T3D tiles at the independent K2D top layout.",
+            "t2d_fast_top_hinge_path": True,
+            "t2d_fast_top_hinge_reason": "large K2D independent layout; run bounded T2D footprint solve before rigid T3D placement",
+            "t2d_fast_top_hinge_tile_threshold": 150,
+            **optimization_metrics,
+            **alignment_metrics,
+            "face_planarity_error": _original._tile_face_planarity(placed_vertices),
+            "top_face_planarity_error": face_planarity["top"],
+            "bottom_face_planarity_error": face_planarity["bottom"],
+            "side_face_planarity_error": face_planarity["side"],
+            "transform_source": "rigid placement of each mitered T3D tile onto fast independent K2D top vertices",
+            "fabrication_geometry_model": "T2D keeps the full mitered T3D tile shape; no thin-plate regeneration",
+            "paper_t2d_extrusion_model": True,
+            "top_vertices_match_k2d_max_error": float(np.max(top_errors_arr)) if top_errors_arr.size else 0.0,
+            "top_vertices_match_k2d_rms_error": float(np.sqrt(np.mean(top_errors_arr * top_errors_arr))) if top_errors_arr.size else 0.0,
+            "top_vertices_rms_from_k2d_layout": float(np.sqrt(np.mean(top_errors_arr * top_errors_arr))) if top_errors_arr.size else 0.0,
+            "tile_shape_rms_error_to_T3D": float(full_shape_rms),
+            "tile_shape_max_error_to_T3D": float(full_shape_max),
+            "tile_shape_preserved_from_T3D": bool(full_shape_max < 1e-8),
+            "top_tile_shape_rms_error_to_T3D": float(top_shape_rms),
+            "top_tile_shape_max_error_to_T3D": float(top_shape_max),
+            "t2d_t3d_congruent_tile_geometry": bool(full_shape_max < 1e-8),
+            "layout_split_virtual_weld_applied": bool(layout_weld_metrics.get("split_virtual_weld_applied", False)),
+            "layout_split_virtual_weld_group_count": int(layout_weld_metrics.get("split_virtual_weld_group_count", 0)),
+        }
+        repaired = _original.TileAssembly(
+            vertices=placed_vertices,
+            top_faces=np.asarray([[0, 1, 2, 3] for _ in range(count)], dtype=int),
+            bottom_faces=np.asarray([[4, 7, 6, 5] for _ in range(count)], dtype=int),
+            side_faces=np.asarray([[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]], dtype=int),
+            stage=stage,
+            metrics=metrics,
+            transform_matrices=rigid_transforms,
+        )
+        report = _original.StageReport(
+            name=f"K3D -> {stage}",
+            objective=str(metrics["objective"]),
+            before_error=0.0,
+            after_error=float(full_shape_rms),
+            constraint_violation=float(metrics["top_vertices_match_k2d_rms_error"]),
+            computation_time=time.perf_counter() - start,
+            counts=_original._assembly_counts(repaired),
+        )
+        return repaired, report
+
+    previous_thick_footprint_tiles = _T2D_THICK_FOOTPRINT_TILES
+    _T2D_THICK_FOOTPRINT_TILES = np.asarray(tiles_3d.vertices, dtype=float)
+    try:
+        base_assembly, base_report = _ORIGINAL_MAKE_T2D_FROM_TRANSFORMS(
+            mesh_2d,
+            flat_layout,
+            mesh_3d,
+            tiles_3d,
+            stage,
+            params,
+        )
+    finally:
+        _T2D_THICK_FOOTPRINT_TILES = previous_thick_footprint_tiles
     if len(base_assembly.vertices) == 0:
         return base_assembly, base_report
 
@@ -2874,15 +3651,11 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
     top_errors = []
     flat_layout_tops = np.asarray(flat_layout.tile_top_vertices_3d, dtype=float)
     for tile_id in range(len(base_assembly.vertices)):
-        flat_top = flat_layout_tops[tile_id] if tile_id < len(flat_layout_tops) else base_assembly.vertices[tile_id, :4]
+        flat_top = base_assembly.vertices[tile_id, :4]
         placed, transform = _original._rigidly_place_t3d_tile_in_flat_layout(
             tiles_3d.vertices[tile_id],
             flat_top,
         )
-        # T2D top hinges are defined on the solved K2D flat layout.  Keep those
-        # four top vertices exact; only the bottom/side vertices inherit the
-        # mitered T3D rigid placement.
-        placed[:4] = flat_top
         placed_vertices[tile_id] = placed
         rigid_transforms[tile_id] = transform
         top_errors.append(np.linalg.norm(placed[:4, :2] - flat_top[:, :2], axis=1))
@@ -2976,6 +3749,440 @@ def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_call
     return out, hinge_graph, report
 
 
+def _build_gap_graph(mesh_faces, t2d, t3d):
+    gap_faces, gap_weld_metrics = _canonicalize_faces_by_coincident_tile_tops(
+        np.asarray(t3d.vertices, dtype=float)[:, :4, :],
+        np.asarray(mesh_faces, dtype=int),
+    )
+    graph = _ORIGINAL_BUILD_GAP_GRAPH(gap_faces, t2d, t3d)
+    graph.metrics.update(
+        {
+            "gap_graph_split_virtual_weld_applied": bool(gap_weld_metrics.get("split_virtual_weld_applied", False)),
+            "gap_graph_split_virtual_weld_group_count": int(gap_weld_metrics.get("split_virtual_weld_group_count", 0)),
+            "gap_graph_split_virtual_weld_vertex_count": int(gap_weld_metrics.get("split_virtual_weld_vertex_count", 0)),
+            "gap_graph_split_virtual_weld_reason": str(gap_weld_metrics.get("split_virtual_weld_reason", "")),
+            "gap_graph_constraint_faces": "split-coincident vertex ids are welded for lift/string gap topology only",
+        }
+    )
+    return graph
+
+
+def _gap_adjacency(gap_graph) -> dict[int, list[int]]:
+    adjacency: dict[int, list[int]] = {int(gap.id): [] for gap in gap_graph.gaps}
+    for a, b in gap_graph.edges:
+        adjacency.setdefault(int(a), []).append(int(b))
+        adjacency.setdefault(int(b), []).append(int(a))
+    return adjacency
+
+
+def _gap_by_id(gap_graph) -> dict[int, object]:
+    return {int(gap.id): gap for gap in gap_graph.gaps}
+
+
+def _weighted_gap_path(gap_graph, start: int, goal: int, mu_c: float = 0.0) -> list[int]:
+    start = int(start)
+    goal = int(goal)
+    if start == goal:
+        return [start]
+    gaps = _gap_by_id(gap_graph)
+    adjacency = _gap_adjacency(gap_graph)
+    if start not in gaps or goal not in gaps:
+        return [goal]
+
+    def edge_cost(a: int, b: int) -> float:
+        pa = np.asarray(gaps[a].centroid_2d, dtype=float)
+        pb = np.asarray(gaps[b].centroid_2d, dtype=float)
+        length = float(np.linalg.norm(pa - pb))
+        # Internal paths are preferred over boundary wandering; high-GPE gaps are
+        # attractive because the string is expected to couple to lifting regions.
+        boundary_penalty = 0.35 if bool(gaps[b].boundary) else 0.0
+        gpe_attraction = 0.05 * max(0.0, float(gaps[b].gpe))
+        return max(length, 1e-9) * (1.0 + boundary_penalty + max(float(mu_c), 0.0) * 0.1) / (1.0 + gpe_attraction)
+
+    queue: list[tuple[float, int]] = [(0.0, start)]
+    dist: dict[int, float] = {start: 0.0}
+    parent: dict[int, int] = {start: -1}
+    while queue:
+        cost, node = heapq.heappop(queue)
+        if cost > dist.get(node, float("inf")) + 1e-12:
+            continue
+        if node == goal:
+            break
+        for nxt in adjacency.get(node, []):
+            nxt = int(nxt)
+            next_cost = cost + edge_cost(node, nxt)
+            if next_cost + 1e-12 >= dist.get(nxt, float("inf")):
+                continue
+            dist[nxt] = next_cost
+            parent[nxt] = node
+            heapq.heappush(queue, (next_cost, nxt))
+    if goal not in parent:
+        return [goal]
+    path = [goal]
+    while path[-1] != start:
+        path.append(parent[path[-1]])
+    return list(reversed(path))
+
+
+def _append_gap_path(route: list[int], segment: list[int]) -> None:
+    for gap_id in segment:
+        gap_id = int(gap_id)
+        if route and route[-1] == gap_id:
+            continue
+        route.append(gap_id)
+
+
+def _nearest_boundary_gap_id(gap_graph, point: np.ndarray | None = None) -> int | None:
+    boundary = [gap for gap in gap_graph.gaps if bool(gap.boundary)]
+    if not boundary:
+        return None
+    if point is None:
+        values = np.asarray([gap.centroid_2d for gap in boundary], dtype=float)
+        point = values[np.lexsort((values[:, 1], values[:, 0]))[0]]
+    p = np.asarray(point, dtype=float)
+    return int(min(boundary, key=lambda gap: float(np.linalg.norm(np.asarray(gap.centroid_2d, dtype=float) - p))).id)
+
+
+def _ordered_boundary_gap_ids(gap_graph, start: int | None = None) -> list[int]:
+    boundary_ids = [int(gap.id) for gap in gap_graph.gaps if bool(gap.boundary)]
+    if len(boundary_ids) <= 1:
+        return boundary_ids
+    boundary_set = set(boundary_ids)
+    adjacency = _gap_adjacency(gap_graph)
+    gap_lookup = _gap_by_id(gap_graph)
+    boundary_adj = {gid: [int(nid) for nid in adjacency.get(gid, []) if int(nid) in boundary_set] for gid in boundary_ids}
+    start_id = int(start) if start is not None and int(start) in boundary_set else boundary_ids[0]
+
+    visited: set[int] = set()
+    ordered: list[int] = []
+    current = start_id
+    prev: int | None = None
+    while current not in visited:
+        ordered.append(current)
+        visited.add(current)
+        options = [nid for nid in boundary_adj.get(current, []) if nid != prev and nid not in visited]
+        if not options:
+            break
+        cur_pos = np.asarray(gap_lookup[current].centroid_2d, dtype=float)
+        options.sort(key=lambda nid: float(np.linalg.norm(np.asarray(gap_lookup[nid].centroid_2d, dtype=float) - cur_pos)))
+        prev, current = current, options[0]
+
+    if len(ordered) == len(boundary_ids):
+        return ordered
+
+    center = np.mean([np.asarray(gap_lookup[gid].centroid_2d, dtype=float) for gid in boundary_ids], axis=0)
+    ordered = sorted(
+        boundary_ids,
+        key=lambda gid: math.atan2(
+            float(np.asarray(gap_lookup[gid].centroid_2d, dtype=float)[1] - center[1]),
+            float(np.asarray(gap_lookup[gid].centroid_2d, dtype=float)[0] - center[0]),
+        ),
+    )
+    if start_id in ordered:
+        offset = ordered.index(start_id)
+        ordered = ordered[offset:] + ordered[:offset]
+    return ordered
+
+
+def _select_lift_points(gap_graph, tau: float):
+    """Select LiftPoints using a discrete paper-style GPE peak/basin model.
+
+    The paper describes lift points through GPE peaks with Morse-Smale style
+    segmentation and peak coupling.  Here the gap graph is already discrete, so
+    we implement the analogous graph procedure: local GPE maxima, steepest-ascent
+    basins, and tau-threshold peak coupling.  Chosen gaps are annotated so the UI
+    can state exactly which gap became a LiftPoint and why.
+    """
+    gaps = list(gap_graph.gaps)
+    adjacency = _gap_adjacency(gap_graph)
+    interior = [gap for gap in gaps if not bool(gap.boundary)]
+    candidates = interior if interior else gaps
+    positive = [gap for gap in candidates if float(gap.gpe) > 0.0]
+    if not positive:
+        selected = []
+        if gaps:
+            gap = max(gaps, key=lambda item: float(item.gpe))
+            selected = [_original.LiftPoint(int(gap.id), gap.centroid_2d, gap.centroid_3d, float(gap.gpe), 0)]
+            setattr(selected[0], "selection_reason", "fallback_max_gpe_no_positive_interior_peak")
+            setattr(selected[0], "basin_size", 1)
+        gap_graph.metrics.update(
+            {
+                "lift_point_selection_model": "discrete_graph_gpe_peak_coupling",
+                "lift_point_selection_exactness": "paper-style discrete Morse-Smale approximation",
+                "lift_point_count": int(len(selected)),
+                "lift_point_selection_threshold": 0.0,
+                "lift_point_rows": [
+                    {
+                        "gap_id": int(lift.gap_id),
+                        "cluster_id": int(lift.cluster_id),
+                        "gpe": float(lift.gpe),
+                        "position_2d": [float(x) for x in np.asarray(lift.position_2d, dtype=float).reshape(-1)[:3]],
+                        "position_3d": [float(x) for x in np.asarray(lift.position_3d, dtype=float).reshape(-1)[:3]],
+                        "selection_reason": str(getattr(lift, "selection_reason", "")),
+                    }
+                    for lift in selected
+                ],
+            }
+        )
+        return selected
+
+    max_gpe = max(float(gap.gpe) for gap in positive)
+    threshold = max(0.0, min(1.0, float(tau))) * max_gpe
+    gap_lookup = _gap_by_id(gap_graph)
+    candidate_ids = {int(gap.id) for gap in candidates}
+    local_maxima = []
+    for gap in positive:
+        gid = int(gap.id)
+        neighbor_ids = [nid for nid in adjacency.get(gid, []) if nid in candidate_ids]
+        neighbor_gpe = [float(gap_lookup[nid].gpe) for nid in neighbor_ids]
+        if not neighbor_gpe or float(gap.gpe) >= max(neighbor_gpe) - 1e-12:
+            local_maxima.append(gap)
+    if not local_maxima:
+        local_maxima = [max(positive, key=lambda item: float(item.gpe))]
+
+    def ascend_peak(gid: int) -> int:
+        seen: set[int] = set()
+        current = int(gid)
+        while current not in seen:
+            seen.add(current)
+            current_gap = gap_lookup[current]
+            neighbor_ids = [nid for nid in adjacency.get(current, []) if nid in candidate_ids]
+            if not neighbor_ids:
+                break
+            best = max(neighbor_ids, key=lambda nid: float(gap_lookup[nid].gpe))
+            if float(gap_lookup[best].gpe) <= float(current_gap.gpe) + 1e-12:
+                break
+            current = int(best)
+        return current
+
+    basin_members: dict[int, list[int]] = {}
+    for gap in candidates:
+        peak_id = ascend_peak(int(gap.id))
+        basin_members.setdefault(peak_id, []).append(int(gap.id))
+
+    ranked = sorted(local_maxima, key=lambda item: (float(item.gpe), len(basin_members.get(int(item.id), []))), reverse=True)
+    selected: list[object] = []
+    selected_tiles: set[int] = set()
+    suppressed_count = 0
+    for gap in ranked:
+        gid = int(gap.id)
+        if float(gap.gpe) < threshold and selected:
+            continue
+        # Peak coupling: adjacent/overlapping peaks in the same physical tile
+        # neighborhood are represented by the highest-GPE peak.
+        tiles = {int(tile) for tile in gap.surrounding_tiles}
+        if selected_tiles.intersection(tiles):
+            suppressed_count += 1
+            continue
+        lift = _original.LiftPoint(gid, gap.centroid_2d, gap.centroid_3d, float(gap.gpe), len(selected))
+        basin = basin_members.get(gid, [gid])
+        setattr(lift, "selection_reason", "local_gpe_maximum_above_tau_after_peak_coupling")
+        setattr(lift, "basin_size", int(len(basin)))
+        setattr(lift, "basin_gap_ids", [int(x) for x in basin])
+        selected.append(lift)
+        selected_tiles.update(tiles)
+    if not selected:
+        gap = ranked[0]
+        lift = _original.LiftPoint(int(gap.id), gap.centroid_2d, gap.centroid_3d, float(gap.gpe), 0)
+        setattr(lift, "selection_reason", "fallback_highest_local_gpe_peak")
+        setattr(lift, "basin_size", int(len(basin_members.get(int(gap.id), [int(gap.id)]))))
+        setattr(lift, "basin_gap_ids", [int(x) for x in basin_members.get(int(gap.id), [int(gap.id)])])
+        selected = [lift]
+
+    rows = []
+    for lift in selected:
+        rows.append(
+            {
+                "gap_id": int(lift.gap_id),
+                "cluster_id": int(lift.cluster_id),
+                "gpe": float(lift.gpe),
+                "gpe_ratio": float(lift.gpe / max(max_gpe, 1e-12)),
+                "basin_size": int(getattr(lift, "basin_size", 0)),
+                "position_2d": [float(x) for x in np.asarray(lift.position_2d, dtype=float).reshape(-1)[:3]],
+                "position_3d": [float(x) for x in np.asarray(lift.position_3d, dtype=float).reshape(-1)[:3]],
+                "selection_reason": str(getattr(lift, "selection_reason", "")),
+            }
+        )
+    gap_graph.metrics.update(
+        {
+            "lift_point_selection_model": "discrete_graph_gpe_peak_coupling",
+            "lift_point_selection_exactness": "paper-style discrete Morse-Smale approximation on gap graph",
+            "lift_point_selection_tau": float(tau),
+            "lift_point_selection_threshold": float(threshold),
+            "lift_point_candidate_count": int(len(candidates)),
+            "lift_point_positive_candidate_count": int(len(positive)),
+            "lift_point_local_peak_count": int(len(local_maxima)),
+            "lift_point_peak_coupling_suppressed_count": int(suppressed_count),
+            "lift_point_count": int(len(selected)),
+            "lift_point_gap_ids": [int(lift.gap_id) for lift in selected],
+            "lift_point_rows": rows,
+        }
+    )
+    return selected
+
+
+def _build_string_path(gap_graph, lift_points, mu_c: float):
+    boundary = [gap for gap in gap_graph.gaps if bool(gap.boundary)]
+    boundary_ids = [int(gap.id) for gap in boundary]
+    if not gap_graph.gaps:
+        return _original.StringPath([], [], [], 0.0, 0.0, {"string_path_model": "empty_gap_graph"})
+    gap_lookup = _gap_by_id(gap_graph)
+    lift_ids = [int(lift.gap_id) for lift in lift_points]
+    if boundary:
+        lift_points_2d = [np.asarray(gap_lookup[gid].centroid_2d, dtype=float) for gid in lift_ids if gid in gap_lookup]
+        anchor_target = np.mean(lift_points_2d, axis=0) if lift_points_2d else None
+        start = _nearest_boundary_gap_id(gap_graph, anchor_target)
+        end = start
+    else:
+        start = int(gap_graph.gaps[0].id)
+        end = start
+
+    ordered_lifts = sorted(
+        [gap_lookup[gid] for gid in lift_ids if gid in gap_lookup],
+        key=lambda gap: float(gap.gpe),
+        reverse=True,
+    )
+    route: list[int] = _ordered_boundary_gap_ids(gap_graph, start)
+    if route and route[0] != route[-1]:
+        route.append(route[0])
+    if not route and start is not None:
+        route.append(int(start))
+    current = route[-1] if route else (int(ordered_lifts[0].id) if ordered_lifts else int(gap_graph.gaps[0].id))
+    for lift_gap in ordered_lifts:
+        segment = _weighted_gap_path(gap_graph, current, int(lift_gap.id), mu_c)
+        _append_gap_path(route, segment)
+        current = int(lift_gap.id)
+    if end is not None and route:
+        segment = _weighted_gap_path(gap_graph, route[-1], int(end), mu_c)
+        _append_gap_path(route, segment)
+    if not route and gap_graph.gaps:
+        route = [int(gap_graph.gaps[0].id)]
+
+    theta = _original._turn_angle_total(gap_graph, route)
+    friction = _original.safe_capstan_friction(mu_c, theta)
+    log_channel_cost = float(mu_c * theta) if math.isfinite(mu_c) and math.isfinite(theta) else float("inf")
+    route_node_count = len(route)
+    unique_route_node_count = len(set(route))
+    duplicate_visit_count = route_node_count - unique_route_node_count
+    theta_upper_bound = math.pi * max(0, route_node_count - 2)
+    max_single_turn = _original._max_single_turn_angle(gap_graph, route)
+    warnings: list[str] = []
+    if route_node_count and duplicate_visit_count > route_node_count * 0.5:
+        warnings.append("String path revisits many gap nodes.")
+    if theta > theta_upper_bound + 1e-6:
+        warnings.append("Turn angle exceeds simple polyline upper bound.")
+    if theta > 200:
+        warnings.append("String path turn angle is extremely large; routing likely failed.")
+
+    metrics = {
+        "string_path_model": "boundary_loop_to_gpe_lift_peaks_weighted_gap_graph_path",
+        "string_path_exactness": "paper-style channel route approximation; no continuous fabrication channel solver",
+        "string_path_start_boundary_gap_id": int(start) if start is not None else -1,
+        "string_path_end_boundary_gap_id": int(end) if end is not None else -1,
+        "string_path_boundary_loop_included": bool(len(boundary_ids) > 0),
+        "string_path_boundary_loop_node_count": int(len(boundary_ids)),
+        "route_length": int(route_node_count),
+        "route_node_count": int(route_node_count),
+        "unique_route_node_count": int(unique_route_node_count),
+        "duplicate_visit_count": int(duplicate_visit_count),
+        "boundary_gap_count": int(len(boundary_ids)),
+        "lift_point_count": int(len(lift_points)),
+        "lift_gap_ids": [int(x) for x in lift_ids],
+        "max_single_turn_angle": float(max_single_turn),
+        "turn_angle_total": float(theta),
+        "theta_total": float(theta),
+        "theta_upper_bound": float(theta_upper_bound),
+        "log_channel_cost": float(log_channel_cost),
+        "estimated_channel_friction": float(friction),
+        "overflow_prevented": bool(not math.isfinite(friction) or log_channel_cost > 60.0),
+        "invalid_turn_accumulation": bool(theta > theta_upper_bound + 1e-6),
+        "warnings": "; ".join(warnings),
+    }
+    return _original.StringPath(
+        gap_ids=[int(x) for x in route],
+        boundary_gap_ids=boundary_ids,
+        lift_gap_ids=[int(x) for x in lift_ids],
+        turn_angle_total=float(theta),
+        estimated_channel_friction=float(friction),
+        metrics=metrics,
+    )
+
+
+def _align_flat_tops_to_target_xy(flat_tops: np.ndarray, target_tops: np.ndarray) -> tuple[np.ndarray, dict[str, float | bool | str]]:
+    flat = np.asarray(flat_tops, dtype=float).copy()
+    target = np.asarray(target_tops, dtype=float)
+    count = min(len(flat), len(target))
+    if count == 0:
+        return flat, {"t2d_global_xy_alignment_applied": False, "t2d_global_xy_alignment_reason": "empty"}
+    src = np.mean(flat[:count, :, :2], axis=1)
+    dst = np.mean(target[:count, :, :2], axis=1)
+    if len(src) < 2:
+        return flat, {"t2d_global_xy_alignment_applied": False, "t2d_global_xy_alignment_reason": "too_few_tiles"}
+    src_center = np.mean(src, axis=0)
+    dst_center = np.mean(dst, axis=0)
+    src0 = src - src_center
+    dst0 = dst - dst_center
+    if float(np.linalg.norm(src0)) <= 1e-12 or float(np.linalg.norm(dst0)) <= 1e-12:
+        return flat, {"t2d_global_xy_alignment_applied": False, "t2d_global_xy_alignment_reason": "degenerate_centers"}
+
+    def _fit_candidate(mirror: np.ndarray, label: str):
+        mirrored_src0 = src0 @ mirror.T
+        try:
+            u, _s, vt = np.linalg.svd(mirrored_src0.T @ dst0)
+            rotation = vt.T @ u.T
+            if np.linalg.det(rotation) < 0.0:
+                vt[-1, :] *= -1.0
+                rotation = vt.T @ u.T
+        except Exception:
+            return None
+        aligned_centers = mirrored_src0 @ rotation.T + dst_center
+        residual = np.linalg.norm(aligned_centers - dst, axis=1)
+        rms = float(np.sqrt(np.mean(residual * residual))) if residual.size else 0.0
+        return {
+            "mirror": mirror,
+            "mirror_label": label,
+            "rotation": rotation,
+            "rms": rms,
+            "residual": residual,
+        }
+
+    try:
+        candidates = [
+            _fit_candidate(np.eye(2, dtype=float), "none"),
+            _fit_candidate(np.asarray([[-1.0, 0.0], [0.0, 1.0]], dtype=float), "mirror_x"),
+            _fit_candidate(np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=float), "mirror_y"),
+        ]
+        valid = [candidate for candidate in candidates if candidate is not None]
+        if not valid:
+            return flat, {"t2d_global_xy_alignment_applied": False, "t2d_global_xy_alignment_reason": "svd_failed"}
+        best = min(valid, key=lambda item: float(item["rms"]))
+        no_mirror = next((candidate for candidate in valid if candidate["mirror_label"] == "none"), None)
+        if no_mirror is not None and best["mirror_label"] != "none":
+            no_mirror_rms = float(no_mirror["rms"])
+            best_rms = float(best["rms"])
+            # Avoid flipping the layout for near-ties; only correct a real chart
+            # handedness mismatch.
+            if best_rms > no_mirror_rms * 0.92 and (no_mirror_rms - best_rms) < max(1e-9, no_mirror_rms * 0.05):
+                best = no_mirror
+    except Exception:
+        return flat, {"t2d_global_xy_alignment_applied": False, "t2d_global_xy_alignment_reason": "svd_failed"}
+    rotation = np.asarray(best["rotation"], dtype=float)
+    mirror = np.asarray(best["mirror"], dtype=float)
+    aligned_xy = ((flat[:, :, :2] - src_center) @ mirror.T) @ rotation.T + dst_center
+    flat[:, :, :2] = aligned_xy
+    angle = float(np.degrees(np.arctan2(rotation[1, 0], rotation[0, 0])))
+    residual = np.asarray(best["residual"], dtype=float)
+    reflected = str(best["mirror_label"]) != "none"
+    return flat, {
+        "t2d_global_xy_alignment_applied": True,
+        "t2d_global_xy_alignment_rotation_deg": angle,
+        "t2d_global_xy_alignment_center_rms": float(np.sqrt(np.mean(residual * residual))) if residual.size else 0.0,
+        "t2d_global_xy_alignment_target": "T3D top XY tile centers",
+        "t2d_global_xy_alignment_reflection_applied": bool(reflected),
+        "t2d_global_xy_alignment_reflection_axis": str(best["mirror_label"]),
+    }
+
+
 def _resolve_t2d_assembly(source, stage: str = "dual_hinge"):
     if hasattr(source, "vertices") and hasattr(source, "top_faces") and hasattr(source, "bottom_faces"):
         return source
@@ -3002,14 +4209,27 @@ def _t2d_export_scale(assembly, panel_size: float) -> float:
     return float(panel_size) / max(median, 1e-12)
 
 
-def _t2d_prism_vertices(assembly, panel_size: float, thickness: float) -> np.ndarray:
+def _t2d_prism_vertices(assembly, panel_size: float, thickness: float | None) -> np.ndarray:
     scale = _t2d_export_scale(assembly, panel_size)
-    top_xy = np.asarray(assembly.vertices, dtype=float)[:, :4, :2] * scale
+    source = np.asarray(assembly.vertices, dtype=float)
+    if source.ndim == 3 and source.shape[1] >= 8 and source.shape[2] >= 3:
+        out = source[:, :8, :3].copy() * scale
+        if thickness is not None:
+            z_center = np.mean(out[..., 2], axis=1, keepdims=True)
+            z_local = out[..., 2] - z_center
+            z_span = np.max(z_local, axis=1, keepdims=True) - np.min(z_local, axis=1, keepdims=True)
+            active = z_span[:, 0] > 1e-12
+            if np.any(active):
+                z_local[active] *= float(thickness) / z_span[active]
+                out[active, :, 2] = z_center[active] + z_local[active]
+        return out
+
+    top_xy = source[:, :4, :2] * scale
     out = np.zeros((top_xy.shape[0], 8, 3), dtype=float)
     out[:, :4, :2] = top_xy
     out[:, 4:, :2] = top_xy
-    out[:, :4, 2] = 0.5 * float(thickness)
-    out[:, 4:, 2] = -0.5 * float(thickness)
+    out[:, :4, 2] = 0.5 * float(thickness if thickness is not None else panel_size * 0.05)
+    out[:, 4:, 2] = -0.5 * float(thickness if thickness is not None else panel_size * 0.05)
     return out
 
 
@@ -3065,8 +4285,8 @@ def _triangle_edge_nonmanifold_count(triangles: list[tuple[int, int, int]]) -> i
 
 def _t2d_stl_mesh_and_metrics(assembly, *, panel_size: float = 0.1, thickness: float | None = None):
     panel_size = float(panel_size)
-    thickness = float(panel_size * 0.05 if thickness is None else thickness)
-    vertices = _t2d_prism_vertices(assembly, panel_size, thickness)
+    export_thickness = None if thickness is None else float(thickness)
+    vertices = _t2d_prism_vertices(assembly, panel_size, export_thickness)
     local_tris = _prism_triangle_indices()
     triangles: list[np.ndarray] = []
     tri_indices: list[tuple[int, int, int]] = []
@@ -3083,13 +4303,14 @@ def _t2d_stl_mesh_and_metrics(assembly, *, panel_size: float = 0.1, thickness: f
         "t2d_tile_count": int(vertices.shape[0]),
         "t2d_vertex_count": int(vertices.shape[0] * vertices.shape[1]),
         "t2d_face_count": int(len(triangles)),
-        "t2d_export_thickness": float(thickness),
+        "t2d_export_thickness": float(np.median(np.ptp(vertices[..., 2], axis=1))) if len(vertices) else 0.0,
+        "t2d_export_requested_thickness": None if thickness is None else float(thickness),
         "t2d_export_panel_size": float(panel_size),
         "t2d_min_area": float(np.min(areas)) if len(areas) else 0.0,
         "t2d_max_aspect_ratio": float(np.max(aspects)) if len(aspects) else 0.0,
         "t2d_connected_component_count": int(vertices.shape[0]),
         "t2d_nonmanifold_edge_count": _triangle_edge_nonmanifold_count(tri_indices),
-        "t2d_export_model": "flat_2d_layout_extruded_as_thin_plate_stl",
+        "t2d_export_model": "current_T2D_assembly_vertices_scaled_to_stl",
         "t2d_export_exactness_label": "fabrication_export",
     }
     return vertices, triangles, metrics
@@ -3140,6 +4361,771 @@ def export_t2d_stl(
     return data, metrics
 
 
+def _spatial_candidate_pairs_for_tiles(tiles_xy: np.ndarray, pad: float = 0.0) -> list[tuple[int, int]]:
+    """Broad-phase tile pair search using padded AABB cell occupancy."""
+    tiles = np.asarray(tiles_xy, dtype=float)
+    n = int(len(tiles))
+    if n <= 1:
+        return []
+    bmin = np.nanmin(tiles[:, :, :2], axis=1)
+    bmax = np.nanmax(tiles[:, :, :2], axis=1)
+    spans = np.maximum(bmax - bmin, 1e-8)
+    pad = max(float(pad), 0.0)
+    finite = np.all(np.isfinite(spans), axis=1)
+    max_spans = np.max(spans[finite], axis=1) if np.any(finite) else np.asarray([1.0])
+    cell = max(float(np.median(max_spans)) + pad, 1e-6)
+
+    lo = np.floor((bmin - pad) / cell).astype(int)
+    hi = np.floor((bmax + pad) / cell).astype(int)
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for idx in range(n):
+        if not np.all(np.isfinite(lo[idx])) or not np.all(np.isfinite(hi[idx])):
+            continue
+        lo_i = lo[idx].copy()
+        hi_i = hi[idx].copy()
+        for gx in range(int(lo_i[0]), int(hi_i[0]) + 1):
+            for gy in range(int(lo_i[1]), int(hi_i[1]) + 1):
+                buckets.setdefault((gx, gy), []).append(int(idx))
+
+    pairs: set[tuple[int, int]] = set()
+    for members in buckets.values():
+        if len(members) <= 1:
+            continue
+        for a_pos, i in enumerate(members[:-1]):
+            for j in members[a_pos + 1:]:
+                if i == j:
+                    continue
+                a, b = (i, j) if i < j else (j, i)
+                if (a, b) in pairs:
+                    continue
+                sep = np.maximum(np.maximum(bmin[b] - bmax[a], bmin[a] - bmax[b]), 0.0)
+                if float(np.linalg.norm(sep)) <= pad:
+                    pairs.add((int(a), int(b)))
+    return sorted(pairs)
+
+
+def _tiles_from_mesh_vertices(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    verts = np.asarray(vertices, dtype=float)
+    face_idx = np.asarray(faces, dtype=int)
+    if len(face_idx) == 0:
+        return np.zeros((0, 4, verts.shape[1] if verts.ndim == 2 else 3), dtype=float)
+    return verts[face_idx]
+
+
+def _edge_matching_errors(xy: np.ndarray, edges: list[tuple[int, int]] | np.ndarray, target_lengths: np.ndarray) -> tuple[float, float]:
+    edge_idx = np.asarray(edges, dtype=int)
+    if edge_idx.size == 0:
+        return 0.0, 0.0
+    pts = np.asarray(xy, dtype=float)
+    current = np.linalg.norm(pts[edge_idx[:, 0]] - pts[edge_idx[:, 1]], axis=1)
+    err = np.abs(current - np.asarray(target_lengths, dtype=float))
+    return float(np.mean(err)), float(np.max(err))
+
+
+def _edge_matching_error(xy: np.ndarray, edges: list[tuple[int, int]] | np.ndarray, target_lengths: np.ndarray) -> float:
+    edge_idx = np.asarray(edges, dtype=int)
+    if edge_idx.size == 0:
+        return 0.0
+    pts = np.asarray(xy, dtype=float)
+    current = np.linalg.norm(pts[edge_idx[:, 0]] - pts[edge_idx[:, 1]], axis=1)
+    diff = current - np.asarray(target_lengths, dtype=float)
+    return float(np.sqrt(np.mean(diff * diff)))
+
+
+def _gap_angles(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    verts = np.asarray(vertices, dtype=float)
+    face_idx = np.asarray(faces, dtype=int)
+    if len(face_idx) == 0:
+        return np.zeros(0, dtype=float)
+    pts = verts[face_idx, :2]
+    prev_pts = np.roll(pts, 1, axis=1)
+    next_pts = np.roll(pts, -1, axis=1)
+    a = prev_pts - pts
+    b = next_pts - pts
+    na = np.linalg.norm(a, axis=2)
+    nb = np.linalg.norm(b, axis=2)
+    denom = na * nb
+    valid = denom > 1e-12
+    cosv = np.zeros_like(denom, dtype=float)
+    cosv[valid] = np.sum(a[valid] * b[valid], axis=1) / denom[valid]
+    return np.degrees(np.arccos(np.clip(cosv[valid], -1.0, 1.0))).astype(float)
+
+
+def _gap_angle_range(vertices: np.ndarray, faces: np.ndarray, *, chunk_faces: int = 200_000) -> tuple[float, float, int]:
+    verts = np.asarray(vertices, dtype=float)
+    face_idx = np.asarray(faces, dtype=int)
+    if len(face_idx) == 0:
+        return 0.0, 0.0, 0
+    min_angle = float("inf")
+    max_angle = float("-inf")
+    count = 0
+    chunk = max(1, int(chunk_faces))
+    for start in range(0, len(face_idx), chunk):
+        pts = verts[face_idx[start : start + chunk], :2]
+        prev_pts = np.roll(pts, 1, axis=1)
+        next_pts = np.roll(pts, -1, axis=1)
+        a = prev_pts - pts
+        b = next_pts - pts
+        denom = np.linalg.norm(a, axis=2) * np.linalg.norm(b, axis=2)
+        valid = denom > 1e-12
+        if not np.any(valid):
+            continue
+        cosv = np.sum(a[valid] * b[valid], axis=1) / denom[valid]
+        angles = np.degrees(np.arccos(np.clip(cosv, -1.0, 1.0))).astype(float)
+        min_angle = min(min_angle, float(np.min(angles)))
+        max_angle = max(max_angle, float(np.max(angles)))
+        count += int(len(angles))
+    if count == 0:
+        return 0.0, 0.0, 0
+    return float(min_angle), float(max_angle), int(count)
+
+
+def _shared_edge_count_from_faces(faces: np.ndarray, *, chunk_edges: int = 2_000_000) -> int:
+    faces_arr = np.asarray(faces, dtype=int)
+    if len(faces_arr) == 0:
+        return 0
+    local_edges = np.asarray([[0, 1], [1, 2], [2, 3], [3, 0]], dtype=int)
+    edge_blocks: list[np.ndarray] = []
+    chunk_faces = max(1, int(chunk_edges) // 4)
+    for start in range(0, len(faces_arr), chunk_faces):
+        block = faces_arr[start : start + chunk_faces]
+        edges = block[:, local_edges].reshape(-1, 2)
+        edge_blocks.append(np.sort(edges, axis=1))
+    all_edges = np.vstack(edge_blocks)
+    _unique, counts = np.unique(all_edges, axis=0, return_counts=True)
+    return int(np.count_nonzero(counts > 1))
+
+
+def _k2d_collision_and_clearance_metrics(
+    tiles: np.ndarray,
+    grid,
+    all_pairs: bool = False,
+) -> tuple[int, float, int]:
+    arr = np.asarray(tiles, dtype=float)
+    if len(arr) <= 1:
+        return 0, 0.0, 0
+    pairs = _original._collision_candidate_pairs(arr.shape[0], grid, all_pairs)
+    if not pairs:
+        return 0, 0.0, 0
+    pair_idx = np.asarray(pairs, dtype=int)
+    bmin = np.min(arr[:, :, :2], axis=1)
+    bmax = np.max(arr[:, :, :2], axis=1)
+    i = pair_idx[:, 0]
+    j = pair_idx[:, 1]
+    sep = np.maximum(np.maximum(bmin[j] - bmax[i], bmin[i] - bmax[j]), 0.0)
+    overlap = np.minimum(bmax[i], bmax[j]) - np.maximum(bmin[i], bmin[j])
+    colliding = np.all(overlap > 0.0, axis=1)
+    clearances = np.linalg.norm(sep, axis=1)
+    if np.any(colliding):
+        clearances[colliding] = -np.min(overlap[colliding], axis=1)
+    return int(np.count_nonzero(colliding)), float(np.min(clearances)) if clearances.size else 0.0, int(len(pair_idx))
+
+
+def _count_2d_tile_collisions(tiles: np.ndarray, grid=None, all_pairs: bool = False) -> int:
+    return int(_k2d_collision_and_clearance_metrics(tiles, grid, all_pairs)[0])
+
+
+def _min_aabb_clearance_2d(tiles: np.ndarray, grid=None, all_pairs: bool = False) -> float:
+    return float(_k2d_collision_and_clearance_metrics(tiles, grid, all_pairs)[1])
+
+
+def _optimize_k2d(mesh_2d, mesh_3d, params, progress_callback=None):
+    start = time.perf_counter()
+    timings: dict[str, float] = {}
+    _original._emit_progress(progress_callback, "Prepare K2D edge targets", 0.02, "K3D correspondence edge lengths")
+    prepare_start = time.perf_counter()
+    base_xy = mesh_2d.vertices[:, :2].copy()
+    edges = _original._unique_mesh_edges(mesh_2d.faces)
+    edge_idx = np.asarray(edges, dtype=int)
+    target_lengths = (
+        np.linalg.norm(mesh_3d.vertices[edge_idx[:, 0]] - mesh_3d.vertices[edge_idx[:, 1]], axis=1)
+        if len(edge_idx)
+        else np.zeros(0, dtype=float)
+    )
+    before_mean, before_max = _edge_matching_errors(base_xy, edge_idx, target_lengths)
+    base_tiles = _tiles_from_mesh_vertices(mesh_2d.vertices, mesh_2d.faces)
+    collisions_before, _min_clearance_before, collision_pair_count_before = _k2d_collision_and_clearance_metrics(base_tiles, mesh_2d.grid)
+    timings["k2d_timer_prepare_edge_targets_sec"] = float(time.perf_counter() - prepare_start)
+
+    def residual(xy_flat: np.ndarray) -> np.ndarray:
+        xy = xy_flat.reshape(-1, 2)
+        parts: list[np.ndarray] = []
+        if len(edge_idx):
+            current = np.linalg.norm(xy[edge_idx[:, 0]] - xy[edge_idx[:, 1]], axis=1)
+        else:
+            current = np.zeros(0, dtype=float)
+        parts.append(np.sqrt(float(params.w_edge)) * (current - target_lengths))
+        parts.append(np.sqrt(float(params.w_fab)) * (xy - base_xy).ravel())
+        return np.concatenate([p.ravel() for p in parts])
+
+    _original._emit_progress(progress_callback, "Fast K2D optimizer", 0.08, "Try CUDA/Adam path if available")
+    torch_start = time.perf_counter()
+    torch_result, torch_metrics = _original._optimize_k2d_torch(mesh_2d, mesh_3d, params, base_xy, edges, target_lengths)
+    timings["k2d_timer_torch_optimizer_sec"] = float(time.perf_counter() - torch_start)
+    large_grid_fast_path = (mesh_2d.grid.nx + 1) * (mesh_2d.grid.ny + 1) > 100 and torch_result is None
+    optimizer_iterations = int(max(12, params.max_2d_iterations * 4))
+    optimizer_converged = True
+    actual_backend = "cuda" if torch_result is not None else "projective_numpy"
+    timings["k2d_timer_scipy_least_squares_sec"] = 0.0
+    timings["k2d_timer_projective_edge_match_sec"] = 0.0
+    if torch_result is not None:
+        xy = torch_result
+        optimizer_iterations += int(max(40, params.max_2d_iterations * 6))
+    elif _original.least_squares is not None and not large_grid_fast_path:
+        scipy_start = time.perf_counter()
+        opt = _original.least_squares(residual, base_xy.ravel(), max_nfev=max(5, params.max_2d_iterations), method="trf")
+        timings["k2d_timer_scipy_least_squares_sec"] = float(time.perf_counter() - scipy_start)
+        projective_start = time.perf_counter()
+        xy = _original._projective_edge_match_2d(opt.x.reshape(-1, 2), base_xy, edges, target_lengths, mesh_2d.faces, mesh_2d.grid, iterations=optimizer_iterations)
+        timings["k2d_timer_projective_edge_match_sec"] = float(time.perf_counter() - projective_start)
+        optimizer_iterations = int(getattr(opt, "nfev", params.max_2d_iterations)) + optimizer_iterations
+        optimizer_converged = bool(getattr(opt, "success", True))
+        actual_backend = "scipy+projective_numpy"
+    else:
+        projective_start = time.perf_counter()
+        xy = _original._projective_edge_match_2d(base_xy, base_xy, edges, target_lengths, mesh_2d.faces, mesh_2d.grid, iterations=optimizer_iterations)
+        timings["k2d_timer_projective_edge_match_sec"] = float(time.perf_counter() - projective_start)
+
+    k2d_collision_relax_skipped_for_speed = False
+    collision_relax_start = time.perf_counter()
+    if actual_backend != "cuda":
+        if len(mesh_2d.faces) > 120:
+            k2d_collision_relax_skipped_for_speed = True
+        else:
+            relaxed_xy = _original._relax_2d_collisions(xy, mesh_2d.faces, mesh_2d.grid, iterations=3, weight=0.08)
+            relaxed_mean, relaxed_max = _edge_matching_errors(relaxed_xy, edge_idx, target_lengths)
+            current_mean, current_max = _edge_matching_errors(xy, edge_idx, target_lengths)
+            if relaxed_mean <= current_mean and relaxed_max <= current_max:
+                xy = relaxed_xy
+    timings["k2d_timer_collision_relax_sec"] = float(time.perf_counter() - collision_relax_start)
+
+    strict_metrics: dict[str, float | int | str | bool] = {"strict_k2d_solver_used": False}
+    pre_strict_start = time.perf_counter()
+    pre_strict_mean, pre_strict_max = _edge_matching_errors(xy, edge_idx, target_lengths)
+    mean_target_length = float(np.mean(target_lengths)) if len(target_lengths) else 1.0
+    strict_threshold = max(1e-5, 0.002 * mean_target_length)
+    timings["k2d_timer_pre_strict_error_check_sec"] = float(time.perf_counter() - pre_strict_start)
+    timings["k2d_timer_strict_solve_sec"] = 0.0
+    if getattr(params, "strict_paper_flow", False) and pre_strict_max > strict_threshold:
+        strict_start = time.perf_counter()
+        xy_strict, strict_metrics = _original._strict_k2d_edge_length_solve(
+            base_xy,
+            mesh_2d.faces,
+            edges,
+            target_lengths,
+            params,
+            progress_callback=_original._subprogress(progress_callback, 0.25, 0.92, "strict solve: "),
+        )
+        timings["k2d_timer_strict_solve_sec"] = float(time.perf_counter() - strict_start)
+        strict_mean, strict_max = _edge_matching_errors(xy_strict, edge_idx, target_lengths)
+        if strict_max <= pre_strict_max or strict_mean <= pre_strict_mean:
+            xy = xy_strict
+            actual_backend = "strict_edge_length_cuda" if strict_metrics.get("strict_k2d_projective_backend") == "cuda" else ("strict_edge_length_cpu" if actual_backend != "cuda" else "cuda+strict_edge_length_cpu")
+
+    finalize_start = time.perf_counter()
+    _original._emit_progress(progress_callback, "Finalize K2D metrics", 0.96, "Build flat vertices")
+    finalize_vertices_start = time.perf_counter()
+    vertices = np.column_stack([xy, np.zeros(len(xy))])
+    z_abs_max = float(np.max(np.abs(vertices[:, 2]))) if len(vertices) else 0.0
+    if z_abs_max > 1e-6:
+        raise RuntimeError("K2D is not planar. K2D must be a 2D flat layout.")
+    timings["k2d_timer_finalize_vertices_sec"] = float(time.perf_counter() - finalize_vertices_start)
+    _original._emit_progress(progress_callback, "Finalize K2D metrics", 0.965, "Edge metrics")
+    finalize_edge_start = time.perf_counter()
+    after_mean, after_max = _edge_matching_errors(xy, edge_idx, target_lengths)
+    timings["k2d_timer_finalize_edge_metrics_sec"] = float(time.perf_counter() - finalize_edge_start)
+    _original._emit_progress(progress_callback, "Finalize K2D metrics", 0.972, "Collision/clearance metrics")
+    finalize_collision_start = time.perf_counter()
+    tiles = _tiles_from_mesh_vertices(vertices, mesh_2d.faces)
+    collisions, min_clearance, collision_pair_count = _k2d_collision_and_clearance_metrics(tiles, mesh_2d.grid)
+    timings["k2d_timer_finalize_collision_clearance_sec"] = float(time.perf_counter() - finalize_collision_start)
+    _original._emit_progress(progress_callback, "Finalize K2D metrics", 0.982, "Gap angle metrics")
+    finalize_gap_start = time.perf_counter()
+    min_gap_angle, max_gap_angle, gap_angle_count = _gap_angle_range(vertices, mesh_2d.faces)
+    timings["k2d_timer_finalize_gap_angles_sec"] = float(time.perf_counter() - finalize_gap_start)
+    timings["k2d_finalize_gap_angle_count"] = int(gap_angle_count)
+    _original._emit_progress(progress_callback, "Finalize K2D metrics", 0.988, "Displacement metrics")
+    finalize_tail_start = time.perf_counter()
+    displacement = np.linalg.norm(xy - base_xy, axis=1)
+    displacement_rms = float(np.sqrt(np.mean(displacement * displacement))) if displacement.size else 0.0
+    displacement_max = float(np.max(displacement)) if displacement.size else 0.0
+    if "z_range_K3D" in mesh_3d.metrics:
+        z_range_k3d = float(mesh_3d.metrics["z_range_K3D"])
+    else:
+        z_range_k3d = float(_original._z_range(mesh_3d.vertices))
+    warning = ""
+    if displacement_rms < 1e-5 and z_range_k3d > mesh_2d.grid.tile_size * 0.02:
+        warning = "K2D is almost identical to M2D despite non-flat K3D. Edge matching may not be active."
+    timings["k2d_timer_finalize_displacement_warning_sec"] = float(time.perf_counter() - finalize_tail_start)
+    _original._emit_progress(progress_callback, "Finalize K2D metrics", 0.992, "Shared-edge count")
+    finalize_gap_count_start = time.perf_counter()
+    # For a manifold quad mesh, total edge incidences = boundary_edges + 2 * shared_edges,
+    # while unique mesh edges = boundary_edges + shared_edges.  unique edges were already
+    # computed for K2D edge matching, so this avoids rebuilding millions of HingeSpec objects.
+    k2d_gap_count = max(0, int(4 * len(mesh_2d.faces) - len(edge_idx)))
+    timings["k2d_timer_finalize_gap_count_sec"] = float(time.perf_counter() - finalize_gap_count_start)
+
+    torch_module = _original.torch
+    gpu_memory_peak = max(
+        int(torch_module.cuda.max_memory_allocated(0)) if "cuda" in str(actual_backend) and torch_module is not None and torch_module.cuda.is_available() else 0,
+        int(strict_metrics.get("strict_k2d_gpu_memory_peak", 0)),
+    )
+    timings["k2d_timer_finalize_total_sec"] = float(time.perf_counter() - finalize_start)
+    timed_items = [(key, value) for key, value in timings.items() if key.endswith("_sec")]
+    slowest_key, slowest_value = max(timed_items, key=lambda item: item[1]) if timed_items else ("", 0.0)
+    timings["k2d_timer_total_measured_sec"] = float(sum(value for _key, value in timed_items))
+    metrics = {
+        "objective": "E_Flat = w1*EEdge + w2*ECollision + w3*EFab",
+        "paper_weight_w1_edge": float(params.w_edge),
+        "paper_weight_w2_collision": float(params.w_collision),
+        "paper_weight_w3_fab": float(params.w_fab),
+        "paper_default_weights_used": bool(abs(params.w_edge - 1.0) < 1e-9 and abs(params.w_collision - 1.0) < 1e-9 and abs(params.w_fab - 0.001) < 1e-12),
+        "edge_matching_error": after_mean,
+        "edge_matching_error_before": before_mean,
+        "edge_matching_error_after": after_mean,
+        "k2d_z_abs_max": z_abs_max,
+        "k2d_edge_error_before": before_mean,
+        "k2d_edge_error_after": after_mean,
+        "mean_edge_length_error_before": before_mean,
+        "mean_edge_length_error_after": after_mean,
+        "max_edge_length_error_before": before_max,
+        "max_edge_length_error_after": after_max,
+        "k2d_displacement_rms": displacement_rms,
+        "k2d_displacement_max": displacement_max,
+        "k2d_xy_displacement_rms_from_M2D": displacement_rms,
+        "k2d_xy_displacement_max_from_M2D": displacement_max,
+        "collision_count_before": int(collisions_before),
+        "collision_count_after": int(collisions),
+        "2d_collision_count": int(collisions),
+        "k2d_tile_overlap_count": int(collisions),
+        "k2d_min_clearance": float(min_clearance),
+        "k2d_gap_count": int(k2d_gap_count),
+        "k2d_gap_count_method": "quad_edge_incidence_minus_precomputed_unique_edges",
+        "min_gap_angle": float(min_gap_angle),
+        "max_gap_angle": float(max_gap_angle),
+        "fabrication_clearance_violation": float(np.mean(displacement)) if displacement.size else 0.0,
+        "collision_projection": "deferred to Dual Hinge on medium/large grids; small-grid local AABB relax only if edge matching is preserved",
+        "k2d_collision_relax_skipped_for_speed": bool(k2d_collision_relax_skipped_for_speed),
+        "fast_path": bool(large_grid_fast_path),
+        "optimizer_iterations": int(optimizer_iterations),
+        "optimizer_converged": bool(optimizer_converged),
+        "strict_edge_length_threshold": float(strict_threshold),
+        "pre_strict_mean_edge_error": float(pre_strict_mean),
+        "pre_strict_max_edge_error": float(pre_strict_max),
+        **strict_metrics,
+        "approximation_warning": warning,
+        "actual_backend": actual_backend,
+        "dominant_backend": actual_backend,
+        "gpu_kernel_time": float(torch_metrics.get("gpu_kernel_time", 0.0)) + float(strict_metrics.get("strict_k2d_gpu_kernel_time", 0.0)),
+        "cpu_preprocess_time": float(torch_metrics.get("cpu_preprocess_time", 0.0)),
+        "cpu_postprocess_time": float(torch_metrics.get("cpu_postprocess_time", 0.0)),
+        "cpu_gpu_transfer_count": int(torch_metrics.get("cpu_gpu_transfer_count", 0)) + int(strict_metrics.get("strict_k2d_cpu_gpu_transfer_count", 0)),
+        "gpu_memory_peak": gpu_memory_peak,
+        "k2d_finalize_metrics_acceleration": "reuse tile array; vectorized edge metrics; chunked gap angle min/max; collision count and min clearance in one candidate-pair pass",
+        "k2d_finalize_elapsed_sec": float(time.perf_counter() - finalize_start),
+        "k2d_finalize_collision_pair_count": int(collision_pair_count),
+        "k2d_finalize_collision_pair_count_before": int(collision_pair_count_before),
+        "k2d_timer_slowest_phase": str(slowest_key),
+        "k2d_timer_slowest_phase_sec": float(slowest_value),
+        "k2d_timer_note": "Inspect k2d_timer_*_sec in K2D metrics; largest value is the current bottleneck.",
+        **timings,
+    }
+    out = _original.QuadMesh(vertices, mesh_2d.faces.copy(), mesh_2d.grid, "K2D", metrics, list(mesh_2d.split_lines))
+    report = _original.StageReport(
+        name="M2D -> K2D",
+        objective=str(metrics["objective"]),
+        before_error=before_mean,
+        after_error=after_mean,
+        constraint_violation=float(collisions),
+        computation_time=time.perf_counter() - start,
+        counts=_original._mesh_counts(out),
+    )
+    return out, report
+
+
+def _paper_local_global_se2_layout(
+    rest_xy: np.ndarray,
+    hinge_constraints: list[tuple[int, int, int, int]],
+    footprint_builder,
+    initial_xy: np.ndarray | None,
+    iterations: int,
+    connection_weight: float,
+    collision_weight: float,
+    anchor_weight: float,
+    clearance: float,
+    stage_name: str,
+    time_budget_sec: float = 8.0,
+    max_candidate_pairs: int = 3000,
+    collision_sweeps_per_iteration: int = 2,
+    initial_expansion: float = 1.0,
+    max_center_drift_tiles: float = 2.0,
+    progress_callback=None,
+) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
+    rest = np.asarray(rest_xy, dtype=float)
+    if len(rest) == 0:
+        return rest.copy(), {"paper_layout_optimizer": "empty"}
+    current = np.asarray(initial_xy if initial_xy is not None else rest, dtype=float).copy()
+    if current.shape != rest.shape:
+        current = rest.copy()
+
+    iterations = max(1, int(iterations))
+    w_conn = max(0.0, float(connection_weight))
+    w_coll = max(0.0, float(collision_weight))
+    w_anchor = max(0.0, float(anchor_weight))
+    clearance = max(float(clearance), 1e-6)
+    time_budget_sec = max(0.0, float(time_budget_sec))
+    max_candidate_pairs = max(50, int(max_candidate_pairs))
+    collision_sweeps_per_iteration = max(1, int(collision_sweeps_per_iteration))
+    solve_start_time = time.perf_counter()
+
+    edge_lengths: list[float] = []
+    for tile in rest:
+        edge_lengths.extend(float(np.linalg.norm(tile[(i + 1) % tile.shape[0]] - tile[i])) for i in range(tile.shape[0]))
+    tile_scale = max(float(np.median(edge_lengths)) if edge_lengths else 1.0, 1e-8)
+
+    initial_expansion = max(1.0, float(initial_expansion))
+    additive_expansion_offset = 0.0
+    if initial_expansion > 1.000001 and len(current):
+        centers0 = np.mean(current, axis=1)
+        world_center0 = np.mean(centers0, axis=0)
+        dirs = centers0 - world_center0
+        norms = np.linalg.norm(dirs, axis=1)
+        dirs = dirs / np.maximum(norms[:, None], 1e-12)
+        additive_expansion_offset = min((initial_expansion - 1.0) * tile_scale, tile_scale * 9.0)
+        current = current + additive_expansion_offset * dirs[:, None, :]
+
+    anchor_layout = current.copy()
+    anchor_centers = np.mean(anchor_layout, axis=1)
+    max_step = max(clearance * 2.0, tile_scale * 0.08)
+    max_center_drift = max(tile_scale * float(max_center_drift_tiles), clearance * 8.0)
+
+    hinge_neighbors: list[set[int]] = [set() for _ in range(len(current))]
+    for ia, _ca, ib, _cb in hinge_constraints:
+        if 0 <= ia < len(current) and 0 <= ib < len(current):
+            hinge_neighbors[int(ia)].add(int(ib))
+            hinge_neighbors[int(ib)].add(int(ia))
+
+    pair_cache: dict[str, object] = {"pairs": None, "iter": -10**9, "pad": None, "hit": 0, "miss": 0, "capped": False}
+    active_tile_counts: list[int] = []
+    active_pair_counts: list[int] = []
+    coarse_iterations = 0
+    fine_iterations = 0
+    max_collision_count = 0
+    last_pair_count = 0
+
+    def _cap_pairs(fp: np.ndarray, pairs: list[tuple[int, int]], limit: int) -> list[tuple[int, int]]:
+        if len(pairs) <= limit:
+            return pairs
+        pair_cache["capped"] = True
+        bmin = np.min(fp[:, :, :2], axis=1)
+        bmax = np.max(fp[:, :, :2], axis=1)
+        scores: list[tuple[float, int]] = []
+        for k, (i, j) in enumerate(pairs):
+            sep = np.maximum(np.maximum(bmin[j] - bmax[i], bmin[i] - bmax[j]), 0.0)
+            scores.append((float(np.dot(sep, sep)), int(k)))
+        scores.sort(key=lambda x: x[0])
+        return [pairs[k] for _, k in scores[:limit]]
+
+    def _phase(it: int) -> tuple[bool, float, int, int, int]:
+        coarse = it < max(1, int(iterations * 0.45))
+        if coarse:
+            return True, clearance * 0.65, max(50, int(max_candidate_pairs * 0.45)), max(1, collision_sweeps_per_iteration - 1), 8
+        return False, clearance, max_candidate_pairs, collision_sweeps_per_iteration, 4
+
+    def _candidate_pairs(layout: np.ndarray, it: int, pad: float, limit: int, update_interval: int, force: bool = False):
+        fp = np.asarray(footprint_builder(layout), dtype=float)
+        cached_pairs = pair_cache.get("pairs")
+        cache_iter = int(pair_cache.get("iter", -10**9))
+        cache_pad = pair_cache.get("pad")
+        valid = (
+            cached_pairs is not None
+            and cache_pad is not None
+            and abs(float(cache_pad) - float(pad)) <= max(1e-12, pad * 1e-9)
+            and (it - cache_iter) <= update_interval
+        )
+        if force or not valid:
+            pairs = _spatial_candidate_pairs_for_tiles(fp, pad=pad)
+            pairs = _cap_pairs(fp, pairs, limit)
+            pair_cache.update({"pairs": pairs, "iter": int(it), "pad": float(pad), "miss": int(pair_cache["miss"]) + 1})
+        else:
+            pairs = list(cached_pairs)  # type: ignore[arg-type]
+            pair_cache["hit"] = int(pair_cache["hit"]) + 1
+        return fp, pairs
+
+    def _connection_values(layout: np.ndarray) -> list[float]:
+        vals: list[float] = []
+        for ia, ca, ib, cb in hinge_constraints:
+            if ia < len(layout) and ib < len(layout) and ca < layout.shape[1] and cb < layout.shape[1]:
+                vals.append(float(np.linalg.norm(layout[ia, ca] - layout[ib, cb])))
+        return vals
+
+    def _active_sets(layout: np.ndarray, fp: np.ndarray, pairs: list[tuple[int, int]], phase_clearance: float):
+        active: set[int] = set()
+        conn_threshold = max(clearance * 0.25, tile_scale * 0.015)
+        for ia, ca, ib, cb in hinge_constraints:
+            if ia >= len(layout) or ib >= len(layout) or ca >= layout.shape[1] or cb >= layout.shape[1]:
+                continue
+            if float(np.linalg.norm(layout[ia, ca] - layout[ib, cb])) > conn_threshold:
+                active.add(int(ia))
+                active.add(int(ib))
+        for i, j in pairs:
+            overlap, _mtv, signed = _original._sat_polygon_mtv(fp[i], fp[j], clearance=phase_clearance)
+            if overlap or signed < max(clearance, tile_scale * 0.03):
+                active.add(int(i))
+                active.add(int(j))
+        if not active:
+            active = set(range(len(layout)))
+        grown = set(active)
+        for tile_id in active:
+            grown.update(hinge_neighbors[tile_id])
+        active_hinges = [(ia, ca, ib, cb) for ia, ca, ib, cb in hinge_constraints if int(ia) in grown or int(ib) in grown]
+        active_pairs = [(i, j) for i, j in pairs if int(i) in grown or int(j) in grown]
+        return grown, active_hinges, active_pairs
+
+    def _energy(layout: np.ndarray, it: int, phase_clearance: float, limit: int, update_interval: int, force_pairs: bool = False):
+        fp, pairs = _candidate_pairs(layout, it, max(phase_clearance * 8.0, tile_scale * 0.08, 1e-4), limit, update_interval, force=force_pairs)
+        penetration_sq = 0.0
+        collision_count = 0
+        min_clear = float("inf")
+        for i, j in pairs:
+            overlap, _, signed = _original._sat_polygon_mtv(fp[i], fp[j], clearance=clearance)
+            min_clear = min(min_clear, float(signed))
+            if overlap:
+                collision_count += 1
+                penetration_sq += float((-signed) ** 2)
+        conn_vals = _connection_values(layout)
+        conn_rms = float(np.sqrt(np.mean(np.square(conn_vals)))) if conn_vals else 0.0
+        conn_max = float(max(conn_vals, default=0.0))
+        centers = np.mean(layout, axis=1)
+        center_drift = centers - anchor_centers
+        anchor_rms = float(np.sqrt(np.mean(center_drift * center_drift))) if center_drift.size else 0.0
+        e = w_conn * conn_rms * conn_rms + w_coll * (penetration_sq + collision_count * clearance * clearance * 25.0) + w_anchor * anchor_rms * anchor_rms
+        return float(e), {
+            "collision_count": int(collision_count),
+            "min_clearance": float(min_clear if np.isfinite(min_clear) else 0.0),
+            "hinge_rms": float(conn_rms),
+            "hinge_max": float(conn_max),
+            "anchor_rms": float(anchor_rms),
+            "pair_count": int(len(pairs)),
+        }
+
+    def _clamp_step(base: np.ndarray, proposal: np.ndarray) -> np.ndarray:
+        out = proposal.copy()
+        base_centers = np.mean(base, axis=1)
+        prop_centers = np.mean(out, axis=1)
+        delta = prop_centers - base_centers
+        norms = np.linalg.norm(delta, axis=1)
+        active = norms > max_step
+        if np.any(active):
+            scale = (max_step / np.maximum(norms[active], 1e-12))[:, None]
+            out[active] = base[active] + (out[active] - base[active]) * scale[:, None, :]
+        centers = np.mean(out, axis=1)
+        drift = centers - anchor_centers
+        drift_norm = np.linalg.norm(drift, axis=1)
+        active = drift_norm > max_center_drift
+        if np.any(active):
+            target_centers = anchor_centers[active] + drift[active] * (max_center_drift / np.maximum(drift_norm[active], 1e-12))[:, None]
+            out[active] += (target_centers - centers[active])[:, None, :]
+        return out
+
+    _original._emit_progress(progress_callback, stage_name, 0.02, "Initialize cached active-set E_Hinge optimizer")
+    _coarse, phase_clearance, phase_limit, _sweeps, update_interval = _phase(0)
+    before_energy, before_stats = _energy(current, 0, phase_clearance, phase_limit, update_interval, force_pairs=True)
+    before_collision_count = int(before_stats["collision_count"])
+    before_clearance = float(before_stats["min_clearance"])
+    before_conn = float(before_stats["hinge_rms"])
+    best = current.copy()
+    best_energy = before_energy
+    current_energy = before_energy
+    current_stats = dict(before_stats)
+    timed_out = False
+    executed_iterations = 0
+    rejected_steps = 0
+    consecutive_rejected_steps = 0
+    accepted_steps = 0
+    early_stop_reason = "completed_requested_iterations"
+    max_consecutive_rejections = max(12, min(60, iterations // 8))
+
+    progress_stride = max(1, iterations // 60)
+    for it in range(iterations):
+        coarse, phase_clearance, phase_limit, phase_sweeps, update_interval = _phase(it)
+        coarse_iterations += int(coarse)
+        fine_iterations += int(not coarse)
+        if it % progress_stride == 0:
+            _original._emit_progress(
+                progress_callback,
+                stage_name,
+                min(0.98, (it + 1) / max(1, iterations)),
+                f"{'coarse' if coarse else 'fine'} iter {it + 1}/{iterations}, collisions={int(current_stats.get('collision_count', 0))}, hinge_rms={float(current_stats.get('hinge_rms', 0.0)):.4g}",
+            )
+        if time_budget_sec > 0.0 and (time.perf_counter() - solve_start_time) >= time_budget_sec:
+            timed_out = True
+            break
+        executed_iterations = it + 1
+
+        desired_sum = np.zeros_like(current)
+        desired_weight = np.zeros(current.shape[:2], dtype=float)
+        desired_sum += current
+        desired_weight += 1.0
+        if w_anchor > 0.0:
+            desired_sum += anchor_layout * w_anchor
+            desired_weight += w_anchor
+
+        fp, pairs = _candidate_pairs(current, it, max(phase_clearance * 8.0, tile_scale * 0.08, 1e-4), phase_limit, update_interval)
+        last_pair_count = int(len(pairs))
+        active_tiles, active_hinges, active_pairs = _active_sets(current, fp, pairs, phase_clearance)
+        active_tile_counts.append(len(active_tiles))
+        active_pair_counts.append(len(active_pairs))
+
+        ramp = min(1.0, (it + 1) / max(1.0, iterations * 0.25))
+        for ia, ca, ib, cb in active_hinges:
+            if ia >= len(current) or ib >= len(current) or ca >= current.shape[1] or cb >= current.shape[1]:
+                continue
+            mid = 0.5 * (current[ia, ca] + current[ib, cb])
+            w = w_conn * ramp
+            desired_sum[ia, ca] += mid * w
+            desired_weight[ia, ca] += w
+            desired_sum[ib, cb] += mid * w
+            desired_weight[ib, cb] += w
+
+        if w_coll > 0.0:
+            for _ in range(phase_sweeps):
+                shifts = np.zeros((len(current), 2), dtype=float)
+                counts = np.zeros((len(current), 1), dtype=float)
+                active_count = 0
+                for i, j in active_pairs:
+                    overlap, mtv, _signed = _original._sat_polygon_mtv(fp[i], fp[j], clearance=phase_clearance)
+                    if not overlap:
+                        continue
+                    active_count += 1
+                    shifts[i] += 0.5 * mtv
+                    shifts[j] -= 0.5 * mtv
+                    counts[i, 0] += 1.0
+                    counts[j, 0] += 1.0
+                max_collision_count = max(max_collision_count, int(active_count))
+                if active_count == 0:
+                    break
+                active = counts[:, 0] > 0.0
+                shifts[active] /= np.maximum(counts[active], 1.0)
+                w = min(1.5, 0.35 + 0.25 * w_coll) * ramp * (0.65 if coarse else 1.0)
+                desired_sum[active] += (current[active] + shifts[active, None, :]) * w
+                desired_weight[active] += w
+
+        proposal = current.copy()
+        for tile_id in active_tiles:
+            weights = np.maximum(desired_weight[tile_id], 1e-12)
+            targets = desired_sum[tile_id] / weights[:, None]
+            proposal[tile_id] = _original._fit_rigid_2d_weighted(rest[tile_id], targets, weights)
+        proposal = _clamp_step(current, proposal)
+        proposal -= np.mean(np.mean(proposal, axis=1), axis=0) - np.mean(np.mean(anchor_layout, axis=1), axis=0)
+
+        accepted = False
+        for alpha in (1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125):
+            trial = current + alpha * (proposal - current)
+            trial = _clamp_step(current, trial)
+            trial_energy, trial_stats = _energy(trial, it, phase_clearance, phase_limit, update_interval)
+            hinge_improves = float(trial_stats["hinge_rms"]) <= float(current_stats["hinge_rms"]) * 0.98
+            collision_improves = int(trial_stats["collision_count"]) < int(current_stats["collision_count"])
+            energy_improves = trial_energy <= current_energy * 1.02
+            improves = energy_improves or collision_improves or hinge_improves
+            if improves:
+                current = trial
+                current_energy = trial_energy
+                current_stats = dict(trial_stats)
+                accepted = True
+                accepted_steps += 1
+                consecutive_rejected_steps = 0
+                if trial_energy < best_energy:
+                    best = trial.copy()
+                    best_energy = trial_energy
+                break
+        if not accepted:
+            rejected_steps += 1
+            consecutive_rejected_steps += 1
+            pair_cache["iter"] = -10**9
+            if consecutive_rejected_steps >= max_consecutive_rejections:
+                early_stop_reason = "consecutive_rejected_steps"
+                break
+
+    current = best.copy()
+    _coarse, phase_clearance, _phase_limit, _sweeps, update_interval = _phase(iterations)
+    after_energy, after_stats = _energy(current, iterations + 1, phase_clearance, max_candidate_pairs, update_interval, force_pairs=True)
+    after_collision_count = int(after_stats["collision_count"])
+    after_clearance = float(after_stats["min_clearance"])
+    after_conn_rms = float(after_stats["hinge_rms"])
+    after_conn_max = float(after_stats["hinge_max"])
+    last_pair_count = int(after_stats["pair_count"])
+
+    shape_rms = _original._tile_shape_distance_error(np.dstack([current, np.zeros(current.shape[:2])]), np.dstack([rest, np.zeros(rest.shape[:2])]))
+    shape_max = _original._tile_shape_distance_error(
+        np.dstack([current, np.zeros(current.shape[:2])]),
+        np.dstack([rest, np.zeros(rest.shape[:2])]),
+        use_max=True,
+    )
+    return current, {
+        "paper_layout_optimizer": "cached active-set coarse-to-fine local/global E_Hinge SE(2) solver",
+        "paper_layout_stage": str(stage_name),
+        "paper_layout_energy": "E_Hinge = E_Rigid + E_Collision + E_Conn",
+        "paper_layout_E_Rigid": "exact per-tile rigid SE(2) Procrustes projection",
+        "paper_layout_E_Collision": "SAT full-footprint local projection with cached AABB broad-phase pairs",
+        "paper_layout_E_Conn": "vertex-joint midpoint local projection",
+        "paper_layout_iterations_requested": int(iterations),
+        "paper_layout_iterations_executed": int(executed_iterations),
+        "paper_layout_timed_out": bool(timed_out),
+        "paper_layout_time_budget_sec": float(time_budget_sec),
+        "paper_layout_elapsed_sec": float(time.perf_counter() - solve_start_time),
+        "paper_layout_max_candidate_pairs": int(max_candidate_pairs),
+        "paper_layout_candidate_pairs_capped": bool(pair_cache["capped"]),
+        "paper_layout_collision_sweeps_per_iteration": int(collision_sweeps_per_iteration),
+        "paper_layout_connection_weight": float(connection_weight),
+        "paper_layout_collision_weight": float(collision_weight),
+        "paper_layout_anchor_weight": float(anchor_weight),
+        "paper_layout_anchor_reference": "expanded fabrication layout, not raw K2D shared mesh",
+        "paper_layout_initial_expansion": float(initial_expansion),
+        "paper_layout_expansion_mode": "bounded additive radial offset in tile-size units",
+        "paper_layout_additive_expansion_offset": float(additive_expansion_offset),
+        "paper_layout_global_space_expansion_enabled": bool(initial_expansion > 1.000001),
+        "paper_layout_max_center_drift_tiles": float(max_center_drift_tiles),
+        "paper_layout_clearance": float(clearance),
+        "paper_layout_trust_region_max_step": float(max_step),
+        "paper_layout_trust_region_max_center_drift": float(max_center_drift),
+        "paper_layout_accepted_steps": int(accepted_steps),
+        "paper_layout_rejected_steps": int(rejected_steps),
+        "paper_layout_consecutive_rejected_steps_at_end": int(consecutive_rejected_steps),
+        "paper_layout_max_consecutive_rejections": int(max_consecutive_rejections),
+        "paper_layout_early_stop_reason": str("time_budget" if timed_out else early_stop_reason),
+        "paper_layout_returned_best_state": True,
+        "paper_layout_energy_before": float(before_energy),
+        "paper_layout_energy_after": float(after_energy),
+        "paper_layout_candidate_pair_count_last": int(last_pair_count),
+        "paper_layout_collision_count_before": int(before_collision_count),
+        "paper_layout_collision_count_after": int(after_collision_count),
+        "paper_layout_collision_count_max_seen": int(max_collision_count),
+        "paper_layout_min_clearance_before": float(before_clearance),
+        "paper_layout_min_clearance_after": float(after_clearance),
+        "paper_layout_hinge_rms_before": float(before_conn),
+        "paper_layout_hinge_rms_after": float(after_conn_rms),
+        "paper_layout_hinge_max_after": float(after_conn_max),
+        "paper_layout_tile_shape_rms_error": float(shape_rms),
+        "paper_layout_tile_shape_max_error": float(shape_max),
+        "paper_layout_tile_shape_preserved": bool(shape_max < 1e-8),
+        "paper_layout_hinge_pairs_exempt_from_collision": False,
+        "paper_layout_old_soft_pushback_disabled": True,
+        "paper_layout_scattered_layout_guard_enabled": True,
+        "paper_layout_candidate_pair_cache_enabled": True,
+        "paper_layout_candidate_pair_cache_hits": int(pair_cache["hit"]),
+        "paper_layout_candidate_pair_cache_misses": int(pair_cache["miss"]),
+        "paper_layout_candidate_pair_update_policy": "force on start/final/rejection, otherwise every 8 coarse or 4 fine iterations",
+        "paper_layout_spatial_hash_model": "padded AABB occupancy cells with precise padded AABB broad-phase filter",
+        "paper_layout_active_set_enabled": True,
+        "paper_layout_active_tile_count_mean": float(np.mean(active_tile_counts)) if active_tile_counts else float(len(current)),
+        "paper_layout_active_pair_count_mean": float(np.mean(active_pair_counts)) if active_pair_counts else float(last_pair_count),
+        "paper_layout_coarse_to_fine_enabled": True,
+        "paper_layout_coarse_iterations": int(coarse_iterations),
+        "paper_layout_fine_iterations": int(fine_iterations),
+    }
+
+
 # Patch the original module in-place. Functions such as build_onestring_design()
 # keep their original global namespace, so this assignment is what makes them call
 # the new extrusion implementation.
@@ -3148,13 +5134,28 @@ _original._extrude_tiles = _extrude_tiles
 _original._build_surface_parameterization = _build_surface_parameterization
 _original._flatten_to_domain = _flatten_to_domain
 _original._build_m2d = _build_m2d
+_original.inverse_map_uv_to_surface = inverse_map_uv_to_surface
+_original._closest_points_on_surface_mesh = _closest_points_on_surface_mesh
+_original._distances_to_surface_mesh = _distances_to_surface_mesh
+_original._spatial_candidate_pairs_for_tiles = _spatial_candidate_pairs_for_tiles
+_original._tiles_from_mesh_vertices = _tiles_from_mesh_vertices
+_original._edge_matching_error = _edge_matching_error
+_original._edge_matching_errors = _edge_matching_errors
+_original._gap_angles = _gap_angles
+_original._count_2d_tile_collisions = _count_2d_tile_collisions
+_original._min_aabb_clearance_2d = _min_aabb_clearance_2d
+_original._paper_local_global_se2_layout = _ORIGINAL_PAPER_LOCAL_GLOBAL_SE2_LAYOUT
 _original._lift_m2d_to_m3d = _lift_m2d_to_m3d
+_original._optimize_k2d = _optimize_k2d
 _original._optimize_k3d = _optimize_k3d
 _original._make_flat_tile_layout = _make_flat_tile_layout
 _original._optimize_t2d_footprint_layout = _optimize_t2d_footprint_layout
 _original._optimize_rigid_assembly_hinge_layout_2d = _optimize_rigid_assembly_hinge_layout_2d
 _original._make_t2d_from_transforms = _make_t2d_from_transforms
 _original._optimize_dual_hinges = _optimize_dual_hinges
+_original._build_gap_graph = _build_gap_graph
+_original._select_lift_points = _select_lift_points
+_original._build_string_path = _build_string_path
 
 # Re-export the original module's API from this wrapper.
 for _name, _value in _original.__dict__.items():
@@ -3169,9 +5170,15 @@ for _name, _value in _original.__dict__.items():
         "_build_surface_parameterization",
         "_flatten_to_domain",
         "_build_m2d",
+        "inverse_map_uv_to_surface",
+        "_closest_points_on_surface_mesh",
+        "_distances_to_surface_mesh",
         "_lift_m2d_to_m3d",
         "_optimize_k3d",
         "_make_flat_tile_layout",
+        "_build_gap_graph",
+        "_select_lift_points",
+        "_build_string_path",
         "_optimize_dual_hinges",
         "PipelineParameters",
     }:
@@ -3183,6 +5190,9 @@ globals()["_extrude_tiles"] = _extrude_tiles
 globals()["_build_surface_parameterization"] = _build_surface_parameterization
 globals()["_flatten_to_domain"] = _flatten_to_domain
 globals()["_build_m2d"] = _build_m2d
+globals()["inverse_map_uv_to_surface"] = inverse_map_uv_to_surface
+globals()["_closest_points_on_surface_mesh"] = _closest_points_on_surface_mesh
+globals()["_distances_to_surface_mesh"] = _distances_to_surface_mesh
 globals()["_lift_m2d_to_m3d"] = _lift_m2d_to_m3d
 globals()["_optimize_k3d"] = _optimize_k3d
 globals()["_make_flat_tile_layout"] = _make_flat_tile_layout
@@ -3190,6 +5200,9 @@ globals()["_optimize_t2d_footprint_layout"] = _optimize_t2d_footprint_layout
 globals()["_optimize_rigid_assembly_hinge_layout_2d"] = _optimize_rigid_assembly_hinge_layout_2d
 globals()["_make_t2d_from_transforms"] = _make_t2d_from_transforms
 globals()["_optimize_dual_hinges"] = _optimize_dual_hinges
+globals()["_build_gap_graph"] = _build_gap_graph
+globals()["_select_lift_points"] = _select_lift_points
+globals()["_build_string_path"] = _build_string_path
 globals()["export_t2d_stl"] = export_t2d_stl
 globals()["SIDEFACE_CONTACT_PATCH_ACTIVE"] = True
 globals()["SIDEFACE_CONTACT_PATCH_ORIGINAL_PATH"] = str(_ORIGINAL_PATH)

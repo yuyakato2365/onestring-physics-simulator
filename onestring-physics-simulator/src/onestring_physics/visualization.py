@@ -224,6 +224,22 @@ def _high_csf_vertices(state: OneStringDesignState) -> tuple[np.ndarray, np.ndar
     return uv[mask], xyz[mask], csf[mask]
 
 
+def _residual_high_csf_vertices(state: OneStringDesignState) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    parameterization = state.surface_parameterization
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    csf = np.asarray(getattr(state.conformal_domain, "csf_values", np.zeros(0)), dtype=float)
+    indices = state.mesh_2d_initial.metrics.get("csf_split_residual_high_vertex_indices_after_all", [])
+    try:
+        ids = np.asarray([int(i) for i in indices], dtype=int)
+    except Exception:
+        ids = np.zeros(0, dtype=int)
+    ids = ids[(ids >= 0) & (ids < len(uv)) & (ids < len(xyz)) & (ids < len(csf))]
+    if len(ids) == 0:
+        return np.zeros((0, 2), dtype=float), np.zeros((0, 3), dtype=float), np.zeros(0, dtype=float)
+    return uv[ids], xyz[ids], csf[ids]
+
+
 def _surface_peak_markers(state: OneStringDesignState) -> tuple[np.ndarray, np.ndarray]:
     parameterization = state.surface_parameterization
     peak_uv = _surface_peak_uvs(parameterization)
@@ -261,6 +277,7 @@ def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
     )
 
     high_uv, high_s, high_csf = _high_csf_vertices(state)
+    residual_uv, residual_s, residual_csf = _residual_high_csf_vertices(state)
     peak_uv, peak_s = _surface_peak_markers(state)
     if len(high_s):
         fig.add_trace(
@@ -286,6 +303,19 @@ def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
                 mode="markers",
                 marker=dict(size=5, color="#ef4444"),
                 name="S mapped split samples",
+            ),
+            row=1,
+            col=1,
+        )
+    if len(residual_s):
+        fig.add_trace(
+            go.Scatter3d(
+                x=residual_s[:, 0],
+                y=residual_s[:, 1],
+                z=residual_s[:, 2],
+                mode="markers",
+                marker=dict(size=4, color=residual_csf, colorscale="Viridis", symbol="circle-open"),
+                name="S residual CSF after split steps",
             ),
             row=1,
             col=1,
@@ -356,6 +386,18 @@ def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
                 mode="markers",
                 marker=dict(size=6, color="#ef4444"),
                 name="Omega split samples",
+            ),
+            row=1,
+            col=2,
+        )
+    if len(residual_uv):
+        fig.add_trace(
+            go.Scatter(
+                x=residual_uv[:, 0],
+                y=residual_uv[:, 1],
+                mode="markers",
+                marker=dict(size=8, color=residual_csf, colorscale="Viridis", symbol="circle-open"),
+                name="Omega residual CSF after split steps",
             ),
             row=1,
             col=2,
@@ -656,13 +698,6 @@ def add_tile_assembly(
             j_idx.extend([base + 1, base + 2])
             k_idx.extend([base + 2, base + 3])
         for edge_id, edge in enumerate([(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]):
-            local_side_edge = edge_id if edge_id < 4 else edge_id - 4 if edge_id < 8 else None
-            if local_side_edge is not None and edge_id >= 4 and (int(tile_id), int(local_side_edge)) in hidden_side_edges:
-                continue
-            if edge_id >= 8:
-                adjacent = {8: (0, 3), 9: (0, 1), 10: (1, 2), 11: (2, 3)}[edge_id]
-                if all((int(tile_id), int(e)) in hidden_side_edges for e in adjacent):
-                    continue
             pts = tile[list(edge)]
             edge_x.extend([pts[0, 0], pts[1, 0], None])
             edge_y.extend([pts[0, 1], pts[1, 1], None])
@@ -766,7 +801,7 @@ def add_gap_graph(
             marker=dict(size=3, color=colors, opacity=0.85),
             text=[str(gap.label) for gap in gaps],
             textposition="top center",
-            name="gaps",
+            name="gaps (orange=boundary, red=LiftPoint)",
         )
     )
     if string_path is not None and string_path.gap_ids:
@@ -780,7 +815,7 @@ def add_gap_graph(
                     mode="lines+markers",
                     line=dict(color="#dc2626", width=5),
                     marker=dict(size=2.5, color="#dc2626"),
-                    name="boundary-first string path",
+                    name="string path",
                 )
             )
 

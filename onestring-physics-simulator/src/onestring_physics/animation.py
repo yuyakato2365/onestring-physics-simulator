@@ -303,13 +303,52 @@ def _assembly_vertices_at_frame(
     return _simultaneous_hinge_contraction_vertices(start, target, t)
 
 
+def _rigid_local_shape_blend(start_local: np.ndarray, target_local: np.ndarray, alpha: float) -> np.ndarray:
+    """Interpolate per-tile local frames without shearing the tile in between."""
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    if alpha <= 0.0:
+        return np.asarray(start_local, dtype=float).copy()
+    if alpha >= 1.0:
+        return np.asarray(target_local, dtype=float).copy()
+    start_arr = np.asarray(start_local, dtype=float)
+    target_arr = np.asarray(target_local, dtype=float)
+    if start_arr.shape != target_arr.shape or start_arr.ndim != 3:
+        return (1.0 - alpha) * start_arr + alpha * target_arr
+
+    try:
+        from scipy.spatial.transform import Rotation
+    except Exception:
+        return (1.0 - alpha) * start_arr + alpha * target_arr
+
+    out = np.empty_like(start_arr)
+    for tile_id in range(start_arr.shape[0]):
+        source = start_arr[tile_id]
+        target = target_arr[tile_id]
+        if not np.all(np.isfinite(source)) or not np.all(np.isfinite(target)):
+            out[tile_id] = (1.0 - alpha) * source + alpha * target
+            continue
+        try:
+            u, _s, vt = np.linalg.svd(source.T @ target)
+            rotation = vt.T @ u.T
+            if np.linalg.det(rotation) < 0.0:
+                vt[-1, :] *= -1.0
+                rotation = vt.T @ u.T
+            step = Rotation.from_matrix(rotation).as_rotvec() * alpha
+            rotation_alpha = Rotation.from_rotvec(step).as_matrix()
+            out[tile_id] = source @ rotation_alpha.T
+        except Exception:
+            out[tile_id] = (1.0 - alpha) * source + alpha * target
+    return out
+
+
 def _simultaneous_hinge_contraction_vertices(start: np.ndarray, target: np.ndarray, t: float) -> np.ndarray:
     """Synchronous hinge-shortening style preview.
 
     Each tile is animated as a centroid plus local shape.  Centroids contract
     from the flat T2D layout toward their assembled T3D positions at the same
-    time, and local tile orientation/thickness blends toward T3D.  This avoids
-    the previous wave-like activation and makes the whole sheet rise together.
+    time, and local tile orientation rotates toward T3D.  The local blend is
+    rigid per tile so a panel does not collapse or shear just because the T2D
+    and T3D poses are differently oriented.
     """
     t = float(np.clip(t, 0.0, 1.0))
     # Hinge/channel shortening is mostly an in-plane contraction first; height
@@ -321,16 +360,12 @@ def _simultaneous_hinge_contraction_vertices(start: np.ndarray, target: np.ndarr
     start_center = np.nanmean(start, axis=1, keepdims=True)
     target_center = np.nanmean(target, axis=1, keepdims=True)
     center = (1.0 - center_alpha) * start_center + center_alpha * target_center
+    center[..., 2] = (1.0 - z_alpha) * start_center[..., 2] + z_alpha * target_center[..., 2]
 
     start_local = start - start_center
     target_local = target - target_center
-    local = (1.0 - local_alpha) * start_local + local_alpha * target_local
-    vertices = center + local
-
-    # Bias z separately so the visual reads as simultaneous lifting caused by
-    # shrinking hinges/gaps, not as independent tiles crawling along a path.
-    vertices[..., 2] = (1.0 - z_alpha) * start[..., 2] + z_alpha * target[..., 2]
-    return vertices
+    local = _rigid_local_shape_blend(start_local, target_local, local_alpha)
+    return center + local
 
 
 def _animation_tile_indices(state: OneStringDesignState, max_tiles: int | None) -> np.ndarray:

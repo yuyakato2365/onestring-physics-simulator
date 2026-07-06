@@ -7,6 +7,7 @@ from onestring_physics.onestring_pipeline import (
     _csf_split_lines,
     _detect_parameterization_reflection_symmetry,
     _extrude_tiles,
+    _free_layout_parameters,
     _m2d_connected_component_sizes,
     _mirror_csf_split_lines,
     _orient_tile_normals_consistently,
@@ -20,7 +21,7 @@ from onestring_physics.onestring_pipeline import (
     safe_capstan_friction,
     simulate_onestring_deployment,
 )
-from onestring_physics.animation import assembly_progress_animation
+from onestring_physics.animation import _simultaneous_hinge_contraction_vertices, assembly_progress_animation
 from onestring_physics.visualization import figure_flat_tile_layout, figure_tile_assembly
 import numpy as np
 from types import SimpleNamespace
@@ -34,6 +35,29 @@ def experimental_params(**kwargs):
     }
     values.update(kwargs)
     return PipelineParameters(**values)
+
+
+def test_hinge_layout_defaults_match_streamlit_controls():
+    params = PipelineParameters()
+
+    assert params.hinge_layout_connection_weight == 8.0
+    assert params.hinge_layout_collision_weight == 4.0
+    assert params.hinge_layout_anchor_weight == 0.0
+    assert params.hinge_layout_initial_expansion == 1.6
+    assert params.hinge_layout_max_center_drift_tiles == 5.0
+
+    free = _free_layout_parameters(
+        grid=SimpleNamespace(tile_size=1.0, gap_size=0.08),
+        iterations=params.hinge_layout_iterations,
+        connection_weight=params.hinge_layout_connection_weight,
+        collision_weight=params.hinge_layout_collision_weight,
+        anchor_weight=params.hinge_layout_anchor_weight,
+        initial_expansion=params.hinge_layout_initial_expansion,
+        max_center_drift_tiles=params.hinge_layout_max_center_drift_tiles,
+    )
+    assert free["anchor_weight"] == 0.0
+    assert free["initial_expansion"] == 1.6
+    assert free["max_center_drift_tiles"] == 5.0
 
 
 def test_onestring_pipeline_stores_paper_intermediates():
@@ -60,6 +84,15 @@ def test_onestring_pipeline_stores_paper_intermediates():
     assert len(state.gap_graph.gaps) > 0
     assert len(state.lift_points) > 0
     assert len(state.string_path.boundary_gap_ids) > 0
+    assert state.gap_graph.metrics["lift_point_selection_model"] == "discrete_graph_gpe_peak_coupling"
+    assert state.gap_graph.metrics["lift_point_count"] == len(state.lift_points)
+    assert state.gap_graph.metrics["lift_point_rows"]
+    for row in state.gap_graph.metrics["lift_point_rows"]:
+        assert {"gap_id", "gpe", "position_2d", "position_3d", "selection_reason"}.issubset(row)
+        assert row["selection_reason"]
+    assert state.string_path.metrics["string_path_model"] == "boundary_loop_to_gpe_lift_peaks_weighted_gap_graph_path"
+    assert state.string_path.metrics["string_path_boundary_loop_included"] is True
+    assert set(state.string_path.boundary_gap_ids).issubset(set(state.string_path.gap_ids))
 
 
 def test_onestring_actuation_reports_t3d_error_and_constraints():
@@ -424,19 +457,15 @@ def test_split_coincident_edges_are_not_treated_as_open_outer_walls():
     assert sorted(assembly.metrics["split_contact_side_edges"]) == [[0, 1], [1, 3]]
 
 
-def test_t2d_uses_k2d_top_vertices_and_has_frumstum_geometry():
+def test_t2d_preserves_t3d_tile_shape_for_animation_and_has_frustum_geometry():
     target = create_builtin_shape("dome", {"amplitude": 0.6, "radius": 2.0})
     state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=8, max_2d_iterations=12))
-    k2d_tiles = state.k2d_flat_layout.tile_top_vertices_3d
-
     assert "t3d_extrusion_normal_flip_count" in state.tiles_3d.metrics
     assert state.tiles_3d.metrics["t3d_extrusion_normal_inconsistent_edge_count"] == 0
     assert state.tiles_3d.metrics["t3d_reversed_extrusion_vertex_count"] == 0
 
-    top_to_k2d = np.max(np.abs(state.tiles_2d_top_hinge.vertices[:, :4, :2] - k2d_tiles[:, :, :2]))
-    assert state.tiles_2d_top_hinge.metrics["top_vertices_match_k2d_max_error"] < 0.2
-    assert top_to_k2d < 0.2
-    assert np.max(np.abs(state.tiles_2d_top_hinge.vertices[:, :4, 2])) < 1e-8
+    assert state.tiles_2d_top_hinge.metrics["t2d_t3d_congruent_tile_geometry"] is True
+    assert state.tiles_2d_top_hinge.metrics["tile_shape_max_error_to_T3D"] < 1e-6
     assert state.tiles_2d_top_hinge.vertices.shape[1] == 8
     assert state.tiles_2d_top_hinge.side_faces.shape == (4, 4)
     assert state.tiles_2d_top_hinge.metrics["side_faces_count"] == state.tiles_2d_top_hinge.tile_count * 4
@@ -475,6 +504,29 @@ def test_assembly_progress_animation_has_frames():
     assert len(fig.data) > 0
 
 
+def test_assembly_progress_animation_keeps_tiles_rigid_between_poses():
+    start = np.asarray(
+        [[[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]],
+        dtype=float,
+    )
+    theta = np.deg2rad(70.0)
+    rotation = np.asarray(
+        [
+            [np.cos(theta), -np.sin(theta), 0.0],
+            [np.sin(theta), np.cos(theta), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    target = start @ rotation.T + np.asarray([[[4.0, -2.0, 1.0]]])
+
+    mid = _simultaneous_hinge_contraction_vertices(start, target, 0.5)
+
+    start_lengths = np.linalg.norm(start[:, :, None, :] - start[:, None, :, :], axis=-1)
+    mid_lengths = np.linalg.norm(mid[:, :, None, :] - mid[:, None, :, :], axis=-1)
+    assert np.max(np.abs(start_lengths - mid_lengths)) < 1e-10
+
+
 def test_safe_capstan_friction_does_not_overflow():
     assert np.isinf(safe_capstan_friction(1.0, 1000.0))
     assert safe_capstan_friction(0.2, 2.0) > 0.0
@@ -493,6 +545,8 @@ def test_export_t2d_stl_combined_records_metrics():
     assert metrics["t2d_vertex_count"] == state.tiles_2d_dual_hinge.tile_count * 8
     assert metrics["t2d_face_count"] == state.tiles_2d_dual_hinge.tile_count * 12
     assert metrics["t2d_nonmanifold_edge_count"] == 0
+    assert metrics["t2d_export_model"] == "current_T2D_assembly_vertices_scaled_to_stl"
+    assert metrics["t2d_export_thickness"] > 0.0
 
 
 def test_export_t2d_stl_can_return_per_tile_files():
