@@ -450,8 +450,10 @@ def test_split_coincident_edges_are_not_treated_as_open_outer_walls():
     canonical_faces, weld_metrics = _canonicalize_faces_by_coincident_vertices(vertices, faces)
     assembly, _report = _extrude_tiles(mesh, 0.1, "T3D")
 
-    assert weld_metrics["split_virtual_weld_applied"] is True
-    assert len({int(v) for v in canonical_faces.reshape(-1)}) == 6
+    assert weld_metrics["split_virtual_weld_applied"] is False
+    assert weld_metrics["split_boundary_topology_preserved"] is True
+    assert weld_metrics["split_virtual_weld_candidate_group_count"] == 2
+    assert len({int(v) for v in canonical_faces.reshape(-1)}) == 8
     assert assembly.metrics["split_contact_miter_edge_count"] == 1
     assert assembly.metrics["boundary_side_plane_count"] == 6
     assert sorted(assembly.metrics["split_contact_side_edges"]) == [[0, 1], [1, 3]]

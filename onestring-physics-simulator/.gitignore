@@ -11,9 +11,11 @@ build/
 *.egg-info/
 streamlit.out.log
 streamlit.err.log
+streamlit-*.log
 streamlit.pid
 .streamlit/
 app_backup_before_*.py
+*.backup_before_*
 src_backup_before_*/
 *_tmp/
 *_patch.zip

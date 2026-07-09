@@ -289,6 +289,12 @@ pip install -e ".[dev]"
 streamlit run app.py
 ```
 
+For reproducing the known-good work-PC environment on another Windows PC,
+start with `CHATGPT_HANDOFF.md` and `docs/home_pc_codex_handoff_ja.md`.
+The CUDA PyTorch snapshot used on the work PC is captured in
+`requirements-local-cu128-lock.txt`; `requirements.txt` alone does not pin a
+CUDA-enabled PyTorch build.
+
 If you do not want editable install:
 
 ```powershell
