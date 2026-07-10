@@ -17,6 +17,14 @@ streamlit.pid
 app_backup_before_*.py
 *.backup_before_*
 src_backup_before_*/
+# The compatibility wrapper imports this exact base implementation at runtime.
+# Keep only this required file; other historical backup trees remain ignored.
+!src_backup_before_sideface_contact/
+src_backup_before_sideface_contact/*
+!src_backup_before_sideface_contact/onestring_physics/
+src_backup_before_sideface_contact/onestring_physics/*
+!src_backup_before_sideface_contact/onestring_physics/onestring_pipeline.py
 *_tmp/
 *_patch.zip
+src/onestring_physics.zip
 tmp_pdf_text.txt

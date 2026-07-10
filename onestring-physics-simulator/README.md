@@ -2,6 +2,10 @@
 
 A Python research prototype inspired by **One String to Pull Them All: Fast Assembly of Curved Structures from Flat Auxetic Linkages**.
 
+The optional `boundary_sliding_lscm` mode is LSCM with a prescribed rectangular target boundary and order-preserving sliding boundary correspondence. It is explicitly not Boundary First Flattening: it does not implement the Cherrier formula or a Poincare-Steklov operator. See [docs/boundary_sliding_lscm_ja.md](docs/boundary_sliding_lscm_ja.md).
+
+For a reproducible Windows/CUDA setup, including the wrapper-to-base runtime path that must be present in a clone, follow [docs/home_pc_codex_handoff_ja.md](docs/home_pc_codex_handoff_ja.md) and run `python scripts/verify_home_environment.py --require-cuda` before comparing performance.
+
 This simulator is a paper-audited OneString research prototype, not a complete paper implementation. The default `PipelineParameters()` path requests `omega_parameterization_mode="bff"`, but the active flattening backend is reported explicitly. If no wired reference BFF backend is available, the pipeline uses an explicit free-boundary conformal LSCM fallback instead of pretending that rectangular-boundary harmonic UVs are BFF. PCA remains available only as an explicit debug/experimental path with `allow_experimental_pipeline=True`.
 
 The default Streamlit workflow is:

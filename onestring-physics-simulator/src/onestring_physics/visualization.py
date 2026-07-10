@@ -482,16 +482,56 @@ def figure_m3d_overlay(state: OneStringDesignState) -> go.Figure:
     fig = go.Figure()
     _add_quad_mesh_surface(fig, state.target_surface.vertices, state.target_surface.faces, color="#94a3b8", opacity=0.28, name="target surface S")
     _add_quad_mesh_surface(fig, state.mesh_3d_initial.vertices, state.mesh_3d_initial.faces, color="#ef4444", opacity=0.82, name="M3D c^-1 grid")
-    failures = int(state.mesh_3d_initial.metrics.get("m3d_uv_triangle_lookup_fail_count", 0))
-    if failures:
+    metrics = state.mesh_3d_initial.metrics
+    failure_ids = np.asarray(metrics.get("m3d_uv_lookup_failure_vertex_ids", []), dtype=int)
+    failure_ids = failure_ids[(failure_ids >= 0) & (failure_ids < len(state.mesh_3d_initial.vertices))]
+    if len(failure_ids):
+        points = state.mesh_3d_initial.vertices[failure_ids]
         fig.add_trace(
             go.Scatter3d(
-                x=state.mesh_3d_initial.vertices[:, 0],
-                y=state.mesh_3d_initial.vertices[:, 1],
-                z=state.mesh_3d_initial.vertices[:, 2] + 0.03,
+                x=points[:, 0],
+                y=points[:, 1],
+                z=points[:, 2] + 0.03,
                 mode="markers",
-                marker=dict(size=5, color="#dc2626"),
+                marker=dict(size=7, color="#dc2626", symbol="x"),
                 name="UV lookup failures",
+            )
+        )
+    outside_ids = np.asarray(metrics.get("m3d_outside_omega_vertex_ids", []), dtype=int)
+    outside_ids = outside_ids[(outside_ids >= 0) & (outside_ids < len(state.mesh_3d_initial.vertices))]
+    if len(outside_ids):
+        points = state.mesh_3d_initial.vertices[outside_ids]
+        fig.add_trace(
+            go.Scatter3d(
+                x=points[:, 0],
+                y=points[:, 1],
+                z=points[:, 2] + 0.045,
+                mode="markers",
+                marker=dict(size=6, color="#f59e0b", symbol="diamond"),
+                name="outside Omega / clamped lookup",
+            )
+        )
+    hit_counts = np.asarray(metrics.get("m3d_surface_triangle_hit_counts", []), dtype=float)
+    target_faces = np.asarray(state.target_surface.faces, dtype=int)[:, :3]
+    if len(hit_counts) == len(target_faces) and np.any(hit_counts > 0):
+        hit_ids = np.flatnonzero(hit_counts > 0)
+        centers = np.mean(np.asarray(state.target_surface.vertices, dtype=float)[target_faces[hit_ids]], axis=1)
+        fig.add_trace(
+            go.Scatter3d(
+                x=centers[:, 0],
+                y=centers[:, 1],
+                z=centers[:, 2] + 0.02,
+                mode="markers",
+                marker=dict(
+                    size=4,
+                    color=hit_counts[hit_ids],
+                    colorscale="Plasma",
+                    colorbar=dict(title="inverse-map hits"),
+                    opacity=0.82,
+                ),
+                text=[f"surface triangle {triangle_id}<br>hits={int(hit_counts[triangle_id])}" for triangle_id in hit_ids],
+                hoverinfo="text",
+                name="surface triangle usage",
             )
         )
     fig.update_layout(title="M3D inverse parameterization overlay on target surface")
@@ -583,16 +623,112 @@ def figure_flat_tile_layout(
 
 def figure_domain(state: OneStringDesignState) -> go.Figure:
     fig = go.Figure()
-    boundary = state.conformal_domain.boundary
+    parameterization = state.surface_parameterization
+    metrics = getattr(parameterization, "metrics", {}) or {}
+    target_corners = np.asarray(metrics.get("boundary_target_corners", np.zeros((0, 2))), dtype=float)
+    if target_corners.shape == (4, 2):
+        target_boundary = np.vstack([target_corners, target_corners[0]])
+        fig.add_trace(
+            go.Scatter(
+                x=target_boundary[:, 0],
+                y=target_boundary[:, 1],
+                mode="lines",
+                line=dict(color="#111827", width=3, dash="dash"),
+                name="target rectangle",
+            )
+        )
+
+    boundary = np.asarray(parameterization.omega_boundary, dtype=float)
+    if boundary.size == 0:
+        boundary = np.asarray(state.conformal_domain.boundary, dtype=float)
     fig.add_trace(
         go.Scatter(
             x=boundary[:, 0],
             y=boundary[:, 1],
             mode="lines",
-            line=dict(color="#0f172a", width=3),
-            name="Omega boundary",
+            line=dict(color="#0f766e", width=3),
+            name="final Omega boundary",
         )
     )
+
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    uv_faces = np.asarray(parameterization.uv_faces, dtype=int)[:, :3]
+    face_distortion = np.asarray(metrics.get("uv_face_angle_distortion_deg", []), dtype=float)
+    if len(uv_faces) and len(face_distortion) == len(uv_faces):
+        centers = np.mean(uv[uv_faces], axis=1)
+        fig.add_trace(
+            go.Scattergl(
+                x=centers[:, 0],
+                y=centers[:, 1],
+                mode="markers",
+                marker=dict(
+                    size=7,
+                    color=face_distortion,
+                    colorscale="Viridis",
+                    colorbar=dict(title="angle error (deg)"),
+                    opacity=0.78,
+                ),
+                text=[f"triangle {index}<br>mean angle error={value:.4g} deg" for index, value in enumerate(face_distortion)],
+                hoverinfo="text",
+                name="angle distortion",
+            )
+        )
+
+    boundary_loop = [int(value) for value in (metrics.get("boundary_loop", []) or [])]
+    if boundary_loop and max(boundary_loop) < len(uv):
+        boundary_vertices = uv[np.asarray(boundary_loop, dtype=int)]
+        fig.add_trace(
+            go.Scatter(
+                x=boundary_vertices[:, 0],
+                y=boundary_vertices[:, 1],
+                mode="markers",
+                marker=dict(
+                    size=7,
+                    color=np.arange(len(boundary_vertices)),
+                    colorscale="Turbo",
+                    showscale=False,
+                    line=dict(color="#ffffff", width=0.5),
+                ),
+                text=[f"boundary order {index}<br>vertex {vertex_id}" for index, vertex_id in enumerate(boundary_loop)],
+                hoverinfo="text",
+                name="boundary correspondence order",
+            )
+        )
+        corner_ids = [int(value) for value in (metrics.get("boundary_corner_vertex_ids", []) or [])]
+        valid_corner_ids = [value for value in corner_ids if 0 <= value < len(uv)]
+        if valid_corner_ids:
+            corner_uv = uv[np.asarray(valid_corner_ids, dtype=int)]
+            fig.add_trace(
+                go.Scatter(
+                    x=corner_uv[:, 0],
+                    y=corner_uv[:, 1],
+                    mode="markers+text",
+                    marker=dict(size=14, color="#dc2626", symbol="star", line=dict(color="#7f1d1d", width=1)),
+                    text=[f"C{index}" for index in range(len(valid_corner_ids))],
+                    textposition="top center",
+                    name="corner anchors",
+                )
+            )
+
+    flip_ids = [int(value) for value in (metrics.get("uv_flip_triangle_ids", []) or [])]
+    for display_index, triangle_id in enumerate(flip_ids):
+        if not (0 <= triangle_id < len(uv_faces)):
+            continue
+        triangle = uv[uv_faces[triangle_id]]
+        triangle = np.vstack([triangle, triangle[0]])
+        fig.add_trace(
+            go.Scatter(
+                x=triangle[:, 0],
+                y=triangle[:, 1],
+                mode="lines",
+                fill="toself",
+                fillcolor="rgba(220,38,38,0.45)",
+                line=dict(color="#991b1b", width=2),
+                name="flipped UV triangle" if display_index == 0 else "flipped UV triangle",
+                showlegend=display_index == 0,
+            )
+        )
+
     mesh = state.mesh_2d_initial
     grid_x: list[float | None] = []
     grid_y: list[float | None] = []
@@ -616,12 +752,13 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
         else:
             fig.add_vline(x=value, line=dict(color="#ef4444", dash="dash"))
     fig.update_layout(
-        title="Omega analytic planar domain",
-        height=520,
-        margin=dict(l=20, r=20, t=44, b=20),
+        title="Omega boundary correspondence and distortion diagnostics",
+        height=620,
+        margin=dict(l=20, r=40, t=44, b=120),
         xaxis_title="u",
         yaxis_title="v",
         yaxis=dict(scaleanchor="x", scaleratio=1),
+        legend=dict(orientation="h", x=0.0, y=-0.18, xanchor="left", yanchor="top"),
     )
     return fig
 
@@ -668,11 +805,38 @@ def add_tile_assembly(
     opacity: float = 0.72,
     name: str = "tiles",
 ) -> None:
+    metrics = getattr(assembly, "metrics", {}) or {}
+    if bool(metrics.get("t3d_intersection_trim_applied", False)):
+        render_vertices = np.asarray(metrics.get("t3d_trimmed_render_vertices", np.zeros((0, 3))), dtype=float)
+        render_i = np.asarray(metrics.get("t3d_trimmed_render_i", np.zeros(0)), dtype=int)
+        render_j = np.asarray(metrics.get("t3d_trimmed_render_j", np.zeros(0)), dtype=int)
+        render_k = np.asarray(metrics.get("t3d_trimmed_render_k", np.zeros(0)), dtype=int)
+        if len(render_vertices) and len(render_i) and len(render_i) == len(render_j) == len(render_k):
+            lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
+            fig.add_trace(
+                go.Mesh3d(
+                    x=render_vertices[:, 0],
+                    y=render_vertices[:, 1],
+                    z=render_vertices[:, 2],
+                    i=render_i,
+                    j=render_j,
+                    k=render_k,
+                    color=color,
+                    opacity=opacity,
+                    flatshading=True,
+                    lighting=lighting,
+                    name=f"{name} (trimmed)",
+                    showlegend=True,
+                )
+            )
+            _add_tile_edges(fig, assembly)
+            return
+
     faces = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
     side_face_edges = [None, None, 0, 1, 2, 3]
     hidden_side_edges = {
         (int(tile_id), int(edge_id))
-        for tile_id, edge_id in getattr(assembly, "metrics", {}).get("split_contact_side_edges", [])
+        for tile_id, edge_id in metrics.get("split_contact_side_edges", [])
     }
     lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
     x: list[float] = []
@@ -718,6 +882,29 @@ def add_tile_assembly(
             showlegend=True,
         )
     )
+    fig.add_trace(
+        go.Scatter3d(
+            x=edge_x,
+            y=edge_y,
+            z=edge_z,
+            mode="lines",
+            line=dict(color="#111827", width=2),
+            name="tile edges",
+            showlegend=False,
+        )
+    )
+
+
+def _add_tile_edges(fig: go.Figure, assembly: TileAssembly) -> None:
+    edge_x: list[float | None] = []
+    edge_y: list[float | None] = []
+    edge_z: list[float | None] = []
+    for tile in np.asarray(assembly.vertices, dtype=float):
+        for edge in [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]:
+            pts = tile[list(edge)]
+            edge_x.extend([pts[0, 0], pts[1, 0], None])
+            edge_y.extend([pts[0, 1], pts[1, 1], None])
+            edge_z.extend([pts[0, 2], pts[1, 2], None])
     fig.add_trace(
         go.Scatter3d(
             x=edge_x,

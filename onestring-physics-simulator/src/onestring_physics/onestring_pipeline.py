@@ -16,6 +16,7 @@ import importlib.util
 import copy
 from dataclasses import dataclass
 import heapq
+import itertools
 import math
 import sys
 import time
@@ -880,6 +881,9 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
+    model_version: str = "2026-07-10-basic-implementation"
+    t3d_intersection_trim_enabled: bool = False
+    t3d_intersection_trim_grid_resolution: int = 10
     omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "paper_default"
     omega_parameterization_mode: Literal[
         "bff",
@@ -888,9 +892,23 @@ class PipelineParameters(_original.PipelineParameters):
         "fallback",
         "pca_debug",
         "lscm_paper_like",
+        "boundary_sliding_lscm",
         "arap_paper_like",
         "paper_like_unimplemented",
     ] = "bff"
+    boundary_target_shape: Literal["rectangle"] = "rectangle"
+    boundary_target_aspect_mode: Literal["lscm_initial", "fixed"] = "lscm_initial"
+    boundary_target_aspect_ratio: float = 1.0
+    boundary_target_aspect_min: float = 0.2
+    boundary_target_aspect_max: float = 5.0
+    boundary_sliding_max_iterations: int = 40
+    boundary_sliding_step_size: float = 0.08
+    boundary_sliding_energy_tolerance: float = 1e-7
+    boundary_sliding_min_spacing: float = 1e-3
+    boundary_sliding_length_weight: float = 0.02
+    boundary_sliding_spacing_weight: float = 0.002
+    boundary_sliding_flip_area_epsilon: float = 1e-10
+    boundary_sliding_line_search_max_steps: int = 14
     allow_experimental_pipeline: bool = False
     enable_csf_splits: bool = True
     enable_heuristic_csf_split: bool = True
@@ -1043,7 +1061,7 @@ def _edge_stretch_values(surface_vertices: np.ndarray, uv_vertices: np.ndarray, 
     return np.asarray(values, dtype=float)
 
 
-def _omega_quality_metrics(parameterization) -> dict[str, float | int | str]:
+def _omega_quality_metrics(parameterization) -> dict[str, object]:
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
     faces = np.asarray(parameterization.uv_faces, dtype=int)
@@ -1076,7 +1094,8 @@ def _omega_quality_metrics(parameterization) -> dict[str, float | int | str]:
     uv_angles = _triangle_angles(uv_tri)
     xyz_angles = _triangle_angles(xyz_tri)
     angle_delta = np.abs(uv_angles - xyz_angles)
-    metrics: dict[str, float | int | str] = {
+    face_angle_distortion = np.degrees(np.mean(angle_delta, axis=1)) if angle_delta.ndim == 2 else np.zeros(0, dtype=float)
+    metrics: dict[str, object] = {
         "uv_triangle_flip_count": int(np.sum(signed < -1e-12)),
         "uv_min_triangle_area": float(np.min(uv_area)) if len(uv_area) else 0.0,
         "uv_area_ratio_min": float(np.min(ratios)) if len(ratios) else 0.0,
@@ -1093,7 +1112,16 @@ def _omega_quality_metrics(parameterization) -> dict[str, float | int | str]:
         "angle_distortion_max_rad": float(np.max(angle_delta)) if angle_delta.size else 0.0,
         "angle_distortion_mean_deg": float(np.degrees(np.mean(angle_delta))) if angle_delta.size else 0.0,
         "angle_distortion_max_deg": float(np.degrees(np.max(angle_delta))) if angle_delta.size else 0.0,
+        "uv_flip_triangle_ids": np.flatnonzero(signed < -1e-12).astype(int).tolist(),
+        "uv_degenerate_triangle_ids": np.flatnonzero(uv_area <= 1e-12).astype(int).tolist(),
+        "uv_face_angle_distortion_deg": np.asarray(face_angle_distortion, dtype=float).tolist(),
+        "uv_face_csf": np.asarray(csf, dtype=float).reshape(-1).tolist(),
     }
+    try:
+        lscm_matrix, _lscm_matrix_metrics = _build_lscm_residual_matrix(xyz, surface_faces)
+        metrics["lscm_energy_final"] = _lscm_energy(lscm_matrix, uv)
+    except Exception as exc:
+        metrics["lscm_energy_metric_error"] = f"{type(exc).__name__}: {exc}"
     metrics.update(_boundary_distortion_metrics(parameterization))
     warnings: list[str] = []
     if metrics["uv_triangle_flip_count"]:
@@ -1158,6 +1186,112 @@ def _shape_preserving_projected_uv(vertices: np.ndarray, boundary_loop: list[int
     return uv, metrics
 
 
+def _mesh_boundary_loops(
+    faces: np.ndarray,
+    vertex_count: int,
+) -> tuple[list[list[int]], dict[str, int]]:
+    """Extract every boundary loop and report the topology needed by S -> Omega."""
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    edge_incidence: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    adjacency: dict[int, set[int]] = {}
+    used_vertices: set[int] = set()
+    for face_id, face in enumerate(tris):
+        ids = [int(value) for value in face]
+        if len(set(ids)) != 3 or min(ids) < 0 or max(ids) >= int(vertex_count):
+            raise RuntimeError(f"S->Omega requires valid non-degenerate triangle indices; invalid face {face_id}.")
+        used_vertices.update(ids)
+        for a, b in ((ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])):
+            key = (min(a, b), max(a, b))
+            edge_incidence.setdefault(key, []).append((a, b))
+            adjacency.setdefault(a, set()).add(b)
+            adjacency.setdefault(b, set()).add(a)
+
+    non_manifold = [edge for edge, incident in edge_incidence.items() if len(incident) > 2]
+    if non_manifold:
+        raise RuntimeError(
+            f"S->Omega requires a manifold disk; found {len(non_manifold)} non-manifold edges."
+        )
+
+    components = 0
+    remaining = set(used_vertices)
+    while remaining:
+        components += 1
+        stack = [remaining.pop()]
+        while stack:
+            vertex_id = stack.pop()
+            for neighbor in adjacency.get(vertex_id, set()):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    stack.append(neighbor)
+
+    boundary_directed = [incident[0] for incident in edge_incidence.values() if len(incident) == 1]
+    boundary_adjacency: dict[int, list[int]] = {}
+    for a, b in boundary_directed:
+        boundary_adjacency.setdefault(int(a), []).append(int(b))
+        boundary_adjacency.setdefault(int(b), []).append(int(a))
+    bad_degree = [vertex_id for vertex_id, neighbors in boundary_adjacency.items() if len(neighbors) != 2]
+    if bad_degree:
+        raise RuntimeError(
+            "S->Omega boundary is not a collection of simple loops; "
+            f"{len(bad_degree)} boundary vertices do not have degree two."
+        )
+
+    loops: list[list[int]] = []
+    unvisited_edges = {tuple(sorted((int(a), int(b)))) for a, b in boundary_directed}
+    while unvisited_edges:
+        first_edge = min(unvisited_edges)
+        start, current = int(first_edge[0]), int(first_edge[1])
+        loop = [start]
+        previous = start
+        while True:
+            loop.append(current)
+            unvisited_edges.discard(tuple(sorted((previous, current))))
+            candidates = [neighbor for neighbor in boundary_adjacency[current] if neighbor != previous]
+            if not candidates:
+                raise RuntimeError("S->Omega boundary traversal reached an open chain.")
+            next_vertex = int(candidates[0])
+            if next_vertex == start:
+                unvisited_edges.discard(tuple(sorted((current, next_vertex))))
+                break
+            if next_vertex in loop:
+                raise RuntimeError("S->Omega boundary traversal found a self-repeating loop.")
+            previous, current = current, next_vertex
+        loops.append(loop)
+
+    edge_count = int(len(edge_incidence))
+    euler_characteristic = int(len(used_vertices) - edge_count + len(tris))
+    return loops, {
+        "surface_connected_component_count": int(components),
+        "surface_boundary_loop_count": int(len(loops)),
+        "surface_non_manifold_edge_count": int(len(non_manifold)),
+        "surface_used_vertex_count": int(len(used_vertices)),
+        "surface_isolated_vertex_count": int(max(0, int(vertex_count) - len(used_vertices))),
+        "surface_edge_count": edge_count,
+        "surface_euler_characteristic": euler_characteristic,
+    }
+
+
+def _validate_single_disk_surface(vertices: np.ndarray, faces: np.ndarray) -> tuple[list[int], dict[str, int | bool]]:
+    loops, topology = _mesh_boundary_loops(faces, len(np.asarray(vertices)))
+    errors: list[str] = []
+    if topology["surface_connected_component_count"] != 1:
+        errors.append(f"connected components={topology['surface_connected_component_count']}")
+    if topology["surface_boundary_loop_count"] != 1:
+        errors.append(f"boundary loops={topology['surface_boundary_loop_count']}")
+    if topology["surface_non_manifold_edge_count"] != 0:
+        errors.append(f"non-manifold edges={topology['surface_non_manifold_edge_count']}")
+    if topology["surface_isolated_vertex_count"] != 0:
+        errors.append(f"isolated vertices={topology['surface_isolated_vertex_count']}")
+    if topology["surface_euler_characteristic"] != 1:
+        errors.append(f"Euler characteristic={topology['surface_euler_characteristic']} (expected 1)")
+    if errors:
+        raise RuntimeError("boundary_sliding_lscm requires one connected manifold disk: " + "; ".join(errors))
+    loop = loops[0]
+    if len(loop) < 4:
+        raise RuntimeError("boundary_sliding_lscm rectangle target requires at least four boundary vertices.")
+    return loop, {**topology, "surface_disk_topology_valid": True}
+
+
 def _triangle_local_coordinates(tri: np.ndarray) -> np.ndarray:
     p0, p1, p2 = np.asarray(tri, dtype=float)
     e1 = p1 - p0
@@ -1172,6 +1306,74 @@ def _triangle_local_coordinates(tri: np.ndarray) -> np.ndarray:
     y_axis = np.cross(n / n_norm, x_axis)
     rel = np.asarray([p0 - p0, p1 - p0, p2 - p0], dtype=float)
     return np.column_stack([rel @ x_axis, rel @ y_axis])
+
+
+def _build_lscm_residual_matrix(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+):
+    """Build the shared area-weighted Cauchy-Riemann residual matrix A."""
+    try:
+        from scipy import sparse
+    except Exception as exc:  # pragma: no cover - depends on optional env
+        raise RuntimeError("scipy sparse is required for LSCM parameterization") from exc
+
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    n_vertices = int(len(pts))
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    row = 0
+    used_triangles = 0
+    skipped_triangles = 0
+    for face in tris:
+        local = _triangle_local_coordinates(pts[face])
+        signed_area = float(_triangle_signed_area_2d(local.reshape(1, 3, 2))[0])
+        area = abs(signed_area)
+        if area <= 1e-14 or not np.isfinite(area):
+            skipped_triangles += 1
+            continue
+        x_coord = local[:, 0]
+        y_coord = local[:, 1]
+        denom = 2.0 * signed_area
+        if abs(denom) <= 1e-14:
+            skipped_triangles += 1
+            continue
+        grad = np.asarray(
+            [
+                [(y_coord[1] - y_coord[2]) / denom, (x_coord[2] - x_coord[1]) / denom],
+                [(y_coord[2] - y_coord[0]) / denom, (x_coord[0] - x_coord[2]) / denom],
+                [(y_coord[0] - y_coord[1]) / denom, (x_coord[1] - x_coord[0]) / denom],
+            ],
+            dtype=float,
+        )
+        weight = float(np.sqrt(area))
+        for local_id, vertex_id in enumerate(face):
+            gx, gy = float(grad[local_id, 0]), float(grad[local_id, 1])
+            rows.extend([row, row])
+            cols.extend([int(vertex_id), n_vertices + int(vertex_id)])
+            data.extend([weight * gx, -weight * gy])
+            rows.extend([row + 1, row + 1])
+            cols.extend([int(vertex_id), n_vertices + int(vertex_id)])
+            data.extend([weight * gy, weight * gx])
+        row += 2
+        used_triangles += 1
+    matrix = sparse.coo_matrix((data, (rows, cols)), shape=(row, 2 * n_vertices)).tocsr()
+    return matrix, {
+        "lscm_used_triangle_count": int(used_triangles),
+        "lscm_skipped_degenerate_triangle_count": int(skipped_triangles),
+    }
+
+
+def _uv_vector(uv: np.ndarray) -> np.ndarray:
+    values = np.asarray(uv, dtype=float)
+    return np.concatenate([values[:, 0], values[:, 1]])
+
+
+def _lscm_energy(matrix, uv: np.ndarray) -> float:
+    residual = np.asarray(matrix @ _uv_vector(uv), dtype=float).reshape(-1)
+    return float(np.dot(residual, residual))
 
 
 def _farthest_boundary_pin_pair(vertices: np.ndarray, boundary_loop: list[int]) -> tuple[int, int, float]:
@@ -1530,48 +1732,8 @@ def _lscm_free_boundary_uv(
     if n_vertices == 0 or len(tris) == 0:
         return np.zeros((0, 2), dtype=float), {"omega_parameterization_solver": "lscm_empty"}
 
-    rows: list[int] = []
-    cols: list[int] = []
-    data: list[float] = []
-    rhs: list[float] = []
-    row = 0
-    used_triangles = 0
-    skipped_triangles = 0
-    for face in tris:
-        local = _triangle_local_coordinates(pts[face])
-        signed_area = float(_triangle_signed_area_2d(local.reshape(1, 3, 2))[0])
-        area = abs(signed_area)
-        if area <= 1e-14 or not np.isfinite(area):
-            skipped_triangles += 1
-            continue
-        x = local[:, 0]
-        y = local[:, 1]
-        denom = 2.0 * signed_area
-        if abs(denom) <= 1e-14:
-            skipped_triangles += 1
-            continue
-        grad = np.asarray(
-            [
-                [(y[1] - y[2]) / denom, (x[2] - x[1]) / denom],
-                [(y[2] - y[0]) / denom, (x[0] - x[2]) / denom],
-                [(y[0] - y[1]) / denom, (x[1] - x[0]) / denom],
-            ],
-            dtype=float,
-        )
-        weight = float(np.sqrt(area))
-        for local_id, vertex_id in enumerate(face):
-            gx, gy = float(grad[local_id, 0]), float(grad[local_id, 1])
-            # du/dx - dv/dy = 0
-            rows.extend([row, row])
-            cols.extend([int(vertex_id), n_vertices + int(vertex_id)])
-            data.extend([weight * gx, -weight * gy])
-            # du/dy + dv/dx = 0
-            rows.extend([row + 1, row + 1])
-            cols.extend([int(vertex_id), n_vertices + int(vertex_id)])
-            data.extend([weight * gy, weight * gx])
-        rhs.extend([0.0, 0.0])
-        row += 2
-        used_triangles += 1
+    residual_matrix, matrix_metrics = _build_lscm_residual_matrix(pts, tris)
+    used_triangles = int(matrix_metrics["lscm_used_triangle_count"])
 
     pin_a, pin_b, pin_distance = _farthest_boundary_pin_pair(pts, boundary_loop)
     pin_weight = max(1000.0, 100.0 * np.sqrt(max(used_triangles, 1)))
@@ -1579,20 +1741,23 @@ def _lscm_free_boundary_uv(
         (pin_a, 0.0, 0.0),
         (pin_b, pin_distance, 0.0),
     ]
-    for vertex_id, u_value, v_value in pins:
-        rows.append(row)
-        cols.append(int(vertex_id))
-        data.append(pin_weight)
-        rhs.append(pin_weight * float(u_value))
-        row += 1
-        rows.append(row)
-        cols.append(n_vertices + int(vertex_id))
-        data.append(pin_weight)
-        rhs.append(pin_weight * float(v_value))
-        row += 1
-
-    matrix = sparse.coo_matrix((data, (rows, cols)), shape=(row, 2 * n_vertices)).tocsr()
-    solution = sparse_linalg.lsqr(matrix, np.asarray(rhs, dtype=float), atol=1e-10, btol=1e-10, iter_lim=max(2000, 20 * n_vertices))
+    pin_rows: list[int] = []
+    pin_cols: list[int] = []
+    pin_data: list[float] = []
+    rhs = np.zeros(4, dtype=float)
+    for pin_row, (vertex_id, u_value, v_value) in enumerate(pins):
+        pin_rows.extend([2 * pin_row, 2 * pin_row + 1])
+        pin_cols.extend([int(vertex_id), n_vertices + int(vertex_id)])
+        pin_data.extend([pin_weight, pin_weight])
+        rhs[2 * pin_row] = pin_weight * float(u_value)
+        rhs[2 * pin_row + 1] = pin_weight * float(v_value)
+    pin_matrix = sparse.coo_matrix(
+        (pin_data, (pin_rows, pin_cols)),
+        shape=(4, 2 * n_vertices),
+    ).tocsr()
+    matrix = sparse.vstack([residual_matrix, pin_matrix], format="csr")
+    full_rhs = np.concatenate([np.zeros(residual_matrix.shape[0], dtype=float), rhs])
+    solution = sparse_linalg.lsqr(matrix, full_rhs, atol=1e-10, btol=1e-10, iter_lim=max(2000, 20 * n_vertices))
     x = np.asarray(solution[0], dtype=float)
     uv = np.column_stack([x[:n_vertices], x[n_vertices:]])
 
@@ -1614,14 +1779,590 @@ def _lscm_free_boundary_uv(
         "omega_boundary_forced_rectangle": False,
         "omega_boundary_shape_preserved": False,
         "omega_boundary_model": "LSCM free boundary; no square/circle/projected-outline boundary forcing",
-        "lscm_used_triangle_count": int(used_triangles),
-        "lscm_skipped_degenerate_triangle_count": int(skipped_triangles),
+        **matrix_metrics,
+        "lscm_energy_final": _lscm_energy(residual_matrix, uv),
         "lscm_pin_vertex_a": int(pin_a),
         "lscm_pin_vertex_b": int(pin_b),
         "lscm_pin_distance_3d": float(pin_distance),
         "lscm_lsqr_iterations": int(solution[2]),
         "lscm_lsqr_residual_norm": float(solution[3]),
     }
+
+
+@dataclass(frozen=True)
+class _RectangleBoundaryTarget:
+    width: float
+    height: float
+
+    @property
+    def perimeter(self) -> float:
+        return float(2.0 * (self.width + self.height))
+
+    @property
+    def corners(self) -> np.ndarray:
+        half_w = 0.5 * float(self.width)
+        half_h = 0.5 * float(self.height)
+        return np.asarray(
+            [[-half_w, -half_h], [half_w, -half_h], [half_w, half_h], [-half_w, half_h]],
+            dtype=float,
+        )
+
+    @property
+    def corner_parameters(self) -> np.ndarray:
+        perimeter = max(self.perimeter, 1e-12)
+        return np.asarray(
+            [0.0, self.width / perimeter, (self.width + self.height) / perimeter, (2.0 * self.width + self.height) / perimeter],
+            dtype=float,
+        )
+
+    def position_on_side(self, side: int, t_value: np.ndarray | float) -> np.ndarray:
+        t = np.asarray(t_value, dtype=float)
+        start = self.corners[int(side) % 4]
+        end = self.corners[(int(side) + 1) % 4]
+        return start + t[..., None] * (end - start)
+
+    def tangent_on_side(self, side: int) -> np.ndarray:
+        return self.corners[(int(side) + 1) % 4] - self.corners[int(side) % 4]
+
+    def gamma(self, s_value: np.ndarray | float) -> np.ndarray:
+        values = np.mod(np.asarray(s_value, dtype=float), 1.0)
+        distance = values * self.perimeter
+        side_lengths = np.asarray([self.width, self.height, self.width, self.height], dtype=float)
+        cumulative = np.concatenate([[0.0], np.cumsum(side_lengths)])
+        flat = distance.reshape(-1)
+        out = np.zeros((len(flat), 2), dtype=float)
+        for index, value in enumerate(flat):
+            side = min(3, int(np.searchsorted(cumulative[1:], value, side="right")))
+            local_t = (value - cumulative[side]) / max(side_lengths[side], 1e-12)
+            out[index] = self.position_on_side(side, local_t)
+        return out.reshape((*values.shape, 2))
+
+
+def _pca_align_boundary_uv(boundary_uv: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    points = np.asarray(boundary_uv, dtype=float)
+    centered = points - np.mean(points, axis=0)
+    if len(points) < 2:
+        return centered, np.eye(2, dtype=float)
+    _u, _singular, vt = np.linalg.svd(centered, full_matrices=False)
+    basis = np.asarray(vt.T, dtype=float)
+    if basis.shape != (2, 2):
+        basis = np.eye(2, dtype=float)
+    if float(np.linalg.det(basis)) < 0.0:
+        basis[:, 1] *= -1.0
+    return centered @ basis, basis
+
+
+def _rectangle_target_from_initial_uv(boundary_uv: np.ndarray, params) -> tuple[_RectangleBoundaryTarget, dict[str, float | str]]:
+    aligned, _basis = _pca_align_boundary_uv(boundary_uv)
+    span = np.ptp(aligned, axis=0) if len(aligned) else np.ones(2, dtype=float)
+    requested_mode = str(getattr(params, "boundary_target_aspect_mode", "lscm_initial"))
+    if requested_mode == "fixed":
+        raw_aspect = float(getattr(params, "boundary_target_aspect_ratio", 1.0))
+    elif requested_mode == "lscm_initial":
+        raw_aspect = float(span[0] / max(float(span[1]), 1e-12))
+    else:
+        raise ValueError(f"unknown boundary_target_aspect_mode: {requested_mode}")
+    aspect_min = max(1e-4, float(getattr(params, "boundary_target_aspect_min", 0.2)))
+    aspect_max = max(aspect_min, float(getattr(params, "boundary_target_aspect_max", 5.0)))
+    aspect = float(np.clip(raw_aspect if np.isfinite(raw_aspect) else 1.0, aspect_min, aspect_max))
+    max_dimension = 2.0
+    height = max_dimension / max(1.0, aspect)
+    width = aspect * height
+    return _RectangleBoundaryTarget(width=width, height=height), {
+        "boundary_target_aspect_mode": requested_mode,
+        "boundary_target_aspect_ratio_raw": float(raw_aspect),
+        "boundary_target_aspect_ratio": float(aspect),
+        "boundary_target_aspect_min": float(aspect_min),
+        "boundary_target_aspect_max": float(aspect_max),
+    }
+
+
+def _select_rectangle_corner_vertices(
+    boundary_loop: list[int],
+    free_uv: np.ndarray,
+    target: _RectangleBoundaryTarget,
+) -> tuple[list[int], list[int], np.ndarray, dict[str, float | int | str]]:
+    loop = [int(value) for value in boundary_loop]
+    points, _basis = _pca_align_boundary_uv(np.asarray(free_uv, dtype=float)[loop])
+    span = np.maximum(np.ptp(points, axis=0), 1e-12)
+    normalized = 2.0 * points / span
+    directions = np.asarray([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], dtype=float)
+    directions /= np.linalg.norm(directions, axis=1)[:, None]
+    directional_scores = normalized @ directions.T
+
+    cornerness = np.zeros(len(loop), dtype=float)
+    for index in range(len(loop)):
+        incoming = points[index] - points[(index - 1) % len(loop)]
+        outgoing = points[(index + 1) % len(loop)] - points[index]
+        denom = max(float(np.linalg.norm(incoming) * np.linalg.norm(outgoing)), 1e-12)
+        cornerness[index] = float(np.arccos(np.clip(np.dot(incoming, outgoing) / denom, -1.0, 1.0))) / np.pi
+
+    candidate_count = min(12, len(loop))
+    candidates = [np.argsort(directional_scores[:, corner])[-candidate_count:][::-1] for corner in range(4)]
+    side_fraction = np.asarray([target.width, target.height, target.width, target.height], dtype=float) / max(target.perimeter, 1e-12)
+    best_positions: tuple[int, int, int, int] | None = None
+    best_score = -float("inf")
+    for candidate in itertools.product(*candidates):
+        p0, p1, p2, p3 = [int(value) for value in candidate]
+        relative = np.asarray([0, (p1 - p0) % len(loop), (p2 - p0) % len(loop), (p3 - p0) % len(loop)], dtype=int)
+        if not (0 < relative[1] < relative[2] < relative[3] < len(loop)):
+            continue
+        gaps = np.diff(np.concatenate([relative, [len(loop)]])) / float(len(loop))
+        score = float(sum(directional_scores[position, corner] + 0.15 * cornerness[position] for corner, position in enumerate(candidate)))
+        score -= 0.4 * float(np.sum((gaps - side_fraction) ** 2))
+        if score > best_score:
+            best_score = score
+            best_positions = (p0, p1, p2, p3)
+    if best_positions is None:
+        raise RuntimeError("boundary_sliding_lscm could not select four ordered rectangle corner anchors from the free LSCM boundary.")
+    p0, p1, p2, p3 = best_positions
+    relative_positions = [0, (p1 - p0) % len(loop), (p2 - p0) % len(loop), (p3 - p0) % len(loop)]
+    rotated_loop = loop[p0:] + loop[:p0]
+    rotated_aligned = np.vstack([points[p0:], points[:p0]])
+    corner_vertex_ids = [int(rotated_loop[position]) for position in relative_positions]
+    return rotated_loop, relative_positions, rotated_aligned, {
+        "boundary_corner_vertex_ids": corner_vertex_ids,
+        "boundary_corner_loop_positions": [int(value) for value in relative_positions],
+        "boundary_corner_selection_score": float(best_score),
+        "boundary_corner_selection_model": "free_lscm_pca_directional_extrema_with_local_turn_and_cyclic_order_search",
+        "boundary_corner_candidate_count_per_corner": int(candidate_count),
+    }
+
+
+def _isotonic_non_decreasing(values: np.ndarray) -> np.ndarray:
+    source = np.asarray(values, dtype=float).reshape(-1)
+    if len(source) <= 1:
+        return source.copy()
+    blocks: list[list[float | int]] = []
+    for index, value in enumerate(source):
+        blocks.append([float(value), 1.0, int(index), int(index + 1)])
+        while len(blocks) >= 2 and float(blocks[-2][0]) / float(blocks[-2][1]) > float(blocks[-1][0]) / float(blocks[-1][1]):
+            right = blocks.pop()
+            left = blocks.pop()
+            blocks.append(
+                [
+                    float(left[0]) + float(right[0]),
+                    float(left[1]) + float(right[1]),
+                    int(left[2]),
+                    int(right[3]),
+                ]
+            )
+    result = np.zeros_like(source)
+    for total, weight, start, end in blocks:
+        result[int(start):int(end)] = float(total) / max(float(weight), 1e-12)
+    return result
+
+
+def _project_strictly_increasing(values: np.ndarray, min_spacing: float) -> np.ndarray:
+    source = np.asarray(values, dtype=float).reshape(-1)
+    count = len(source)
+    if count == 0:
+        return source.copy()
+    spacing = min(max(float(min_spacing), 0.0), 0.9 / float(count + 1))
+    offsets = spacing * np.arange(1, count + 1, dtype=float)
+    cap = max(0.0, 1.0 - spacing * float(count + 1))
+    shifted = _isotonic_non_decreasing(source - offsets)
+    shifted = np.clip(shifted, 0.0, cap)
+    shifted = _isotonic_non_decreasing(shifted)
+    return shifted + offsets
+
+
+def _solve_lscm_with_boundary(
+    residual_matrix,
+    vertex_count: int,
+    boundary_ids: np.ndarray,
+    boundary_uv: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float | int | str]]:
+    try:
+        from scipy.sparse import linalg as sparse_linalg
+    except Exception as exc:  # pragma: no cover - depends on optional env
+        raise RuntimeError("scipy sparse is required for constrained LSCM") from exc
+    boundary = np.asarray(boundary_ids, dtype=int)
+    boundary_values = np.asarray(boundary_uv, dtype=float)
+    boundary_set = set(int(value) for value in boundary)
+    interior = np.asarray([vertex_id for vertex_id in range(int(vertex_count)) if vertex_id not in boundary_set], dtype=int)
+    x = np.zeros(2 * int(vertex_count), dtype=float)
+    boundary_columns = np.concatenate([boundary, int(vertex_count) + boundary])
+    x[boundary_columns] = np.concatenate([boundary_values[:, 0], boundary_values[:, 1]])
+    if len(interior) == 0:
+        return np.column_stack([x[:vertex_count], x[vertex_count:]]), {
+            "boundary_sliding_interior_vertex_count": 0,
+            "boundary_sliding_constrained_solver": "boundary_only",
+            "boundary_sliding_constrained_lsqr_iterations": 0,
+        }
+    interior_columns = np.concatenate([interior, int(vertex_count) + interior])
+    matrix_i = residual_matrix[:, interior_columns]
+    rhs = -np.asarray(residual_matrix[:, boundary_columns] @ x[boundary_columns], dtype=float).reshape(-1)
+    solution = sparse_linalg.lsqr(
+        matrix_i,
+        rhs,
+        atol=1e-11,
+        btol=1e-11,
+        iter_lim=max(2000, 20 * int(vertex_count)),
+    )
+    x[interior_columns] = np.asarray(solution[0], dtype=float)
+    return np.column_stack([x[:vertex_count], x[vertex_count:]]), {
+        "boundary_sliding_interior_vertex_count": int(len(interior)),
+        "boundary_sliding_constrained_solver": "lsqr_reduced_lscm",
+        "boundary_sliding_constrained_lsqr_iterations": int(solution[2]),
+        "boundary_sliding_constrained_lsqr_residual_norm": float(solution[3]),
+    }
+
+
+def _boundary_side_positions(corner_positions: list[int], boundary_count: int) -> list[np.ndarray]:
+    positions: list[np.ndarray] = []
+    for side in range(4):
+        start = int(corner_positions[side])
+        end = int(corner_positions[side + 1]) if side < 3 else int(boundary_count)
+        positions.append(np.arange(start + 1, end, dtype=int))
+    return positions
+
+
+def _initial_boundary_side_parameters(
+    aligned_boundary: np.ndarray,
+    corner_positions: list[int],
+    side_positions: list[np.ndarray],
+    min_spacing: float,
+) -> list[np.ndarray]:
+    values: list[np.ndarray] = []
+    count = len(aligned_boundary)
+    for side, positions in enumerate(side_positions):
+        if len(positions) == 0:
+            values.append(np.zeros(0, dtype=float))
+            continue
+        start = np.asarray(aligned_boundary[corner_positions[side]], dtype=float)
+        end_position = corner_positions[side + 1] if side < 3 else 0
+        end = np.asarray(aligned_boundary[end_position % count], dtype=float)
+        direction = end - start
+        denom = max(float(np.dot(direction, direction)), 1e-12)
+        projected = ((aligned_boundary[positions] - start) @ direction) / denom
+        values.append(_project_strictly_increasing(projected, min_spacing))
+    return values
+
+
+def _boundary_uv_from_side_parameters(
+    target: _RectangleBoundaryTarget,
+    boundary_count: int,
+    corner_positions: list[int],
+    side_positions: list[np.ndarray],
+    side_parameters: list[np.ndarray],
+) -> np.ndarray:
+    boundary_uv = np.zeros((int(boundary_count), 2), dtype=float)
+    for corner, position in enumerate(corner_positions):
+        boundary_uv[int(position)] = target.corners[corner]
+    for side, positions in enumerate(side_positions):
+        if len(positions):
+            boundary_uv[positions] = target.position_on_side(side, side_parameters[side])
+    return boundary_uv
+
+
+def _boundary_regularization_terms(
+    target: _RectangleBoundaryTarget,
+    boundary_uv: np.ndarray,
+    boundary_edge_lengths_3d: np.ndarray,
+    side_positions: list[np.ndarray],
+    side_parameters: list[np.ndarray],
+) -> tuple[float, float, float, list[np.ndarray], list[np.ndarray]]:
+    uv = np.asarray(boundary_uv, dtype=float)
+    lengths_3d = np.asarray(boundary_edge_lengths_3d, dtype=float)
+    edge_vectors = np.roll(uv, -1, axis=0) - uv
+    target_lengths = np.linalg.norm(edge_vectors, axis=1)
+    alpha = float(np.dot(target_lengths, lengths_3d) / max(float(np.dot(lengths_3d, lengths_3d)), 1e-12))
+    length_residual = target_lengths - alpha * lengths_3d
+    length_energy = float(np.dot(length_residual, length_residual))
+    length_gradients: list[np.ndarray] = []
+    spacing_gradients: list[np.ndarray] = []
+    spacing_energy = 0.0
+    for side, positions in enumerate(side_positions):
+        tangent = target.tangent_on_side(side)
+        side_length_gradient = np.zeros(len(positions), dtype=float)
+        for local_index, position in enumerate(positions):
+            previous_edge = (int(position) - 1) % len(uv)
+            current_edge = int(position)
+            previous_unit = edge_vectors[previous_edge] / max(float(target_lengths[previous_edge]), 1e-12)
+            current_unit = edge_vectors[current_edge] / max(float(target_lengths[current_edge]), 1e-12)
+            derivative_previous = float(np.dot(previous_unit, tangent))
+            derivative_current = -float(np.dot(current_unit, tangent))
+            side_length_gradient[local_index] = 2.0 * (
+                length_residual[previous_edge] * derivative_previous
+                + length_residual[current_edge] * derivative_current
+            )
+        length_gradients.append(side_length_gradient)
+
+        q = np.concatenate([[0.0], np.asarray(side_parameters[side], dtype=float), [1.0]])
+        gaps = np.diff(q)
+        gap_delta = np.diff(gaps)
+        spacing_energy += float(np.dot(gap_delta, gap_delta))
+        gap_gradient = np.zeros_like(gaps)
+        if len(gap_delta):
+            gap_gradient[:-1] -= 2.0 * gap_delta
+            gap_gradient[1:] += 2.0 * gap_delta
+        q_gradient = np.zeros_like(q)
+        q_gradient[:-1] -= gap_gradient
+        q_gradient[1:] += gap_gradient
+        spacing_gradients.append(q_gradient[1:-1])
+    return length_energy, float(spacing_energy), alpha, length_gradients, spacing_gradients
+
+
+def _uv_validity_for_boundary_slide(uv: np.ndarray, faces: np.ndarray, boundary_uv: np.ndarray, epsilon: float) -> dict[str, float | int | bool]:
+    signed = _triangle_signed_area_2d(np.asarray(uv, dtype=float)[np.asarray(faces, dtype=int)[:, :3]])
+    flip_count = int(np.sum(signed < -abs(float(epsilon))))
+    degenerate_count = int(np.sum(np.abs(signed) <= abs(float(epsilon))))
+    self_intersections = _boundary_self_intersection_count(np.vstack([boundary_uv, boundary_uv[0]]))
+    return {
+        "valid": bool(flip_count == 0 and degenerate_count == 0 and self_intersections == 0),
+        "uv_triangle_flip_count": flip_count,
+        "uv_degenerate_triangle_count": degenerate_count,
+        "uv_min_triangle_area": float(np.min(np.abs(signed))) if len(signed) else 0.0,
+        "boundary_self_intersection_count": int(self_intersections),
+    }
+
+
+def _boundary_target_distance(points: np.ndarray, target: _RectangleBoundaryTarget) -> np.ndarray:
+    values = np.asarray(points, dtype=float)
+    corners = target.corners
+    distances = np.full(len(values), float("inf"), dtype=float)
+    for side in range(4):
+        start = corners[side]
+        delta = corners[(side + 1) % 4] - start
+        denom = max(float(np.dot(delta, delta)), 1e-12)
+        t = np.clip(((values - start) @ delta) / denom, 0.0, 1.0)
+        closest = start + t[:, None] * delta
+        distances = np.minimum(distances, np.linalg.norm(values - closest, axis=1))
+    return distances
+
+
+def _boundary_parameters_s(
+    target: _RectangleBoundaryTarget,
+    corner_positions: list[int],
+    side_positions: list[np.ndarray],
+    side_parameters: list[np.ndarray],
+    boundary_count: int,
+) -> np.ndarray:
+    values = np.zeros(int(boundary_count), dtype=float)
+    corner_s = target.corner_parameters
+    side_lengths = np.asarray([target.width, target.height, target.width, target.height], dtype=float)
+    for side in range(4):
+        values[corner_positions[side]] = corner_s[side]
+        if len(side_positions[side]):
+            values[side_positions[side]] = corner_s[side] + side_parameters[side] * side_lengths[side] / max(target.perimeter, 1e-12)
+    return values
+
+
+def _boundary_sliding_lscm_uv(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    params,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """LSCM with a prescribed rectangle and order-preserving sliding boundary correspondence."""
+    started = time.perf_counter()
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    boundary_loop, topology_metrics = _validate_single_disk_surface(pts, tris)
+    free_uv, free_metrics = _lscm_free_boundary_uv(pts, tris, boundary_loop)
+    target, target_metrics = _rectangle_target_from_initial_uv(free_uv[boundary_loop], params)
+    ordered_boundary, corner_positions, aligned_boundary, corner_metrics = _select_rectangle_corner_vertices(
+        boundary_loop,
+        free_uv,
+        target,
+    )
+    boundary_ids = np.asarray(ordered_boundary, dtype=int)
+    side_positions = _boundary_side_positions(corner_positions, len(boundary_ids))
+    min_spacing = max(0.0, float(getattr(params, "boundary_sliding_min_spacing", 1e-3)))
+    side_parameters = _initial_boundary_side_parameters(aligned_boundary, corner_positions, side_positions, min_spacing)
+    residual_matrix, matrix_metrics = _build_lscm_residual_matrix(pts, tris)
+    free_energy = _lscm_energy(residual_matrix, free_uv)
+    boundary_lengths_3d = np.asarray(
+        [np.linalg.norm(pts[boundary_ids[(index + 1) % len(boundary_ids)]] - pts[boundary_ids[index]]) for index in range(len(boundary_ids))],
+        dtype=float,
+    )
+    boundary_uv = _boundary_uv_from_side_parameters(target, len(boundary_ids), corner_positions, side_positions, side_parameters)
+    uv, solve_metrics = _solve_lscm_with_boundary(residual_matrix, len(pts), boundary_ids, boundary_uv)
+    flip_epsilon = max(0.0, float(getattr(params, "boundary_sliding_flip_area_epsilon", 1e-10)))
+    validity = _uv_validity_for_boundary_slide(uv, tris, boundary_uv, flip_epsilon)
+    if not bool(validity["valid"]):
+        raise RuntimeError(
+            "boundary_sliding_lscm initial constrained solve is invalid: "
+            f"flips={validity['uv_triangle_flip_count']}, degenerate={validity['uv_degenerate_triangle_count']}, "
+            f"boundary intersections={validity['boundary_self_intersection_count']}. No fallback was used."
+        )
+
+    length_weight = max(0.0, float(getattr(params, "boundary_sliding_length_weight", 0.02)))
+    spacing_weight = max(0.0, float(getattr(params, "boundary_sliding_spacing_weight", 0.002)))
+    length_energy, spacing_energy, alpha, length_gradients, spacing_gradients = _boundary_regularization_terms(
+        target,
+        boundary_uv,
+        boundary_lengths_3d,
+        side_positions,
+        side_parameters,
+    )
+    lscm_energy = _lscm_energy(residual_matrix, uv)
+    constrained_initial_energy = float(lscm_energy)
+    length_initial = float(length_energy)
+    spacing_initial = float(spacing_energy)
+    total_energy = float(lscm_energy + length_weight * length_energy + spacing_weight * spacing_energy)
+    max_iterations = max(0, int(getattr(params, "boundary_sliding_max_iterations", 40)))
+    base_step = max(1e-12, float(getattr(params, "boundary_sliding_step_size", 0.08)))
+    tolerance = max(0.0, float(getattr(params, "boundary_sliding_energy_tolerance", 1e-7)))
+    line_search_steps = max(1, int(getattr(params, "boundary_sliding_line_search_max_steps", 14)))
+    iterations = 0
+    converged = len(np.concatenate(side_parameters)) == 0
+    stop_reason = "all_boundary_vertices_are_corner_anchors" if converged else "maximum_iterations"
+    projected_order_violation_count = 0
+
+    for iteration in range(max_iterations):
+        residual = np.asarray(residual_matrix @ _uv_vector(uv), dtype=float).reshape(-1)
+        gradient_vector = np.asarray(2.0 * residual_matrix.T @ residual, dtype=float).reshape(-1)
+        gradients: list[np.ndarray] = []
+        for side, positions in enumerate(side_positions):
+            tangent = target.tangent_on_side(side)
+            side_gradient = np.zeros(len(positions), dtype=float)
+            for local_index, boundary_position in enumerate(positions):
+                vertex_id = int(boundary_ids[int(boundary_position)])
+                uv_gradient = np.asarray([gradient_vector[vertex_id], gradient_vector[len(pts) + vertex_id]], dtype=float)
+                side_gradient[local_index] = float(np.dot(uv_gradient, tangent))
+            side_gradient += length_weight * length_gradients[side]
+            side_gradient += spacing_weight * spacing_gradients[side]
+            gradients.append(side_gradient)
+        flat_gradient = np.concatenate(gradients) if gradients else np.zeros(0, dtype=float)
+        if len(flat_gradient) == 0 or float(np.max(np.abs(flat_gradient))) <= tolerance:
+            converged = True
+            stop_reason = "projected_gradient_tolerance"
+            break
+        gradient_scale = max(float(np.max(np.abs(flat_gradient))), 1e-12)
+        accepted = False
+        valid_candidate_found = False
+        accepted_relative_improvement = 0.0
+        for line_step in range(line_search_steps):
+            step = base_step * (0.5 ** line_step)
+            candidate_parameters: list[np.ndarray] = []
+            for side, current_values in enumerate(side_parameters):
+                raw = np.asarray(current_values, dtype=float) - step * gradients[side] / gradient_scale
+                if len(raw):
+                    raw_with_anchors = np.concatenate([[0.0], raw, [1.0]])
+                    projected_order_violation_count += int(np.sum(np.diff(raw_with_anchors) < min_spacing - 1e-12))
+                candidate_parameters.append(_project_strictly_increasing(raw, min_spacing))
+            candidate_boundary = _boundary_uv_from_side_parameters(
+                target,
+                len(boundary_ids),
+                corner_positions,
+                side_positions,
+                candidate_parameters,
+            )
+            candidate_uv, candidate_solve_metrics = _solve_lscm_with_boundary(
+                residual_matrix,
+                len(pts),
+                boundary_ids,
+                candidate_boundary,
+            )
+            candidate_validity = _uv_validity_for_boundary_slide(candidate_uv, tris, candidate_boundary, flip_epsilon)
+            if not bool(candidate_validity["valid"]):
+                continue
+            valid_candidate_found = True
+            candidate_length, candidate_spacing, candidate_alpha, candidate_length_grad, candidate_spacing_grad = _boundary_regularization_terms(
+                target,
+                candidate_boundary,
+                boundary_lengths_3d,
+                side_positions,
+                candidate_parameters,
+            )
+            candidate_lscm = _lscm_energy(residual_matrix, candidate_uv)
+            candidate_total = float(candidate_lscm + length_weight * candidate_length + spacing_weight * candidate_spacing)
+            if candidate_total <= total_energy + 1e-13 * max(1.0, abs(total_energy)):
+                accepted_relative_improvement = float((total_energy - candidate_total) / max(1.0, abs(total_energy)))
+                side_parameters = candidate_parameters
+                boundary_uv = candidate_boundary
+                uv = candidate_uv
+                solve_metrics = candidate_solve_metrics
+                validity = candidate_validity
+                length_energy = candidate_length
+                spacing_energy = candidate_spacing
+                alpha = candidate_alpha
+                length_gradients = candidate_length_grad
+                spacing_gradients = candidate_spacing_grad
+                lscm_energy = candidate_lscm
+                total_energy = candidate_total
+                accepted = True
+                iterations = iteration + 1
+                break
+        if not accepted:
+            if valid_candidate_found:
+                converged = True
+                stop_reason = "projected_line_search_stationary"
+                break
+            raise RuntimeError(
+                "boundary_sliding_lscm could not find a flip-free, non-degenerate line-search step; "
+                "the current result was not accepted as success and no fallback was used."
+            )
+        if accepted_relative_improvement <= tolerance:
+            converged = True
+            stop_reason = "relative_energy_tolerance"
+            break
+
+    final_order_violations = 0
+    for values in side_parameters:
+        q = np.concatenate([[0.0], np.asarray(values, dtype=float), [1.0]])
+        final_order_violations += int(np.sum(np.diff(q) < min_spacing - 1e-12))
+    target_error = _boundary_target_distance(boundary_uv, target)
+    parameter_s = _boundary_parameters_s(target, corner_positions, side_positions, side_parameters, len(boundary_ids))
+    metrics: dict[str, object] = {
+        **topology_metrics,
+        **free_metrics,
+        **matrix_metrics,
+        **target_metrics,
+        **corner_metrics,
+        **solve_metrics,
+        "parameterization_method": "boundary_sliding_lscm",
+        "parameterization_exactness_label": "boundary_controlled_conformal_approximation",
+        "parameterization_warning": "Boundary-sliding LSCM approximation; this is not Boundary First Flattening.",
+        "flattening_backend": "local_boundary_sliding_lscm",
+        "omega_parameterization_solver": "reduced_lscm_with_order_preserving_sliding_rectangle_boundary",
+        "omega_boundary_constraint_model": "rectangle_corner_anchors_plus_order_preserving_tangential_boundary_slide",
+        "omega_boundary_forced_rectangle": True,
+        "omega_boundary_fixed": False,
+        "omega_boundary_shape": "rectangular",
+        "omega_boundary_model": "LSCM with a prescribed rectangle and sliding boundary correspondence",
+        "boundary_target_shape": "rectangle",
+        "boundary_target_width": float(target.width),
+        "boundary_target_height": float(target.height),
+        "boundary_target_perimeter": float(target.perimeter),
+        "boundary_target_corners": target.corners.tolist(),
+        "boundary_loop": [int(value) for value in ordered_boundary],
+        "boundary_parameter_s": parameter_s.tolist(),
+        "boundary_sliding_iterations": int(iterations),
+        "boundary_sliding_converged": bool(converged),
+        "boundary_sliding_stop_reason": stop_reason,
+        "boundary_sliding_max_iterations": int(max_iterations),
+        "boundary_sliding_step_size": float(base_step),
+        "boundary_sliding_energy_tolerance": float(tolerance),
+        "boundary_sliding_min_spacing": float(min_spacing),
+        "boundary_sliding_length_weight": float(length_weight),
+        "boundary_sliding_spacing_weight": float(spacing_weight),
+        "boundary_sliding_flip_area_epsilon": float(flip_epsilon),
+        "boundary_sliding_line_search_max_steps": int(line_search_steps),
+        "lscm_energy_free_boundary_initial": float(free_energy),
+        "lscm_energy_constrained_initial": float(constrained_initial_energy),
+        "lscm_energy_final": float(lscm_energy),
+        "boundary_length_energy_initial": float(length_initial),
+        "boundary_length_energy_final": float(length_energy),
+        "boundary_length_scale_alpha_final": float(alpha),
+        "boundary_spacing_energy_initial": float(spacing_initial),
+        "boundary_spacing_energy_final": float(spacing_energy),
+        "boundary_total_energy_final": float(total_energy),
+        "boundary_target_rms_error": float(np.sqrt(np.mean(target_error * target_error))) if len(target_error) else 0.0,
+        "boundary_target_max_error": float(np.max(target_error)) if len(target_error) else 0.0,
+        "boundary_order_violation_count": int(final_order_violations),
+        "boundary_order_projection_count": int(projected_order_violation_count),
+        "uv_triangle_flip_count": int(validity["uv_triangle_flip_count"]),
+        "uv_degenerate_triangle_count": int(validity["uv_degenerate_triangle_count"]),
+        "uv_min_triangle_area": float(validity["uv_min_triangle_area"]),
+        "boundary_self_intersection_count": int(validity["boundary_self_intersection_count"]),
+        "bff_implemented": False,
+        "bff_reference_backend_available": False,
+        "lscm_implemented": True,
+        "parameterization_runtime_seconds": float(time.perf_counter() - started),
+    }
+    return uv, metrics
 
 
 def _try_external_conformal_backend(
@@ -1738,6 +2479,7 @@ def _build_surface_parameterization(surface, target, grid, params):
 
     surface_vertices = np.asarray(surface.vertices, dtype=float)
     surface_faces = np.asarray(surface.faces[:, :3], dtype=int)
+    parameterization_started = time.perf_counter()
     boundary_loop = _original._mesh_boundary_loop(surface_faces)
     if len(boundary_loop) < 3:
         raise RuntimeError("S->Omega parameterization requires an open target mesh with a boundary; only explicit debug heightfield mode is available for this surface.")
@@ -1747,6 +2489,55 @@ def _build_surface_parameterization(surface, target, grid, params):
             f"{parameterization_mode} is not implemented. Use bff to request a reference/free-boundary conformal S->Omega backend, "
             "or explicitly enable pca_debug as an experimental non-paper path."
         )
+
+    if parameterization_mode == "boundary_sliding_lscm":
+        if boundary_mode != "paper_default":
+            raise ValueError("boundary_sliding_lscm uses its own rectangle target and requires omega_boundary_mode='paper_default'.")
+        if str(getattr(params, "boundary_target_shape", "rectangle")) != "rectangle":
+            raise ValueError("boundary_sliding_lscm currently implements boundary_target_shape='rectangle' only.")
+        uv_vertices, sliding_metrics = _boundary_sliding_lscm_uv(surface_vertices, surface_faces, params)
+        ordered_boundary = [int(value) for value in sliding_metrics["boundary_loop"]]
+        boundary = uv_vertices[ordered_boundary + [ordered_boundary[0]]]
+        metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
+        metrics: dict[str, object] = {
+            **sliding_metrics,
+            "omega_boundary_mode": "paper_default",
+            "omega_parameterization_mode": "boundary_sliding_lscm",
+            "requested_omega_parameterization_mode": "boundary_sliding_lscm",
+            "surface_vertex_count": int(len(surface_vertices)),
+            "surface_triangle_count": int(len(surface_faces)),
+            "boundary_vertex_count": int(len(ordered_boundary)),
+            "mean_slope": metric["mean_slope"],
+            "max_slope": metric["max_slope"],
+            "harmonic_solve_performed": False,
+            "constrained_lscm_solve_performed": True,
+            "height_field_shortcut_used": False,
+            "omega_corresponds_to_S": True,
+            "omega_correspondence_model": "boundary-controlled LSCM map c:S->Omega with order-preserving boundary slide; inverse by UV triangle lookup",
+            "paper_flow_stage": "S -> Omega by boundary-controlled LSCM approximation",
+            "paper_exactness_warning": "This is not reference BFF: no Cherrier formula or Poincare-Steklov operator is implemented.",
+            "omega_warning": "Boundary-sliding LSCM approximation; rectangle corners are anchored and other boundary vertices slide tangentially.",
+            "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
+        }
+        out = _original.SurfaceParameterization(
+            method="boundary_sliding_lscm",
+            surface_vertices_3d=surface_vertices,
+            surface_faces=surface_faces,
+            uv_vertices_2d=uv_vertices,
+            uv_faces=surface_faces.copy(),
+            omega_boundary=boundary,
+            triangle_acceleration=None,
+            metrics=metrics,
+        )
+        out = _mark_parameterization_mode(
+            out,
+            method="boundary_sliding_lscm",
+            exactness="boundary_controlled_conformal_approximation",
+            warning="Boundary-sliding LSCM approximation; this is not Boundary First Flattening.",
+        )
+        if int(out.metrics.get("uv_triangle_flip_count", 0)) or int(out.metrics.get("uv_degenerate_triangle_count", 0)):
+            raise RuntimeError("boundary_sliding_lscm produced invalid UV triangles after final quality validation; no fallback was used.")
+        return out
 
     if parameterization_mode == "bff":
         if boundary_mode != "paper_default":
@@ -1777,6 +2568,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             "paper_flow_stage": "S -> Omega by boundary-first rectangular target domain and cotangent harmonic extension",
             "paper_exactness_warning": "This is a local discrete BFF-style rectangular target solve, not a reference BFF library binding.",
             "omega_warning": "Rectangular target-domain boundary is prescribed for downstream tile compatibility; free-boundary LSCM is available only as lscm_paper_like diagnostic mode.",
+            "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
             **backend_metrics,
         }
         out = _original.SurfaceParameterization(
@@ -1845,6 +2637,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             "surface_vertex_count": int(len(surface_vertices)),
             "surface_triangle_count": int(len(surface_faces)),
             "boundary_vertex_count": int(len(boundary_loop)),
+            "boundary_loop": [int(value) for value in boundary_loop],
             "mean_slope": metric["mean_slope"],
             "max_slope": metric["max_slope"],
             "harmonic_solve_performed": False,
@@ -1856,6 +2649,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             "paper_flow_stage": "S -> Omega by free-boundary LSCM; boundary is not forced to a rectangle or projected outline",
             "paper_exactness_warning": "BFF is not implemented; current conformal path is LSCM with two pinned vertices.",
             "omega_warning": "Conformal LSCM path; no full-boundary fitting correction is applied.",
+            "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
             **lscm_metrics,
         }
         out = _original.SurfaceParameterization(
@@ -2666,10 +3460,29 @@ def _build_m2d(grid, domain, params=None):
 
 
 def _lift_m2d_to_m3d(target, mesh, parameterization, params):
-    out, report = _ORIGINAL_LIFT_M2D_TO_M3D(target, mesh, parameterization, params)
+    lookup_records: list[tuple[int, bool]] = []
+    previous_inverse_map = _original.inverse_map_uv_to_surface
+
+    def recording_inverse_map(uv_point, active_parameterization):
+        point, triangle_id, outside = inverse_map_uv_to_surface(uv_point, active_parameterization)
+        lookup_records.append((int(triangle_id), bool(outside)))
+        return point, triangle_id, outside
+
+    if str(getattr(params, "m3d_construction_mode", "mesh_harmonic")) != "analytic_scaled_heightfield_debug":
+        _original.inverse_map_uv_to_surface = recording_inverse_map
+    try:
+        out, report = _ORIGINAL_LIFT_M2D_TO_M3D(target, mesh, parameterization, params)
+    finally:
+        _original.inverse_map_uv_to_surface = previous_inverse_map
     lookup_fail = int(out.metrics.get("m3d_uv_triangle_lookup_fail_count", 0))
     outside = int(out.metrics.get("m3d_outside_omega_count", 0))
     used_shortcut = bool(out.metrics.get("m3d_used_height_field_shortcut", False))
+    triangle_ids = np.asarray([record[0] for record in lookup_records], dtype=int)
+    outside_flags = np.asarray([record[1] for record in lookup_records], dtype=bool)
+    surface_triangle_count = int(len(np.asarray(parameterization.surface_faces, dtype=int)))
+    valid_triangle_ids = triangle_ids[triangle_ids >= 0]
+    hit_counts = np.bincount(valid_triangle_ids, minlength=surface_triangle_count) if surface_triangle_count else np.zeros(0, dtype=int)
+    unique_hit_count = int(np.sum(hit_counts > 0))
     out.metrics.update(
         {
             "m3d_uv_lookup_failure_count": lookup_fail,
@@ -2680,6 +3493,12 @@ def _lift_m2d_to_m3d(target, mesh, parameterization, params):
             "m3d_uv_triangle_lookup_acceleration": "regular-grid shortcut or cKDTree nearest triangle candidates",
             "m3d_surface_distance_acceleration": "cKDTree nearest surface triangle candidates",
             "m3d_exactness_label": "debug" if used_shortcut else "approximation",
+            "m3d_uv_lookup_failure_vertex_ids": np.flatnonzero(triangle_ids < 0).astype(int).tolist(),
+            "m3d_outside_omega_vertex_ids": np.flatnonzero(outside_flags).astype(int).tolist(),
+            "m3d_surface_triangle_ids": triangle_ids.astype(int).tolist(),
+            "m3d_surface_triangle_hit_counts": hit_counts.astype(int).tolist(),
+            "m3d_surface_triangle_hit_count": unique_hit_count,
+            "m3d_surface_triangle_hit_fraction": float(unique_hit_count / max(surface_triangle_count, 1)),
             "m3d_parameterization_warning": (
                 "Height-field shortcut is not paper inverse parameterization."
                 if used_shortcut
@@ -3209,6 +4028,9 @@ def _optimize_k3d(target, mesh, parameterization, params):
                 "k3d_fallback_used": False,
                 "k3d_fallback_reason": "",
                 "k3d_exactness_label": "approximation",
+                "model_version": str(getattr(params, "model_version", "")),
+                "t3d_intersection_trim_enabled": bool(getattr(params, "t3d_intersection_trim_enabled", False)),
+                "t3d_intersection_trim_grid_resolution": int(getattr(params, "t3d_intersection_trim_grid_resolution", 10)),
             }
         )
         return out, report
@@ -3232,6 +4054,9 @@ def _optimize_k3d(target, mesh, parameterization, params):
             "k3d_surface_residual": float(metrics.get("surface_fit_error_before", 0.0)),
             "k3d_exactness_label": "fallback",
             "approximation_warning": f"K3D optimization rejected by quality guard: {reject_reason}; fallback to M3D",
+            "model_version": str(getattr(params, "model_version", "")),
+            "t3d_intersection_trim_enabled": bool(getattr(params, "t3d_intersection_trim_enabled", False)),
+            "t3d_intersection_trim_grid_resolution": int(getattr(params, "t3d_intersection_trim_grid_resolution", 10)),
         }
     )
     fallback = _original.QuadMesh(
@@ -3378,80 +4203,240 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
     }
 
 
-def _orient_tile_normals_to_outward_reference(
+def _signed_polygon_area_2d(poly: np.ndarray) -> float:
+    pts = np.asarray(poly, dtype=float)
+    if len(pts) < 3:
+        return 0.0
+    x = pts[:, 0]
+    y = pts[:, 1]
+    return float(0.5 * np.sum(x * np.roll(y, -1) - y * np.roll(x, -1)))
+
+
+def _polygon_area_2d(poly: np.ndarray) -> float:
+    return abs(_signed_polygon_area_2d(poly))
+
+
+def _convex_polygon_clip(subject: np.ndarray, clip: np.ndarray) -> np.ndarray:
+    output = [np.asarray(p, dtype=float) for p in np.asarray(subject, dtype=float)]
+    clip_pts = np.asarray(clip, dtype=float)
+    if len(output) < 3 or len(clip_pts) < 3:
+        return np.zeros((0, 2), dtype=float)
+    orient = 1.0 if _signed_polygon_area_2d(clip_pts) >= 0.0 else -1.0
+
+    def inside(point: np.ndarray, a: np.ndarray, b: np.ndarray) -> bool:
+        edge = b - a
+        rel = point - a
+        return orient * float(edge[0] * rel[1] - edge[1] * rel[0]) >= -1e-10
+
+    def intersection(p1: np.ndarray, p2: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        d1 = p2 - p1
+        d2 = b - a
+        denom = float(d1[0] * d2[1] - d1[1] * d2[0])
+        if abs(denom) <= 1e-12:
+            return p2
+        rel = a - p1
+        t = float((rel[0] * d2[1] - rel[1] * d2[0]) / denom)
+        return p1 + np.clip(t, 0.0, 1.0) * d1
+
+    for i in range(len(clip_pts)):
+        a = clip_pts[i]
+        b = clip_pts[(i + 1) % len(clip_pts)]
+        input_pts = output
+        output = []
+        if not input_pts:
+            break
+        prev = input_pts[-1]
+        prev_inside = inside(prev, a, b)
+        for current in input_pts:
+            current_inside = inside(current, a, b)
+            if current_inside:
+                if not prev_inside:
+                    output.append(intersection(prev, current, a, b))
+                output.append(current)
+            elif prev_inside:
+                output.append(intersection(prev, current, a, b))
+            prev = current
+            prev_inside = current_inside
+    if len(output) < 3:
+        return np.zeros((0, 2), dtype=float)
+    return np.asarray(output, dtype=float)
+
+
+def _point_in_convex_polygon(point: np.ndarray, poly: np.ndarray) -> bool:
+    pts = np.asarray(poly, dtype=float)
+    if len(pts) < 3:
+        return False
+    orient = 1.0 if _signed_polygon_area_2d(pts) >= 0.0 else -1.0
+    p = np.asarray(point, dtype=float)
+    for i in range(len(pts)):
+        a = pts[i]
+        b = pts[(i + 1) % len(pts)]
+        edge = b - a
+        rel = p - a
+        if orient * float(edge[0] * rel[1] - edge[1] * rel[0]) < -1e-9:
+            return False
+    return True
+
+
+def _tile_plane_basis(top: np.ndarray, normal: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pts = np.asarray(top, dtype=float)
+    origin = np.mean(pts, axis=0)
+    n = _normalize(np.asarray(normal, dtype=float), _original._quad_normal(pts))
+    edge = pts[1] - pts[0]
+    if float(np.linalg.norm(edge)) <= 1e-12:
+        edge = pts[2] - pts[0]
+    u = _normalize(edge - n * float(np.dot(edge, n)), np.asarray([1.0, 0.0, 0.0]))
+    if abs(float(np.dot(u, n))) > 0.9:
+        u = _normalize(np.cross(n, np.asarray([0.0, 1.0, 0.0])), np.asarray([1.0, 0.0, 0.0]))
+    v = _normalize(np.cross(n, u), np.asarray([0.0, 1.0, 0.0]))
+    return origin, u, v
+
+
+def _project_to_basis(points: np.ndarray, origin: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    rel = np.asarray(points, dtype=float) - origin[None, :]
+    return np.column_stack([rel @ u, rel @ v])
+
+
+def _bilinear_quad_point(tile: np.ndarray, s: float, t: float, offset: int) -> np.ndarray:
+    pts = np.asarray(tile, dtype=float)[offset:offset + 4]
+    return (
+        (1.0 - s) * (1.0 - t) * pts[0]
+        + s * (1.0 - t) * pts[1]
+        + s * t * pts[2]
+        + (1.0 - s) * t * pts[3]
+    )
+
+
+def _add_render_triangle(
+    verts: list[list[float]],
+    i_idx: list[int],
+    j_idx: list[int],
+    k_idx: list[int],
+    a: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+) -> None:
+    base = len(verts)
+    verts.extend([np.asarray(a, dtype=float).tolist(), np.asarray(b, dtype=float).tolist(), np.asarray(c, dtype=float).tolist()])
+    i_idx.append(base)
+    j_idx.append(base + 1)
+    k_idx.append(base + 2)
+
+
+def _t3d_intersection_trim_render_mesh(
+    vertices: np.ndarray,
     normals: np.ndarray,
-    top_tiles: np.ndarray,
-) -> tuple[np.ndarray, dict[str, float | int | str | bool]]:
-    """Stabilize extrusion normals for an open top-surface target.
-
-    The previous patch used only ``tile_center - global_centroid`` as an
-    outward reference.  That is unsafe for dome/snowman half surfaces: side
-    components can legitimately have centers on the opposite side of the global
-    centroid, so the centroid vector can flip an otherwise correct +z-facing
-    panel into a -z-facing panel.  For the current OneString prototype, T3D is
-    an open upper target surface and the extrusion convention is
-    ``bottom = top - thickness * normal``.  Therefore, whenever a tile normal
-    has a clear z component, the physically consistent choice is non-negative z.
-
-    Only near-vertical/ambiguous normals fall back to the centroid-radial
-    reference.  This prevents isolated split components from being extruded in
-    the opposite direction while retaining a fallback for nearly vertical side
-    faces.
-    """
-    n = np.asarray(normals, dtype=float).copy()
-    tiles = np.asarray(top_tiles, dtype=float)
-    if len(n) == 0 or tiles.size == 0:
-        return n, {
-            "t3d_surface_reference_normal_orientation_applied": False,
-            "t3d_surface_reference_normal_flip_count": 0,
-            "t3d_surface_reference_normal_reason": "empty",
+    faces: np.ndarray,
+    *,
+    resolution: int = 10,
+) -> dict[str, object]:
+    tiles = np.asarray(vertices, dtype=float)
+    tile_count = int(len(tiles))
+    if tile_count == 0:
+        return {
+            "t3d_intersection_trim_applied": False,
+            "t3d_intersection_trim_pair_count": 0,
+            "t3d_intersection_trim_tile_count": 0,
         }
 
-    original = n.copy()
-    z = n[:, 2]
-    z_scale = max(float(np.nanmax(np.abs(z))) if z.size else 0.0, 1.0)
-    z_eps = max(1e-6, 1e-4 * z_scale)
-    z_clear = np.isfinite(z) & (np.abs(z) > z_eps)
-    flip_z = z_clear & (z < 0.0)
-    n[flip_z] *= -1.0
+    resolution = int(max(2, min(24, resolution)))
+    top_tiles = tiles[:, :4, :]
+    areas = np.asarray([_polygon_area_2d(_project_to_basis(top, *_tile_plane_basis(top, normals[i]))) for i, top in enumerate(top_tiles)], dtype=float)
+    cutters: dict[int, list[np.ndarray]] = {}
+    trim_pair_count = 0
+    removed_area = 0.0
+    scale = max(float(np.nanmax(np.ptp(tiles.reshape(-1, 3), axis=0))) if tiles.size else 1.0, 1.0)
+    area_eps = max(1e-10 * scale * scale, 1e-9)
 
-    # Fallback only for z-ambiguous normals.  This is deliberately secondary to
-    # the +z convention so snowman/dome side split components are not inverted.
-    centers = np.mean(tiles, axis=1)
-    centroid = np.mean(centers, axis=0)
-    refs = centers - centroid[None, :]
-    ref_norms = np.linalg.norm(refs, axis=1)
-    ref_valid = ref_norms > max(float(np.nanmax(ref_norms)) * 1e-4, 1e-10)
-    refs[ref_valid] = refs[ref_valid] / ref_norms[ref_valid, None]
-    dots = np.sum(n * refs, axis=1)
-    ambiguous = ~z_clear
-    clear_radial = ambiguous & ref_valid & np.isfinite(dots) & (np.abs(dots) > 1e-4)
-    flip_radial = clear_radial & (dots < 0.0)
-    n[flip_radial] *= -1.0
+    flat_xy = top_tiles[:, :, :2]
+    pairs = _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES(flat_xy, pad=max(float(np.nanmax(np.linalg.norm(tiles[:, :4] - tiles[:, 4:], axis=2))) if tiles.size else 0.0, 1e-6))
+    if not pairs and tile_count <= 250:
+        pairs = [(i, j) for i in range(tile_count) for j in range(i + 1, tile_count)]
 
-    # Final guard: after any fallback, enforce non-negative z for all normals
-    # that have become clearly z-oriented.  This catches numerical/component
-    # artifacts and directly targets the reported inverted-panel symptom.
-    z_after = n[:, 2]
-    final_z_clear = np.isfinite(z_after) & (np.abs(z_after) > z_eps)
-    flip_final = final_z_clear & (z_after < 0.0)
-    n[flip_final] *= -1.0
+    for tile_a, tile_b in pairs:
+        a = int(tile_a)
+        b = int(tile_b)
+        if a == b:
+            continue
+        mins_a = np.min(tiles[a], axis=0)
+        maxs_a = np.max(tiles[a], axis=0)
+        mins_b = np.min(tiles[b], axis=0)
+        maxs_b = np.max(tiles[b], axis=0)
+        if np.any(maxs_a < mins_b - 1e-9) or np.any(maxs_b < mins_a - 1e-9):
+            continue
+        big, small = (a, b) if areas[a] >= areas[b] else (b, a)
+        origin, u, v = _tile_plane_basis(top_tiles[big], normals[big])
+        big_poly = _project_to_basis(top_tiles[big], origin, u, v)
+        small_poly = _project_to_basis(top_tiles[small], origin, u, v)
+        overlap = _convex_polygon_clip(small_poly, big_poly)
+        overlap_area = _polygon_area_2d(overlap)
+        if overlap_area <= area_eps:
+            continue
+        cutters.setdefault(big, []).append(overlap)
+        trim_pair_count += 1
+        removed_area += overlap_area
 
-    dots_before_z = original[:, 2]
-    dots_after_z = n[:, 2]
-    flip_any = np.linalg.norm(n - original, axis=1) > 1e-12
-    return n, {
-        "t3d_surface_reference_normal_orientation_applied": True,
-        "t3d_surface_reference_normal_model": "positive_z_open_surface_with_centroid_fallback_for_z_ambiguous_normals",
-        "t3d_surface_reference_normal_flip_count": int(np.count_nonzero(flip_any)),
-        "t3d_positive_z_normal_flip_count": int(np.count_nonzero(flip_z | flip_final)),
-        "t3d_centroid_fallback_normal_flip_count": int(np.count_nonzero(flip_radial)),
-        "t3d_surface_reference_normal_valid_tile_count": int(len(n)),
-        "t3d_surface_reference_normal_min_dot_before": float(np.min(dots_before_z)) if dots_before_z.size else 0.0,
-        "t3d_surface_reference_normal_min_dot_after": float(np.min(dots_after_z)) if dots_after_z.size else 0.0,
-        "t3d_min_normal_z_after_orientation": float(np.min(dots_after_z)) if dots_after_z.size else 0.0,
-        "t3d_negative_normal_z_count_after_orientation": int(np.count_nonzero(dots_after_z < -z_eps)),
+    if not cutters:
+        return {
+            "t3d_intersection_trim_applied": False,
+            "t3d_intersection_trim_pair_count": 0,
+            "t3d_intersection_trim_tile_count": 0,
+        }
+
+    render_vertices: list[list[float]] = []
+    i_idx: list[int] = []
+    j_idx: list[int] = []
+    k_idx: list[int] = []
+    full_faces = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    for tile_id, tile in enumerate(tiles):
+        if tile_id not in cutters:
+            for face in full_faces:
+                pts = tile[list(face)]
+                _add_render_triangle(render_vertices, i_idx, j_idx, k_idx, pts[0], pts[1], pts[2])
+                _add_render_triangle(render_vertices, i_idx, j_idx, k_idx, pts[0], pts[2], pts[3])
+            continue
+        origin, u, v = _tile_plane_basis(tile[:4], normals[tile_id])
+        tile_cutters = cutters[tile_id]
+        for ys in range(resolution):
+            t0 = ys / resolution
+            t1 = (ys + 1) / resolution
+            for xs in range(resolution):
+                s0 = xs / resolution
+                s1 = (xs + 1) / resolution
+                center = _bilinear_quad_point(tile, 0.5 * (s0 + s1), 0.5 * (t0 + t1), 0)
+                center_2d = _project_to_basis(center[None, :], origin, u, v)[0]
+                if any(_point_in_convex_polygon(center_2d, cutter) for cutter in tile_cutters):
+                    continue
+                top00 = _bilinear_quad_point(tile, s0, t0, 0)
+                top10 = _bilinear_quad_point(tile, s1, t0, 0)
+                top11 = _bilinear_quad_point(tile, s1, t1, 0)
+                top01 = _bilinear_quad_point(tile, s0, t1, 0)
+                bot00 = _bilinear_quad_point(tile, s0, t0, 4)
+                bot10 = _bilinear_quad_point(tile, s1, t0, 4)
+                bot11 = _bilinear_quad_point(tile, s1, t1, 4)
+                bot01 = _bilinear_quad_point(tile, s0, t1, 4)
+                _add_render_triangle(render_vertices, i_idx, j_idx, k_idx, top00, top10, top11)
+                _add_render_triangle(render_vertices, i_idx, j_idx, k_idx, top00, top11, top01)
+                _add_render_triangle(render_vertices, i_idx, j_idx, k_idx, bot00, bot11, bot10)
+                _add_render_triangle(render_vertices, i_idx, j_idx, k_idx, bot00, bot01, bot11)
+        for face in full_faces[2:]:
+            pts = tile[list(face)]
+            _add_render_triangle(render_vertices, i_idx, j_idx, k_idx, pts[0], pts[1], pts[2])
+            _add_render_triangle(render_vertices, i_idx, j_idx, k_idx, pts[0], pts[2], pts[3])
+
+    return {
+        "t3d_intersection_trim_applied": True,
+        "t3d_intersection_trim_model": "render_mesh_subtract_overlapping_top_projection_from_larger_panel_including_adjacent_pairs",
+        "t3d_intersection_trim_pair_count": int(trim_pair_count),
+        "t3d_intersection_trim_tile_count": int(len(cutters)),
+        "t3d_intersection_trim_removed_area_estimate": float(removed_area),
+        "t3d_intersection_trim_grid_resolution": int(resolution),
+        "t3d_trimmed_render_vertices": np.asarray(render_vertices, dtype=float),
+        "t3d_trimmed_render_i": np.asarray(i_idx, dtype=int),
+        "t3d_trimmed_render_j": np.asarray(j_idx, dtype=int),
+        "t3d_trimmed_render_k": np.asarray(k_idx, dtype=int),
     }
+
 
 def _extrude_tiles(mesh, thickness: float, stage: str):
     """Extrude K3D tiles using shared-edge miter/contact planes.
@@ -3507,7 +4492,6 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
 
     raw_normals = np.asarray([_original._quad_normal(top) for top in top_tiles], dtype=float)
     normals, normal_orientation_metrics = _orient_tile_normals_consistently(raw_normals, mesh.faces)
-    normals, surface_reference_normal_metrics = _orient_tile_normals_to_outward_reference(normals, top_tiles)
     raw_side_normals: list[list[np.ndarray]] = []
     for tile_id, top in enumerate(top_tiles):
         raw_side_normals.append([_edge_inward_normal(top, normals[tile_id], edge) for edge in local_edges])
@@ -3642,6 +4626,20 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
     reversed_extrusion_vertex_count = int(np.sum(signed_thickness <= 0.0))
     center_shift = np.mean(vertices[:, 4:], axis=1) - np.mean(vertices[:, :4], axis=1)
     normal_shift_error = np.linalg.norm(center_shift + float(thickness) * normals, axis=1)
+    if bool(mesh.metrics.get("t3d_intersection_trim_enabled", False)):
+        trim_metrics = _t3d_intersection_trim_render_mesh(
+            vertices,
+            normals,
+            mesh.faces,
+            resolution=int(mesh.metrics.get("t3d_intersection_trim_grid_resolution", 10)),
+        )
+    else:
+        trim_metrics = {
+            "t3d_intersection_trim_applied": False,
+            "t3d_intersection_trim_pair_count": 0,
+            "t3d_intersection_trim_tile_count": 0,
+            "t3d_intersection_trim_disabled_reason": "version_without_intersection_trim",
+        }
 
     assembly = _original.TileAssembly(
         vertices=vertices,
@@ -3681,7 +4679,6 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
             "boundary_side_plane_count": int(boundary_side_plane_count),
             "nonmanifold_edge_count": int(nonmanifold_edge_count),
             **normal_orientation_metrics,
-            **surface_reference_normal_metrics,
             "bottom_vertex_solve_fallback_count": int(fallback_count),
             "t3d_bottom_vertex_solve_fallback_count": int(fallback_count),
             "t3d_max_bottom_vertex_jump": float(max_bottom_vertex_jump),
@@ -3689,6 +4686,7 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
             "t3d_nonfinite_vertex_count": int(np.size(vertices) - np.count_nonzero(np.isfinite(vertices))),
             "t3d_degenerate_face_count": int(sum(_quad_area_2d(tile, face) <= 1e-12 for tile in vertices for face in [np.asarray([0, 1, 2, 3])])) if vertices.size else 0,
             "t3d_exactness_label": "experimental",
+            **trim_metrics,
             "surface_fit_error": float(mesh.metrics.get("surface_fit_error_after", 0.0)),
             "tile_count": int(tile_count),
             "k3d_fallback_warning": str(mesh.metrics.get("approximation_warning", "")),

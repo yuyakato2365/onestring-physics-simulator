@@ -49,7 +49,24 @@ from onestring_physics.visualization import (
 
 
 st.set_page_config(page_title="OneString Paper-Faithful Simulator", layout="wide")
-MODEL_VERSION = "paper-pipeline-v1"
+MODEL_VERSION = "2026-07-10-basic-implementation"
+MODEL_VERSIONS = [
+    {
+        "id": MODEL_VERSION,
+        "label": "2026-07-10 基礎実装",
+        "description": "周囲との法線整合だけを使うT3D押し出しを含む基礎実装。",
+        "t3d_intersection_trim_enabled": False,
+    },
+    {
+        "id": "2026-07-10-t3d-large-panel-intersection-trim",
+        "label": "2026-07-10 T3D大パネル交差除去",
+        "description": "T3D押し出し後、ほかのパネルと交差する部分を大きい方のパネルの表示メッシュから除去します。",
+        "t3d_intersection_trim_enabled": True,
+    },
+]
+# Future version additions: append a new entry to MODEL_VERSIONS when the user
+# asks to preserve another implementation version, then branch behavior from
+# selected_model_version["id"] where version-specific behavior is needed.
 
 st.title("onestring-physics-simulator")
 st.caption("Strict Figure-5 order: S -> Omega -> M2D -> c^-1 M3D -> K3D/T3D and M2D -> K2D -> T2D Top -> T2D Dual -> lift/string -> PD snap/lift.")
@@ -251,6 +268,15 @@ def _compute_setting_meters(
 
 
 with st.sidebar:
+    st.header("Version")
+    selected_model_version = st.selectbox(
+        "version",
+        MODEL_VERSIONS,
+        format_func=lambda version: version["label"],
+        help="実装バージョンを選択します。今後バージョン追加指示があれば、この一覧に追記します。",
+    )
+    st.caption(selected_model_version["description"])
+
     st.header("Target Input")
     target_kind = _param_row(
         "目標曲面 S の種類。waveは標準で起伏を抑制。half_gourdは半割りヒョウタン状の非矩形メッシュで、Ω/M2D cropの検証用。",
@@ -287,14 +313,48 @@ with st.sidebar:
         ),
     )
     omega_parameterization_mode = _param_row(
-        "S→Omega のパラメータ化。PCA は debug/experimental であり paper-like ではない。",
+        "S→Omega のパラメータ化。boundary_sliding_lscm は矩形上で境界対応を滑らせるLSCM近似で、BFFではない。",
         lambda: st.selectbox(
             "Omega parameterization mode",
-            ["bff", "lscm_paper_like", "rect_harmonic", "fallback", "paper_like_unimplemented", "pca_debug", "arap_paper_like"],
+            ["bff", "lscm_paper_like", "boundary_sliding_lscm", "rect_harmonic", "fallback", "paper_like_unimplemented", "pca_debug", "arap_paper_like"],
             index=0,
-            help="bff tries a reference/free-boundary conformal backend and reports the actual backend. rect_harmonic is fixed rectangular-boundary harmonic, not BFF.",
+            help="boundary_sliding_lscm keeps the boundary on a rectangle while optimizing correspondence order. It is not reference BFF.",
         ),
     )
+    with st.expander("Boundary-sliding LSCM advanced settings", expanded=False):
+        boundary_target_aspect_mode = st.selectbox(
+            "rectangle aspect mode",
+            ["lscm_initial", "fixed"],
+            index=0,
+            help="Initialize from the free-LSCM bounding box or use the fixed ratio below.",
+        )
+        boundary_target_aspect_ratio = st.number_input(
+            "fixed rectangle aspect ratio",
+            min_value=0.2,
+            max_value=5.0,
+            value=1.0,
+            step=0.1,
+        )
+        boundary_sliding_max_iterations = int(st.number_input("boundary slide max iterations", 0, 200, 40, 5))
+        boundary_sliding_step_size = st.number_input("boundary slide step size", 0.001, 0.5, 0.08, 0.01, format="%.3f")
+        boundary_sliding_energy_tolerance = st.number_input(
+            "boundary slide energy tolerance",
+            min_value=1e-10,
+            max_value=1e-3,
+            value=1e-7,
+            format="%.1e",
+        )
+        boundary_sliding_min_spacing = st.number_input("minimum normalized boundary spacing", 0.0, 0.1, 0.001, 0.001, format="%.4f")
+        boundary_sliding_length_weight = st.number_input("weak 3D boundary-length weight", 0.0, 1.0, 0.02, 0.005, format="%.4f")
+        boundary_sliding_spacing_weight = st.number_input("weak spacing regularization weight", 0.0, 1.0, 0.002, 0.001, format="%.4f")
+        boundary_sliding_flip_area_epsilon = st.number_input(
+            "UV flip/degenerate area epsilon",
+            min_value=1e-14,
+            max_value=1e-4,
+            value=1e-10,
+            format="%.1e",
+        )
+        boundary_sliding_line_search_max_steps = int(st.number_input("line-search max steps", 1, 30, 14, 1))
     allow_experimental_pipeline = _param_row(
         "PCA/debug 経路を明示的に許可する。OFFなら論文未実装部分は停止する。",
         lambda: st.checkbox(
@@ -746,7 +806,7 @@ def build_target():
 
 def current_pipeline_key() -> tuple:
     return (
-        MODEL_VERSION,
+        selected_model_version["id"],
         target_kind,
         uploaded.name if uploaded else None,
         grid_size,
@@ -754,6 +814,16 @@ def current_pipeline_key() -> tuple:
         m2d_crop_policy,
         omega_boundary_mode,
         omega_parameterization_mode,
+        boundary_target_aspect_mode,
+        boundary_target_aspect_ratio,
+        boundary_sliding_max_iterations,
+        boundary_sliding_step_size,
+        boundary_sliding_energy_tolerance,
+        boundary_sliding_min_spacing,
+        boundary_sliding_length_weight,
+        boundary_sliding_spacing_weight,
+        boundary_sliding_flip_area_epsilon,
+        boundary_sliding_line_search_max_steps,
         allow_experimental_pipeline,
         strict_k2d_time_budget_sec,
         strict_k2d_scipy_vertex_limit,
@@ -832,6 +902,17 @@ pipeline_params = PipelineParameters(
     m2d_crop_policy=m2d_crop_policy,
     omega_boundary_mode=omega_boundary_mode,
     omega_parameterization_mode=omega_parameterization_mode,
+    boundary_target_shape="rectangle",
+    boundary_target_aspect_mode=boundary_target_aspect_mode,
+    boundary_target_aspect_ratio=boundary_target_aspect_ratio,
+    boundary_sliding_max_iterations=boundary_sliding_max_iterations,
+    boundary_sliding_step_size=boundary_sliding_step_size,
+    boundary_sliding_energy_tolerance=boundary_sliding_energy_tolerance,
+    boundary_sliding_min_spacing=boundary_sliding_min_spacing,
+    boundary_sliding_length_weight=boundary_sliding_length_weight,
+    boundary_sliding_spacing_weight=boundary_sliding_spacing_weight,
+    boundary_sliding_flip_area_epsilon=boundary_sliding_flip_area_epsilon,
+    boundary_sliding_line_search_max_steps=boundary_sliding_line_search_max_steps,
     allow_experimental_pipeline=allow_experimental_pipeline,
     strict_k2d_time_budget_sec=strict_k2d_time_budget_sec,
     strict_k2d_scipy_vertex_limit=strict_k2d_scipy_vertex_limit,
@@ -850,6 +931,8 @@ pipeline_params = PipelineParameters(
     hinge_layout_max_candidate_pairs=hinge_layout_max_candidate_pairs,
     hinge_layout_collision_sweeps_per_iteration=hinge_layout_collision_sweeps_per_iteration,
     strict_paper_flow=True,
+    model_version=selected_model_version["id"],
+    t3d_intersection_trim_enabled=bool(selected_model_version.get("t3d_intersection_trim_enabled", False)),
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
 
@@ -1039,13 +1122,40 @@ elif view_stage == "Omega":
         "omega_boundary_shape": state.surface_parameterization.metrics.get("omega_boundary_shape", ""),
         "omega_boundary_forced_rectangle": state.surface_parameterization.metrics.get("omega_boundary_forced_rectangle", False),
         "uv_triangle_flip_count": state.surface_parameterization.metrics.get("uv_triangle_flip_count", 0),
+        "uv_degenerate_triangle_count": state.surface_parameterization.metrics.get("uv_degenerate_triangle_count", 0),
+        "uv_min_triangle_area": state.surface_parameterization.metrics.get("uv_min_triangle_area", 0.0),
+        "boundary_self_intersection_count": state.surface_parameterization.metrics.get("boundary_self_intersection_count", 0),
         "angle_distortion_mean_deg": state.surface_parameterization.metrics.get("angle_distortion_mean_deg", 0.0),
+        "angle_distortion_max_deg": state.surface_parameterization.metrics.get("angle_distortion_max_deg", 0.0),
+        "edge_stretch_median": state.surface_parameterization.metrics.get("edge_stretch_median", 0.0),
+        "edge_stretch_p95": state.surface_parameterization.metrics.get("edge_stretch_p95", 0.0),
         "edge_stretch_max": state.surface_parameterization.metrics.get("edge_stretch_max", 0.0),
+        "csf_median": state.surface_parameterization.metrics.get("csf_median", 0.0),
+        "csf_p95": state.surface_parameterization.metrics.get("csf_p95", 0.0),
+        "csf_max": state.surface_parameterization.metrics.get("csf_max", 0.0),
+        "boundary_target_shape": state.surface_parameterization.metrics.get("boundary_target_shape", ""),
+        "boundary_target_aspect_ratio": state.surface_parameterization.metrics.get("boundary_target_aspect_ratio", ""),
+        "boundary_corner_vertex_ids": state.surface_parameterization.metrics.get("boundary_corner_vertex_ids", []),
+        "boundary_sliding_iterations": state.surface_parameterization.metrics.get("boundary_sliding_iterations", ""),
+        "boundary_sliding_converged": state.surface_parameterization.metrics.get("boundary_sliding_converged", ""),
+        "boundary_sliding_stop_reason": state.surface_parameterization.metrics.get("boundary_sliding_stop_reason", ""),
+        "lscm_energy_free_boundary_initial": state.surface_parameterization.metrics.get("lscm_energy_free_boundary_initial", ""),
+        "lscm_energy_constrained_initial": state.surface_parameterization.metrics.get("lscm_energy_constrained_initial", ""),
+        "lscm_energy_final": state.surface_parameterization.metrics.get("lscm_energy_final", ""),
+        "boundary_length_energy_initial": state.surface_parameterization.metrics.get("boundary_length_energy_initial", ""),
+        "boundary_length_energy_final": state.surface_parameterization.metrics.get("boundary_length_energy_final", ""),
+        "boundary_spacing_energy_initial": state.surface_parameterization.metrics.get("boundary_spacing_energy_initial", ""),
+        "boundary_spacing_energy_final": state.surface_parameterization.metrics.get("boundary_spacing_energy_final", ""),
+        "boundary_target_rms_error": state.surface_parameterization.metrics.get("boundary_target_rms_error", ""),
+        "boundary_target_max_error": state.surface_parameterization.metrics.get("boundary_target_max_error", ""),
+        "boundary_order_violation_count": state.surface_parameterization.metrics.get("boundary_order_violation_count", ""),
+        "parameterization_runtime_seconds": state.surface_parameterization.metrics.get("parameterization_runtime_seconds", ""),
         "omega_warning": state.surface_parameterization.metrics.get("omega_warning", ""),
         "m3d_uv_triangle_lookup_fail_count": state.mesh_3d_initial.metrics.get("m3d_uv_triangle_lookup_fail_count", 0),
         "m3d_outside_omega_count": state.mesh_3d_initial.metrics.get("m3d_outside_omega_count", 0),
         "m3d_surface_distance_mean": state.mesh_3d_initial.metrics.get("m3d_surface_distance_mean", 0.0),
         "m3d_surface_distance_max": state.mesh_3d_initial.metrics.get("m3d_surface_distance_max", 0.0),
+        "m3d_surface_triangle_hit_fraction": state.mesh_3d_initial.metrics.get("m3d_surface_triangle_hit_fraction", 0.0),
         "max_csf_before_split": state.mesh_2d_initial.metrics["max_csf_before_split"],
         "max_csf_after_split": state.mesh_2d_initial.metrics["max_csf_after_split"],
         "number_of_splits": state.mesh_2d_initial.metrics["number_of_splits"],
@@ -1053,6 +1163,8 @@ elif view_stage == "Omega":
     }
     if not omega_info["omega_corresponds_to_S"]:
         st.error("Ω is not a paper conformal parameterization in this run. It is debug/experimental unless a real paper parameterization is implemented.")
+    elif state.surface_parameterization.method == "boundary_sliding_lscm":
+        st.info("Boundary-controlled LSCM approximation is active. This mode is intentionally separate from reference BFF.")
     elif not omega_info["bff_implemented"]:
         st.warning("Omega uses the reported fallback backend, not a reference Boundary First Flattening implementation.")
     st.write(omega_info)

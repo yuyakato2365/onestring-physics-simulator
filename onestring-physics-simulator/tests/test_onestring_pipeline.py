@@ -3,6 +3,9 @@ from onestring_physics.onestring_pipeline import (
     DeploymentParameters,
     PipelineParameters,
     QuadMesh,
+    _bff_boundary_first_uv,
+    _boundary_sliding_lscm_uv,
+    _build_lscm_residual_matrix,
     _canonicalize_faces_by_coincident_vertices,
     _csf_split_lines,
     _detect_parameterization_reflection_symmetry,
@@ -10,6 +13,8 @@ from onestring_physics.onestring_pipeline import (
     _free_layout_parameters,
     _m2d_connected_component_sizes,
     _mirror_csf_split_lines,
+    _lscm_energy,
+    _mesh_boundary_loops,
     _orient_tile_normals_consistently,
     _parameterization_stretch_csf,
     _surface_peak_uvs,
@@ -24,6 +29,7 @@ from onestring_physics.onestring_pipeline import (
 from onestring_physics.animation import _simultaneous_hinge_contraction_vertices, assembly_progress_animation
 from onestring_physics.visualization import figure_flat_tile_layout, figure_tile_assembly
 import numpy as np
+import pytest
 from types import SimpleNamespace
 
 
@@ -459,6 +465,75 @@ def test_split_coincident_edges_are_not_treated_as_open_outer_walls():
     assert sorted(assembly.metrics["split_contact_side_edges"]) == [[0, 1], [1, 3]]
 
 
+def test_t3d_intersection_trim_removes_overlap_from_larger_panel_render_mesh():
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.5, 0.5, 0.0],
+            [1.5, 0.5, 0.0],
+            [1.5, 1.5, 0.0],
+            [0.5, 1.5, 0.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=int)
+    mesh = QuadMesh(
+        vertices,
+        faces,
+        None,
+        "K3D",
+        {
+            "t3d_intersection_trim_enabled": True,
+            "t3d_intersection_trim_grid_resolution": 6,
+        },
+    )
+
+    assembly, _report = _extrude_tiles(mesh, 0.1, "T3D")
+
+    assert assembly.metrics["t3d_intersection_trim_applied"] is True
+    assert assembly.metrics["t3d_intersection_trim_pair_count"] == 1
+    assert assembly.metrics["t3d_intersection_trim_tile_count"] == 1
+    assert assembly.metrics["t3d_intersection_trim_removed_area_estimate"] > 0.0
+    assert len(assembly.metrics["t3d_trimmed_render_vertices"]) > 0
+
+
+def test_t3d_intersection_trim_also_handles_adjacent_panel_overlap():
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.2, 0.0, 0.0],
+            [1.2, 1.2, 0.0],
+            [2.0, 2.0, 0.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2, 3], [1, 4, 5, 2]], dtype=int)
+    mesh = QuadMesh(
+        vertices,
+        faces,
+        None,
+        "K3D",
+        {
+            "t3d_intersection_trim_enabled": True,
+            "t3d_intersection_trim_grid_resolution": 6,
+        },
+    )
+
+    assembly, _report = _extrude_tiles(mesh, 0.1, "T3D")
+
+    assert assembly.metrics["t3d_intersection_trim_applied"] is True
+    assert assembly.metrics["t3d_intersection_trim_pair_count"] == 1
+    assert assembly.metrics["t3d_intersection_trim_tile_count"] == 1
+    assert "including_adjacent_pairs" in assembly.metrics["t3d_intersection_trim_model"]
+
+
 def test_t2d_preserves_t3d_tile_shape_for_animation_and_has_frustum_geometry():
     target = create_builtin_shape("dome", {"amplitude": 0.6, "radius": 2.0})
     state = build_onestring_design(target, experimental_params(nx=3, max_3d_iterations=8, max_2d_iterations=12))
@@ -713,3 +788,139 @@ def test_csf_split_defaults_allow_multiple_splits():
     assert params.enable_csf_splits is True
     assert params.csf_split_threshold == 1.9
     assert params.max_csf_splits >= 2
+
+
+def _parameterization_grid_surface(nx: int, ny: int, point_fn) -> tuple[np.ndarray, np.ndarray]:
+    vertices = []
+    for row, y_value in enumerate(np.linspace(-1.0, 1.0, ny)):
+        for column, x_value in enumerate(np.linspace(-1.0, 1.0, nx)):
+            vertices.append(point_fn(float(x_value), float(y_value), column, row))
+    faces = []
+    for row in range(ny - 1):
+        for column in range(nx - 1):
+            a = row * nx + column
+            b = a + 1
+            c = a + nx
+            d = c + 1
+            faces.extend([[a, b, d], [a, d, c]])
+    return np.asarray(vertices, dtype=float), np.asarray(faces, dtype=int)
+
+
+def _boundary_sliding_test_params(**kwargs) -> PipelineParameters:
+    values = {
+        "omega_parameterization_mode": "boundary_sliding_lscm",
+        "boundary_sliding_max_iterations": 60,
+        "boundary_sliding_energy_tolerance": 1e-8,
+        "boundary_sliding_min_spacing": 1e-3,
+    }
+    values.update(kwargs)
+    return PipelineParameters(**values)
+
+
+def test_boundary_sliding_lscm_flat_rectangular_disk_is_exact_and_flip_free():
+    vertices, faces = _parameterization_grid_surface(
+        7,
+        5,
+        lambda x_value, y_value, _column, _row: (2.0 * x_value, y_value, 0.0),
+    )
+
+    uv, metrics = _boundary_sliding_lscm_uv(vertices, faces, _boundary_sliding_test_params())
+
+    assert metrics["surface_disk_topology_valid"] is True
+    assert metrics["boundary_target_rms_error"] < 1e-10
+    assert metrics["boundary_target_max_error"] < 1e-10
+    assert metrics["lscm_energy_final"] < 1e-8
+    assert metrics["uv_triangle_flip_count"] == 0
+    assert metrics["uv_degenerate_triangle_count"] == 0
+    assert metrics["boundary_self_intersection_count"] == 0
+    assert np.all(np.isfinite(uv))
+
+
+def test_boundary_sliding_lscm_curved_dome_converges_without_flips():
+    vertices, faces = _parameterization_grid_surface(
+        7,
+        7,
+        lambda x_value, y_value, _column, _row: (
+            x_value,
+            y_value,
+            0.45 * (1.0 - 0.35 * (x_value * x_value + y_value * y_value)),
+        ),
+    )
+
+    _uv, metrics = _boundary_sliding_lscm_uv(vertices, faces, _boundary_sliding_test_params())
+
+    assert metrics["boundary_sliding_converged"] is True
+    assert 0 <= metrics["boundary_sliding_iterations"] <= 60
+    assert metrics["uv_triangle_flip_count"] == 0
+    assert metrics["uv_degenerate_triangle_count"] == 0
+    assert metrics["boundary_self_intersection_count"] == 0
+    assert metrics["boundary_order_violation_count"] == 0
+
+
+def test_boundary_sliding_lscm_nonuniform_boundary_spacing_does_not_collapse():
+    fractions = np.asarray([0.0, 0.012, 0.055, 0.16, 0.33, 0.56, 0.78, 0.92], dtype=float)
+    angles = 2.0 * np.pi * fractions
+    boundary = np.column_stack([np.cos(angles), np.sin(angles), 0.18 * np.cos(2.0 * angles)])
+    vertices = np.vstack([np.zeros((1, 3), dtype=float), boundary])
+    faces = np.asarray([[0, 1 + index, 1 + ((index + 1) % len(boundary))] for index in range(len(boundary))], dtype=int)
+
+    uv, metrics = _boundary_sliding_lscm_uv(vertices, faces, _boundary_sliding_test_params())
+    ordered_ids = np.asarray(metrics["boundary_loop"], dtype=int)
+    boundary_uv = uv[ordered_ids]
+    edge_lengths = np.linalg.norm(np.roll(boundary_uv, -1, axis=0) - boundary_uv, axis=1)
+
+    assert metrics["boundary_order_violation_count"] == 0
+    assert metrics["uv_triangle_flip_count"] == 0
+    assert metrics["boundary_self_intersection_count"] == 0
+    assert float(np.min(edge_lengths)) > 1e-4
+
+
+def test_boundary_sliding_lscm_neck_has_no_worse_lscm_energy_than_fixed_arclength_rectangle():
+    def neck_point(x_value, y_value, _column, _row):
+        width_scale = 0.38 + 0.62 * abs(y_value)
+        return (
+            x_value * width_scale,
+            y_value,
+            -0.22 * np.exp(-5.0 * (x_value * x_value + y_value * y_value)),
+        )
+
+    vertices, faces = _parameterization_grid_surface(7, 9, neck_point)
+    loops, topology = _mesh_boundary_loops(faces, len(vertices))
+    assert topology["surface_boundary_loop_count"] == 1
+    fixed_uv, _fixed_metrics = _bff_boundary_first_uv(vertices, faces, loops[0])
+    sliding_uv, sliding_metrics = _boundary_sliding_lscm_uv(vertices, faces, _boundary_sliding_test_params())
+    residual_matrix, _matrix_metrics = _build_lscm_residual_matrix(vertices, faces)
+
+    assert _lscm_energy(residual_matrix, sliding_uv) <= _lscm_energy(residual_matrix, fixed_uv) * (1.0 + 1e-6)
+    assert sliding_metrics["uv_triangle_flip_count"] == 0
+    assert sliding_metrics["boundary_self_intersection_count"] == 0
+
+
+def test_boundary_sliding_lscm_rejects_non_disk_input_without_fallback():
+    vertices = np.asarray(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [3.0, 0.0, 0.0], [4.0, 0.0, 0.0], [3.0, 1.0, 0.0]],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=int)
+
+    with pytest.raises(RuntimeError, match="one connected manifold disk"):
+        _boundary_sliding_lscm_uv(vertices, faces, _boundary_sliding_test_params())
+
+
+def test_boundary_sliding_lscm_full_pipeline_reports_required_metrics_and_m3d_coverage():
+    target = create_builtin_shape("dome", {"amplitude": 0.35, "radius": 2.0})
+    state = build_onestring_design(
+        target,
+        _boundary_sliding_test_params(nx=2, max_3d_iterations=2, max_2d_iterations=2),
+    )
+    metrics = state.surface_parameterization.metrics
+
+    assert state.surface_parameterization.method == "boundary_sliding_lscm"
+    assert metrics["parameterization_exactness_label"] == "boundary_controlled_conformal_approximation"
+    assert metrics["parameterization_warning"] == "Boundary-sliding LSCM approximation; this is not Boundary First Flattening."
+    assert metrics["boundary_target_shape"] == "rectangle"
+    assert len(metrics["boundary_corner_vertex_ids"]) == 4
+    assert metrics["uv_triangle_flip_count"] == 0
+    assert metrics["uv_degenerate_triangle_count"] == 0
+    assert state.mesh_3d_initial.metrics["m3d_uv_triangle_lookup_fail_count"] == 0
+    assert state.mesh_3d_initial.metrics["m3d_surface_triangle_hit_fraction"] > 0.0
