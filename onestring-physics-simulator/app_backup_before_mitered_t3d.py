@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import time
+import os
+from dataclasses import replace
 from pathlib import Path
 import sys
 import importlib
+from types import SimpleNamespace
 
 import numpy as np
 import plotly.graph_objects as go
@@ -62,6 +65,12 @@ MODEL_VERSIONS = [
         "label": "2026-07-10 T3D大パネル交差除去",
         "description": "T3D押し出し後、ほかのパネルと交差する部分を大きい方のパネルの表示メッシュから除去します。",
         "t3d_intersection_trim_enabled": True,
+    },
+    {
+        "id": "0.2.0-paper-reference-bff",
+        "label": "0.2.0 Paper Reference BFF",
+        "description": "公式BFF CLI、厳密Jacobian/CSF、規則grid、厳密barycentric inverse mapを追加。K3D以降は既存近似。",
+        "t3d_intersection_trim_enabled": False,
     },
 ]
 # Future version additions: append a new entry to MODEL_VERSIONS when the user
@@ -313,14 +322,41 @@ with st.sidebar:
         ),
     )
     omega_parameterization_mode = _param_row(
-        "S→Omega のパラメータ化。boundary_sliding_lscm は矩形上で境界対応を滑らせるLSCM近似で、BFFではない。",
+        "S→Omega のパラメータ化。paper_reference_bff だけが公式BFF CLIを使用し、代替fallbackを禁止する。",
         lambda: st.selectbox(
             "Omega parameterization mode",
-            ["bff", "lscm_paper_like", "boundary_sliding_lscm", "rect_harmonic", "fallback", "paper_like_unimplemented", "pca_debug", "arap_paper_like"],
-            index=0,
-            help="boundary_sliding_lscm keeps the boundary on a rectangle while optimizing correspondence order. It is not reference BFF.",
+            ["rectangular_harmonic_legacy", "lscm_free_boundary", "paper_reference_bff", "bff", "boundary_sliding_lscm", "pca_debug"],
+            index=2 if selected_model_version["id"] == "0.2.0-paper-reference-bff" else 0,
+            help="bff is a deprecated alias of rectangular_harmonic_legacy. paper_reference_bff requires the official CLI.",
         ),
     )
+    if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
+        st.warning("This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.")
+    with st.expander("Paper-reference BFF settings", expanded=omega_parameterization_mode == "paper_reference_bff"):
+        bff_boundary_policy = st.selectbox(
+            "BFF boundary policy",
+            ["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle", "custom_boundary_curvature"],
+            index=0,
+            help="OneStringの正確な境界条件はUNSPECIFIED_IN_PAPER。CLI非対応のpolicyは明示失敗します。",
+        )
+        bff_executable = st.text_input(
+            "official bff-command-line path",
+            value=os.environ.get("ONESTRING_BFF_EXECUTABLE", ""),
+            help="空ならONESTRING_BFF_EXECUTABLE、third_party、PATHの順に探索します。",
+        )
+        reference_grid_spacing_value = float(st.number_input("reference grid spacing (0 = derive hypothesis_a)", min_value=0.0, value=0.0, step=0.05))
+        reference_grid_rotation_degrees = float(st.number_input("reference grid rotation (degrees)", value=0.0, step=1.0))
+        reference_grid_origin_u = float(st.number_input("reference grid origin u", value=0.0, step=0.05))
+        reference_grid_origin_v = float(st.number_input("reference grid origin v", value=0.0, step=0.05))
+        reference_csf_normalization = st.selectbox(
+            "lambda normalization",
+            ["min_to_one_hypothesis_a", "none_unspecified"],
+            index=0,
+        )
+        reference_stop_on_required_split = st.checkbox(
+            "stop when lambda > 2 requires unspecified reparameterization",
+            value=True,
+        )
     with st.expander("Boundary-sliding LSCM advanced settings", expanded=False):
         boundary_target_aspect_mode = st.selectbox(
             "rectangle aspect mode",
@@ -814,6 +850,14 @@ def current_pipeline_key() -> tuple:
         m2d_crop_policy,
         omega_boundary_mode,
         omega_parameterization_mode,
+        bff_boundary_policy,
+        bff_executable,
+        reference_grid_spacing_value,
+        reference_grid_rotation_degrees,
+        reference_grid_origin_u,
+        reference_grid_origin_v,
+        reference_csf_normalization,
+        reference_stop_on_required_split,
         boundary_target_aspect_mode,
         boundary_target_aspect_ratio,
         boundary_sliding_max_iterations,
@@ -902,6 +946,14 @@ pipeline_params = PipelineParameters(
     m2d_crop_policy=m2d_crop_policy,
     omega_boundary_mode=omega_boundary_mode,
     omega_parameterization_mode=omega_parameterization_mode,
+    bff_executable=bff_executable or None,
+    bff_boundary_policy=bff_boundary_policy,
+    reference_grid_spacing=reference_grid_spacing_value if reference_grid_spacing_value > 0.0 else None,
+    reference_grid_rotation_degrees=reference_grid_rotation_degrees,
+    reference_grid_origin_u=reference_grid_origin_u,
+    reference_grid_origin_v=reference_grid_origin_v,
+    reference_csf_normalization=reference_csf_normalization,
+    reference_stop_on_required_split=reference_stop_on_required_split,
     boundary_target_shape="rectangle",
     boundary_target_aspect_mode=boundary_target_aspect_mode,
     boundary_target_aspect_ratio=boundary_target_aspect_ratio,
@@ -1046,6 +1098,7 @@ view_stage = st.selectbox(
         "S",
         "Split Map",
         "Omega",
+        "Mode Comparison",
         "M2D",
         "M3D",
         "K3D",
@@ -1133,6 +1186,12 @@ elif view_stage == "Omega":
         "csf_median": state.surface_parameterization.metrics.get("csf_median", 0.0),
         "csf_p95": state.surface_parameterization.metrics.get("csf_p95", 0.0),
         "csf_max": state.surface_parameterization.metrics.get("csf_max", 0.0),
+        "lambda_min": state.surface_parameterization.metrics.get("lambda_min", ""),
+        "lambda_median": state.surface_parameterization.metrics.get("lambda_median", ""),
+        "lambda_max": state.surface_parameterization.metrics.get("lambda_max", ""),
+        "lambda_normalization_status": state.surface_parameterization.metrics.get("lambda_normalization_status", ""),
+        "anisotropy_max": max(state.surface_parameterization.metrics.get("per_triangle_anisotropy", [0.0]) or [0.0]),
+        "internal_triangle_overlap_count": state.surface_parameterization.metrics.get("internal_triangle_overlap_count", 0),
         "boundary_target_shape": state.surface_parameterization.metrics.get("boundary_target_shape", ""),
         "boundary_target_aspect_ratio": state.surface_parameterization.metrics.get("boundary_target_aspect_ratio", ""),
         "boundary_corner_vertex_ids": state.surface_parameterization.metrics.get("boundary_corner_vertex_ids", []),
@@ -1156,6 +1215,8 @@ elif view_stage == "Omega":
         "m3d_surface_distance_mean": state.mesh_3d_initial.metrics.get("m3d_surface_distance_mean", 0.0),
         "m3d_surface_distance_max": state.mesh_3d_initial.metrics.get("m3d_surface_distance_max", 0.0),
         "m3d_surface_triangle_hit_fraction": state.mesh_3d_initial.metrics.get("m3d_surface_triangle_hit_fraction", 0.0),
+        "m3d_round_trip_error_rms": state.mesh_3d_initial.metrics.get("m3d_round_trip_error_rms", ""),
+        "fallbacks_used": state.surface_parameterization.metrics.get("fallbacks_used", []),
         "max_csf_before_split": state.mesh_2d_initial.metrics["max_csf_before_split"],
         "max_csf_after_split": state.mesh_2d_initial.metrics["max_csf_after_split"],
         "number_of_splits": state.mesh_2d_initial.metrics["number_of_splits"],
@@ -1166,8 +1227,100 @@ elif view_stage == "Omega":
     elif state.surface_parameterization.method == "boundary_sliding_lscm":
         st.info("Boundary-controlled LSCM approximation is active. This mode is intentionally separate from reference BFF.")
     elif not omega_info["bff_implemented"]:
-        st.warning("Omega uses the reported fallback backend, not a reference Boundary First Flattening implementation.")
+        st.warning("Omega is not a reference Boundary First Flattening implementation. No BFF claim is made for this mode.")
     st.write(omega_info)
+elif view_stage == "Mode Comparison":
+    st.caption(
+        "S→M3Dの3モード比較です。spacing / rotation / origin と fully-contained crop を共通化します。"
+        "K3D以降は現行選択モードだけが下流ビューに表示され、paper-referenceとは扱いません。"
+    )
+    comparison_key = (
+        "paper_reference_mode_comparison_v1",
+        pipeline_key,
+        reference_grid_spacing_value,
+        reference_grid_rotation_degrees,
+        reference_grid_origin_u,
+        reference_grid_origin_v,
+        bff_boundary_policy,
+        bff_executable,
+    )
+    if st.session_state.get("mode_comparison_key") != comparison_key:
+        comparison_states = {}
+        comparison_target = build_target()
+        comparison_grid = _onestring_pipeline.create_quad_grid(grid_size, grid_size, tile_size, gap_size)
+        comparison_surface = _onestring_pipeline._build_surface_mesh(
+            comparison_target,
+            comparison_grid,
+            effective_surface_mesh_subdivisions,
+        )
+        with st.spinner("Building shared-grid S→M3D comparison"):
+            for comparison_mode in ("rectangular_harmonic_legacy", "lscm_free_boundary", "paper_reference_bff"):
+                try:
+                    comparison_params = replace(
+                        pipeline_params,
+                        omega_parameterization_mode=comparison_mode,
+                        reference_stop_on_required_split=False,
+                        enable_csf_splits=False,
+                        enable_heuristic_csf_split=False,
+                        enable_peak_guided_split=False,
+                        enable_mirror_split=False,
+                    )
+                    parameterization = _onestring_pipeline._build_surface_parameterization(
+                        comparison_surface,
+                        comparison_target,
+                        comparison_grid,
+                        comparison_params,
+                    )
+                    if comparison_mode == "paper_reference_bff":
+                        domain = _onestring_pipeline._flatten_to_domain(parameterization, comparison_grid, comparison_params)
+                    else:
+                        parameterization.metrics["per_triangle_lambda"] = np.ones(len(comparison_surface.faces), dtype=float).tolist()
+                        domain = _onestring_pipeline._reference_flatten_to_domain(parameterization, comparison_grid, comparison_params)
+                    mesh_2d = _onestring_pipeline._build_reference_m2d(comparison_grid, domain, comparison_params)
+                    mesh_3d, _ = _onestring_pipeline._lift_m2d_to_m3d(
+                        comparison_target,
+                        mesh_2d,
+                        parameterization,
+                        comparison_params,
+                    )
+                    comparison_states[comparison_mode] = SimpleNamespace(
+                        target_surface=comparison_surface,
+                        surface_parameterization=parameterization,
+                        conformal_domain=domain,
+                        mesh_2d_initial=mesh_2d,
+                        mesh_3d_initial=mesh_3d,
+                    )
+                except Exception as exc:
+                    comparison_states[comparison_mode] = exc
+        st.session_state.mode_comparison_states = comparison_states
+        st.session_state.mode_comparison_key = comparison_key
+    comparison_states = st.session_state.mode_comparison_states
+    for column, comparison_mode in zip(
+        st.columns(3),
+        ("rectangular_harmonic_legacy", "lscm_free_boundary", "paper_reference_bff"),
+    ):
+        with column:
+            st.subheader(comparison_mode)
+            comparison = comparison_states[comparison_mode]
+            if isinstance(comparison, Exception):
+                st.error(f"{type(comparison).__name__}: {comparison}")
+                continue
+            st.plotly_chart(figure_domain(comparison), width="stretch", key=f"compare_omega_{comparison_mode}")
+            st.plotly_chart(figure_quad_mesh(comparison.mesh_2d_initial, title="M2D"), width="stretch", key=f"compare_m2d_{comparison_mode}")
+            st.plotly_chart(figure_m3d_overlay(comparison), width="stretch", key=f"compare_m3d_{comparison_mode}")
+            metrics = comparison.surface_parameterization.metrics
+            st.write(
+                {
+                    "backend": metrics.get("flattening_backend"),
+                    "flip_count": metrics.get("uv_triangle_flip_count", 0),
+                    "boundary_intersections": metrics.get("boundary_self_intersection_count", 0),
+                    "internal_overlaps": metrics.get("internal_triangle_overlap_count", 0),
+                    "lambda_max": metrics.get("lambda_max", "not available in legacy mode"),
+                    "anisotropy_max": max(metrics.get("per_triangle_anisotropy", [0.0]) or [0.0]),
+                    "M3D_round_trip_error": comparison.mesh_3d_initial.metrics.get("m3d_round_trip_error_rms", "legacy diagnostic unavailable"),
+                    "M3D_surface_error": comparison.mesh_3d_initial.metrics.get("m3d_surface_distance_max", 0.0),
+                }
+            )
 elif view_stage in {"M2D", "K3D"}:
     mesh = {"M2D": state.mesh_2d_initial, "M3D": state.mesh_3d_initial, "K3D": state.mesh_3d_optimized}[view_stage]
     st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")

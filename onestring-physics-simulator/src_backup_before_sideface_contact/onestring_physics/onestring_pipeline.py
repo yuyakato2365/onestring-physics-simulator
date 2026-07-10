@@ -1010,7 +1010,15 @@ def _build_surface_mesh(target: HeightField, grid: QuadGrid, subdivision_factor:
             faces.append((a, c, d))
     if not vertices_list or not faces:
         raise RuntimeError(f"target surface '{target.kind}' produced an empty supported mesh; lower grid size or adjust radius.")
-    return SurfaceMesh(vertices=np.asarray(vertices_list, dtype=float), faces=np.asarray(faces, dtype=int), kind=target.kind)
+    # Support masks can retain isolated boundary samples that belong to no
+    # fully-supported cell.  They are not part of the generated triangle mesh
+    # and must not be passed to topology-sensitive parameterization backends.
+    face_array = np.asarray(faces, dtype=int)
+    used_vertex_ids = np.unique(face_array)
+    remap = np.full(len(vertices_list), -1, dtype=int)
+    remap[used_vertex_ids] = np.arange(len(used_vertex_ids), dtype=int)
+    compact_vertices = np.asarray(vertices_list, dtype=float)[used_vertex_ids]
+    return SurfaceMesh(vertices=compact_vertices, faces=remap[face_array], kind=target.kind)
 
 
 def _build_surface_parameterization(surface: SurfaceMesh, target: HeightField, grid: QuadGrid, params: PipelineParameters) -> SurfaceParameterization:

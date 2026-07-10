@@ -1,5 +1,7 @@
 """Design and deployment tools for a OneString-inspired simulator."""
 
+__version__ = "0.2.0"
+
 from .design_optimizer import DesignParameters, DesignResult, optimize_design
 from .input_shape import create_builtin_shape, load_target_shape, normalize_shape, sample_target_surface
 from .onestring_pipeline import (
@@ -9,8 +11,10 @@ from .onestring_pipeline import (
     FlatTileLayout,
     OneStringDesignState,
     PipelineParameters,
+    ReferenceInitializationState,
     SurfaceParameterization,
     build_onestring_design,
+    build_paper_reference_initialization,
     complexity_metrics,
     compute_backend_info,
     export_t2d_stl,
@@ -24,6 +28,15 @@ from .onestring_pipeline import (
 )
 from .physics_world import PhysicsParameters, PhysicsResult, PhysicsWorld, simulate_deployment
 from .quad_grid import QuadGrid, create_quad_grid
+from .reference_bff import (
+    ReferenceBFFError,
+    ReferenceBFFUnavailableError,
+    ReferenceInverseMapError,
+    ReferenceMeshValidationError,
+    run_official_bff,
+    triangle_jacobian_diagnostics,
+    validate_reference_mesh,
+)
 
 __all__ = [
     "DesignParameters",
@@ -37,9 +50,15 @@ __all__ = [
     "PhysicsResult",
     "PhysicsWorld",
     "PipelineParameters",
+    "ReferenceInitializationState",
     "QuadGrid",
     "SurfaceParameterization",
+    "ReferenceBFFError",
+    "ReferenceBFFUnavailableError",
+    "ReferenceInverseMapError",
+    "ReferenceMeshValidationError",
     "build_onestring_design",
+    "build_paper_reference_initialization",
     "complexity_metrics",
     "compute_backend_info",
     "export_t2d_stl",
@@ -57,4 +76,8 @@ __all__ = [
     "safe_capstan_friction",
     "simulate_onestring_deployment",
     "simulate_deployment",
+    "run_official_bff",
+    "triangle_jacobian_diagnostics",
+    "validate_reference_mesh",
+    "__version__",
 ]

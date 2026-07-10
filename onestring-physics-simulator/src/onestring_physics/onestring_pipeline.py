@@ -25,6 +25,19 @@ from typing import Literal
 
 import numpy as np
 
+from .reference_bff import (
+    count_internal_triangle_overlaps,
+    ReferenceBFFError,
+    ReferenceBFFUnavailableError,
+    ReferenceInverseMapError,
+    ReferenceMeshValidationError,
+    json_ready,
+    normalize_uv_and_compute_csf,
+    run_official_bff,
+    strict_inverse_map_uv_to_surface,
+    write_diagnostics_json,
+)
+
 
 def _project_root_from_this_file() -> Path:
     # <project>/src/onestring_physics/onestring_pipeline.py
@@ -881,12 +894,15 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
-    model_version: str = "2026-07-10-basic-implementation"
+    model_version: str = "0.2.0-paper-reference-bff"
     t3d_intersection_trim_enabled: bool = False
     t3d_intersection_trim_grid_resolution: int = 10
     omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "paper_default"
     omega_parameterization_mode: Literal[
         "bff",
+        "rectangular_harmonic_legacy",
+        "lscm_free_boundary",
+        "paper_reference_bff",
         "rect_harmonic",
         "harmonic",
         "fallback",
@@ -896,6 +912,23 @@ class PipelineParameters(_original.PipelineParameters):
         "arap_paper_like",
         "paper_like_unimplemented",
     ] = "bff"
+    bff_executable: str | None = None
+    bff_boundary_policy: Literal[
+        "automatic_reference",
+        "boundary_scale_zero",
+        "target_disk",
+        "target_rectangle",
+        "custom_boundary_curvature",
+    ] = "automatic_reference"
+    bff_timeout_seconds: float = 120.0
+    reference_csf_normalization: Literal["min_to_one_hypothesis_a", "none_unspecified"] = "min_to_one_hypothesis_a"
+    reference_grid_spacing: float | None = None
+    reference_grid_rotation_degrees: float = 0.0
+    reference_grid_origin_u: float = 0.0
+    reference_grid_origin_v: float = 0.0
+    reference_inverse_tolerance: float = 1e-10
+    reference_stop_on_required_split: bool = True
+    reference_diagnostics_path: str = "output/paper_reference_diagnostics.json"
     boundary_target_shape: Literal["rectangle"] = "rectangle"
     boundary_target_aspect_mode: Literal["lscm_initial", "fixed"] = "lscm_initial"
     boundary_target_aspect_ratio: float = 1.0
@@ -927,6 +960,19 @@ class PipelineParameters(_original.PipelineParameters):
     hinge_layout_anchor_weight: float = 0.0
     hinge_layout_initial_expansion: float = 1.6
     hinge_layout_max_center_drift_tiles: float = 5.0
+
+
+@dataclass
+class ReferenceInitializationState:
+    """Version 0.2.0 scope: S -> Omega -> M2D -> M3D plus diagnostics."""
+
+    target_surface: object
+    surface_parameterization: object
+    conformal_domain: object
+    mesh_2d_initial: object
+    mesh_3d_initial: object
+    diagnostics: dict[str, object]
+    diagnostics_path: str
 
 
 def _triangle_area_3d(points: np.ndarray) -> np.ndarray:
@@ -2484,9 +2530,100 @@ def _build_surface_parameterization(surface, target, grid, params):
     if len(boundary_loop) < 3:
         raise RuntimeError("S->Omega parameterization requires an open target mesh with a boundary; only explicit debug heightfield mode is available for this surface.")
 
+    if parameterization_mode == "paper_reference_bff":
+        if boundary_mode != "paper_default":
+            raise ValueError("paper_reference_bff requires omega_boundary_mode='paper_default'; its boundary policy is selected separately.")
+        boundary_policy = str(getattr(params, "bff_boundary_policy", "automatic_reference"))
+        result = run_official_bff(
+            surface_vertices,
+            surface_faces,
+            executable=getattr(params, "bff_executable", None),
+            boundary_policy=boundary_policy,
+            timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
+        )
+        uv_vertices, differential = normalize_uv_and_compute_csf(
+            surface_vertices,
+            result.uv_vertices,
+            surface_faces,
+            normalization=str(getattr(params, "reference_csf_normalization", "min_to_one_hypothesis_a")),
+        )
+        if int(differential["uv_degenerate_triangle_count"]):
+            raise ReferenceBFFUnavailableError(
+                "Official BFF output contains degenerate UV triangles; no deletion or fallback was used."
+            )
+        if int(differential["uv_triangle_flip_count"]):
+            raise ReferenceBFFUnavailableError(
+                "Official BFF output contains locally flipped UV triangles; no deletion or fallback was used."
+            )
+        boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
+        lambda_values = np.asarray(differential["lambda"], dtype=float)
+        metrics: dict[str, object] = {
+            **result.metrics,
+            "parameterization_method": "paper_reference_bff",
+            "parameterization_exactness_label": "official_bff_backend",
+            "parameterization_warning": "OneString boundary condition is UNSPECIFIED_IN_PAPER; official BFF CLI policy is recorded explicitly.",
+            "omega_boundary_mode": "paper_default",
+            "omega_parameterization_mode": "paper_reference_bff",
+            "requested_omega_parameterization_mode": "paper_reference_bff",
+            "surface_vertex_count": int(len(surface_vertices)),
+            "surface_triangle_count": int(len(surface_faces)),
+            "boundary_vertex_count": int(len(boundary_loop)),
+            "boundary_loop": [int(value) for value in boundary_loop],
+            "harmonic_solve_performed": False,
+            "height_field_shortcut_used": False,
+            "omega_corresponds_to_S": True,
+            "omega_correspondence_model": "official BFF c:S->Omega; inverse by strict containing-triangle barycentric coordinates",
+            "paper_flow_stage": "S -> Omega by official Boundary First Flattening CLI",
+            "paper_exactness_warning": "S_TO_M3D: paper-reference candidate; K3D_AND_LATER: existing approximate implementation",
+            "bff_implemented": True,
+            "bff_reference_backend_available": True,
+            "bff_backend_used": str(result.metrics["parameterization_backend_name"]),
+            "flattening_backend": str(result.metrics["parameterization_backend_name"]),
+            "omega_boundary_fixed": boundary_policy in {"target_disk"},
+            "omega_boundary_forced_rectangle": False,
+            "omega_boundary_shape": "disk" if boundary_policy == "target_disk" else "free",
+            "omega_boundary_constraint_model": str(result.metrics["bff_boundary_policy_effective"]),
+            "uv_triangle_flip_count": int(differential["uv_triangle_flip_count"]),
+            "uv_degenerate_triangle_count": int(differential["uv_degenerate_triangle_count"]),
+            "per_triangle_sigma1": np.asarray(differential["sigma1"], dtype=float).tolist(),
+            "per_triangle_sigma2": np.asarray(differential["sigma2"], dtype=float).tolist(),
+            "per_triangle_anisotropy": np.asarray(differential["anisotropy"], dtype=float).tolist(),
+            "per_triangle_area_scale": np.asarray(differential["area_scale_uv_to_surface"], dtype=float).tolist(),
+            "per_triangle_lambda": lambda_values.tolist(),
+            "per_triangle_log_lambda": np.asarray(differential["log_lambda"], dtype=float).tolist(),
+            "triangle_flip_flags": np.asarray(differential["triangle_flip"], dtype=bool).tolist(),
+            "uv_degenerate_triangle_flags": np.asarray(differential["uv_degenerate_triangle"], dtype=bool).tolist(),
+            "lambda_min": float(differential["lambda_min"]),
+            "lambda_median": float(differential["lambda_median"]),
+            "lambda_max": float(differential["lambda_max"]),
+            "lambda_bound": 2.0,
+            "lambda_exceeds_bound_triangle_count": int(differential["lambda_exceeds_bound_triangle_count"]),
+            "lambda_mapping_direction": str(differential["mapping_direction"]),
+            "lambda_normalization": str(differential["lambda_normalization"]),
+            "lambda_normalization_status": str(differential["lambda_normalization_status"]),
+            "lambda_uv_similarity_scale_applied": float(differential["lambda_uv_similarity_scale_applied"]),
+            "boundary_self_intersection_count": int(_boundary_self_intersection_count(boundary)),
+            "internal_triangle_overlap_count": int(count_internal_triangle_overlaps(uv_vertices, surface_faces)),
+            "internal_triangle_overlap_status": "evaluated for positive-area overlap between non-adjacent UV triangles",
+            "conformal_energy": float(np.nansum(np.square(np.asarray(differential["anisotropy"], dtype=float) - 1.0))),
+            "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
+        }
+        if metrics["fallbacks_used"]:
+            raise ReferenceBFFUnavailableError("paper_reference_bff recorded a fallback; reference run rejected.")
+        return _original.SurfaceParameterization(
+            method="paper_reference_bff",
+            surface_vertices_3d=surface_vertices,
+            surface_faces=surface_faces,
+            uv_vertices_2d=uv_vertices,
+            uv_faces=surface_faces.copy(),
+            omega_boundary=boundary,
+            triangle_acceleration=None,
+            metrics=metrics,
+        )
+
     if parameterization_mode in {"arap_paper_like", "paper_like_unimplemented"}:
         raise NotImplementedError(
-            f"{parameterization_mode} is not implemented. Use bff to request a reference/free-boundary conformal S->Omega backend, "
+            f"{parameterization_mode} is not implemented. Use paper_reference_bff to request the official BFF backend, "
             "or explicitly enable pca_debug as an experimental non-paper path."
         )
 
@@ -2539,22 +2676,24 @@ def _build_surface_parameterization(surface, target, grid, params):
             raise RuntimeError("boundary_sliding_lscm produced invalid UV triangles after final quality validation; no fallback was used.")
         return out
 
-    if parameterization_mode == "bff":
+    if parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
         if boundary_mode != "paper_default":
             raise ValueError("bff rectangular-target solve only supports omega_boundary_mode='paper_default'.")
         metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
         uv_vertices, backend_metrics = _bff_boundary_first_uv(surface_vertices, surface_faces, boundary_loop)
         boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
+        legacy_warning = (
+            "This is not Boundary First Flattening. "
+            "It is rectangular-boundary cotangent harmonic parameterization."
+        )
         metrics: dict[str, float | int | str | bool] = {
-            "parameterization_method": "bff",
-            "parameterization_exactness_label": "bff_rectangular_boundary_local",
-            "parameterization_warning": (
-                "Local BFF-style rectangular target boundary is active. The boundary condition is prescribed as a rectangle "
-                "before the interior cotangent harmonic solve; no reference libigl/geometry-central BFF backend is wired."
-            ),
+            "parameterization_method": "rectangular_harmonic_legacy",
+            "parameterization_exactness_label": "rectangular_boundary_harmonic_legacy",
+            "parameterization_warning": legacy_warning,
             "omega_boundary_mode": "paper_default",
-            "omega_parameterization_mode": "bff",
-            "requested_omega_parameterization_mode": "bff",
+            "omega_parameterization_mode": "rectangular_harmonic_legacy",
+            "requested_omega_parameterization_mode": parameterization_mode,
+            "deprecated_alias_used": parameterization_mode == "bff",
             "surface_vertex_count": int(len(surface_vertices)),
             "surface_triangle_count": int(len(surface_faces)),
             "boundary_vertex_count": int(len(boundary_loop)),
@@ -2566,13 +2705,25 @@ def _build_surface_parameterization(surface, target, grid, params):
             "omega_corresponds_to_S": True,
             "omega_correspondence_model": "BFF-style prescribed rectangular-boundary UV map c:S->Omega, inverse by UV triangle lookup",
             "paper_flow_stage": "S -> Omega by boundary-first rectangular target domain and cotangent harmonic extension",
-            "paper_exactness_warning": "This is a local discrete BFF-style rectangular target solve, not a reference BFF library binding.",
-            "omega_warning": "Rectangular target-domain boundary is prescribed for downstream tile compatibility; free-boundary LSCM is available only as lscm_paper_like diagnostic mode.",
+            "paper_exactness_warning": legacy_warning,
+            "omega_warning": legacy_warning,
             "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
             **backend_metrics,
         }
+        metrics.update(
+            {
+                "bff_implemented": False,
+                "bff_backend_used": "none",
+                "bff_reference_backend_available": False,
+                "flattening_backend": "rectangular_boundary_cotangent_harmonic_legacy",
+                "omega_parameterization_solver": "rectangular_boundary_cotangent_harmonic_legacy",
+                "parameterization_warning": legacy_warning,
+                "paper_exactness_warning": legacy_warning,
+                "omega_warning": legacy_warning,
+            }
+        )
         out = _original.SurfaceParameterization(
-            method="bff",
+            method="rectangular_harmonic_legacy",
             surface_vertices_3d=surface_vertices,
             surface_faces=surface_faces,
             uv_vertices_2d=uv_vertices,
@@ -2583,9 +2734,9 @@ def _build_surface_parameterization(surface, target, grid, params):
         )
         return _mark_parameterization_mode(
             out,
-            method="bff",
-            exactness="bff_rectangular_boundary_local",
-            warning=str(metrics["parameterization_warning"]),
+            method="rectangular_harmonic_legacy",
+            exactness="rectangular_boundary_harmonic_legacy",
+            warning=legacy_warning,
         )
 
     if parameterization_mode in {"rect_harmonic", "harmonic", "fallback"}:
@@ -2622,18 +2773,19 @@ def _build_surface_parameterization(surface, target, grid, params):
             warning="Rectangular-boundary harmonic parameterization is active; this is not BFF.",
         )
 
-    if parameterization_mode == "lscm_paper_like":
+    if parameterization_mode in {"lscm_paper_like", "lscm_free_boundary"}:
         if boundary_mode not in {"paper_default", "shape_preserving_experimental"}:
             raise ValueError("lscm_paper_like uses a free boundary and does not support rectangular_debug boundary forcing.")
         uv_vertices, lscm_metrics = _lscm_free_boundary_uv(surface_vertices, surface_faces, boundary_loop)
         boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
         metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
         metrics: dict[str, float | int | str | bool] = {
-            "parameterization_method": "lscm_paper_like",
+            "parameterization_method": "lscm_free_boundary",
             "parameterization_exactness_label": "conformal_approximation",
             "parameterization_warning": "Free-boundary LSCM is implemented for conformal S->Omega mapping, but it is not Boundary First Flattening unless the paper path specifically accepts LSCM.",
             "omega_boundary_mode": "paper_default" if boundary_mode == "paper_default" else boundary_mode,
-            "omega_parameterization_mode": "lscm_paper_like",
+            "omega_parameterization_mode": "lscm_free_boundary",
+            "requested_omega_parameterization_mode": parameterization_mode,
             "surface_vertex_count": int(len(surface_vertices)),
             "surface_triangle_count": int(len(surface_faces)),
             "boundary_vertex_count": int(len(boundary_loop)),
@@ -2653,7 +2805,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             **lscm_metrics,
         }
         out = _original.SurfaceParameterization(
-            method="lscm_paper_like",
+            method="lscm_free_boundary",
             surface_vertices_3d=surface_vertices,
             surface_faces=surface_faces,
             uv_vertices_2d=uv_vertices,
@@ -2664,7 +2816,7 @@ def _build_surface_parameterization(surface, target, grid, params):
         )
         return _mark_parameterization_mode(
             out,
-            method="lscm_paper_like",
+            method="lscm_free_boundary",
             exactness="conformal_approximation",
             warning="Free-boundary LSCM is implemented; BFF remains unimplemented.",
         )
@@ -2849,7 +3001,143 @@ def _rebuild_domain_overlay_for_general_omega(domain, parameterization, grid, pa
     }
 
 
+def _reference_triangle_values_to_vertices(face_values: np.ndarray, faces: np.ndarray, vertex_count: int) -> np.ndarray:
+    values = np.asarray(face_values, dtype=float).reshape(-1)
+    out = np.ones(int(vertex_count), dtype=float)
+    buckets: list[list[float]] = [[] for _ in range(int(vertex_count))]
+    for face, value in zip(np.asarray(faces, dtype=int), values):
+        if np.isfinite(value):
+            for vertex_id in face:
+                buckets[int(vertex_id)].append(float(value))
+    for vertex_id, local in enumerate(buckets):
+        if local:
+            out[vertex_id] = float(np.max(local))
+    return out
+
+
+def _reference_gaussian_angle_defects(vertices: np.ndarray, faces: np.ndarray, boundary_loop: list[int]) -> np.ndarray:
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)
+    angle_sum = np.zeros(len(pts), dtype=float)
+    for face in tris:
+        tri = pts[face]
+        for local_vertex in range(3):
+            center = tri[local_vertex]
+            a = tri[(local_vertex + 1) % 3] - center
+            b = tri[(local_vertex + 2) % 3] - center
+            denom = max(float(np.linalg.norm(a) * np.linalg.norm(b)), 1e-300)
+            angle_sum[int(face[local_vertex])] += float(np.arccos(np.clip(np.dot(a, b) / denom, -1.0, 1.0)))
+    defects = 2.0 * np.pi - angle_sum
+    if boundary_loop:
+        boundary_ids = np.asarray(boundary_loop, dtype=int)
+        defects[boundary_ids] = np.pi - angle_sum[boundary_ids]
+    return defects
+
+
+def _reference_flatten_to_domain(parameterization, grid, params):
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    boundary = np.asarray(parameterization.omega_boundary, dtype=float)
+    boundary_open = boundary[:-1]
+    origin = np.asarray(
+        [float(getattr(params, "reference_grid_origin_u", 0.0)), float(getattr(params, "reference_grid_origin_v", 0.0))],
+        dtype=float,
+    )
+    angle_degrees = float(getattr(params, "reference_grid_rotation_degrees", 0.0))
+    angle = np.deg2rad(angle_degrees)
+    rotation = np.asarray([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]], dtype=float)
+    canonical_boundary = (boundary_open - origin) @ rotation
+    span = np.ptp(canonical_boundary, axis=0)
+    requested_spacing = getattr(params, "reference_grid_spacing", None)
+    if requested_spacing is None:
+        spacing = max(float(span[0]) / max(int(grid.nx), 1), float(span[1]) / max(int(grid.ny), 1), 1e-8)
+        spacing_status = "UNSPECIFIED_IN_PAPER: derived from requested nx/ny (hypothesis_a)"
+    else:
+        spacing = float(requested_spacing)
+        if not np.isfinite(spacing) or spacing <= 0.0:
+            raise ValueError("reference_grid_spacing must be finite and positive")
+        spacing_status = "explicit user parameter"
+    margin = int(max(0, getattr(params, "omega_overlay_margin", 1)))
+    minimum = np.min(canonical_boundary, axis=0)
+    maximum = np.max(canonical_boundary, axis=0)
+    i_min = int(np.floor(minimum[0] / spacing)) - margin
+    i_max = int(np.ceil(maximum[0] / spacing)) + margin
+    j_min = int(np.floor(minimum[1] / spacing)) - margin
+    j_max = int(np.ceil(maximum[1] / spacing)) + margin
+    xs = np.arange(i_min, i_max + 1, dtype=float) * spacing
+    ys = np.arange(j_min, j_max + 1, dtype=float) * spacing
+    xx, yy = np.meshgrid(xs, ys, indexing="xy")
+    canonical = np.stack([xx, yy], axis=-1).reshape(-1, 2)
+    overlay_uv = origin + canonical @ rotation.T
+    lambda_triangles = np.asarray(parameterization.metrics.get("per_triangle_lambda", []), dtype=float)
+    csf_vertices = _reference_triangle_values_to_vertices(lambda_triangles, parameterization.surface_faces, len(uv))
+    domain = _original.PlanarDomain(
+        boundary=boundary,
+        uv_vertices=overlay_uv,
+        method="paper_reference_bff regular square grid",
+        csf_values=csf_vertices,
+        split_lines=[],
+    )
+    domain.overlay_nx = int(len(xs) - 1)
+    domain.overlay_ny = int(len(ys) - 1)
+    domain.overlay_margin_tiles = margin
+    domain.overlay_step_u = spacing
+    domain.overlay_step_v = spacing
+    domain.original_requested_nx = int(grid.nx)
+    domain.original_requested_ny = int(grid.ny)
+    domain.reference_mode = True
+    domain.parameterization = parameterization
+    domain.reference_grid_spacing = spacing
+    domain.reference_grid_spacing_status = spacing_status
+    domain.reference_grid_rotation_degrees = angle_degrees
+    domain.reference_grid_origin = origin.tolist()
+    domain.reference_grid_index_bounds = [i_min, i_max, j_min, j_max]
+    domain.csf_before = float(np.nanmax(lambda_triangles)) if lambda_triangles.size else 1.0
+    domain.csf_after_split = domain.csf_before
+    domain.csf_split_threshold = 2.0
+    domain.csf_split_enabled = False
+    domain.csf_model = "exact per-triangle max singular value of J^-1"
+    domain.csf_split_exactness_label = "diagnostic_only"
+    boundary_loop = [int(value) for value in parameterization.metrics.get("boundary_loop", [])]
+    gaussian = _reference_gaussian_angle_defects(
+        parameterization.surface_vertices_3d,
+        parameterization.surface_faces,
+        boundary_loop,
+    )
+    peak_id = int(np.nanargmax(gaussian)) if gaussian.size else -1
+    domain.reference_split_diagnostics = {
+        "lambda_bound": 2.0,
+        "lambda_max": float(domain.csf_before),
+        "split_required": bool(domain.csf_before > 2.0),
+        "highest_gaussian_curvature_vertex_id": peak_id,
+        "highest_gaussian_curvature_angle_defect": float(gaussian[peak_id]) if peak_id >= 0 else None,
+        "highest_gaussian_curvature_uv": uv[peak_id].tolist() if peak_id >= 0 else None,
+        "paper_split_rule": "complete hierarchical grid-direction bisection through highest Gaussian curvature",
+        "split_locations": [],
+        "split_count": 0,
+        "status": "UNSPECIFIED_SPLIT_REPARAMETERIZATION" if domain.csf_before > 2.0 else "not_required",
+    }
+    parameterization.metrics.update(
+        {
+            "reference_grid_spacing": spacing,
+            "reference_grid_spacing_status": spacing_status,
+            "reference_grid_rotation_degrees": angle_degrees,
+            "reference_grid_origin": origin.tolist(),
+            "split_diagnostics": domain.reference_split_diagnostics,
+        }
+    )
+    if bool(domain.csf_before > 2.0) and bool(getattr(params, "reference_stop_on_required_split", True)):
+        raise ReferenceBFFError(
+            "UNSPECIFIED_SPLIT_REPARAMETERIZATION: lambda exceeds 2, but the OneString paper does not fully specify "
+            "post-split BFF reparameterization. Reference mode stopped without applying the legacy split heuristic."
+        )
+    return domain
+
+
 def _flatten_to_domain(parameterization, grid, params=None):
+    if str(getattr(parameterization, "method", "")) == "paper_reference_bff":
+        if params is None:
+            raise ValueError("paper_reference_bff requires explicit PipelineParameters")
+        return _reference_flatten_to_domain(parameterization, grid, params)
     domain = _ORIGINAL_FLATTEN_TO_DOMAIN(parameterization, grid, params)
     threshold = float(getattr(params, "csf_split_threshold", 1.9)) if params is not None else 1.9
     enabled = bool(getattr(params, "enable_csf_splits", True)) if params is not None else True
@@ -3275,7 +3563,118 @@ def _symmetrize_m2d_faces(mesh, domain) -> tuple[np.ndarray, int]:
     return np.asarray(ordered_faces, dtype=int), int(added)
 
 
+def _reference_point_in_polygon_inclusive(point: np.ndarray, polygon: np.ndarray, tolerance: float = 1e-10) -> bool:
+    p = np.asarray(point, dtype=float)
+    poly = np.asarray(polygon, dtype=float)
+    for index in range(len(poly)):
+        a = poly[index]
+        b = poly[(index + 1) % len(poly)]
+        ab = b - a
+        length2 = float(np.dot(ab, ab))
+        if length2 <= tolerance * tolerance:
+            continue
+        t = float(np.clip(np.dot(p - a, ab) / length2, 0.0, 1.0))
+        if float(np.linalg.norm(p - (a + t * ab))) <= tolerance:
+            return True
+    inside = False
+    x, y = float(p[0]), float(p[1])
+    for index in range(len(poly)):
+        x0, y0 = map(float, poly[index])
+        x1, y1 = map(float, poly[(index + 1) % len(poly)])
+        if (y0 > y) != (y1 > y):
+            x_cross = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+            if x < x_cross:
+                inside = not inside
+    return inside
+
+
+def _reference_proper_segment_intersection(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray, tolerance: float = 1e-12) -> bool:
+    def orient(p, q, r) -> float:
+        return float((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]))
+
+    o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+    return bool(o1 * o2 < -tolerance and o3 * o4 < -tolerance)
+
+
+def _reference_quad_fully_inside(points: np.ndarray, polygon: np.ndarray) -> bool:
+    quad = np.asarray(points, dtype=float)
+    poly = np.asarray(polygon, dtype=float)
+    if not all(_reference_point_in_polygon_inclusive(point, poly) for point in quad):
+        return False
+    for edge_id in range(4):
+        a = quad[edge_id]
+        b = quad[(edge_id + 1) % 4]
+        for boundary_id in range(len(poly)):
+            c = poly[boundary_id]
+            d = poly[(boundary_id + 1) % len(poly)]
+            if _reference_proper_segment_intersection(a, b, c, d):
+                return False
+    return True
+
+
+def _build_reference_m2d(grid, domain, params=None):
+    overlay_nx = int(domain.overlay_nx)
+    overlay_ny = int(domain.overlay_ny)
+    overlay_grid = _original.create_quad_grid(overlay_nx, overlay_ny, grid.tile_size, grid.gap_size)
+    vertices = np.column_stack([np.asarray(domain.uv_vertices, dtype=float), np.zeros(len(domain.uv_vertices), dtype=float)])
+    overlay_grid.vertex_positions = vertices.copy()
+    boundary = np.asarray(domain.boundary[:-1], dtype=float)
+    kept_faces: list[tuple[int, int, int, int]] = []
+    kept_ids: list[int] = []
+    for tile in overlay_grid.tiles or []:
+        face = tuple(int(value) for value in tile.vertex_ids)
+        if _reference_quad_fully_inside(vertices[list(face), :2], boundary):
+            kept_faces.append(face)
+            kept_ids.append(int(tile.id))
+    if not kept_faces:
+        raise RuntimeError("paper_reference_bff regular grid produced no fully contained quads in Omega.")
+    faces_full = np.asarray(kept_faces, dtype=int)
+    used_vertex_ids = np.unique(faces_full)
+    remap = np.full(len(vertices), -1, dtype=int)
+    remap[used_vertex_ids] = np.arange(len(used_vertex_ids), dtype=int)
+    vertices = vertices[used_vertex_ids]
+    faces = remap[faces_full]
+    overlay_grid.vertex_positions = vertices.copy()
+    split_diagnostics = dict(getattr(domain, "reference_split_diagnostics", {}))
+    metrics = {
+        "m2d_grid_overlay": "explicit regular square grid over official-BFF Omega",
+        "m2d_crop_policy": "all_vertices_inside_and_no_boundary_crossing",
+        "m2d_boundary_clipping_policy": "all_vertices_inside",
+        "m2d_requested_grid_nx": int(getattr(domain, "original_requested_nx", grid.nx)),
+        "m2d_requested_grid_ny": int(getattr(domain, "original_requested_ny", grid.ny)),
+        "m2d_overlay_grid_nx": overlay_nx,
+        "m2d_overlay_grid_ny": overlay_ny,
+        "m2d_overlay_total_quad_count": int(len(overlay_grid.tiles or [])),
+        "m2d_cropped_quad_count": int(len(overlay_grid.tiles or []) - len(faces)),
+        "m2d_kept_quad_count": int(len(faces)),
+        "m2d_vertex_count": int(len(vertices)),
+        "m2d_quad_count": int(len(faces)),
+        "m2d_kept_original_overlay_tile_ids": kept_ids,
+        "m2d_kept_original_overlay_vertex_ids": used_vertex_ids.astype(int).tolist(),
+        "m2d_unused_overlay_vertices_removed": True,
+        "reference_grid_spacing": float(domain.reference_grid_spacing),
+        "reference_grid_spacing_status": str(domain.reference_grid_spacing_status),
+        "reference_grid_rotation_degrees": float(domain.reference_grid_rotation_degrees),
+        "reference_grid_origin": list(domain.reference_grid_origin),
+        "reference_grid_index_bounds": list(domain.reference_grid_index_bounds),
+        "automatic_peak_alignment_used": False,
+        "automatic_density_change_used": False,
+        "automatic_symmetry_completion_used": False,
+        "hidden_grid_shift_used": False,
+        "max_csf_before_split": float(domain.csf_before),
+        "max_csf_after_split": float(domain.csf_after_split),
+        "number_of_splits": 0,
+        "split_locations": [],
+        "split_diagnostics": split_diagnostics,
+        "csf_model": str(domain.csf_model),
+        "csf_split_exactness_label": "diagnostic_only",
+    }
+    return _original.QuadMesh(vertices, faces, overlay_grid, "M2D", metrics, [])
+
+
 def _build_m2d(grid, domain, params=None):
+    if bool(getattr(domain, "reference_mode", False)):
+        return _build_reference_m2d(grid, domain, params)
     mesh = _ORIGINAL_BUILD_M2D(grid, domain, params)
     all_overlay_faces = np.asarray([tile.vertex_ids for tile in (mesh.grid.tiles or [])], dtype=int)
     if len(all_overlay_faces):
@@ -3460,6 +3859,71 @@ def _build_m2d(grid, domain, params=None):
 
 
 def _lift_m2d_to_m3d(target, mesh, parameterization, params):
+    if str(getattr(parameterization, "method", "")) == "paper_reference_bff":
+        started = time.perf_counter()
+        mapped: list[np.ndarray] = []
+        triangle_ids: list[int] = []
+        barycentric_values: list[list[float]] = []
+        round_trip_errors: list[float] = []
+        tolerance = float(getattr(params, "reference_inverse_tolerance", 1e-10))
+        for vertex_id, uv_point in enumerate(np.asarray(mesh.vertices, dtype=float)[:, :2]):
+            point, triangle_id, barycentric, round_trip = strict_inverse_map_uv_to_surface(
+                uv_point,
+                parameterization.uv_vertices_2d,
+                parameterization.uv_faces,
+                parameterization.surface_vertices_3d,
+                parameterization.surface_faces,
+                tolerance=tolerance,
+                vertex_id=int(vertex_id),
+            )
+            mapped.append(point)
+            triangle_ids.append(int(triangle_id))
+            barycentric_values.append(np.asarray(barycentric, dtype=float).tolist())
+            round_trip_errors.append(float(round_trip))
+        vertices = np.asarray(mapped, dtype=float)
+        planarity = _original._quad_planarity_error(vertices, mesh.faces)
+        errors = np.asarray(round_trip_errors, dtype=float)
+        metrics = {
+            "surface_deviation": 0.0,
+            "quad_planarity_error": float(planarity),
+            "m3d_construction_method": "strict_barycentric_inverse_of_official_bff",
+            "parameterization_method": "paper_reference_bff",
+            "m3d_surface_distance_mean": 0.0,
+            "m3d_surface_distance_max": 0.0,
+            "m3d_uv_triangle_lookup_fail_count": 0,
+            "m3d_uv_lookup_failure_count": 0,
+            "m3d_outside_omega_count": 0,
+            "m3d_outside_uv_triangle_count": 0,
+            "m3d_negative_barycentric_count": int(np.count_nonzero(np.asarray(barycentric_values) < -tolerance)),
+            "m3d_nearest_fallback_count": 0,
+            "m3d_used_height_field_shortcut": False,
+            "m3d_surface_projection_model": "strict containing UV triangle plus barycentric coordinates",
+            "m3d_exactness_label": "paper-reference candidate",
+            "m3d_vertex_count": int(len(vertices)),
+            "m3d_quad_count": int(len(mesh.faces)),
+            "m3d_planarity_error": float(planarity),
+            "m3d_surface_triangle_ids": triangle_ids,
+            "m3d_barycentric_coordinates": barycentric_values,
+            "m3d_round_trip_error_mean": float(np.mean(errors)) if errors.size else 0.0,
+            "m3d_round_trip_error_rms": float(np.sqrt(np.mean(errors * errors))) if errors.size else 0.0,
+            "m3d_round_trip_error_max": float(np.max(errors)) if errors.size else 0.0,
+            "m3d_inverse_tolerance": tolerance,
+            "fallbacks_used": [],
+            "paper_scope_label": "S_TO_M3D: paper-reference candidate",
+            "later_scope_label": "K3D_AND_LATER: existing approximate implementation",
+        }
+        out = _original.QuadMesh(vertices, np.asarray(mesh.faces, dtype=int).copy(), mesh.grid, "M3D", metrics, [])
+        report = _original.StageReport(
+            name="M2D -> M3D",
+            objective="Strict inverse conformal map c^-1 by containing UV triangle and barycentric interpolation.",
+            before_error=0.0,
+            after_error=float(metrics["m3d_round_trip_error_rms"]),
+            constraint_violation=float(planarity),
+            computation_time=time.perf_counter() - started,
+            failed_constraints=[],
+            counts=_original._mesh_counts(out),
+        )
+        return out, report
     lookup_records: list[tuple[int, bool]] = []
     previous_inverse_map = _original.inverse_map_uv_to_surface
 
@@ -4000,6 +4464,7 @@ def _weld_k3d_duplicate_reference_vertices(
 
 
 def _optimize_k3d(target, mesh, parameterization, params):
+    reference_prefix = str(getattr(parameterization, "method", "")) == "paper_reference_bff"
     out, report = _ORIGINAL_OPTIMIZE_K3D(target, mesh, parameterization, params)
     welded_vertices, weld_metrics = _weld_k3d_duplicate_reference_vertices(mesh.vertices, out.vertices)
     if bool(weld_metrics.get("k3d_split_duplicate_weld_applied", False)):
@@ -4031,6 +4496,7 @@ def _optimize_k3d(target, mesh, parameterization, params):
                 "model_version": str(getattr(params, "model_version", "")),
                 "t3d_intersection_trim_enabled": bool(getattr(params, "t3d_intersection_trim_enabled", False)),
                 "t3d_intersection_trim_grid_resolution": int(getattr(params, "t3d_intersection_trim_grid_resolution", 10)),
+                "paper_scope_label": "K3D_AND_LATER: existing approximate implementation" if reference_prefix else "",
             }
         )
         return out, report
@@ -4057,6 +4523,7 @@ def _optimize_k3d(target, mesh, parameterization, params):
             "model_version": str(getattr(params, "model_version", "")),
             "t3d_intersection_trim_enabled": bool(getattr(params, "t3d_intersection_trim_enabled", False)),
             "t3d_intersection_trim_grid_resolution": int(getattr(params, "t3d_intersection_trim_grid_resolution", 10)),
+            "paper_scope_label": "K3D_AND_LATER: existing approximate implementation" if reference_prefix else "",
         }
     )
     fallback = _original.QuadMesh(
@@ -6857,6 +7324,216 @@ def _paper_local_global_se2_layout(
     }
 
 
+# Keep the unwrapped constructor so version 0.2.0 can add reference diagnostics
+# without changing the implementation order inside the legacy module.
+_ORIGINAL_BUILD_ONESTRING_DESIGN = _original.build_onestring_design
+
+
+def _finite_stats(values) -> dict[str, float | None]:
+    array = np.asarray(values, dtype=float).reshape(-1)
+    array = array[np.isfinite(array)]
+    if not len(array):
+        return {"min": None, "median": None, "mean": None, "max": None}
+    return {
+        "min": float(np.min(array)),
+        "median": float(np.median(array)),
+        "mean": float(np.mean(array)),
+        "max": float(np.max(array)),
+    }
+
+
+def _collect_reference_run_diagnostics(state, params) -> dict[str, object]:
+    parameterization_metrics = dict(state.surface_parameterization.metrics)
+    m2d_metrics = dict(state.mesh_2d_initial.metrics)
+    m3d_metrics = dict(state.mesh_3d_initial.metrics)
+    k3d_metrics = dict(state.mesh_3d_optimized.metrics)
+    fallbacks: list[str] = list(parameterization_metrics.get("fallbacks_used", []) or [])
+    if bool(k3d_metrics.get("fallback_used", False)) or bool(k3d_metrics.get("k3d_fallback_used", False)):
+        fallbacks.append(f"K3D: {k3d_metrics.get('k3d_fallback_reason', k3d_metrics.get('approximation_warning', 'fallback'))}")
+    for stage_name, report in dict(getattr(state, "stage_reports", {})).items():
+        if getattr(report, "failed_constraints", None):
+            fallbacks.append(f"{stage_name}: failed_constraints={list(report.failed_constraints)}")
+    sigma1 = parameterization_metrics.get("per_triangle_sigma1", [])
+    sigma2 = parameterization_metrics.get("per_triangle_sigma2", [])
+    anisotropy = parameterization_metrics.get("per_triangle_anisotropy", [])
+    area_scale = parameterization_metrics.get("per_triangle_area_scale", [])
+    lambda_values = parameterization_metrics.get("per_triangle_lambda", [])
+    split_diagnostics = dict(parameterization_metrics.get("split_diagnostics", {}) or m2d_metrics.get("split_diagnostics", {}) or {})
+    diagnostics: dict[str, object] = {
+        "model_version": str(getattr(params, "model_version", "0.2.0-paper-reference-bff")),
+        "parameterization_backend_name": parameterization_metrics.get("parameterization_backend_name"),
+        "parameterization_backend_version": parameterization_metrics.get("parameterization_backend_version"),
+        "parameterization_backend_commit_sha": parameterization_metrics.get("parameterization_backend_commit_sha"),
+        "parameterization_backend_sha256": parameterization_metrics.get("parameterization_backend_sha256"),
+        "boundary_policy": parameterization_metrics.get("bff_boundary_policy_effective"),
+        "onestring_boundary_condition_status": parameterization_metrics.get("onestring_boundary_condition_status"),
+        "input_topology": parameterization_metrics.get("input_topology"),
+        "boundary_loop_count": dict(parameterization_metrics.get("input_topology", {}) or {}).get("boundary_loop_count"),
+        "uv_triangle_flip_count": int(parameterization_metrics.get("uv_triangle_flip_count", 0)),
+        "uv_degenerate_triangle_count": int(parameterization_metrics.get("uv_degenerate_triangle_count", 0)),
+        "boundary_self_intersection_count": int(parameterization_metrics.get("boundary_self_intersection_count", 0)),
+        "internal_triangle_overlap_count": int(parameterization_metrics.get("internal_triangle_overlap_count", 0)),
+        "internal_triangle_overlap_status": parameterization_metrics.get("internal_triangle_overlap_status"),
+        "conformal_energy": float(parameterization_metrics.get("conformal_energy", 0.0)),
+        "per_triangle_sigma1": sigma1,
+        "per_triangle_sigma2": sigma2,
+        "anisotropy_statistics": _finite_stats(anisotropy),
+        "lambda_statistics": _finite_stats(lambda_values),
+        "lambda_normalization": parameterization_metrics.get("lambda_normalization"),
+        "lambda_normalization_status": parameterization_metrics.get("lambda_normalization_status"),
+        "area_distortion_statistics": _finite_stats(area_scale),
+        "inverse_map_failure_count": int(m3d_metrics.get("m3d_uv_lookup_failure_count", 0)),
+        "inverse_map_outside_omega_count": int(m3d_metrics.get("m3d_outside_omega_count", 0)),
+        "M2D_vertex_count": int(m2d_metrics.get("m2d_vertex_count", len(state.mesh_2d_initial.vertices))),
+        "M2D_quad_count": int(m2d_metrics.get("m2d_quad_count", len(state.mesh_2d_initial.faces))),
+        "M3D_round_trip_error": float(m3d_metrics.get("m3d_round_trip_error_rms", 0.0)),
+        "M3D_round_trip_error_max": float(m3d_metrics.get("m3d_round_trip_error_max", 0.0)),
+        "split_count": int(split_diagnostics.get("split_count", 0)),
+        "split_locations": list(split_diagnostics.get("split_locations", []) or []),
+        "split_status": split_diagnostics.get("status", "not_required"),
+        "fallbacks_used": fallbacks,
+        "scope": {
+            "S_TO_M3D": "paper-reference candidate",
+            "K3D_AND_LATER": "existing approximate implementation",
+        },
+        "grid": {
+            "spacing": parameterization_metrics.get("reference_grid_spacing"),
+            "rotation_degrees": parameterization_metrics.get("reference_grid_rotation_degrees"),
+            "origin": parameterization_metrics.get("reference_grid_origin"),
+            "crop_policy": m2d_metrics.get("m2d_crop_policy"),
+        },
+    }
+    return diagnostics
+
+
+def _collect_reference_initialization_diagnostics(parameterization, mesh_2d, mesh_3d, params) -> dict[str, object]:
+    p = dict(parameterization.metrics)
+    m2 = dict(mesh_2d.metrics)
+    m3 = dict(mesh_3d.metrics)
+    split = dict(p.get("split_diagnostics", {}) or m2.get("split_diagnostics", {}) or {})
+    fallbacks = list(p.get("fallbacks_used", []) or []) + list(m3.get("fallbacks_used", []) or [])
+    return {
+        "model_version": str(getattr(params, "model_version", "0.2.0-paper-reference-bff")),
+        "parameterization_backend_name": p.get("parameterization_backend_name"),
+        "parameterization_backend_version": p.get("parameterization_backend_version"),
+        "parameterization_backend_commit_sha": p.get("parameterization_backend_commit_sha"),
+        "parameterization_backend_sha256": p.get("parameterization_backend_sha256"),
+        "boundary_policy": p.get("bff_boundary_policy_effective"),
+        "onestring_boundary_condition_status": p.get("onestring_boundary_condition_status"),
+        "input_topology": p.get("input_topology"),
+        "boundary_loop_count": dict(p.get("input_topology", {}) or {}).get("boundary_loop_count"),
+        "uv_triangle_flip_count": int(p.get("uv_triangle_flip_count", 0)),
+        "uv_degenerate_triangle_count": int(p.get("uv_degenerate_triangle_count", 0)),
+        "boundary_self_intersection_count": int(p.get("boundary_self_intersection_count", 0)),
+        "internal_triangle_overlap_count": int(p.get("internal_triangle_overlap_count", 0)),
+        "internal_triangle_overlap_status": p.get("internal_triangle_overlap_status"),
+        "conformal_energy": float(p.get("conformal_energy", 0.0)),
+        "per_triangle_sigma1": p.get("per_triangle_sigma1", []),
+        "per_triangle_sigma2": p.get("per_triangle_sigma2", []),
+        "anisotropy_statistics": _finite_stats(p.get("per_triangle_anisotropy", [])),
+        "lambda_statistics": _finite_stats(p.get("per_triangle_lambda", [])),
+        "lambda_normalization": p.get("lambda_normalization"),
+        "lambda_normalization_status": p.get("lambda_normalization_status"),
+        "area_distortion_statistics": _finite_stats(p.get("per_triangle_area_scale", [])),
+        "inverse_map_failure_count": int(m3.get("m3d_uv_lookup_failure_count", 0)),
+        "inverse_map_outside_omega_count": int(m3.get("m3d_outside_omega_count", 0)),
+        "M2D_vertex_count": int(m2.get("m2d_vertex_count", len(mesh_2d.vertices))),
+        "M2D_quad_count": int(m2.get("m2d_quad_count", len(mesh_2d.faces))),
+        "M3D_round_trip_error": float(m3.get("m3d_round_trip_error_rms", 0.0)),
+        "M3D_round_trip_error_max": float(m3.get("m3d_round_trip_error_max", 0.0)),
+        "split_count": int(split.get("split_count", 0)),
+        "split_locations": list(split.get("split_locations", []) or []),
+        "split_status": split.get("status", "not_required"),
+        "split_diagnostics": split,
+        "fallbacks_used": fallbacks,
+        "scope": {
+            "S_TO_M3D": "paper-reference candidate",
+            "K3D_AND_LATER": "not executed by build_paper_reference_initialization",
+        },
+        "grid": {
+            "spacing": p.get("reference_grid_spacing"),
+            "rotation_degrees": p.get("reference_grid_rotation_degrees"),
+            "origin": p.get("reference_grid_origin"),
+            "crop_policy": m2.get("m2d_crop_policy"),
+        },
+    }
+
+
+def build_paper_reference_initialization(target, params=None, progress_callback=None):
+    """Run only the version-0.2.0 paper-reference candidate scope through M3D."""
+
+    active_params = params or PipelineParameters(omega_parameterization_mode="paper_reference_bff")
+    if str(getattr(active_params, "omega_parameterization_mode", "")) != "paper_reference_bff":
+        raise ValueError("build_paper_reference_initialization requires omega_parameterization_mode='paper_reference_bff'")
+    _original._validate_compute_config(active_params.compute)
+    active_params.ny = active_params.nx if active_params.ny is None else active_params.ny
+    grid = _original.create_quad_grid(active_params.nx, active_params.ny, active_params.tile_size, active_params.gap_size)
+    _original._emit_progress(progress_callback, "Initialize grid", 0.05, "explicit reference grid parameters")
+    surface = _original._build_surface_mesh(target, grid, active_params.surface_mesh_subdivisions)
+    _original._emit_progress(progress_callback, "S: target surface mesh", 0.20, f"{len(surface.vertices)} vertices")
+    parameterization = _build_surface_parameterization(surface, target, grid, active_params)
+    _original._emit_progress(progress_callback, "S -> Omega", 0.45, "official BFF backend")
+    domain = _flatten_to_domain(parameterization, grid, active_params)
+    mesh_2d = _build_m2d(grid, domain, active_params)
+    _original._emit_progress(progress_callback, "Omega -> M2D", 0.70, f"{len(mesh_2d.faces)} fully contained quads")
+    mesh_3d, _report = _lift_m2d_to_m3d(target, mesh_2d, parameterization, active_params)
+    diagnostics = _collect_reference_initialization_diagnostics(parameterization, mesh_2d, mesh_3d, active_params)
+    requested_path = str(getattr(active_params, "reference_diagnostics_path", "output/paper_reference_diagnostics.json"))
+    diagnostics_path = Path(requested_path)
+    if not diagnostics_path.is_absolute():
+        diagnostics_path = _project_root_from_this_file() / diagnostics_path
+    written = write_diagnostics_json(diagnostics_path, diagnostics)
+    parameterization.metrics["reference_diagnostics_path"] = str(written)
+    parameterization.metrics["reference_run_diagnostics"] = json_ready(diagnostics)
+    if diagnostics["fallbacks_used"]:
+        raise ReferenceBFFError(
+            "Reference initialization recorded fallbacks and is rejected: "
+            + "; ".join(str(value) for value in diagnostics["fallbacks_used"])
+        )
+    _original._emit_progress(progress_callback, "M2D -> M3D", 1.0, "strict barycentric inverse map")
+    return ReferenceInitializationState(
+        target_surface=surface,
+        surface_parameterization=parameterization,
+        conformal_domain=domain,
+        mesh_2d_initial=mesh_2d,
+        mesh_3d_initial=mesh_3d,
+        diagnostics=diagnostics,
+        diagnostics_path=str(written),
+    )
+
+
+def build_onestring_design(
+    target,
+    params=None,
+    run_simulation=False,
+    deployment_params=None,
+    progress_callback=None,
+):
+    active_params = params or PipelineParameters()
+    state = _ORIGINAL_BUILD_ONESTRING_DESIGN(
+        target,
+        active_params,
+        run_simulation=run_simulation,
+        deployment_params=deployment_params,
+        progress_callback=progress_callback,
+    )
+    if str(getattr(active_params, "omega_parameterization_mode", "")) == "paper_reference_bff":
+        diagnostics = _collect_reference_run_diagnostics(state, active_params)
+        requested_path = str(getattr(active_params, "reference_diagnostics_path", "output/paper_reference_diagnostics.json"))
+        target_path = Path(requested_path)
+        if not target_path.is_absolute():
+            target_path = _project_root_from_this_file() / target_path
+        written = write_diagnostics_json(target_path, diagnostics)
+        state.surface_parameterization.metrics["reference_diagnostics_path"] = str(written)
+        state.surface_parameterization.metrics["reference_run_diagnostics"] = json_ready(diagnostics)
+        if diagnostics["fallbacks_used"]:
+            raise ReferenceBFFError(
+                "Reference run recorded fallbacks and is therefore rejected: "
+                + "; ".join(str(value) for value in diagnostics["fallbacks_used"])
+            )
+    return state
+
+
 # Patch the original module in-place. Functions such as build_onestring_design()
 # keep their original global namespace, so this assignment is what makes them call
 # the new extrusion implementation.
@@ -6912,11 +7589,13 @@ for _name, _value in _original.__dict__.items():
         "_build_string_path",
         "_optimize_dual_hinges",
         "PipelineParameters",
+        "build_onestring_design",
     }:
         continue
     globals()[_name] = _value
 
 globals()["PipelineParameters"] = PipelineParameters
+globals()["build_onestring_design"] = build_onestring_design
 globals()["_extrude_tiles"] = _extrude_tiles
 globals()["_build_surface_parameterization"] = _build_surface_parameterization
 globals()["_flatten_to_domain"] = _flatten_to_domain

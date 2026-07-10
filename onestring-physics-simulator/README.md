@@ -2,11 +2,23 @@
 
 A Python research prototype inspired by **One String to Pull Them All: Fast Assembly of Curved Structures from Flat Auxetic Linkages**.
 
+## Version 0.2.0: paper-reference initialization
+
+Version 0.2.0 adds `paper_reference_bff`, a fail-fast S-to-M3D path backed by
+the official GeometryCollective `bff-command-line` executable. It includes
+strict triangle-disk validation, exact per-triangle Jacobian/SVD diagnostics,
+an explicit regular square grid, fully-contained-cell cropping, strict
+containing-triangle barycentric lifting, split diagnostics, and JSON output.
+It never calls LSCM, PCA, harmonic mapping, or nearest geometry as a BFF
+fallback. See [BFF backend](docs/bff_backend.md),
+[conformal scale factor](docs/conformal_scale_factor.md), and
+[traceability](docs/paper_traceability.md).
+
 The optional `boundary_sliding_lscm` mode is LSCM with a prescribed rectangular target boundary and order-preserving sliding boundary correspondence. It is explicitly not Boundary First Flattening: it does not implement the Cherrier formula or a Poincare-Steklov operator. See [docs/boundary_sliding_lscm_ja.md](docs/boundary_sliding_lscm_ja.md).
 
 For a reproducible Windows/CUDA setup, including the wrapper-to-base runtime path that must be present in a clone, follow [docs/home_pc_codex_handoff_ja.md](docs/home_pc_codex_handoff_ja.md) and run `python scripts/verify_home_environment.py --require-cuda` before comparing performance.
 
-This simulator is a paper-audited OneString research prototype, not a complete paper implementation. The default `PipelineParameters()` path requests `omega_parameterization_mode="bff"`, but the active flattening backend is reported explicitly. If no wired reference BFF backend is available, the pipeline uses an explicit free-boundary conformal LSCM fallback instead of pretending that rectangular-boundary harmonic UVs are BFF. PCA remains available only as an explicit debug/experimental path with `allow_experimental_pipeline=True`.
+This simulator is a paper-audited OneString research prototype, not a complete paper implementation. For backward compatibility, bare `PipelineParameters()` still accepts the deprecated `bff` alias, but that alias now resolves to `rectangular_harmonic_legacy` and always reports: `This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.` Use `paper_reference_bff` explicitly for the official backend. If that backend is missing, the run fails with `ReferenceBFFUnavailableError`; it does not fall back.
 
 The default Streamlit workflow is:
 
@@ -22,7 +34,7 @@ The deployed physical error is evaluated against the designed assembled tile con
 
 ## 論文の流れと、この実装の流れ
 
-このリポジトリは、OneString 論文の処理順と物理的な意図を観察するための **paper-audited prototype** です。論文と同じ概念的パイプラインを追いますが、論文の ShapeOp / libigl / fabrication solver を完全移植したものではありません。現在の `bff` は参照BFF backendを要求するモードであり、この環境で参照backendが無い場合は `local_free_boundary_lscm_fallback` として明示されます。長方形境界固定の調和写像は `rect_harmonic` として分離され、BFFとは表示しません。
+このリポジトリは、OneString 論文の処理順と物理的な意図を観察するための **paper-audited prototype** です。`paper_reference_bff` は公式BFF CLIを要求し、利用できなければ明示的に失敗します。旧 `bff` 名は `rectangular_harmonic_legacy` のdeprecated aliasであり、BFFとは表示しません。K3D以降は既存近似のままなので、0.2.0全体を完全なOneString再現とは呼びません。
 
 ### 論文側の大きな流れ
 
@@ -290,6 +302,8 @@ cd onestring-physics-simulator
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
+$env:ONESTRING_BFF_EXECUTABLE = "C:\path\to\boundary-first-flattening\binaries\windows-v1.6\bff-command-line.exe"
+python scripts\verify_reference_bff.py
 streamlit run app.py
 ```
 
@@ -312,7 +326,7 @@ The default demo uses:
 
 - target: dome
 - grid: 3x3
-- explicit debug/experimental surface parameterization to `Omega`; paper-default conformal parameterization is not implemented
+- selectable `rectangular_harmonic_legacy`, `lscm_free_boundary`, and official-backend `paper_reference_bff` modes
 - inverse parameterization lift `c^-1` from `M2D` in `Omega` back to `M3D` on `S`
 - 3D optimization for `K3D` with planarity, square, and surface objectives
 - 2D edge matching for `K2D`
@@ -402,7 +416,7 @@ Legacy rope/tendon code remains in the package for compatibility with earlier te
 
 - The default M3D construction uses the stored `Omega` map: M2D vertices live in `Omega`, then each UV point is mapped back to `S` using UV triangle lookup and barycentric interpolation on the corresponding surface triangle. This depends on the reported `flattening_backend` and is tracked with quality metrics rather than treated as exact paper equivalence.
 - Direct height-field lifting `[u, v, z=f(u,v)]` is available only through the explicit `analytic_scaled_heightfield_debug` M3D construction mode and is tracked as a debug shortcut.
-- The default parameterization is `omega_parameterization_mode="bff"` with `omega_boundary_mode="paper_default"`. In this environment, no libigl/geometry-central BFF backend is wired, so the active backend is `local_free_boundary_lscm_fallback`. This is a free-boundary conformal approximation, not BFF, and it is reported with `bff_implemented=False`, `bff_reference_backend_available=False`, and `flattening_backend`. The rectangular fixed-boundary harmonic method is separated as `omega_parameterization_mode="rect_harmonic"` and must not be described as BFF.
+- Version 0.2.0 exposes `rectangular_harmonic_legacy`, `lscm_free_boundary`, and `paper_reference_bff`. The deprecated `bff` alias selects the legacy rectangular harmonic method and emits the mandatory non-BFF warning. `paper_reference_bff` uses only the official CLI and raises `ReferenceBFFUnavailableError` if it cannot run.
 - M2D overlays a grid on `Omega` and then clips whole quads against the Omega boundary polygon. Free-boundary Omega domains may be non-rectangular, so the overlay is rebuilt at a slightly higher density when needed. `rectangular_debug` and `rect_harmonic` remain explicit non-BFF alternatives.
 - CSF estimation uses local 3D/UV edge-stretch ratios. Regions whose normalized stretch exceeds `2.0` generate a coarse Omega split line. The implementation detects simple reflection symmetry in both `S` and `Omega`; when symmetry is detected, M2D crop results and CSF split lines are mirrored across the detected axis before the split is applied. The split is snapped to an existing M2D grid line and duplicates the vertices on one side of the line, so the topology is cut without deleting neighboring quads. This is still a lightweight approximation of the paper's split strategy, not a full BFF/CSF segmentation implementation.
 - When a dominant surface peak is detected, the Omega overlay grid is shifted so the peak's UV position lands on an M2D grid vertex. This makes the corresponding K3D peak occur at a shared corner where four panels can meet; CSF split lines are allowed to pass through that vertex.

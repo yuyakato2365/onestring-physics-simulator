@@ -1,4 +1,6 @@
 .venv/
+.codex-testdeps/
+output/
 __pycache__/
 *.py[cod]
 .pytest_cache/
