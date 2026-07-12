@@ -1,5 +1,66 @@
 # onestring-physics-simulator
 
+## Version 0.3.0: variable-topology T3D and Autodesk ABD bridge
+
+Version 0.3.0 adds two independent changes:
+
+- T3D can use authoritative variable-topology convex solids with classified
+  cap/wedge/pyramid/local-thickness recovery. The old eight-vertex tile is kept
+  only as a T2D/deployment compatibility proxy.
+- Actuation exposes `legacy` and `abd` physics backends. `abd` invokes an
+  external Autodesk `affine-body-dynamics` executable; it is not a Python
+  reimplementation and never falls back to the legacy SAT projection.
+
+### Autodesk ABD prerequisites (Windows)
+
+The upstream project currently requires a C++ compiler, CMake, and CUDA because
+its CMake project declares both `CXX` and `CUDA` languages. Build it as a
+separate project:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_autodesk_abd.ps1
+```
+
+Then verify the unmodified official `cube_drop` scene before using OneString:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\verify_autodesk_abd.ps1
+```
+
+Set the verified executable:
+
+```powershell
+$env:ONESTRING_ABD_EXECUTABLE = "C:\path\to\affine-body-dynamics\build\Release\abd_sim.exe"
+python -m streamlit run app.py
+```
+
+The stock Autodesk executable supports headless IPC/CCD/friction/Newton contact
+and pin joints, but does not expose the unilateral OneString guide-length
+constraint required by this project. A full OneString ABD run therefore also
+requires an Autodesk-derived extension advertising `--onestring-manifest`.
+Without that capability, the `abd` backend stops with an explicit error. It does
+not silently run stock ABD without the string and does not switch to `legacy`.
+
+The bridge writes:
+
+- `scene.json`: official Autodesk ABD scene (rest meshes, density, initial
+  poses, IPC contact, friction, gravity, stiffness, and pin joints);
+- `onestring_manifest.json`: guide points, unilateral pull schedule, prescribed
+  shake trajectory, and required per-frame logs;
+- `sim.json` / `sim.glb`: official headless outputs;
+- `onestring_abd_frames.npz`: Streamlit-ready affine-body frames and logs.
+
+See [ABD backend details](docs/abd_backend.md) and
+[T3D recovery details](docs/t3d_variable_topology_recovery.md).
+
+## Version 2026-07-12: one-sided T3D extrusion
+
+The selectable `2026-07-12-one-sided-t3d` version keeps every K3D quad as the
+T3D top face and creates the opposite face only on the negative-normal side at
+distance `t`. Shared edges continue to use the miter/contact-plane construction
+so adjacent non-coplanar panels meet instead of being treated as unrelated
+normal-translation prisms.
+
 A Python research prototype inspired by **One String to Pull Them All: Fast Assembly of Curved Structures from Flat Auxetic Linkages**.
 
 ## Version 0.2.0: paper-reference initialization

@@ -25,6 +25,8 @@ from typing import Literal
 
 import numpy as np
 
+from .abd_backend import ABDBackendConfig, ShakeTrajectory, run_abd_backend
+
 from .reference_bff import (
     count_internal_triangle_overlaps,
     ReferenceBFFError,
@@ -36,6 +38,27 @@ from .reference_bff import (
     run_official_bff,
     strict_inverse_map_uv_to_surface,
     write_diagnostics_json,
+)
+from .t3d_recovery import (
+    ConvexTileSolid,
+    T3DConstructionError,
+    T3D_FAILED_GLOBAL_COLLISION_INFEASIBLE,
+    T3D_FAILED_NONMANIFOLD_CONTACT,
+    T3D_FAILED_NONORIENTABLE_COMPONENT,
+    T3D_FAILED_TOP_SURFACE_INTERSECTION,
+    T3D_OK_NOMINAL_FRUSTUM,
+    T3D_RECOVERED_CAPPED_FRUSTUM,
+    T3D_RECOVERED_JUNCTION_CAP,
+    T3D_RECOVERED_LOCAL_THICKNESS,
+    T3D_RECOVERED_PYRAMID,
+    T3D_RECOVERED_SYNCHRONIZED_PAIR,
+    T3D_RECOVERED_WEDGE,
+    aabb_overlap,
+    build_tile_polyhedron,
+    clip_convex_polyhedron,
+    convex_sat_overlap,
+    polyhedron_validation,
+    triangulate_solid,
 )
 
 
@@ -894,7 +917,18 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
-    model_version: str = "0.2.0-paper-reference-bff"
+    model_version: str = "2026-07-12-one-sided-t3d"
+    t3d_extrusion_side: Literal["negative_normal_from_k3d"] = "negative_normal_from_k3d"
+    # Backward-compatible API default. The selectable 2026-07-12 version turns
+    # this on explicitly; older callers keep the fixed-proxy legacy path.
+    t3d_variable_topology_enabled: bool = False
+    allow_legacy_normal_prism_emergency_fallback: bool = False
+    t3d_min_thickness_ratio: float = 0.25
+    t3d_minimum_volume_ratio: float = 1e-6
+    t3d_minimum_feature_ratio: float = 1e-6
+    t3d_miter_jump_limit: float = 0.75
+    t3d_allow_nonmanifold_junction_cap: bool = False
+    t3d_fail_on_unresolved_global_collision: bool = True
     t3d_intersection_trim_enabled: bool = False
     t3d_intersection_trim_grid_resolution: int = 10
     omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "paper_default"
@@ -960,6 +994,29 @@ class PipelineParameters(_original.PipelineParameters):
     hinge_layout_anchor_weight: float = 0.0
     hinge_layout_initial_expansion: float = 1.6
     hinge_layout_max_center_drift_tiles: float = 5.0
+
+
+@dataclass
+class DeploymentParameters(_original.DeploymentParameters):
+    physics_backend: Literal["legacy", "abd"] = "legacy"
+    abd_executable: str | None = None
+    abd_job_directory: str = "output/abd_run"
+    abd_timestep: float = 0.01
+    abd_density: float = 1000.0
+    abd_orthogonality_stiffness: float = 1e9
+    abd_minimum_separation_distance: float = 1e-6
+    abd_barrier_activation_distance: float = 5e-4
+    abd_newton_velocity_tolerance: float = 1e-3
+    abd_timeout_seconds: float = 600.0
+    abd_pull_end_ratio: float = 0.75
+    abd_shake_amplitude: float = 0.0
+    abd_shake_frequency_hz: float = 0.0
+    abd_shake_direction_x: float = 1.0
+    abd_shake_direction_y: float = 0.0
+    abd_shake_direction_z: float = 0.0
+    abd_shake_start_time: float = 0.0
+    abd_shake_end_time: float = 0.0
+    abd_require_onestring_extension: bool = True
 
 
 @dataclass
@@ -2498,13 +2555,12 @@ def _mark_parameterization_mode(parameterization, *, method: str, exactness: str
     )
     if extra:
         parameterization.metrics.update(extra)
-    parameterization.metrics.update(_omega_quality_metrics(parameterization))
-    if warning and not str(parameterization.metrics.get("parameterization_warning", "")):
-        parameterization.metrics["parameterization_warning"] = warning
-    elif warning:
-        existing = str(parameterization.metrics.get("parameterization_warning", ""))
-        if warning not in existing:
-            parameterization.metrics["parameterization_warning"] = (existing + "; " + warning).strip("; ")
+    quality_metrics = _omega_quality_metrics(parameterization)
+    quality_warning = str(quality_metrics.get("parameterization_warning", ""))
+    parameterization.metrics.update(quality_metrics)
+    if quality_warning and quality_warning != warning:
+        parameterization.metrics["parameterization_quality_warning"] = quality_warning
+    parameterization.metrics["parameterization_warning"] = warning
     return parameterization
 
 
@@ -4494,6 +4550,15 @@ def _optimize_k3d(target, mesh, parameterization, params):
                 "k3d_fallback_reason": "",
                 "k3d_exactness_label": "approximation",
                 "model_version": str(getattr(params, "model_version", "")),
+                "t3d_extrusion_side": str(getattr(params, "t3d_extrusion_side", "negative_normal_from_k3d")),
+                "t3d_variable_topology_enabled": bool(getattr(params, "t3d_variable_topology_enabled", False)),
+                "allow_legacy_normal_prism_emergency_fallback": bool(getattr(params, "allow_legacy_normal_prism_emergency_fallback", False)),
+                "t3d_min_thickness_ratio": float(getattr(params, "t3d_min_thickness_ratio", 0.25)),
+                "t3d_minimum_volume_ratio": float(getattr(params, "t3d_minimum_volume_ratio", 1e-6)),
+                "t3d_minimum_feature_ratio": float(getattr(params, "t3d_minimum_feature_ratio", 1e-6)),
+                "t3d_miter_jump_limit": float(getattr(params, "t3d_miter_jump_limit", 0.75)),
+                "t3d_allow_nonmanifold_junction_cap": bool(getattr(params, "t3d_allow_nonmanifold_junction_cap", False)),
+                "t3d_fail_on_unresolved_global_collision": bool(getattr(params, "t3d_fail_on_unresolved_global_collision", True)),
                 "t3d_intersection_trim_enabled": bool(getattr(params, "t3d_intersection_trim_enabled", False)),
                 "t3d_intersection_trim_grid_resolution": int(getattr(params, "t3d_intersection_trim_grid_resolution", 10)),
                 "paper_scope_label": "K3D_AND_LATER: existing approximate implementation" if reference_prefix else "",
@@ -4521,6 +4586,15 @@ def _optimize_k3d(target, mesh, parameterization, params):
             "k3d_exactness_label": "fallback",
             "approximation_warning": f"K3D optimization rejected by quality guard: {reject_reason}; fallback to M3D",
             "model_version": str(getattr(params, "model_version", "")),
+            "t3d_extrusion_side": str(getattr(params, "t3d_extrusion_side", "negative_normal_from_k3d")),
+            "t3d_variable_topology_enabled": bool(getattr(params, "t3d_variable_topology_enabled", False)),
+            "allow_legacy_normal_prism_emergency_fallback": bool(getattr(params, "allow_legacy_normal_prism_emergency_fallback", False)),
+            "t3d_min_thickness_ratio": float(getattr(params, "t3d_min_thickness_ratio", 0.25)),
+            "t3d_minimum_volume_ratio": float(getattr(params, "t3d_minimum_volume_ratio", 1e-6)),
+            "t3d_minimum_feature_ratio": float(getattr(params, "t3d_minimum_feature_ratio", 1e-6)),
+            "t3d_miter_jump_limit": float(getattr(params, "t3d_miter_jump_limit", 0.75)),
+            "t3d_allow_nonmanifold_junction_cap": bool(getattr(params, "t3d_allow_nonmanifold_junction_cap", False)),
+            "t3d_fail_on_unresolved_global_collision": bool(getattr(params, "t3d_fail_on_unresolved_global_collision", True)),
             "t3d_intersection_trim_enabled": bool(getattr(params, "t3d_intersection_trim_enabled", False)),
             "t3d_intersection_trim_grid_resolution": int(getattr(params, "t3d_intersection_trim_grid_resolution", 10)),
             "paper_scope_label": "K3D_AND_LATER: existing approximate implementation" if reference_prefix else "",
@@ -4905,14 +4979,421 @@ def _t3d_intersection_trim_render_mesh(
     }
 
 
+def _top_surface_intersection_pairs(top_tiles: np.ndarray, faces: np.ndarray) -> list[tuple[int, int]]:
+    """Return nonadjacent, near-coplanar K3D top polygons with positive-area overlap."""
+    adjacent = {
+        tuple(sorted((entries[0][0], entries[1][0])))
+        for entries in _build_edge_incidence(faces).values()
+        if len(entries) == 2
+    }
+    intersections: list[tuple[int, int]] = []
+    for tile_a in range(len(top_tiles)):
+        top_a = np.asarray(top_tiles[tile_a], dtype=float)
+        normal_a = _normalize(_original._quad_normal(top_a), np.asarray([0.0, 0.0, 1.0]))
+        origin, u, v = _tile_plane_basis(top_a, normal_a)
+        poly_a = _project_to_basis(top_a, origin, u, v)
+        span = max(float(np.linalg.norm(top_a[(idx + 1) % 4] - top_a[idx])) for idx in range(4))
+        for tile_b in range(tile_a + 1, len(top_tiles)):
+            if (tile_a, tile_b) in adjacent:
+                continue
+            top_b = np.asarray(top_tiles[tile_b], dtype=float)
+            if np.any(np.max(top_a, axis=0) < np.min(top_b, axis=0) - 1e-9) or np.any(
+                np.max(top_b, axis=0) < np.min(top_a, axis=0) - 1e-9
+            ):
+                continue
+            normal_b = _normalize(_original._quad_normal(top_b), normal_a)
+            if abs(float(np.dot(normal_a, normal_b))) < 1.0 - 1e-5:
+                continue
+            plane_distance = np.max(np.abs((top_b - origin[None, :]) @ normal_a))
+            if float(plane_distance) > max(span * 1e-7, 1e-9):
+                continue
+            poly_b = _project_to_basis(top_b, origin, u, v)
+            overlap = _convex_polygon_clip(poly_a, poly_b)
+            if _polygon_area_2d(overlap) > max(span * span * 1e-10, 1e-12):
+                intersections.append((tile_a, tile_b))
+    return intersections
+
+
+def _extrude_tiles_variable_topology(mesh, thickness: float, stage: str):
+    """Construct authoritative variable-topology solids and 8-vertex proxies."""
+    import time
+
+    started = time.perf_counter()
+    top_tiles = _original._mesh_tiles(mesh)
+    tile_count = int(len(top_tiles))
+    raw_normals = np.asarray([_original._quad_normal(top) for top in top_tiles], dtype=float)
+    normals, orientation_metrics = _orient_tile_normals_consistently(raw_normals, mesh.faces)
+    if int(orientation_metrics.get("t3d_extrusion_normal_inconsistent_edge_count", 0)) > 0:
+        raise T3DConstructionError(
+            T3D_FAILED_NONORIENTABLE_COMPONENT,
+            "face-adjacency orientation constraints are inconsistent",
+        )
+
+    top_intersections = _top_surface_intersection_pairs(top_tiles, mesh.faces)
+    if top_intersections:
+        involved = sorted({tile_id for pair in top_intersections for tile_id in pair})
+        raise T3DConstructionError(
+            T3D_FAILED_TOP_SURFACE_INTERSECTION,
+            f"nonadjacent K3D top faces overlap: {top_intersections[:8]}",
+            involved,
+        )
+
+    local_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    raw_side_normals = [
+        [_edge_inward_normal(top, normals[tile_id], edge) for edge in local_edges]
+        for tile_id, top in enumerate(top_tiles)
+    ]
+    side_normals = [[value.copy() for value in row] for row in raw_side_normals]
+    incidence = _build_edge_incidence(mesh.faces)
+    split_edge_pairs = _coincident_boundary_edge_pairs(top_tiles, mesh.faces)
+    nonmanifold = [entries for entries in incidence.values() if len(entries) > 2]
+    if nonmanifold and not bool(mesh.metrics.get("t3d_allow_nonmanifold_junction_cap", False)):
+        involved = sorted({tile_id for entries in nonmanifold for tile_id, _edge_id in entries})
+        raise T3DConstructionError(
+            T3D_FAILED_NONMANIFOLD_CONTACT,
+            "an edge has three or more incident tiles and no junction design is enabled",
+            involved,
+        )
+
+    shared_pairs: list[tuple[int, int]] = []
+    internal_miter_edge_count = 0
+    for entries in incidence.values():
+        if len(entries) != 2:
+            continue
+        (tile_a, edge_a), (tile_b, edge_b) = entries
+        q_a = raw_side_normals[tile_a][edge_a]
+        q_b = raw_side_normals[tile_b][edge_b]
+        miter = _normalize(q_a - q_b, q_a)
+        side_normals[tile_a][edge_a] = miter
+        side_normals[tile_b][edge_b] = -miter
+        shared_pairs.append((int(tile_a), int(tile_b)))
+        internal_miter_edge_count += 1
+    for (tile_a, edge_a), (tile_b, edge_b) in split_edge_pairs:
+        q_a = raw_side_normals[tile_a][edge_a]
+        q_b = raw_side_normals[tile_b][edge_b]
+        miter = _normalize(q_a - q_b, q_a)
+        side_normals[tile_a][edge_a] = miter
+        side_normals[tile_b][edge_b] = -miter
+        shared_pairs.append((int(tile_a), int(tile_b)))
+
+    requested = float(thickness)
+    min_thickness = requested * float(mesh.metrics.get("t3d_min_thickness_ratio", 0.25))
+    tile_scale = float(np.median([
+        np.linalg.norm(top[(idx + 1) % 4] - top[idx])
+        for top in top_tiles
+        for idx in range(4)
+    ])) if tile_count else 1.0
+    minimum_volume = max(
+        requested * tile_scale * tile_scale * float(mesh.metrics.get("t3d_minimum_volume_ratio", 1e-6)),
+        1e-15,
+    )
+    minimum_feature = max(tile_scale * float(mesh.metrics.get("t3d_minimum_feature_ratio", 1e-6)), 1e-10)
+    jump_limit = float(mesh.metrics.get("t3d_miter_jump_limit", 0.75))
+
+    solids: list[ConvexTileSolid] = []
+    for tile_id, top in enumerate(top_tiles):
+        center = np.mean(top, axis=0)
+        planes: list[tuple[np.ndarray, float]] = []
+        for edge_id, (a, b) in enumerate(local_edges):
+            plane_normal = _normalize(side_normals[tile_id][edge_id], raw_side_normals[tile_id][edge_id])
+            midpoint = 0.5 * (top[a] + top[b])
+            plane_offset = float(np.dot(plane_normal, midpoint))
+            if float(np.dot(plane_normal, center)) > plane_offset:
+                plane_normal = -plane_normal
+                plane_offset = -plane_offset
+            planes.append((plane_normal, plane_offset))
+        solid = build_tile_polyhedron(
+            tile_id=tile_id,
+            top=top,
+            normal=normals[tile_id],
+            side_planes=planes,
+            requested_thickness=requested,
+            minimum_thickness=min_thickness,
+            minimum_volume=minimum_volume,
+            minimum_feature_size=minimum_feature,
+            miter_jump_limit=jump_limit,
+        )
+        solids.append(solid)
+
+    # A vertex shared by three or more tiles can need a common cap even when all
+    # edge-wise miters are individually valid. Apply one identical cap half-space
+    # to every incident solid, and commit only if all mandatory top polygons and
+    # manufacturing checks survive.
+    vertex_incidence: dict[int, list[tuple[int, int]]] = {}
+    for tile_id, face in enumerate(np.asarray(mesh.faces, dtype=int)):
+        for local_vertex_id, global_vertex_id in enumerate(face):
+            vertex_incidence.setdefault(int(global_vertex_id), []).append((int(tile_id), int(local_vertex_id)))
+    junction_cap_count = 0
+    for global_vertex_id, entries in vertex_incidence.items():
+        incident_tiles = sorted({tile_id for tile_id, _local_id in entries})
+        if len(incident_tiles) < 3:
+            continue
+        junction = np.mean(
+            [top_tiles[tile_id][local_id] for tile_id, local_id in entries],
+            axis=0,
+        )
+        incident_center = np.mean([np.mean(top_tiles[tile_id], axis=0) for tile_id in incident_tiles], axis=0)
+        average_normal = _normalize(np.mean(normals[np.asarray(incident_tiles, dtype=int)], axis=0), normals[incident_tiles[0]])
+        radial = junction - incident_center
+        radial -= average_normal * float(np.dot(radial, average_normal))
+        cap_normal = _normalize(radial)
+        if float(np.linalg.norm(cap_normal)) <= 1e-12:
+            continue
+        cap_offset = float(np.dot(cap_normal, junction) + jump_limit * requested)
+        if any(float(np.max(top_tiles[tile_id] @ cap_normal - cap_offset)) > 1e-9 for tile_id in incident_tiles):
+            continue
+        if not any(float(np.max(solids[tile_id].vertices @ cap_normal - cap_offset)) > 1e-9 for tile_id in incident_tiles):
+            continue
+        candidates: dict[int, tuple[np.ndarray, list[list[int]], dict[str, object], dict[str, object]]] = {}
+        valid = True
+        for tile_id in incident_tiles:
+            vertices_new, faces_new, clip_info = clip_convex_polyhedron(
+                solids[tile_id].vertices, solids[tile_id].faces, cap_normal, cap_offset, 1e-9
+            )
+            quality = polyhedron_validation(vertices_new, faces_new, minimum_volume, minimum_feature)
+            if not bool(quality["valid"]):
+                valid = False
+                break
+            candidates[tile_id] = (vertices_new, faces_new, clip_info, quality)
+        if not valid:
+            continue
+        for tile_id, (vertices_new, faces_new, clip_info, quality) in candidates.items():
+            solid = solids[tile_id]
+            solid.vertices = vertices_new
+            solid.faces = faces_new
+            solid.recovery_status = T3D_RECOVERED_JUNCTION_CAP
+            solid.recovery_reasons.append(f"shared_junction_cap_vertex_{global_vertex_id}")
+            solid.top_face_ids = [
+                face_id
+                for face_id, face in enumerate(faces_new)
+                if all(abs(float(np.dot(normals[tile_id], vertices_new[idx] - np.mean(top_tiles[tile_id], axis=0)))) <= 2e-8 for idx in face)
+            ]
+            solid.contact_face_by_edge = {}
+            solid.metrics.update(
+                {
+                    "status": solid.recovery_status,
+                    "recovery_steps": list(solid.recovery_reasons),
+                    "junction_cap_vertex_id": int(global_vertex_id),
+                    "junction_cap_plane_normal": cap_normal.tolist(),
+                    "junction_cap_plane_offset": cap_offset,
+                    "junction_cap_face_added": bool(clip_info.get("cap_added", False)),
+                    "volume": float(quality["volume"]),
+                    "minimum_feature_size": float(quality["minimum_feature_size"]),
+                    "minimum_width": float(quality["minimum_feature_size"]),
+                    "vertex_count": int(len(vertices_new)),
+                    "face_count": int(len(faces_new)),
+                    "watertight": bool(quality["watertight"]),
+                    "manifold": bool(quality["manifold"]),
+                }
+            )
+        junction_cap_count += 1
+
+    synchronized_pairs = 0
+    recovery_statuses = {solid.recovery_status for solid in solids}
+    nominal_status = T3D_OK_NOMINAL_FRUSTUM
+    for tile_a, tile_b in sorted(set(tuple(sorted(pair)) for pair in shared_pairs)):
+        if solids[tile_a].recovery_status != nominal_status or solids[tile_b].recovery_status != nominal_status:
+            synchronized_pairs += 1
+            for tile_id in (tile_a, tile_b):
+                if "shared_contact_plane_synchronized" not in solids[tile_id].recovery_reasons:
+                    solids[tile_id].recovery_reasons.append("shared_contact_plane_synchronized")
+                    solids[tile_id].metrics["recovery_steps"] = list(solids[tile_id].recovery_reasons)
+                    solids[tile_id].metrics["pair_synchronized"] = True
+
+    adjacent_pairs = {tuple(sorted(pair)) for pair in shared_pairs}
+
+    def collision_list() -> list[tuple[int, int]]:
+        found: list[tuple[int, int]] = []
+        for tile_a in range(tile_count):
+            for tile_b in range(tile_a + 1, tile_count):
+                if (tile_a, tile_b) in adjacent_pairs:
+                    continue
+                if aabb_overlap(solids[tile_a], solids[tile_b]) and convex_sat_overlap(solids[tile_a], solids[tile_b]):
+                    found.append((tile_a, tile_b))
+        return found
+
+    collision_pairs_before = collision_list()
+    for tile_a, tile_b in collision_pairs_before:
+        solids[tile_a].metrics["collision_count_before"] = int(solids[tile_a].metrics.get("collision_count_before", 0)) + 1
+        solids[tile_b].metrics["collision_count_before"] = int(solids[tile_b].metrics.get("collision_count_before", 0)) + 1
+
+    global_clip_count = 0
+    # A symmetric separating clip is allowed only when the plane leaves both
+    # mandatory K3D top polygons untouched.  Otherwise the pair is a fundamental
+    # failure rather than silently cutting the design surface.
+    for _pass in range(3):
+        active_pairs = collision_list()
+        if not active_pairs:
+            break
+        changed = False
+        for tile_a, tile_b in active_pairs:
+            solid_a, solid_b = solids[tile_a], solids[tile_b]
+            center_a = np.mean(solid_a.vertices, axis=0)
+            center_b = np.mean(solid_b.vertices, axis=0)
+            axis = _normalize(center_b - center_a, normals[tile_a] - normals[tile_b])
+            if float(np.linalg.norm(axis)) <= 1e-12:
+                continue
+            top_a = np.asarray(top_tiles[tile_a], dtype=float)
+            top_b = np.asarray(top_tiles[tile_b], dtype=float)
+            top_a_max = float(np.max(top_a @ axis))
+            top_b_min = float(np.min(top_b @ axis))
+            if top_a_max > top_b_min - 1e-9:
+                # Try the opposite labeling without changing which top is kept.
+                axis = -axis
+                top_a_max = float(np.max(top_a @ axis))
+                top_b_min = float(np.min(top_b @ axis))
+            if top_a_max > top_b_min - 1e-9:
+                continue
+            plane_offset = 0.5 * (top_a_max + top_b_min)
+            va, fa, info_a = clip_convex_polyhedron(solid_a.vertices, solid_a.faces, axis, plane_offset, 1e-9)
+            vb, fb, info_b = clip_convex_polyhedron(solid_b.vertices, solid_b.faces, -axis, -plane_offset, 1e-9)
+            quality_a = polyhedron_validation(va, fa, minimum_volume, minimum_feature)
+            quality_b = polyhedron_validation(vb, fb, minimum_volume, minimum_feature)
+            if not bool(quality_a["valid"]) or not bool(quality_b["valid"]):
+                continue
+            if np.max(top_a @ axis - plane_offset) > 1e-8 or np.max(-top_b @ axis + plane_offset) > 1e-8:
+                continue
+            for tile_id, vertices_new, faces_new, quality, info in (
+                (tile_a, va, fa, quality_a, info_a),
+                (tile_b, vb, fb, quality_b, info_b),
+            ):
+                solid = solids[tile_id]
+                solid.vertices = vertices_new
+                solid.faces = faces_new
+                solid.recovery_status = "T3D_RECOVERED_GLOBAL_CLIP"
+                if "symmetric_global_collision_clip" not in solid.recovery_reasons:
+                    solid.recovery_reasons.append("symmetric_global_collision_clip")
+                solid.top_face_ids = [
+                    face_id
+                    for face_id, face in enumerate(faces_new)
+                    if all(abs(float(np.dot(normals[tile_id], vertices_new[idx] - np.mean(top_tiles[tile_id], axis=0)))) <= 2e-8 for idx in face)
+                ]
+                solid.contact_face_by_edge = {}
+                solid.metrics.update(
+                    {
+                        "status": solid.recovery_status,
+                        "recovery_steps": list(solid.recovery_reasons),
+                        "volume": float(quality["volume"]),
+                        "minimum_feature_size": float(quality["minimum_feature_size"]),
+                        "minimum_width": float(quality["minimum_feature_size"]),
+                        "vertex_count": int(len(vertices_new)),
+                        "face_count": int(len(faces_new)),
+                        "watertight": bool(quality["watertight"]),
+                        "manifold": bool(quality["manifold"]),
+                        "global_clip_cap_added": bool(info.get("cap_added", False)),
+                    }
+                )
+            global_clip_count += 1
+            changed = True
+        if not changed:
+            break
+    collision_pairs = collision_list()
+    for solid in solids:
+        solid.metrics["collision_count_after"] = 0
+    for tile_a, tile_b in collision_pairs:
+        solids[tile_a].metrics["collision_count_after"] = int(solids[tile_a].metrics.get("collision_count_after", 0)) + 1
+        solids[tile_b].metrics["collision_count_after"] = int(solids[tile_b].metrics.get("collision_count_after", 0)) + 1
+    if collision_pairs and bool(mesh.metrics.get("t3d_fail_on_unresolved_global_collision", True)):
+        involved = sorted({tile_id for pair in collision_pairs for tile_id in pair})
+        raise T3DConstructionError(
+            T3D_FAILED_GLOBAL_COLLISION_INFEASIBLE,
+            f"nonadjacent authoritative solids collide: {collision_pairs[:8]}",
+            involved,
+        )
+
+    # Compatibility geometry: K3D remains the top and a one-sided normal prism
+    # remains the stable rigid seed used by T2D/deployment.  It is deliberately
+    # not the authoritative T3D geometry.
+    proxy = np.zeros((tile_count, 8, 3), dtype=float)
+    transforms = np.repeat(np.eye(4, dtype=float)[None, :, :], tile_count, axis=0)
+    for tile_id, top in enumerate(top_tiles):
+        proxy[tile_id, :4] = top
+        proxy[tile_id, 4:] = top - requested * normals[tile_id][None, :]
+        transforms[tile_id, :3, 3] = -requested * normals[tile_id]
+    top_faces = np.tile(np.asarray([[0, 1, 2, 3]], dtype=int), (tile_count, 1))
+    bottom_faces = np.tile(np.asarray([[4, 7, 6, 5]], dtype=int), (tile_count, 1))
+    side_faces = np.asarray([[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]], dtype=int)
+    status_counts: dict[str, int] = {}
+    for solid in solids:
+        status_counts[solid.recovery_status] = status_counts.get(solid.recovery_status, 0) + 1
+    recovered_count = sum(count for status, count in status_counts.items() if status != nominal_status)
+    metrics: dict[str, object] = {
+        "objective": "Variable-topology half-space T3D recovery with an 8-vertex compatibility proxy.",
+        "extrusion_model": "authoritative_convex_tile_solids_with_8_vertex_proxy",
+        "t3d_extrusion_model": "variable_topology_halfspace_recovery",
+        "t3d_authoritative_geometry": "ConvexTileSolid list",
+        "t3d_compatibility_proxy_geometry": "one-sided 8-vertex normal prism for T2D/deployment only",
+        "t3d_variable_topology_enabled": True,
+        "t3d_one_sided_extrusion": True,
+        "t3d_k3d_reference_face": "top",
+        "tile_thickness": requested,
+        "requested_thickness": requested,
+        "tile_count": tile_count,
+        "t3d_nominal_tile_count": int(status_counts.get(nominal_status, 0)),
+        "t3d_recovered_tile_count": int(recovered_count),
+        "t3d_failed_tile_count": 0,
+        "t3d_recovery_status_counts": dict(status_counts),
+        "t3d_failure_status_counts": {},
+        "t3d_cap_face_count": int(sum(int(s.metrics.get("cap_face_count", 0)) for s in solids)),
+        "t3d_pyramid_tile_count": int(status_counts.get(T3D_RECOVERED_PYRAMID, 0)),
+        "t3d_wedge_tile_count": int(status_counts.get(T3D_RECOVERED_WEDGE, 0)),
+        "t3d_local_thickness_tile_count": int(status_counts.get(T3D_RECOVERED_LOCAL_THICKNESS, 0)),
+        "t3d_pair_synchronized_recovery_count": int(synchronized_pairs),
+        "t3d_junction_cap_count": int(junction_cap_count),
+        "t3d_global_clip_count": int(global_clip_count),
+        "t3d_collision_count_before_global_clip": int(len(collision_pairs_before)),
+        "t3d_remaining_collision_count": int(len(collision_pairs)),
+        "t3d_collision_pairs": [list(pair) for pair in collision_pairs],
+        "t3d_min_volume": float(min((float(s.metrics["volume"]) for s in solids), default=0.0)),
+        "t3d_min_feature_size": float(min((float(s.metrics["minimum_feature_size"]) for s in solids), default=0.0)),
+        "t3d_tile_reports": [dict(s.metrics) for s in solids],
+        "t3d_normal_translation_guard_tile_count": 0,
+        "t3d_normal_translation_guard_reasons": {},
+        "bottom_vertex_solve_fallback_count": 0,
+        "t3d_bottom_vertex_solve_fallback_count": 0,
+        "allow_legacy_normal_prism_emergency_fallback": bool(mesh.metrics.get("allow_legacy_normal_prism_emergency_fallback", False)),
+        "legacy_normal_prism_emergency_fallback_used": False,
+        "internal_miter_edge_count": int(internal_miter_edge_count),
+        "split_contact_miter_edge_count": int(len(split_edge_pairs)),
+        "surface_fit_error": float(mesh.metrics.get("surface_fit_error_after", 0.0)),
+        **orientation_metrics,
+    }
+    assembly = _original.TileAssembly(
+        vertices=proxy,
+        top_faces=top_faces,
+        bottom_faces=bottom_faces,
+        side_faces=side_faces,
+        stage=stage,
+        metrics=metrics,
+        transform_matrices=transforms,
+    )
+    assembly.authoritative_solids = solids
+    assembly.authoritative_geometry_model = "variable_topology_convex_solids"
+    assembly.compatibility_proxy_vertices = proxy
+    report = _original.StageReport(
+        name=f"{mesh.stage} -> {stage}",
+        objective="Construct variable-topology convex T3D solids by half-space clipping.",
+        before_error=0.0,
+        after_error=float(recovered_count),
+        constraint_violation=float(len(collision_pairs)),
+        computation_time=time.perf_counter() - started,
+        counts={
+            "tiles": tile_count,
+            "vertices": int(sum(len(s.vertices) for s in solids)),
+            "faces": int(sum(len(s.faces) for s in solids)),
+        },
+    )
+    return assembly, report
+
+
 def _extrude_tiles(mesh, thickness: float, stage: str):
     """Extrude K3D tiles using shared-edge miter/contact planes.
 
     Previous behavior:
         bottom = top - thickness * tile_normal
 
-    New behavior:
-        - top face remains K3D
+    One-sided behavior:
+        - top face remains exactly K3D (zero offset)
         - bottom vertices lie on the offset bottom plane
         - each side face lies on an edge plane
         - shared edges use a single miter/contact plane derived from the two
@@ -4920,8 +5401,14 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
     """
     import time
 
+    if bool(mesh.metrics.get("t3d_variable_topology_enabled", False)):
+        return _extrude_tiles_variable_topology(mesh, thickness, stage)
+
     start = time.perf_counter()
     top_tiles = _original._mesh_tiles(mesh)
+    extrusion_side = str(mesh.metrics.get("t3d_extrusion_side", "negative_normal_from_k3d"))
+    if extrusion_side != "negative_normal_from_k3d":
+        raise ValueError(f"unsupported T3D extrusion side: {extrusion_side}")
     tile_count = int(top_tiles.shape[0])
     vertices = np.zeros((tile_count, 8, 3), dtype=float)
     transforms = np.zeros((tile_count, 4, 4), dtype=float)
@@ -4941,6 +5428,9 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
                 "objective": "Contact-aware mitered extrusion.",
                 "extrusion_model": "mitered_contact_planes",
                 "contact_aware_extrusion": True,
+                "t3d_one_sided_extrusion": True,
+                "t3d_k3d_reference_face": "top",
+                "t3d_extrusion_side": extrusion_side,
                 "tile_thickness": float(thickness),
                 "tile_count": 0,
             },
@@ -5089,6 +5579,8 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
     planarity = _original._tile_face_planarity(vertices)
     face_planarity = _original._tile_face_planarity_by_group(vertices)
     signed_thickness = np.sum((vertices[:, :4] - vertices[:, 4:]) * normals[:, None, :], axis=2)
+    top_offsets_from_k3d = np.sum((vertices[:, :4] - top_tiles) * normals[:, None, :], axis=2)
+    bottom_offsets_from_k3d = np.sum((vertices[:, 4:] - top_tiles) * normals[:, None, :], axis=2)
     thickness_error = signed_thickness - float(thickness)
     reversed_extrusion_vertex_count = int(np.sum(signed_thickness <= 0.0))
     center_shift = np.mean(vertices[:, 4:], axis=1) - np.mean(vertices[:, :4], axis=1)
@@ -5119,6 +5611,13 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
             "extrusion_model": "mitered_contact_planes",
             "t3d_extrusion_model": "experimental_mitered_contact_planes",
             "contact_aware_extrusion": True,
+            "t3d_one_sided_extrusion": True,
+            "t3d_k3d_reference_face": "top",
+            "t3d_extrusion_side": extrusion_side,
+            "t3d_extrusion_interval": "[K3D - t*n, K3D] along the oriented normal",
+            "t3d_k3d_top_face_offset_max": float(np.max(np.abs(top_offsets_from_k3d))) if top_offsets_from_k3d.size else 0.0,
+            "t3d_bottom_offset_from_k3d_min": float(np.min(bottom_offsets_from_k3d)) if bottom_offsets_from_k3d.size else 0.0,
+            "t3d_bottom_offset_from_k3d_max": float(np.max(bottom_offsets_from_k3d)) if bottom_offsets_from_k3d.size else 0.0,
             "mitered_shared_edge_planes": True,
             "legacy_normal_translation_extrusion": False,
             "t2d_transform_seed_model": "translation_only_center_shift_no_affine_shear",
@@ -6498,6 +6997,65 @@ def export_t2d_stl(
     return data, metrics
 
 
+def export_t3d_stl(
+    source,
+    output_path: str | Path | None = None,
+    *,
+    separate_tiles: bool = False,
+    scale: float = 1.0,
+    solid_name: str = "onestring_t3d",
+):
+    """Export authoritative variable-topology T3D solids as STL.
+
+    The eight-vertex compatibility proxy is intentionally rejected when no
+    authoritative solids are present, preventing a display/deployment seed from
+    being mistaken for recovered manufacturing geometry.
+    """
+    assembly = source.tiles_3d if hasattr(source, "tiles_3d") else source
+    solids = getattr(assembly, "authoritative_solids", None)
+    if not solids:
+        raise ValueError("authoritative variable-topology T3D solids are not available for this version")
+    scale = float(scale)
+    per_tile: list[list[np.ndarray]] = []
+    all_triangles: list[np.ndarray] = []
+    for solid in solids:
+        vertices = np.asarray(solid.vertices, dtype=float) * scale
+        triangles = [vertices[list(triangle)] for triangle in triangulate_solid(solid)]
+        per_tile.append(triangles)
+        all_triangles.extend(triangles)
+    metrics = {
+        "t3d_export_model": "authoritative_variable_topology_convex_solids",
+        "t3d_export_tile_count": int(len(solids)),
+        "t3d_export_vertex_count": int(sum(len(solid.vertices) for solid in solids)),
+        "t3d_export_polygon_face_count": int(sum(len(solid.faces) for solid in solids)),
+        "t3d_export_triangle_count": int(len(all_triangles)),
+        "t3d_export_scale": scale,
+        "t3d_export_watertight_tile_count": int(sum(bool(solid.metrics.get("watertight", False)) for solid in solids)),
+        "t3d_export_manifold_tile_count": int(sum(bool(solid.metrics.get("manifold", False)) for solid in solids)),
+    }
+    try:
+        assembly.metrics.update(metrics)
+    except Exception:
+        pass
+    if separate_tiles:
+        outputs: dict[str, bytes] = {}
+        for tile_id, triangles in enumerate(per_tile):
+            filename = f"{solid_name}_tile_{tile_id:04d}.stl"
+            outputs[filename] = _ascii_stl_bytes(filename[:-4], triangles)
+        if output_path is not None:
+            out_dir = Path(output_path)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for filename, data in outputs.items():
+                (out_dir / filename).write_bytes(data)
+        return outputs, metrics
+    data = _ascii_stl_bytes(solid_name, all_triangles)
+    if output_path is not None:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return data, metrics
+
+
 def _spatial_candidate_pairs_for_tiles(tiles_xy: np.ndarray, pad: float = 0.0) -> list[tuple[int, int]]:
     """Broad-phase tile pair search using KDTree centers plus padded AABBs."""
     tiles = np.asarray(tiles_xy, dtype=float)
@@ -7538,6 +8096,7 @@ def build_onestring_design(
 # keep their original global namespace, so this assignment is what makes them call
 # the new extrusion implementation.
 _original.PipelineParameters = PipelineParameters
+_original.DeploymentParameters = DeploymentParameters
 _original._extrude_tiles = _extrude_tiles
 _original._build_surface_parameterization = _build_surface_parameterization
 _original._flatten_to_domain = _flatten_to_domain
@@ -7589,12 +8148,14 @@ for _name, _value in _original.__dict__.items():
         "_build_string_path",
         "_optimize_dual_hinges",
         "PipelineParameters",
+        "DeploymentParameters",
         "build_onestring_design",
     }:
         continue
     globals()[_name] = _value
 
 globals()["PipelineParameters"] = PipelineParameters
+globals()["DeploymentParameters"] = DeploymentParameters
 globals()["build_onestring_design"] = build_onestring_design
 globals()["_extrude_tiles"] = _extrude_tiles
 globals()["_build_surface_parameterization"] = _build_surface_parameterization
@@ -7614,6 +8175,7 @@ globals()["_build_gap_graph"] = _build_gap_graph
 globals()["_select_lift_points"] = _select_lift_points
 globals()["_build_string_path"] = _build_string_path
 globals()["export_t2d_stl"] = export_t2d_stl
+globals()["export_t3d_stl"] = export_t3d_stl
 globals()["SIDEFACE_CONTACT_PATCH_ACTIVE"] = True
 globals()["SIDEFACE_CONTACT_PATCH_ORIGINAL_PATH"] = str(_ORIGINAL_PATH)
 
@@ -7674,6 +8236,10 @@ def simulate_onestring_deployment(state, params=None, progress_callback=None):
     simulation frames so returning to the same settings reuses the animation
     instead of recomputing it.
     """
+    params = params or DeploymentParameters()
+    backend = str(getattr(params, "physics_backend", "legacy"))
+    if backend not in {"legacy", "abd"}:
+        raise ValueError(f"unknown physics backend: {backend}")
     cache_enabled = True
     cache = None
     key = None
@@ -7691,7 +8257,50 @@ def simulate_onestring_deployment(state, params=None, progress_callback=None):
     except Exception:
         cache_enabled = False
 
-    result = _ORIGINAL_SIMULATE_ONESTRING_DEPLOYMENT(state, params, progress_callback=progress_callback)
+    if backend == "abd":
+        if progress_callback is not None:
+            progress_callback("Prepare Autodesk ABD job", 0.03, "serialize rest meshes, joints, guides, pull and shake schedules")
+        gravity_value = float(getattr(params, "gravity", 9.81))
+        config = ABDBackendConfig(
+            executable=getattr(params, "abd_executable", None),
+            timestep=float(getattr(params, "abd_timestep", 0.01)),
+            steps=int(getattr(params, "steps", 100)),
+            density=float(getattr(params, "abd_density", 1000.0)),
+            friction=float(getattr(params, "contact_friction", 0.25)),
+            gravity=(0.0, 0.0, -gravity_value),
+            orthogonality_stiffness=float(getattr(params, "abd_orthogonality_stiffness", 1e9)),
+            minimum_separation_distance=float(getattr(params, "abd_minimum_separation_distance", 1e-6)),
+            barrier_activation_distance=float(getattr(params, "abd_barrier_activation_distance", 5e-4)),
+            newton_velocity_tolerance=float(getattr(params, "abd_newton_velocity_tolerance", 1e-3)),
+            timeout_seconds=float(getattr(params, "abd_timeout_seconds", 600.0)),
+            pull_end_ratio=float(getattr(params, "abd_pull_end_ratio", 0.75)),
+            shake=ShakeTrajectory(
+                amplitude=float(getattr(params, "abd_shake_amplitude", 0.0)),
+                frequency_hz=float(getattr(params, "abd_shake_frequency_hz", 0.0)),
+                direction=(
+                    float(getattr(params, "abd_shake_direction_x", 1.0)),
+                    float(getattr(params, "abd_shake_direction_y", 0.0)),
+                    float(getattr(params, "abd_shake_direction_z", 0.0)),
+                ),
+                start_time=float(getattr(params, "abd_shake_start_time", 0.0)),
+                end_time=float(getattr(params, "abd_shake_end_time", 0.0)),
+            ),
+            require_onestring_extension=bool(getattr(params, "abd_require_onestring_extension", True)),
+        )
+        job_dir = Path(str(getattr(params, "abd_job_directory", "output/abd_run")))
+        if not job_dir.is_absolute():
+            job_dir = _project_root_from_this_file() / job_dir
+        result = run_abd_backend(state, config, job_dir, _project_root_from_this_file())
+        if progress_callback is not None:
+            progress_callback("Autodesk ABD complete", 1.0, "loaded official affine transforms and per-frame logs")
+    else:
+        result = _ORIGINAL_SIMULATE_ONESTRING_DEPLOYMENT(state, params, progress_callback=progress_callback)
+        try:
+            result.metrics["physics_backend"] = "legacy"
+            result.metrics["legacy_sat_collision_projection_used"] = True
+            result.metrics["abd_implementation"] = "not used"
+        except Exception:
+            pass
 
     if cache_enabled and cache is not None and key is not None:
         try:

@@ -216,6 +216,14 @@ def _candidate_executables(explicit: str | os.PathLike[str] | None) -> list[Path
 
 
 def find_official_bff_executable(explicit: str | os.PathLike[str] | None = None) -> Path:
+    if explicit is not None:
+        requested = Path(explicit).expanduser()
+        if requested.is_file():
+            return requested.resolve()
+        raise ReferenceBFFUnavailableError(
+            "Official Boundary First Flattening CLI is unavailable. No substitute was used.\n"
+            f"The explicitly requested executable does not exist: {requested}"
+        )
     candidates = _candidate_executables(explicit)
     for candidate in candidates:
         if candidate.is_file():

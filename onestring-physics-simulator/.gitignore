@@ -1,6 +1,7 @@
 .venv/
 .codex-testdeps/
 output/
+tmp/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -30,3 +31,39 @@ src_backup_before_sideface_contact/onestring_physics/*
 *_patch.zip
 src/onestring_physics.zip
 tmp_pdf_text.txt
+
+# Autodesk ABD build outputs
+third_party/affine-body-dynamics/build/
+third_party/affine-body-dynamics/_deps/
+third_party/affine-body-dynamics/out/
+third_party/affine-body-dynamics/.vs/
+third_party/affine-body-dynamics/**/CMakeFiles/
+third_party/affine-body-dynamics/**/CMakeCache.txt
+third_party/affine-body-dynamics/**/*.exe
+third_party/affine-body-dynamics/**/*.dll
+third_party/affine-body-dynamics/**/*.pdb
+third_party/affine-body-dynamics/**/*.obj
+third_party/affine-body-dynamics/**/*.ilk
+third_party/affine-body-dynamics/**/*.exp
+
+# Local Boundary First Flattening checkout
+third_party/boundary-first-flattening/
+
+# Autodesk ABD upstream sample and comparison data
+# The OneString backend generates its own scenes and tile meshes.
+third_party/affine-body-dynamics/meshes/
+third_party/affine-body-dynamics/inputs/
+third_party/affine-body-dynamics/comparisons/
+third_party/affine-body-dynamics/docs/
+third_party/affine-body-dynamics/notebooks/
+third_party/affine-body-dynamics/fixtures/
+
+# Unused Autodesk ABD upstream components
+third_party/affine-body-dynamics/tests/
+third_party/affine-body-dynamics/tools/
+third_party/affine-body-dynamics/python/
+third_party/affine-body-dynamics/setup.py
+third_party/affine-body-dynamics/Doxyfile
+third_party/affine-body-dynamics/Jenkinsfile
+third_party/affine-body-dynamics/CODE_OF_CONDUCT.md
+third_party/affine-body-dynamics/CONTRIBUTION.md

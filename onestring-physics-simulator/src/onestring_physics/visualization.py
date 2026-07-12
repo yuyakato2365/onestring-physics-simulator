@@ -770,9 +770,18 @@ def figure_tile_assembly(
     hinge_graph: HingeGraph | None = None,
     string_path: StringPath | None = None,
     lift_gap_ids: list[int] | None = None,
+    show_recovery_status: bool = True,
+    show_generated_cap_faces: bool = True,
+    show_fundamental_failures_only: bool = False,
 ) -> go.Figure:
     fig = go.Figure()
-    add_tile_assembly(fig, assembly)
+    add_tile_assembly(
+        fig,
+        assembly,
+        show_recovery_status=show_recovery_status,
+        show_generated_cap_faces=show_generated_cap_faces,
+        show_fundamental_failures_only=show_fundamental_failures_only,
+    )
     if hinge_graph is not None:
         add_hinge_markers(fig, assembly, hinge_graph)
     if gap_graph is not None:
@@ -804,8 +813,96 @@ def add_tile_assembly(
     color: str = "#2dd4bf",
     opacity: float = 0.72,
     name: str = "tiles",
+    show_recovery_status: bool = True,
+    show_generated_cap_faces: bool = True,
+    show_fundamental_failures_only: bool = False,
 ) -> None:
     metrics = getattr(assembly, "metrics", {}) or {}
+    authoritative_solids = getattr(assembly, "authoritative_solids", None)
+    if authoritative_solids:
+        status_colors = {
+            "T3D_OK_NOMINAL_FRUSTUM": "#22c55e",
+            "T3D_RECOVERED_CAPPED_FRUSTUM": "#22d3ee",
+            "T3D_RECOVERED_HALFSPACE_CLIP": "#06b6d4",
+            "T3D_RECOVERED_WEDGE": "#eab308",
+            "T3D_RECOVERED_PYRAMID": "#f97316",
+            "T3D_RECOVERED_LOCAL_THICKNESS": "#a855f7",
+            "T3D_RECOVERED_SYNCHRONIZED_PAIR": "#0ea5e9",
+            "T3D_RECOVERED_JUNCTION_CAP": "#6366f1",
+            "T3D_RECOVERED_GLOBAL_CLIP": "#2563eb",
+            "T3D_RECOVERED_MESH_CLEANUP": "#14b8a6",
+        }
+        lighting = dict(ambient=0.82, diffuse=0.35, specular=0.05, roughness=1.0, fresnel=0.0)
+        for tile_id, solid in enumerate(authoritative_solids):
+            status = str(getattr(solid, "recovery_status", ""))
+            if show_fundamental_failures_only and not status.startswith("T3D_FAILED_"):
+                continue
+            vertices = np.asarray(solid.vertices, dtype=float)
+            triangles: list[tuple[int, int, int]] = []
+            for face in solid.faces:
+                for face_index in range(1, len(face) - 1):
+                    triangles.append((int(face[0]), int(face[face_index]), int(face[face_index + 1])))
+            if not len(vertices) or not triangles:
+                continue
+            tri = np.asarray(triangles, dtype=int)
+            report = dict(getattr(solid, "metrics", {}) or {})
+            hover = (
+                f"tile={tile_id}<br>status={status}<br>"
+                f"recovery={', '.join(getattr(solid, 'recovery_reasons', [])) or 'none'}<br>"
+                f"volume={float(report.get('volume', 0.0)):.6g}<br>"
+                f"min depth={float(report.get('actual_min_depth', 0.0)):.6g}<br>"
+                f"max depth={float(report.get('actual_max_depth', 0.0)):.6g}<br>"
+                f"vertices={len(vertices)}, faces={len(solid.faces)}"
+            )
+            tile_color = status_colors.get(status, "#ef4444" if status.startswith("T3D_FAILED_") else color)
+            if not show_recovery_status:
+                tile_color = color
+            fig.add_trace(
+                go.Mesh3d(
+                    x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
+                    i=tri[:, 0], j=tri[:, 1], k=tri[:, 2],
+                    color=tile_color, opacity=opacity, flatshading=True,
+                    lighting=lighting, name=f"tile {tile_id}: {status}",
+                    text=[hover] * len(vertices), hoverinfo="text", showlegend=False,
+                )
+            )
+            edge_x: list[float | None] = []
+            edge_y: list[float | None] = []
+            edge_z: list[float | None] = []
+            seen_edges: set[tuple[int, int]] = set()
+            for face in solid.faces:
+                for edge_index, vertex_id in enumerate(face):
+                    other = face[(edge_index + 1) % len(face)]
+                    edge = tuple(sorted((int(vertex_id), int(other))))
+                    if edge in seen_edges:
+                        continue
+                    seen_edges.add(edge)
+                    points = vertices[np.asarray(edge, dtype=int)]
+                    edge_x.extend([points[0, 0], points[1, 0], None])
+                    edge_y.extend([points[0, 1], points[1, 1], None])
+                    edge_z.extend([points[0, 2], points[1, 2], None])
+            fig.add_trace(
+                go.Scatter3d(
+                    x=edge_x, y=edge_y, z=edge_z, mode="lines",
+                    line=dict(color="#0f172a", width=2), hoverinfo="skip",
+                    name=f"tile {tile_id} edges", showlegend=False,
+                )
+            )
+            if show_generated_cap_faces and int(report.get("cap_face_count", 0)) > 0:
+                excluded = set(int(v) for v in solid.top_face_ids) | set(int(v) for v in solid.contact_face_by_edge.values())
+                for face_id, face in enumerate(solid.faces):
+                    if face_id in excluded:
+                        continue
+                    points = vertices[np.asarray(face, dtype=int)]
+                    loop = np.vstack([points, points[0]])
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=loop[:, 0], y=loop[:, 1], z=loop[:, 2], mode="lines",
+                            line=dict(color="#f43f5e", width=6), hoverinfo="skip",
+                            name="generated cap face", showlegend=False,
+                        )
+                    )
+        return
     if bool(metrics.get("t3d_intersection_trim_applied", False)):
         render_vertices = np.asarray(metrics.get("t3d_trimmed_render_vertices", np.zeros((0, 3))), dtype=float)
         render_i = np.asarray(metrics.get("t3d_trimmed_render_i", np.zeros(0)), dtype=int)

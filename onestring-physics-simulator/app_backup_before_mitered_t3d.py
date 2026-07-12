@@ -33,6 +33,7 @@ from onestring_physics.onestring_pipeline import (
     gpu_self_test,
     nvidia_smi_probe,
     export_t2d_stl,
+    export_t3d_stl,
     run_simulator_gpu_benchmark,
     simulate_onestring_deployment,
     paper_consistency_report,
@@ -52,10 +53,18 @@ from onestring_physics.visualization import (
 
 
 st.set_page_config(page_title="OneString Paper-Faithful Simulator", layout="wide")
-MODEL_VERSION = "2026-07-10-basic-implementation"
+MODEL_VERSION = "2026-07-12-one-sided-t3d"
 MODEL_VERSIONS = [
     {
         "id": MODEL_VERSION,
+        "label": "2026-07-12 T3D one-sided 1t extrusion",
+        "description": "K3Dを上面として固定し、法線の負方向の片側だけへ厚み1tを押し出します。隣接辺はmiter/contact planeで接続します。",
+        "t3d_extrusion_side": "negative_normal_from_k3d",
+        "t3d_variable_topology_enabled": True,
+        "t3d_intersection_trim_enabled": False,
+    },
+    {
+        "id": "2026-07-10-basic-implementation",
         "label": "2026-07-10 基礎実装",
         "description": "周囲との法線整合だけを使うT3D押し出しを含む基礎実装。",
         "t3d_intersection_trim_enabled": False,
@@ -544,6 +553,48 @@ with st.sidebar:
     )
 
     st.header("Actuation Simulation")
+    physics_backend = st.selectbox(
+        "physics backend",
+        ["legacy", "abd"],
+        index=0,
+        help="legacy uses the existing rigid/SAT projection. abd invokes an external Autodesk affine-body-dynamics executable and never falls back to SAT.",
+    )
+    abd_executable = ""
+    abd_timestep = 0.01
+    abd_density = 1000.0
+    abd_stiffness = 1e9
+    abd_pull_end_ratio = 0.75
+    abd_shake_amplitude = 0.0
+    abd_shake_frequency_hz = 0.0
+    abd_shake_direction = (1.0, 0.0, 0.0)
+    abd_shake_start_time = 0.0
+    abd_shake_end_time = 0.0
+    if physics_backend == "abd":
+        st.warning(
+            "ABD requires a Release build of Autodesk/affine-body-dynamics plus the OneString unilateral-string extension. "
+            "If unavailable, execution stops explicitly; legacy SAT is not used as fallback."
+        )
+        with st.expander("Autodesk ABD settings", expanded=True):
+            abd_executable = st.text_input(
+                "abd_sim executable",
+                value=os.environ.get("ONESTRING_ABD_EXECUTABLE", ""),
+                help="Path to the Autodesk ABD Release executable. The full OneString run requires --onestring-manifest capability.",
+            )
+            abd_timestep = st.number_input("ABD timestep", min_value=0.0001, max_value=0.1, value=0.01, step=0.001, format="%.4f")
+            abd_density = st.number_input("tile density", min_value=1.0, max_value=50000.0, value=1000.0, step=100.0)
+            abd_stiffness = st.number_input("ABD orthogonality stiffness", min_value=1e5, max_value=1e12, value=1e9, step=1e8, format="%.3e")
+            abd_pull_end_ratio = st.slider("final string command / initial length", 0.05, 1.0, 0.75, 0.01)
+            abd_shake_amplitude = st.number_input("shake amplitude", min_value=0.0, max_value=10.0, value=0.0, step=0.01)
+            abd_shake_frequency_hz = st.number_input("shake frequency (Hz)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+            shake_cols = st.columns(3)
+            abd_shake_direction = (
+                float(shake_cols[0].number_input("shake dir X", value=1.0, step=0.1)),
+                float(shake_cols[1].number_input("shake dir Y", value=0.0, step=0.1)),
+                float(shake_cols[2].number_input("shake dir Z", value=0.0, step=0.1)),
+            )
+            time_cols = st.columns(2)
+            abd_shake_start_time = float(time_cols[0].number_input("shake start time", min_value=0.0, value=0.0, step=0.1))
+            abd_shake_end_time = float(time_cols[1].number_input("shake end time", min_value=0.0, value=0.0, step=0.1))
     run_actuation = _param_row(
         "現在のT2Dから snap/lift のProjective Dynamics風シミュレーションを実行する。",
         lambda: st.button("Run snap/lift actuation"),
@@ -902,6 +953,17 @@ def current_pipeline_key() -> tuple:
 def current_actuation_key() -> tuple:
     return (
         current_pipeline_key(),
+        physics_backend,
+        abd_executable,
+        abd_timestep,
+        abd_density,
+        abd_stiffness,
+        abd_pull_end_ratio,
+        abd_shake_amplitude,
+        abd_shake_frequency_hz,
+        abd_shake_direction,
+        abd_shake_start_time,
+        abd_shake_end_time,
         sim_steps,
         solver_iterations,
         solver_substeps,
@@ -984,6 +1046,8 @@ pipeline_params = PipelineParameters(
     hinge_layout_collision_sweeps_per_iteration=hinge_layout_collision_sweeps_per_iteration,
     strict_paper_flow=True,
     model_version=selected_model_version["id"],
+    t3d_extrusion_side=str(selected_model_version.get("t3d_extrusion_side", "negative_normal_from_k3d")),
+    t3d_variable_topology_enabled=bool(selected_model_version.get("t3d_variable_topology_enabled", False)),
     t3d_intersection_trim_enabled=bool(selected_model_version.get("t3d_intersection_trim_enabled", False)),
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
@@ -1025,6 +1089,19 @@ if run_pipeline or st.session_state.get("pipeline_key") != pipeline_key:
 state = st.session_state.onestring_state
 
 deployment_params = DeploymentParameters(
+    physics_backend=physics_backend,
+    abd_executable=abd_executable or None,
+    abd_timestep=abd_timestep,
+    abd_density=abd_density,
+    abd_orthogonality_stiffness=abd_stiffness,
+    abd_pull_end_ratio=abd_pull_end_ratio,
+    abd_shake_amplitude=abd_shake_amplitude,
+    abd_shake_frequency_hz=abd_shake_frequency_hz,
+    abd_shake_direction_x=abd_shake_direction[0],
+    abd_shake_direction_y=abd_shake_direction[1],
+    abd_shake_direction_z=abd_shake_direction[2],
+    abd_shake_start_time=abd_shake_start_time,
+    abd_shake_end_time=abd_shake_end_time,
     steps=sim_steps,
     solver_iterations=solver_iterations,
     rigid_weight=rigid_weight,
@@ -1354,7 +1431,32 @@ elif view_stage == "K2D":
         "m2d_cropped_quad_count": state.mesh_2d_initial.metrics.get("m2d_cropped_quad_count"),
     })
 elif view_stage == "T3D":
-    st.plotly_chart(figure_tile_assembly(state.tiles_3d), width="stretch", key="t3d")
+    t3d_view_columns = st.columns(3)
+    show_recovery_status = t3d_view_columns[0].toggle("Show recovery status", value=True)
+    show_generated_caps = t3d_view_columns[1].toggle("Show generated cap faces", value=True)
+    show_fundamental_only = t3d_view_columns[2].toggle("Show fundamental failures only", value=False)
+    st.plotly_chart(
+        figure_tile_assembly(
+            state.tiles_3d,
+            show_recovery_status=show_recovery_status,
+            show_generated_cap_faces=show_generated_caps,
+            show_fundamental_failures_only=show_fundamental_only,
+        ),
+        width="stretch",
+        key="t3d",
+    )
+    if getattr(state.tiles_3d, "authoritative_solids", None):
+        t3d_stl_bytes, t3d_stl_metrics = export_t3d_stl(state.tiles_3d)
+        st.download_button(
+            "Download authoritative T3D STL",
+            data=t3d_stl_bytes,
+            file_name="onestring_t3d_authoritative.stl",
+            mime="model/stl",
+        )
+        st.caption(
+            f"Authoritative variable-topology export: {t3d_stl_metrics['t3d_export_tile_count']} tiles, "
+            f"{t3d_stl_metrics['t3d_export_triangle_count']} triangles."
+        )
     st.write(state.tiles_3d.metrics)
 elif view_stage == "T2D Top Hinge":
     st.plotly_chart(figure_tile_assembly(state.tiles_2d_top_hinge, hinge_graph=state.hinge_graph), width="stretch", key="t2d_top")
@@ -1824,6 +1926,9 @@ elif view_stage == "Metrics":
     if state.simulation_result is not None:
         design_metrics.update(state.simulation_result.metrics)
     st.dataframe({k: [v] for k, v in design_metrics.items()}, width="stretch")
+    if state.simulation_result is not None and getattr(state.simulation_result, "frame_logs", None):
+        st.subheader("ABD per-frame solver log")
+        st.dataframe(state.simulation_result.frame_logs, width="stretch")
 elif view_stage == "Paper Consistency Audit":
     st.subheader("Paper Consistency Audit")
     st.caption("This table is intentionally strict. It compares the currently generated state with the paper's S→Ω→M2D→M3D→K3D/T3D and M2D→K2D→T2D→hinge optimization pipeline.")

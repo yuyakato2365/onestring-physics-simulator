@@ -1,8 +1,20 @@
 """Design and deployment tools for a OneString-inspired simulator."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .design_optimizer import DesignParameters, DesignResult, optimize_design
+from .abd_backend import (
+    ABDBackendConfig,
+    ABDBackendError,
+    ABDBackendUnavailableError,
+    ABDCapabilityError,
+    ABDRunResult,
+    ShakeTrajectory,
+    find_abd_executable,
+    prepare_abd_job,
+    probe_abd_capabilities,
+    run_abd_backend,
+)
 from .input_shape import create_builtin_shape, load_target_shape, normalize_shape, sample_target_surface
 from .onestring_pipeline import (
     ComputeConfig,
@@ -18,6 +30,7 @@ from .onestring_pipeline import (
     complexity_metrics,
     compute_backend_info,
     export_t2d_stl,
+    export_t3d_stl,
     gpu_self_test,
     inverse_map_uv_to_surface,
     nvidia_smi_probe,
@@ -41,6 +54,12 @@ from .reference_bff import (
 __all__ = [
     "DesignParameters",
     "DesignResult",
+    "ABDBackendConfig",
+    "ABDBackendError",
+    "ABDBackendUnavailableError",
+    "ABDCapabilityError",
+    "ABDRunResult",
+    "ShakeTrajectory",
     "ComputeConfig",
     "DeploymentParameters",
     "DeploymentResult",
@@ -62,6 +81,11 @@ __all__ = [
     "complexity_metrics",
     "compute_backend_info",
     "export_t2d_stl",
+    "export_t3d_stl",
+    "find_abd_executable",
+    "prepare_abd_job",
+    "probe_abd_capabilities",
+    "run_abd_backend",
     "create_builtin_shape",
     "create_quad_grid",
     "gpu_self_test",

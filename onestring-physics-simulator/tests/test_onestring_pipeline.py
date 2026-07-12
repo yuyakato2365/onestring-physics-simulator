@@ -409,6 +409,34 @@ def test_t3d_extrusion_normals_are_oriented_across_shared_edges():
     assert metrics["t3d_extrusion_normal_inconsistent_edge_count"] == 0
 
 
+def test_t3d_extrudes_exactly_one_thickness_to_one_side_of_k3d():
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    mesh = QuadMesh(
+        vertices,
+        np.asarray([[0, 1, 2, 3]], dtype=int),
+        None,
+        "K3D",
+        {"t3d_extrusion_side": "negative_normal_from_k3d"},
+    )
+
+    assembly, _report = _extrude_tiles(mesh, 0.2, "T3D")
+
+    assert np.allclose(assembly.vertices[0, :4], vertices)
+    assert np.allclose(assembly.vertices[0, 4:, 2], -0.2)
+    assert assembly.metrics["t3d_one_sided_extrusion"] is True
+    assert assembly.metrics["t3d_k3d_top_face_offset_max"] == 0.0
+    assert assembly.metrics["t3d_bottom_offset_from_k3d_min"] == pytest.approx(-0.2)
+    assert assembly.metrics["t3d_bottom_offset_from_k3d_max"] == pytest.approx(-0.2)
+
+
 def test_t3d_extrusion_normals_are_oriented_across_split_components():
     raw_normals = np.asarray(
         [
