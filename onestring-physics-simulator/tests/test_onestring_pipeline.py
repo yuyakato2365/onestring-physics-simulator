@@ -19,6 +19,7 @@ from onestring_physics.onestring_pipeline import (
     _parameterization_stretch_csf,
     _surface_peak_uvs,
     _split_m2d_along_existing_grid_line,
+    _separate_split_hinge_components,
     _weld_k3d_duplicate_reference_vertices,
     build_onestring_design,
     export_t2d_stl,
@@ -31,6 +32,39 @@ from onestring_physics.visualization import figure_flat_tile_layout, figure_tile
 import numpy as np
 import pytest
 from types import SimpleNamespace
+
+
+def test_split_hinge_components_receive_rigid_inter_component_padding():
+    tile = np.asarray(
+        [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+         [0, 0, -0.1], [1, 0, -0.1], [1, 1, -0.1], [0, 1, -0.1]],
+        dtype=float,
+    )
+    vertices = np.asarray([
+        tile,
+        tile + np.asarray([1.0, 0.0, 0.0]),
+        tile,
+        tile + np.asarray([1.0, 0.0, 0.0]),
+    ])
+    hinges = [
+        SimpleNamespace(tile_a=0, tile_b=1),
+        SimpleNamespace(tile_a=2, tile_b=3),
+    ]
+    before_centers = np.mean(vertices[:, :4, :2], axis=1)
+
+    separated, components, translations = _separate_split_hinge_components(
+        vertices, SimpleNamespace(hinges=hinges), padding=0.25
+    )
+    after_centers = np.mean(separated[:, :4, :2], axis=1)
+
+    assert components == [[0, 1], [2, 3]]
+    assert np.linalg.norm(after_centers[1] - after_centers[0]) == pytest.approx(
+        np.linalg.norm(before_centers[1] - before_centers[0])
+    )
+    assert np.linalg.norm(after_centers[3] - after_centers[2]) == pytest.approx(
+        np.linalg.norm(before_centers[3] - before_centers[2])
+    )
+    assert np.linalg.norm(translations[0] - translations[1]) >= 1.25 - 1e-7
 
 
 def experimental_params(**kwargs):
@@ -51,6 +85,10 @@ def test_hinge_layout_defaults_match_streamlit_controls():
     assert params.hinge_layout_anchor_weight == 0.0
     assert params.hinge_layout_initial_expansion == 1.6
     assert params.hinge_layout_max_center_drift_tiles == 5.0
+
+    deployment = DeploymentParameters(physics_backend="abd")
+    assert deployment.abd_gravity_z == -9.81
+    assert deployment.abd_use_desk is True
 
     free = _free_layout_parameters(
         grid=SimpleNamespace(tile_size=1.0, gap_size=0.08),
@@ -409,6 +447,34 @@ def test_t3d_extrusion_normals_are_oriented_across_shared_edges():
     assert metrics["t3d_extrusion_normal_inconsistent_edge_count"] == 0
 
 
+def test_t3d_extrudes_exactly_one_thickness_to_one_side_of_k3d():
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    mesh = QuadMesh(
+        vertices,
+        np.asarray([[0, 1, 2, 3]], dtype=int),
+        None,
+        "K3D",
+        {"t3d_extrusion_side": "negative_normal_from_k3d"},
+    )
+
+    assembly, _report = _extrude_tiles(mesh, 0.2, "T3D")
+
+    assert np.allclose(assembly.vertices[0, :4], vertices)
+    assert np.allclose(assembly.vertices[0, 4:, 2], -0.2)
+    assert assembly.metrics["t3d_one_sided_extrusion"] is True
+    assert assembly.metrics["t3d_k3d_top_face_offset_max"] == 0.0
+    assert assembly.metrics["t3d_bottom_offset_from_k3d_min"] == pytest.approx(-0.2)
+    assert assembly.metrics["t3d_bottom_offset_from_k3d_max"] == pytest.approx(-0.2)
+
+
 def test_t3d_extrusion_normals_are_oriented_across_split_components():
     raw_normals = np.asarray(
         [
@@ -640,15 +706,19 @@ def test_export_t2d_stl_can_return_per_tile_files():
 def test_omega_rectangular_debug_and_paper_default_are_explicit():
     target = create_builtin_shape("dome", {"amplitude": 0.35, "radius": 2.0})
     default_state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
-    assert default_state.surface_parameterization.method == "bff"
+    assert default_state.surface_parameterization.method == "rectangular_harmonic_legacy"
     assert default_state.surface_parameterization.metrics["requested_omega_parameterization_mode"] == "bff"
-    assert default_state.surface_parameterization.metrics["flattening_backend"] == "local_bff_rectangular_boundary_cotan_harmonic"
-    assert default_state.surface_parameterization.metrics["bff_implemented"] is True
+    assert default_state.surface_parameterization.metrics["deprecated_alias_used"] is True
+    assert default_state.surface_parameterization.metrics["flattening_backend"] == "rectangular_boundary_cotangent_harmonic_legacy"
+    assert default_state.surface_parameterization.metrics["bff_implemented"] is False
     assert default_state.surface_parameterization.metrics["bff_reference_backend_available"] is False
     assert default_state.surface_parameterization.metrics["omega_boundary_forced_rectangle"] is True
     assert default_state.surface_parameterization.metrics["omega_boundary_shape"] == "rectangular"
     assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == "bff_prescribed_rectangular_boundary_by_3d_arclength"
-    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "bff_rectangular_boundary_local"
+    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "rectangular_boundary_harmonic_legacy"
+    assert default_state.surface_parameterization.metrics["parameterization_warning"] == (
+        "This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization."
+    )
     assert default_state.surface_parameterization.metrics["bff_boundary_rectangular_correction_applied"] is True
     assert default_state.surface_parameterization.metrics["harmonic_solve_performed"] is True
     assert default_state.surface_parameterization.metrics["uv_triangle_flip_count"] == 0
@@ -719,7 +789,7 @@ def test_omega_rectangular_debug_and_paper_default_are_explicit():
         raise AssertionError("unimplemented paper mode must not silently fallback")
 
 
-def test_bff_request_uses_rectangular_target_boundary_even_without_reference_backend():
+def test_deprecated_bff_alias_is_rectangular_harmonic_and_never_claims_reference_backend():
     target = create_builtin_shape("half_gourd", {"amplitude": 0.35, "radius": 2.0})
     state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
     metrics = state.surface_parameterization.metrics
@@ -733,13 +803,17 @@ def test_bff_request_uses_rectangular_target_boundary_even_without_reference_bac
         | np.isclose(boundary[:, 1], hi[1], atol=1e-8)
     )
 
-    assert state.surface_parameterization.method == "bff"
+    assert state.surface_parameterization.method == "rectangular_harmonic_legacy"
     assert metrics["requested_omega_parameterization_mode"] == "bff"
-    assert metrics["flattening_backend"] == "local_bff_rectangular_boundary_cotan_harmonic"
-    assert metrics["bff_implemented"] is True
+    assert metrics["deprecated_alias_used"] is True
+    assert metrics["flattening_backend"] == "rectangular_boundary_cotangent_harmonic_legacy"
+    assert metrics["bff_implemented"] is False
     assert metrics["bff_reference_backend_available"] is False
     assert metrics["bff_reference_backend_error"]
-    assert metrics["parameterization_exactness_label"] == "bff_rectangular_boundary_local"
+    assert metrics["parameterization_exactness_label"] == "rectangular_boundary_harmonic_legacy"
+    assert metrics["parameterization_warning"] == (
+        "This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization."
+    )
     assert metrics["omega_boundary_forced_rectangle"] is True
     assert metrics["omega_boundary_shape"] == "rectangular"
     assert metrics["bff_boundary_rectangular_correction_applied"] is True

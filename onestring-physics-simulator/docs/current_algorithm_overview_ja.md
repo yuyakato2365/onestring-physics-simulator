@@ -22,9 +22,10 @@ S target surface
 
 ## 重要な前提
 
-- `S -> Omega` は論文のBFFそのものではありません。現在の `bff` モードは
-  ローカル実装の rectangular-boundary cotangent harmonic/BFF-style path です。
-- `lscm_paper_like` は自由境界LSCM診断用です。デフォルトの速い状態として
+- `paper_reference_bff` は公式GeometryCollective BFF CLIだけを使用し、利用不能なら
+  `ReferenceBFFUnavailableError` で停止します。LSCM等へのfallbackはありません。
+- 旧 `bff` は `rectangular_harmonic_legacy` のdeprecated aliasです。BFFとは表示しません。
+- `lscm_free_boundary` は自由境界LSCM診断用です。デフォルトの速い状態として
   乱用しないでください。
 - `Omega` を自由境界や極端な非矩形領域にすると、`M2D` のoverlayやhinge候補が
   爆発し、Dual Hinge前段で極端に遅くなる可能性があります。

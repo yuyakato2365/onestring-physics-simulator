@@ -1,6 +1,30 @@
 """Design and deployment tools for a OneString-inspired simulator."""
 
+__version__ = "0.3.0"
+
 from .design_optimizer import DesignParameters, DesignResult, optimize_design
+from .abd_backend import (
+    ABDBackendConfig,
+    ABDBackendError,
+    ABDBackendUnavailableError,
+    ABDCapabilityError,
+    ABDRunResult,
+    ShakeTrajectory,
+    find_abd_executable,
+    prepare_abd_job,
+    probe_abd_capabilities,
+    run_abd_backend,
+)
+from .abd_builtin_compat import install_builtin_shape_abd_compatibility
+from .abd_layout_compat import install_abd_layout_compatibility
+
+# Install before onestring_pipeline imports run_abd_backend. These patches keep
+# the normal routed gap path when valid, provide deterministic guides for
+# builtin shapes when needed, and ensure every ABD collision body starts with a
+# strictly positive gap, including bodies joined by a hinge.
+install_builtin_shape_abd_compatibility()
+install_abd_layout_compatibility()
+
 from .input_shape import create_builtin_shape, load_target_shape, normalize_shape, sample_target_surface
 from .onestring_pipeline import (
     ComputeConfig,
@@ -9,11 +33,14 @@ from .onestring_pipeline import (
     FlatTileLayout,
     OneStringDesignState,
     PipelineParameters,
+    ReferenceInitializationState,
     SurfaceParameterization,
     build_onestring_design,
+    build_paper_reference_initialization,
     complexity_metrics,
     compute_backend_info,
     export_t2d_stl,
+    export_t3d_stl,
     gpu_self_test,
     inverse_map_uv_to_surface,
     nvidia_smi_probe,
@@ -24,10 +51,31 @@ from .onestring_pipeline import (
 )
 from .physics_world import PhysicsParameters, PhysicsResult, PhysicsWorld, simulate_deployment
 from .quad_grid import QuadGrid, create_quad_grid
+from .reference_bff import (
+    ReferenceBFFError,
+    ReferenceBFFUnavailableError,
+    ReferenceInverseMapError,
+    ReferenceMeshValidationError,
+    run_official_bff,
+    triangle_jacobian_diagnostics,
+    validate_reference_mesh,
+)
+from .visualization_status_patch import install_status_visualization_patch
+
+# Make recovery colors independent of Plotly lighting. In particular, clipped
+# cyan/blue solids must never appear gray like the non-authoritative emergency
+# normal prism.
+install_status_visualization_patch()
 
 __all__ = [
     "DesignParameters",
     "DesignResult",
+    "ABDBackendConfig",
+    "ABDBackendError",
+    "ABDBackendUnavailableError",
+    "ABDCapabilityError",
+    "ABDRunResult",
+    "ShakeTrajectory",
     "ComputeConfig",
     "DeploymentParameters",
     "DeploymentResult",
@@ -37,12 +85,23 @@ __all__ = [
     "PhysicsResult",
     "PhysicsWorld",
     "PipelineParameters",
+    "ReferenceInitializationState",
     "QuadGrid",
     "SurfaceParameterization",
+    "ReferenceBFFError",
+    "ReferenceBFFUnavailableError",
+    "ReferenceInverseMapError",
+    "ReferenceMeshValidationError",
     "build_onestring_design",
+    "build_paper_reference_initialization",
     "complexity_metrics",
     "compute_backend_info",
     "export_t2d_stl",
+    "export_t3d_stl",
+    "find_abd_executable",
+    "prepare_abd_job",
+    "probe_abd_capabilities",
+    "run_abd_backend",
     "create_builtin_shape",
     "create_quad_grid",
     "gpu_self_test",
@@ -57,4 +116,10 @@ __all__ = [
     "safe_capstan_friction",
     "simulate_onestring_deployment",
     "simulate_deployment",
+    "run_official_bff",
+    "triangle_jacobian_diagnostics",
+    "validate_reference_mesh",
+    "install_status_visualization_patch",
+    "install_abd_layout_compatibility",
+    "__version__",
 ]

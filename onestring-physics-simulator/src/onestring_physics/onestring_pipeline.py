@@ -25,6 +25,44 @@ from typing import Literal
 
 import numpy as np
 
+from .abd_backend import ABDBackendConfig, ShakeTrajectory, run_abd_backend
+
+from .reference_bff import (
+    count_internal_triangle_overlaps,
+    ReferenceBFFError,
+    ReferenceBFFUnavailableError,
+    ReferenceInverseMapError,
+    ReferenceMeshValidationError,
+    json_ready,
+    normalize_uv_and_compute_csf,
+    run_official_bff,
+    strict_inverse_map_uv_to_surface,
+    write_diagnostics_json,
+)
+from .t3d_recovery import (
+    ConvexTileSolid,
+    T3DConstructionError,
+    T3D_FAILED_GLOBAL_COLLISION_INFEASIBLE,
+    T3D_FAILED_NONMANIFOLD_CONTACT,
+    T3D_FAILED_NONORIENTABLE_COMPONENT,
+    T3D_FAILED_TOP_SURFACE_INTERSECTION,
+    T3D_OK_NOMINAL_FRUSTUM,
+    T3D_RECOVERED_CAPPED_FRUSTUM,
+    T3D_RECOVERED_JUNCTION_CAP,
+    T3D_RECOVERED_LEGACY_EMERGENCY_PRISM,
+    T3D_RECOVERED_LOCAL_THICKNESS,
+    T3D_RECOVERED_PYRAMID,
+    T3D_RECOVERED_SYNCHRONIZED_PAIR,
+    T3D_RECOVERED_WEDGE,
+    aabb_overlap,
+    build_emergency_normal_prism,
+    build_tile_polyhedron,
+    clip_convex_polyhedron,
+    convex_sat_overlap,
+    polyhedron_validation,
+    triangulate_solid,
+)
+
 
 def _project_root_from_this_file() -> Path:
     # <project>/src/onestring_physics/onestring_pipeline.py
@@ -881,12 +919,26 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
-    model_version: str = "2026-07-10-basic-implementation"
+    model_version: str = "2026-07-12-one-sided-t3d"
+    t3d_extrusion_side: Literal["negative_normal_from_k3d"] = "negative_normal_from_k3d"
+    # Backward-compatible API default. The selectable 2026-07-12 version turns
+    # this on explicitly; older callers keep the fixed-proxy legacy path.
+    t3d_variable_topology_enabled: bool = False
+    allow_legacy_normal_prism_emergency_fallback: bool = False
+    t3d_min_thickness_ratio: float = 0.25
+    t3d_minimum_volume_ratio: float = 1e-6
+    t3d_minimum_feature_ratio: float = 1e-6
+    t3d_miter_jump_limit: float = 0.75
+    t3d_allow_nonmanifold_junction_cap: bool = False
+    t3d_fail_on_unresolved_global_collision: bool = True
     t3d_intersection_trim_enabled: bool = False
     t3d_intersection_trim_grid_resolution: int = 10
     omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "paper_default"
     omega_parameterization_mode: Literal[
         "bff",
+        "rectangular_harmonic_legacy",
+        "lscm_free_boundary",
+        "paper_reference_bff",
         "rect_harmonic",
         "harmonic",
         "fallback",
@@ -896,6 +948,23 @@ class PipelineParameters(_original.PipelineParameters):
         "arap_paper_like",
         "paper_like_unimplemented",
     ] = "bff"
+    bff_executable: str | None = None
+    bff_boundary_policy: Literal[
+        "automatic_reference",
+        "boundary_scale_zero",
+        "target_disk",
+        "target_rectangle",
+        "custom_boundary_curvature",
+    ] = "automatic_reference"
+    bff_timeout_seconds: float = 120.0
+    reference_csf_normalization: Literal["min_to_one_hypothesis_a", "none_unspecified"] = "min_to_one_hypothesis_a"
+    reference_grid_spacing: float | None = None
+    reference_grid_rotation_degrees: float = 0.0
+    reference_grid_origin_u: float = 0.0
+    reference_grid_origin_v: float = 0.0
+    reference_inverse_tolerance: float = 1e-10
+    reference_stop_on_required_split: bool = True
+    reference_diagnostics_path: str = "output/paper_reference_diagnostics.json"
     boundary_target_shape: Literal["rectangle"] = "rectangle"
     boundary_target_aspect_mode: Literal["lscm_initial", "fixed"] = "lscm_initial"
     boundary_target_aspect_ratio: float = 1.0
@@ -927,6 +996,46 @@ class PipelineParameters(_original.PipelineParameters):
     hinge_layout_anchor_weight: float = 0.0
     hinge_layout_initial_expansion: float = 1.6
     hinge_layout_max_center_drift_tiles: float = 5.0
+
+
+@dataclass
+class DeploymentParameters(_original.DeploymentParameters):
+    physics_backend: Literal["legacy", "abd"] = "legacy"
+    abd_executable: str | None = None
+    abd_job_directory: str = "output/abd_run"
+    abd_timestep: float = 0.01
+    abd_density: float = 1000.0
+    abd_gravity_z: float = -9.81
+    abd_use_desk: bool = True
+    abd_desk_clearance: float = 5.0e-3
+    abd_orthogonality_stiffness: float = 1e9
+    abd_minimum_separation_distance: float = 1e-6
+    abd_barrier_activation_distance: float = 5e-4
+    abd_newton_velocity_tolerance: float = 1e-3
+    abd_nthreads: int = 0
+    abd_timeout_seconds: float = 600.0
+    abd_pull_end_ratio: float = 0.75
+    abd_shake_amplitude: float = 0.0
+    abd_shake_frequency_hz: float = 0.0
+    abd_shake_direction_x: float = 1.0
+    abd_shake_direction_y: float = 0.0
+    abd_shake_direction_z: float = 0.0
+    abd_shake_start_time: float = 0.0
+    abd_shake_end_time: float = 0.0
+    abd_require_onestring_extension: bool = True
+
+
+@dataclass
+class ReferenceInitializationState:
+    """Version 0.2.0 scope: S -> Omega -> M2D -> M3D plus diagnostics."""
+
+    target_surface: object
+    surface_parameterization: object
+    conformal_domain: object
+    mesh_2d_initial: object
+    mesh_3d_initial: object
+    diagnostics: dict[str, object]
+    diagnostics_path: str
 
 
 def _triangle_area_3d(points: np.ndarray) -> np.ndarray:
@@ -2452,13 +2561,12 @@ def _mark_parameterization_mode(parameterization, *, method: str, exactness: str
     )
     if extra:
         parameterization.metrics.update(extra)
-    parameterization.metrics.update(_omega_quality_metrics(parameterization))
-    if warning and not str(parameterization.metrics.get("parameterization_warning", "")):
-        parameterization.metrics["parameterization_warning"] = warning
-    elif warning:
-        existing = str(parameterization.metrics.get("parameterization_warning", ""))
-        if warning not in existing:
-            parameterization.metrics["parameterization_warning"] = (existing + "; " + warning).strip("; ")
+    quality_metrics = _omega_quality_metrics(parameterization)
+    quality_warning = str(quality_metrics.get("parameterization_warning", ""))
+    parameterization.metrics.update(quality_metrics)
+    if quality_warning and quality_warning != warning:
+        parameterization.metrics["parameterization_quality_warning"] = quality_warning
+    parameterization.metrics["parameterization_warning"] = warning
     return parameterization
 
 
@@ -2484,9 +2592,100 @@ def _build_surface_parameterization(surface, target, grid, params):
     if len(boundary_loop) < 3:
         raise RuntimeError("S->Omega parameterization requires an open target mesh with a boundary; only explicit debug heightfield mode is available for this surface.")
 
+    if parameterization_mode == "paper_reference_bff":
+        if boundary_mode != "paper_default":
+            raise ValueError("paper_reference_bff requires omega_boundary_mode='paper_default'; its boundary policy is selected separately.")
+        boundary_policy = str(getattr(params, "bff_boundary_policy", "automatic_reference"))
+        result = run_official_bff(
+            surface_vertices,
+            surface_faces,
+            executable=getattr(params, "bff_executable", None),
+            boundary_policy=boundary_policy,
+            timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
+        )
+        uv_vertices, differential = normalize_uv_and_compute_csf(
+            surface_vertices,
+            result.uv_vertices,
+            surface_faces,
+            normalization=str(getattr(params, "reference_csf_normalization", "min_to_one_hypothesis_a")),
+        )
+        if int(differential["uv_degenerate_triangle_count"]):
+            raise ReferenceBFFUnavailableError(
+                "Official BFF output contains degenerate UV triangles; no deletion or fallback was used."
+            )
+        if int(differential["uv_triangle_flip_count"]):
+            raise ReferenceBFFUnavailableError(
+                "Official BFF output contains locally flipped UV triangles; no deletion or fallback was used."
+            )
+        boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
+        lambda_values = np.asarray(differential["lambda"], dtype=float)
+        metrics: dict[str, object] = {
+            **result.metrics,
+            "parameterization_method": "paper_reference_bff",
+            "parameterization_exactness_label": "official_bff_backend",
+            "parameterization_warning": "OneString boundary condition is UNSPECIFIED_IN_PAPER; official BFF CLI policy is recorded explicitly.",
+            "omega_boundary_mode": "paper_default",
+            "omega_parameterization_mode": "paper_reference_bff",
+            "requested_omega_parameterization_mode": "paper_reference_bff",
+            "surface_vertex_count": int(len(surface_vertices)),
+            "surface_triangle_count": int(len(surface_faces)),
+            "boundary_vertex_count": int(len(boundary_loop)),
+            "boundary_loop": [int(value) for value in boundary_loop],
+            "harmonic_solve_performed": False,
+            "height_field_shortcut_used": False,
+            "omega_corresponds_to_S": True,
+            "omega_correspondence_model": "official BFF c:S->Omega; inverse by strict containing-triangle barycentric coordinates",
+            "paper_flow_stage": "S -> Omega by official Boundary First Flattening CLI",
+            "paper_exactness_warning": "S_TO_M3D: paper-reference candidate; K3D_AND_LATER: existing approximate implementation",
+            "bff_implemented": True,
+            "bff_reference_backend_available": True,
+            "bff_backend_used": str(result.metrics["parameterization_backend_name"]),
+            "flattening_backend": str(result.metrics["parameterization_backend_name"]),
+            "omega_boundary_fixed": boundary_policy in {"target_disk"},
+            "omega_boundary_forced_rectangle": False,
+            "omega_boundary_shape": "disk" if boundary_policy == "target_disk" else "free",
+            "omega_boundary_constraint_model": str(result.metrics["bff_boundary_policy_effective"]),
+            "uv_triangle_flip_count": int(differential["uv_triangle_flip_count"]),
+            "uv_degenerate_triangle_count": int(differential["uv_degenerate_triangle_count"]),
+            "per_triangle_sigma1": np.asarray(differential["sigma1"], dtype=float).tolist(),
+            "per_triangle_sigma2": np.asarray(differential["sigma2"], dtype=float).tolist(),
+            "per_triangle_anisotropy": np.asarray(differential["anisotropy"], dtype=float).tolist(),
+            "per_triangle_area_scale": np.asarray(differential["area_scale_uv_to_surface"], dtype=float).tolist(),
+            "per_triangle_lambda": lambda_values.tolist(),
+            "per_triangle_log_lambda": np.asarray(differential["log_lambda"], dtype=float).tolist(),
+            "triangle_flip_flags": np.asarray(differential["triangle_flip"], dtype=bool).tolist(),
+            "uv_degenerate_triangle_flags": np.asarray(differential["uv_degenerate_triangle"], dtype=bool).tolist(),
+            "lambda_min": float(differential["lambda_min"]),
+            "lambda_median": float(differential["lambda_median"]),
+            "lambda_max": float(differential["lambda_max"]),
+            "lambda_bound": 2.0,
+            "lambda_exceeds_bound_triangle_count": int(differential["lambda_exceeds_bound_triangle_count"]),
+            "lambda_mapping_direction": str(differential["mapping_direction"]),
+            "lambda_normalization": str(differential["lambda_normalization"]),
+            "lambda_normalization_status": str(differential["lambda_normalization_status"]),
+            "lambda_uv_similarity_scale_applied": float(differential["lambda_uv_similarity_scale_applied"]),
+            "boundary_self_intersection_count": int(_boundary_self_intersection_count(boundary)),
+            "internal_triangle_overlap_count": int(count_internal_triangle_overlaps(uv_vertices, surface_faces)),
+            "internal_triangle_overlap_status": "evaluated for positive-area overlap between non-adjacent UV triangles",
+            "conformal_energy": float(np.nansum(np.square(np.asarray(differential["anisotropy"], dtype=float) - 1.0))),
+            "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
+        }
+        if metrics["fallbacks_used"]:
+            raise ReferenceBFFUnavailableError("paper_reference_bff recorded a fallback; reference run rejected.")
+        return _original.SurfaceParameterization(
+            method="paper_reference_bff",
+            surface_vertices_3d=surface_vertices,
+            surface_faces=surface_faces,
+            uv_vertices_2d=uv_vertices,
+            uv_faces=surface_faces.copy(),
+            omega_boundary=boundary,
+            triangle_acceleration=None,
+            metrics=metrics,
+        )
+
     if parameterization_mode in {"arap_paper_like", "paper_like_unimplemented"}:
         raise NotImplementedError(
-            f"{parameterization_mode} is not implemented. Use bff to request a reference/free-boundary conformal S->Omega backend, "
+            f"{parameterization_mode} is not implemented. Use paper_reference_bff to request the official BFF backend, "
             "or explicitly enable pca_debug as an experimental non-paper path."
         )
 
@@ -2539,22 +2738,24 @@ def _build_surface_parameterization(surface, target, grid, params):
             raise RuntimeError("boundary_sliding_lscm produced invalid UV triangles after final quality validation; no fallback was used.")
         return out
 
-    if parameterization_mode == "bff":
+    if parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
         if boundary_mode != "paper_default":
             raise ValueError("bff rectangular-target solve only supports omega_boundary_mode='paper_default'.")
         metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
         uv_vertices, backend_metrics = _bff_boundary_first_uv(surface_vertices, surface_faces, boundary_loop)
         boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
+        legacy_warning = (
+            "This is not Boundary First Flattening. "
+            "It is rectangular-boundary cotangent harmonic parameterization."
+        )
         metrics: dict[str, float | int | str | bool] = {
-            "parameterization_method": "bff",
-            "parameterization_exactness_label": "bff_rectangular_boundary_local",
-            "parameterization_warning": (
-                "Local BFF-style rectangular target boundary is active. The boundary condition is prescribed as a rectangle "
-                "before the interior cotangent harmonic solve; no reference libigl/geometry-central BFF backend is wired."
-            ),
+            "parameterization_method": "rectangular_harmonic_legacy",
+            "parameterization_exactness_label": "rectangular_boundary_harmonic_legacy",
+            "parameterization_warning": legacy_warning,
             "omega_boundary_mode": "paper_default",
-            "omega_parameterization_mode": "bff",
-            "requested_omega_parameterization_mode": "bff",
+            "omega_parameterization_mode": "rectangular_harmonic_legacy",
+            "requested_omega_parameterization_mode": parameterization_mode,
+            "deprecated_alias_used": parameterization_mode == "bff",
             "surface_vertex_count": int(len(surface_vertices)),
             "surface_triangle_count": int(len(surface_faces)),
             "boundary_vertex_count": int(len(boundary_loop)),
@@ -2566,13 +2767,25 @@ def _build_surface_parameterization(surface, target, grid, params):
             "omega_corresponds_to_S": True,
             "omega_correspondence_model": "BFF-style prescribed rectangular-boundary UV map c:S->Omega, inverse by UV triangle lookup",
             "paper_flow_stage": "S -> Omega by boundary-first rectangular target domain and cotangent harmonic extension",
-            "paper_exactness_warning": "This is a local discrete BFF-style rectangular target solve, not a reference BFF library binding.",
-            "omega_warning": "Rectangular target-domain boundary is prescribed for downstream tile compatibility; free-boundary LSCM is available only as lscm_paper_like diagnostic mode.",
+            "paper_exactness_warning": legacy_warning,
+            "omega_warning": legacy_warning,
             "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
             **backend_metrics,
         }
+        metrics.update(
+            {
+                "bff_implemented": False,
+                "bff_backend_used": "none",
+                "bff_reference_backend_available": False,
+                "flattening_backend": "rectangular_boundary_cotangent_harmonic_legacy",
+                "omega_parameterization_solver": "rectangular_boundary_cotangent_harmonic_legacy",
+                "parameterization_warning": legacy_warning,
+                "paper_exactness_warning": legacy_warning,
+                "omega_warning": legacy_warning,
+            }
+        )
         out = _original.SurfaceParameterization(
-            method="bff",
+            method="rectangular_harmonic_legacy",
             surface_vertices_3d=surface_vertices,
             surface_faces=surface_faces,
             uv_vertices_2d=uv_vertices,
@@ -2583,9 +2796,9 @@ def _build_surface_parameterization(surface, target, grid, params):
         )
         return _mark_parameterization_mode(
             out,
-            method="bff",
-            exactness="bff_rectangular_boundary_local",
-            warning=str(metrics["parameterization_warning"]),
+            method="rectangular_harmonic_legacy",
+            exactness="rectangular_boundary_harmonic_legacy",
+            warning=legacy_warning,
         )
 
     if parameterization_mode in {"rect_harmonic", "harmonic", "fallback"}:
@@ -2622,18 +2835,19 @@ def _build_surface_parameterization(surface, target, grid, params):
             warning="Rectangular-boundary harmonic parameterization is active; this is not BFF.",
         )
 
-    if parameterization_mode == "lscm_paper_like":
+    if parameterization_mode in {"lscm_paper_like", "lscm_free_boundary"}:
         if boundary_mode not in {"paper_default", "shape_preserving_experimental"}:
             raise ValueError("lscm_paper_like uses a free boundary and does not support rectangular_debug boundary forcing.")
         uv_vertices, lscm_metrics = _lscm_free_boundary_uv(surface_vertices, surface_faces, boundary_loop)
         boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
         metric = {"mean_slope": 0.0, "max_slope": 0.0} if target.kind == "sampled" else _original._heightfield_metric_summary(target, grid)
         metrics: dict[str, float | int | str | bool] = {
-            "parameterization_method": "lscm_paper_like",
+            "parameterization_method": "lscm_free_boundary",
             "parameterization_exactness_label": "conformal_approximation",
             "parameterization_warning": "Free-boundary LSCM is implemented for conformal S->Omega mapping, but it is not Boundary First Flattening unless the paper path specifically accepts LSCM.",
             "omega_boundary_mode": "paper_default" if boundary_mode == "paper_default" else boundary_mode,
-            "omega_parameterization_mode": "lscm_paper_like",
+            "omega_parameterization_mode": "lscm_free_boundary",
+            "requested_omega_parameterization_mode": parameterization_mode,
             "surface_vertex_count": int(len(surface_vertices)),
             "surface_triangle_count": int(len(surface_faces)),
             "boundary_vertex_count": int(len(boundary_loop)),
@@ -2653,7 +2867,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             **lscm_metrics,
         }
         out = _original.SurfaceParameterization(
-            method="lscm_paper_like",
+            method="lscm_free_boundary",
             surface_vertices_3d=surface_vertices,
             surface_faces=surface_faces,
             uv_vertices_2d=uv_vertices,
@@ -2664,7 +2878,7 @@ def _build_surface_parameterization(surface, target, grid, params):
         )
         return _mark_parameterization_mode(
             out,
-            method="lscm_paper_like",
+            method="lscm_free_boundary",
             exactness="conformal_approximation",
             warning="Free-boundary LSCM is implemented; BFF remains unimplemented.",
         )
@@ -2849,7 +3063,143 @@ def _rebuild_domain_overlay_for_general_omega(domain, parameterization, grid, pa
     }
 
 
+def _reference_triangle_values_to_vertices(face_values: np.ndarray, faces: np.ndarray, vertex_count: int) -> np.ndarray:
+    values = np.asarray(face_values, dtype=float).reshape(-1)
+    out = np.ones(int(vertex_count), dtype=float)
+    buckets: list[list[float]] = [[] for _ in range(int(vertex_count))]
+    for face, value in zip(np.asarray(faces, dtype=int), values):
+        if np.isfinite(value):
+            for vertex_id in face:
+                buckets[int(vertex_id)].append(float(value))
+    for vertex_id, local in enumerate(buckets):
+        if local:
+            out[vertex_id] = float(np.max(local))
+    return out
+
+
+def _reference_gaussian_angle_defects(vertices: np.ndarray, faces: np.ndarray, boundary_loop: list[int]) -> np.ndarray:
+    pts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)
+    angle_sum = np.zeros(len(pts), dtype=float)
+    for face in tris:
+        tri = pts[face]
+        for local_vertex in range(3):
+            center = tri[local_vertex]
+            a = tri[(local_vertex + 1) % 3] - center
+            b = tri[(local_vertex + 2) % 3] - center
+            denom = max(float(np.linalg.norm(a) * np.linalg.norm(b)), 1e-300)
+            angle_sum[int(face[local_vertex])] += float(np.arccos(np.clip(np.dot(a, b) / denom, -1.0, 1.0)))
+    defects = 2.0 * np.pi - angle_sum
+    if boundary_loop:
+        boundary_ids = np.asarray(boundary_loop, dtype=int)
+        defects[boundary_ids] = np.pi - angle_sum[boundary_ids]
+    return defects
+
+
+def _reference_flatten_to_domain(parameterization, grid, params):
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    boundary = np.asarray(parameterization.omega_boundary, dtype=float)
+    boundary_open = boundary[:-1]
+    origin = np.asarray(
+        [float(getattr(params, "reference_grid_origin_u", 0.0)), float(getattr(params, "reference_grid_origin_v", 0.0))],
+        dtype=float,
+    )
+    angle_degrees = float(getattr(params, "reference_grid_rotation_degrees", 0.0))
+    angle = np.deg2rad(angle_degrees)
+    rotation = np.asarray([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]], dtype=float)
+    canonical_boundary = (boundary_open - origin) @ rotation
+    span = np.ptp(canonical_boundary, axis=0)
+    requested_spacing = getattr(params, "reference_grid_spacing", None)
+    if requested_spacing is None:
+        spacing = max(float(span[0]) / max(int(grid.nx), 1), float(span[1]) / max(int(grid.ny), 1), 1e-8)
+        spacing_status = "UNSPECIFIED_IN_PAPER: derived from requested nx/ny (hypothesis_a)"
+    else:
+        spacing = float(requested_spacing)
+        if not np.isfinite(spacing) or spacing <= 0.0:
+            raise ValueError("reference_grid_spacing must be finite and positive")
+        spacing_status = "explicit user parameter"
+    margin = int(max(0, getattr(params, "omega_overlay_margin", 1)))
+    minimum = np.min(canonical_boundary, axis=0)
+    maximum = np.max(canonical_boundary, axis=0)
+    i_min = int(np.floor(minimum[0] / spacing)) - margin
+    i_max = int(np.ceil(maximum[0] / spacing)) + margin
+    j_min = int(np.floor(minimum[1] / spacing)) - margin
+    j_max = int(np.ceil(maximum[1] / spacing)) + margin
+    xs = np.arange(i_min, i_max + 1, dtype=float) * spacing
+    ys = np.arange(j_min, j_max + 1, dtype=float) * spacing
+    xx, yy = np.meshgrid(xs, ys, indexing="xy")
+    canonical = np.stack([xx, yy], axis=-1).reshape(-1, 2)
+    overlay_uv = origin + canonical @ rotation.T
+    lambda_triangles = np.asarray(parameterization.metrics.get("per_triangle_lambda", []), dtype=float)
+    csf_vertices = _reference_triangle_values_to_vertices(lambda_triangles, parameterization.surface_faces, len(uv))
+    domain = _original.PlanarDomain(
+        boundary=boundary,
+        uv_vertices=overlay_uv,
+        method="paper_reference_bff regular square grid",
+        csf_values=csf_vertices,
+        split_lines=[],
+    )
+    domain.overlay_nx = int(len(xs) - 1)
+    domain.overlay_ny = int(len(ys) - 1)
+    domain.overlay_margin_tiles = margin
+    domain.overlay_step_u = spacing
+    domain.overlay_step_v = spacing
+    domain.original_requested_nx = int(grid.nx)
+    domain.original_requested_ny = int(grid.ny)
+    domain.reference_mode = True
+    domain.parameterization = parameterization
+    domain.reference_grid_spacing = spacing
+    domain.reference_grid_spacing_status = spacing_status
+    domain.reference_grid_rotation_degrees = angle_degrees
+    domain.reference_grid_origin = origin.tolist()
+    domain.reference_grid_index_bounds = [i_min, i_max, j_min, j_max]
+    domain.csf_before = float(np.nanmax(lambda_triangles)) if lambda_triangles.size else 1.0
+    domain.csf_after_split = domain.csf_before
+    domain.csf_split_threshold = 2.0
+    domain.csf_split_enabled = False
+    domain.csf_model = "exact per-triangle max singular value of J^-1"
+    domain.csf_split_exactness_label = "diagnostic_only"
+    boundary_loop = [int(value) for value in parameterization.metrics.get("boundary_loop", [])]
+    gaussian = _reference_gaussian_angle_defects(
+        parameterization.surface_vertices_3d,
+        parameterization.surface_faces,
+        boundary_loop,
+    )
+    peak_id = int(np.nanargmax(gaussian)) if gaussian.size else -1
+    domain.reference_split_diagnostics = {
+        "lambda_bound": 2.0,
+        "lambda_max": float(domain.csf_before),
+        "split_required": bool(domain.csf_before > 2.0),
+        "highest_gaussian_curvature_vertex_id": peak_id,
+        "highest_gaussian_curvature_angle_defect": float(gaussian[peak_id]) if peak_id >= 0 else None,
+        "highest_gaussian_curvature_uv": uv[peak_id].tolist() if peak_id >= 0 else None,
+        "paper_split_rule": "complete hierarchical grid-direction bisection through highest Gaussian curvature",
+        "split_locations": [],
+        "split_count": 0,
+        "status": "UNSPECIFIED_SPLIT_REPARAMETERIZATION" if domain.csf_before > 2.0 else "not_required",
+    }
+    parameterization.metrics.update(
+        {
+            "reference_grid_spacing": spacing,
+            "reference_grid_spacing_status": spacing_status,
+            "reference_grid_rotation_degrees": angle_degrees,
+            "reference_grid_origin": origin.tolist(),
+            "split_diagnostics": domain.reference_split_diagnostics,
+        }
+    )
+    if bool(domain.csf_before > 2.0) and bool(getattr(params, "reference_stop_on_required_split", True)):
+        raise ReferenceBFFError(
+            "UNSPECIFIED_SPLIT_REPARAMETERIZATION: lambda exceeds 2, but the OneString paper does not fully specify "
+            "post-split BFF reparameterization. Reference mode stopped without applying the legacy split heuristic."
+        )
+    return domain
+
+
 def _flatten_to_domain(parameterization, grid, params=None):
+    if str(getattr(parameterization, "method", "")) == "paper_reference_bff":
+        if params is None:
+            raise ValueError("paper_reference_bff requires explicit PipelineParameters")
+        return _reference_flatten_to_domain(parameterization, grid, params)
     domain = _ORIGINAL_FLATTEN_TO_DOMAIN(parameterization, grid, params)
     threshold = float(getattr(params, "csf_split_threshold", 1.9)) if params is not None else 1.9
     enabled = bool(getattr(params, "enable_csf_splits", True)) if params is not None else True
@@ -3275,7 +3625,118 @@ def _symmetrize_m2d_faces(mesh, domain) -> tuple[np.ndarray, int]:
     return np.asarray(ordered_faces, dtype=int), int(added)
 
 
+def _reference_point_in_polygon_inclusive(point: np.ndarray, polygon: np.ndarray, tolerance: float = 1e-10) -> bool:
+    p = np.asarray(point, dtype=float)
+    poly = np.asarray(polygon, dtype=float)
+    for index in range(len(poly)):
+        a = poly[index]
+        b = poly[(index + 1) % len(poly)]
+        ab = b - a
+        length2 = float(np.dot(ab, ab))
+        if length2 <= tolerance * tolerance:
+            continue
+        t = float(np.clip(np.dot(p - a, ab) / length2, 0.0, 1.0))
+        if float(np.linalg.norm(p - (a + t * ab))) <= tolerance:
+            return True
+    inside = False
+    x, y = float(p[0]), float(p[1])
+    for index in range(len(poly)):
+        x0, y0 = map(float, poly[index])
+        x1, y1 = map(float, poly[(index + 1) % len(poly)])
+        if (y0 > y) != (y1 > y):
+            x_cross = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+            if x < x_cross:
+                inside = not inside
+    return inside
+
+
+def _reference_proper_segment_intersection(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray, tolerance: float = 1e-12) -> bool:
+    def orient(p, q, r) -> float:
+        return float((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]))
+
+    o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+    return bool(o1 * o2 < -tolerance and o3 * o4 < -tolerance)
+
+
+def _reference_quad_fully_inside(points: np.ndarray, polygon: np.ndarray) -> bool:
+    quad = np.asarray(points, dtype=float)
+    poly = np.asarray(polygon, dtype=float)
+    if not all(_reference_point_in_polygon_inclusive(point, poly) for point in quad):
+        return False
+    for edge_id in range(4):
+        a = quad[edge_id]
+        b = quad[(edge_id + 1) % 4]
+        for boundary_id in range(len(poly)):
+            c = poly[boundary_id]
+            d = poly[(boundary_id + 1) % len(poly)]
+            if _reference_proper_segment_intersection(a, b, c, d):
+                return False
+    return True
+
+
+def _build_reference_m2d(grid, domain, params=None):
+    overlay_nx = int(domain.overlay_nx)
+    overlay_ny = int(domain.overlay_ny)
+    overlay_grid = _original.create_quad_grid(overlay_nx, overlay_ny, grid.tile_size, grid.gap_size)
+    vertices = np.column_stack([np.asarray(domain.uv_vertices, dtype=float), np.zeros(len(domain.uv_vertices), dtype=float)])
+    overlay_grid.vertex_positions = vertices.copy()
+    boundary = np.asarray(domain.boundary[:-1], dtype=float)
+    kept_faces: list[tuple[int, int, int, int]] = []
+    kept_ids: list[int] = []
+    for tile in overlay_grid.tiles or []:
+        face = tuple(int(value) for value in tile.vertex_ids)
+        if _reference_quad_fully_inside(vertices[list(face), :2], boundary):
+            kept_faces.append(face)
+            kept_ids.append(int(tile.id))
+    if not kept_faces:
+        raise RuntimeError("paper_reference_bff regular grid produced no fully contained quads in Omega.")
+    faces_full = np.asarray(kept_faces, dtype=int)
+    used_vertex_ids = np.unique(faces_full)
+    remap = np.full(len(vertices), -1, dtype=int)
+    remap[used_vertex_ids] = np.arange(len(used_vertex_ids), dtype=int)
+    vertices = vertices[used_vertex_ids]
+    faces = remap[faces_full]
+    overlay_grid.vertex_positions = vertices.copy()
+    split_diagnostics = dict(getattr(domain, "reference_split_diagnostics", {}))
+    metrics = {
+        "m2d_grid_overlay": "explicit regular square grid over official-BFF Omega",
+        "m2d_crop_policy": "all_vertices_inside_and_no_boundary_crossing",
+        "m2d_boundary_clipping_policy": "all_vertices_inside",
+        "m2d_requested_grid_nx": int(getattr(domain, "original_requested_nx", grid.nx)),
+        "m2d_requested_grid_ny": int(getattr(domain, "original_requested_ny", grid.ny)),
+        "m2d_overlay_grid_nx": overlay_nx,
+        "m2d_overlay_grid_ny": overlay_ny,
+        "m2d_overlay_total_quad_count": int(len(overlay_grid.tiles or [])),
+        "m2d_cropped_quad_count": int(len(overlay_grid.tiles or []) - len(faces)),
+        "m2d_kept_quad_count": int(len(faces)),
+        "m2d_vertex_count": int(len(vertices)),
+        "m2d_quad_count": int(len(faces)),
+        "m2d_kept_original_overlay_tile_ids": kept_ids,
+        "m2d_kept_original_overlay_vertex_ids": used_vertex_ids.astype(int).tolist(),
+        "m2d_unused_overlay_vertices_removed": True,
+        "reference_grid_spacing": float(domain.reference_grid_spacing),
+        "reference_grid_spacing_status": str(domain.reference_grid_spacing_status),
+        "reference_grid_rotation_degrees": float(domain.reference_grid_rotation_degrees),
+        "reference_grid_origin": list(domain.reference_grid_origin),
+        "reference_grid_index_bounds": list(domain.reference_grid_index_bounds),
+        "automatic_peak_alignment_used": False,
+        "automatic_density_change_used": False,
+        "automatic_symmetry_completion_used": False,
+        "hidden_grid_shift_used": False,
+        "max_csf_before_split": float(domain.csf_before),
+        "max_csf_after_split": float(domain.csf_after_split),
+        "number_of_splits": 0,
+        "split_locations": [],
+        "split_diagnostics": split_diagnostics,
+        "csf_model": str(domain.csf_model),
+        "csf_split_exactness_label": "diagnostic_only",
+    }
+    return _original.QuadMesh(vertices, faces, overlay_grid, "M2D", metrics, [])
+
+
 def _build_m2d(grid, domain, params=None):
+    if bool(getattr(domain, "reference_mode", False)):
+        return _build_reference_m2d(grid, domain, params)
     mesh = _ORIGINAL_BUILD_M2D(grid, domain, params)
     all_overlay_faces = np.asarray([tile.vertex_ids for tile in (mesh.grid.tiles or [])], dtype=int)
     if len(all_overlay_faces):
@@ -3460,6 +3921,71 @@ def _build_m2d(grid, domain, params=None):
 
 
 def _lift_m2d_to_m3d(target, mesh, parameterization, params):
+    if str(getattr(parameterization, "method", "")) == "paper_reference_bff":
+        started = time.perf_counter()
+        mapped: list[np.ndarray] = []
+        triangle_ids: list[int] = []
+        barycentric_values: list[list[float]] = []
+        round_trip_errors: list[float] = []
+        tolerance = float(getattr(params, "reference_inverse_tolerance", 1e-10))
+        for vertex_id, uv_point in enumerate(np.asarray(mesh.vertices, dtype=float)[:, :2]):
+            point, triangle_id, barycentric, round_trip = strict_inverse_map_uv_to_surface(
+                uv_point,
+                parameterization.uv_vertices_2d,
+                parameterization.uv_faces,
+                parameterization.surface_vertices_3d,
+                parameterization.surface_faces,
+                tolerance=tolerance,
+                vertex_id=int(vertex_id),
+            )
+            mapped.append(point)
+            triangle_ids.append(int(triangle_id))
+            barycentric_values.append(np.asarray(barycentric, dtype=float).tolist())
+            round_trip_errors.append(float(round_trip))
+        vertices = np.asarray(mapped, dtype=float)
+        planarity = _original._quad_planarity_error(vertices, mesh.faces)
+        errors = np.asarray(round_trip_errors, dtype=float)
+        metrics = {
+            "surface_deviation": 0.0,
+            "quad_planarity_error": float(planarity),
+            "m3d_construction_method": "strict_barycentric_inverse_of_official_bff",
+            "parameterization_method": "paper_reference_bff",
+            "m3d_surface_distance_mean": 0.0,
+            "m3d_surface_distance_max": 0.0,
+            "m3d_uv_triangle_lookup_fail_count": 0,
+            "m3d_uv_lookup_failure_count": 0,
+            "m3d_outside_omega_count": 0,
+            "m3d_outside_uv_triangle_count": 0,
+            "m3d_negative_barycentric_count": int(np.count_nonzero(np.asarray(barycentric_values) < -tolerance)),
+            "m3d_nearest_fallback_count": 0,
+            "m3d_used_height_field_shortcut": False,
+            "m3d_surface_projection_model": "strict containing UV triangle plus barycentric coordinates",
+            "m3d_exactness_label": "paper-reference candidate",
+            "m3d_vertex_count": int(len(vertices)),
+            "m3d_quad_count": int(len(mesh.faces)),
+            "m3d_planarity_error": float(planarity),
+            "m3d_surface_triangle_ids": triangle_ids,
+            "m3d_barycentric_coordinates": barycentric_values,
+            "m3d_round_trip_error_mean": float(np.mean(errors)) if errors.size else 0.0,
+            "m3d_round_trip_error_rms": float(np.sqrt(np.mean(errors * errors))) if errors.size else 0.0,
+            "m3d_round_trip_error_max": float(np.max(errors)) if errors.size else 0.0,
+            "m3d_inverse_tolerance": tolerance,
+            "fallbacks_used": [],
+            "paper_scope_label": "S_TO_M3D: paper-reference candidate",
+            "later_scope_label": "K3D_AND_LATER: existing approximate implementation",
+        }
+        out = _original.QuadMesh(vertices, np.asarray(mesh.faces, dtype=int).copy(), mesh.grid, "M3D", metrics, [])
+        report = _original.StageReport(
+            name="M2D -> M3D",
+            objective="Strict inverse conformal map c^-1 by containing UV triangle and barycentric interpolation.",
+            before_error=0.0,
+            after_error=float(metrics["m3d_round_trip_error_rms"]),
+            constraint_violation=float(planarity),
+            computation_time=time.perf_counter() - started,
+            failed_constraints=[],
+            counts=_original._mesh_counts(out),
+        )
+        return out, report
     lookup_records: list[tuple[int, bool]] = []
     previous_inverse_map = _original.inverse_map_uv_to_surface
 
@@ -4000,6 +4526,7 @@ def _weld_k3d_duplicate_reference_vertices(
 
 
 def _optimize_k3d(target, mesh, parameterization, params):
+    reference_prefix = str(getattr(parameterization, "method", "")) == "paper_reference_bff"
     out, report = _ORIGINAL_OPTIMIZE_K3D(target, mesh, parameterization, params)
     welded_vertices, weld_metrics = _weld_k3d_duplicate_reference_vertices(mesh.vertices, out.vertices)
     if bool(weld_metrics.get("k3d_split_duplicate_weld_applied", False)):
@@ -4029,8 +4556,18 @@ def _optimize_k3d(target, mesh, parameterization, params):
                 "k3d_fallback_reason": "",
                 "k3d_exactness_label": "approximation",
                 "model_version": str(getattr(params, "model_version", "")),
+                "t3d_extrusion_side": str(getattr(params, "t3d_extrusion_side", "negative_normal_from_k3d")),
+                "t3d_variable_topology_enabled": bool(getattr(params, "t3d_variable_topology_enabled", False)),
+                "allow_legacy_normal_prism_emergency_fallback": bool(getattr(params, "allow_legacy_normal_prism_emergency_fallback", False)),
+                "t3d_min_thickness_ratio": float(getattr(params, "t3d_min_thickness_ratio", 0.25)),
+                "t3d_minimum_volume_ratio": float(getattr(params, "t3d_minimum_volume_ratio", 1e-6)),
+                "t3d_minimum_feature_ratio": float(getattr(params, "t3d_minimum_feature_ratio", 1e-6)),
+                "t3d_miter_jump_limit": float(getattr(params, "t3d_miter_jump_limit", 0.75)),
+                "t3d_allow_nonmanifold_junction_cap": bool(getattr(params, "t3d_allow_nonmanifold_junction_cap", False)),
+                "t3d_fail_on_unresolved_global_collision": bool(getattr(params, "t3d_fail_on_unresolved_global_collision", True)),
                 "t3d_intersection_trim_enabled": bool(getattr(params, "t3d_intersection_trim_enabled", False)),
                 "t3d_intersection_trim_grid_resolution": int(getattr(params, "t3d_intersection_trim_grid_resolution", 10)),
+                "paper_scope_label": "K3D_AND_LATER: existing approximate implementation" if reference_prefix else "",
             }
         )
         return out, report
@@ -4055,8 +4592,18 @@ def _optimize_k3d(target, mesh, parameterization, params):
             "k3d_exactness_label": "fallback",
             "approximation_warning": f"K3D optimization rejected by quality guard: {reject_reason}; fallback to M3D",
             "model_version": str(getattr(params, "model_version", "")),
+            "t3d_extrusion_side": str(getattr(params, "t3d_extrusion_side", "negative_normal_from_k3d")),
+            "t3d_variable_topology_enabled": bool(getattr(params, "t3d_variable_topology_enabled", False)),
+            "allow_legacy_normal_prism_emergency_fallback": bool(getattr(params, "allow_legacy_normal_prism_emergency_fallback", False)),
+            "t3d_min_thickness_ratio": float(getattr(params, "t3d_min_thickness_ratio", 0.25)),
+            "t3d_minimum_volume_ratio": float(getattr(params, "t3d_minimum_volume_ratio", 1e-6)),
+            "t3d_minimum_feature_ratio": float(getattr(params, "t3d_minimum_feature_ratio", 1e-6)),
+            "t3d_miter_jump_limit": float(getattr(params, "t3d_miter_jump_limit", 0.75)),
+            "t3d_allow_nonmanifold_junction_cap": bool(getattr(params, "t3d_allow_nonmanifold_junction_cap", False)),
+            "t3d_fail_on_unresolved_global_collision": bool(getattr(params, "t3d_fail_on_unresolved_global_collision", True)),
             "t3d_intersection_trim_enabled": bool(getattr(params, "t3d_intersection_trim_enabled", False)),
             "t3d_intersection_trim_grid_resolution": int(getattr(params, "t3d_intersection_trim_grid_resolution", 10)),
+            "paper_scope_label": "K3D_AND_LATER: existing approximate implementation" if reference_prefix else "",
         }
     )
     fallback = _original.QuadMesh(
@@ -4438,14 +4985,476 @@ def _t3d_intersection_trim_render_mesh(
     }
 
 
+def _top_surface_intersection_pairs(top_tiles: np.ndarray, faces: np.ndarray) -> list[tuple[int, int]]:
+    """Return nonadjacent, near-coplanar K3D top polygons with positive-area overlap."""
+    adjacent = {
+        tuple(sorted((entries[0][0], entries[1][0])))
+        for entries in _build_edge_incidence(faces).values()
+        if len(entries) == 2
+    }
+    intersections: list[tuple[int, int]] = []
+    for tile_a in range(len(top_tiles)):
+        top_a = np.asarray(top_tiles[tile_a], dtype=float)
+        normal_a = _normalize(_original._quad_normal(top_a), np.asarray([0.0, 0.0, 1.0]))
+        origin, u, v = _tile_plane_basis(top_a, normal_a)
+        poly_a = _project_to_basis(top_a, origin, u, v)
+        span = max(float(np.linalg.norm(top_a[(idx + 1) % 4] - top_a[idx])) for idx in range(4))
+        for tile_b in range(tile_a + 1, len(top_tiles)):
+            if (tile_a, tile_b) in adjacent:
+                continue
+            top_b = np.asarray(top_tiles[tile_b], dtype=float)
+            if np.any(np.max(top_a, axis=0) < np.min(top_b, axis=0) - 1e-9) or np.any(
+                np.max(top_b, axis=0) < np.min(top_a, axis=0) - 1e-9
+            ):
+                continue
+            normal_b = _normalize(_original._quad_normal(top_b), normal_a)
+            if abs(float(np.dot(normal_a, normal_b))) < 1.0 - 1e-5:
+                continue
+            plane_distance = np.max(np.abs((top_b - origin[None, :]) @ normal_a))
+            if float(plane_distance) > max(span * 1e-7, 1e-9):
+                continue
+            poly_b = _project_to_basis(top_b, origin, u, v)
+            overlap = _convex_polygon_clip(poly_a, poly_b)
+            if _polygon_area_2d(overlap) > max(span * span * 1e-10, 1e-12):
+                intersections.append((tile_a, tile_b))
+    return intersections
+
+
+def _extrude_tiles_variable_topology(mesh, thickness: float, stage: str):
+    """Construct authoritative variable-topology solids and 8-vertex proxies."""
+    import time
+
+    started = time.perf_counter()
+    top_tiles = _original._mesh_tiles(mesh)
+    tile_count = int(len(top_tiles))
+    raw_normals = np.asarray([_original._quad_normal(top) for top in top_tiles], dtype=float)
+    normals, orientation_metrics = _orient_tile_normals_consistently(raw_normals, mesh.faces)
+    if int(orientation_metrics.get("t3d_extrusion_normal_inconsistent_edge_count", 0)) > 0:
+        raise T3DConstructionError(
+            T3D_FAILED_NONORIENTABLE_COMPONENT,
+            "face-adjacency orientation constraints are inconsistent",
+        )
+
+    top_intersections = _top_surface_intersection_pairs(top_tiles, mesh.faces)
+    if top_intersections:
+        involved = sorted({tile_id for pair in top_intersections for tile_id in pair})
+        raise T3DConstructionError(
+            T3D_FAILED_TOP_SURFACE_INTERSECTION,
+            f"nonadjacent K3D top faces overlap: {top_intersections[:8]}",
+            involved,
+        )
+
+    local_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    raw_side_normals = [
+        [_edge_inward_normal(top, normals[tile_id], edge) for edge in local_edges]
+        for tile_id, top in enumerate(top_tiles)
+    ]
+    side_normals = [[value.copy() for value in row] for row in raw_side_normals]
+    incidence = _build_edge_incidence(mesh.faces)
+    split_edge_pairs = _coincident_boundary_edge_pairs(top_tiles, mesh.faces)
+    nonmanifold = [entries for entries in incidence.values() if len(entries) > 2]
+    if nonmanifold and not bool(mesh.metrics.get("t3d_allow_nonmanifold_junction_cap", False)):
+        involved = sorted({tile_id for entries in nonmanifold for tile_id, _edge_id in entries})
+        raise T3DConstructionError(
+            T3D_FAILED_NONMANIFOLD_CONTACT,
+            "an edge has three or more incident tiles and no junction design is enabled",
+            involved,
+        )
+
+    shared_pairs: list[tuple[int, int]] = []
+    internal_miter_edge_count = 0
+    for entries in incidence.values():
+        if len(entries) != 2:
+            continue
+        (tile_a, edge_a), (tile_b, edge_b) = entries
+        q_a = raw_side_normals[tile_a][edge_a]
+        q_b = raw_side_normals[tile_b][edge_b]
+        miter = _normalize(q_a - q_b, q_a)
+        side_normals[tile_a][edge_a] = miter
+        side_normals[tile_b][edge_b] = -miter
+        shared_pairs.append((int(tile_a), int(tile_b)))
+        internal_miter_edge_count += 1
+    for (tile_a, edge_a), (tile_b, edge_b) in split_edge_pairs:
+        q_a = raw_side_normals[tile_a][edge_a]
+        q_b = raw_side_normals[tile_b][edge_b]
+        miter = _normalize(q_a - q_b, q_a)
+        side_normals[tile_a][edge_a] = miter
+        side_normals[tile_b][edge_b] = -miter
+        shared_pairs.append((int(tile_a), int(tile_b)))
+
+    requested = float(thickness)
+    min_thickness = requested * float(mesh.metrics.get("t3d_min_thickness_ratio", 0.25))
+    tile_scale = float(np.median([
+        np.linalg.norm(top[(idx + 1) % 4] - top[idx])
+        for top in top_tiles
+        for idx in range(4)
+    ])) if tile_count else 1.0
+    minimum_volume = max(
+        requested * tile_scale * tile_scale * float(mesh.metrics.get("t3d_minimum_volume_ratio", 1e-6)),
+        1e-15,
+    )
+    minimum_feature = max(tile_scale * float(mesh.metrics.get("t3d_minimum_feature_ratio", 1e-6)), 1e-10)
+    jump_limit = float(mesh.metrics.get("t3d_miter_jump_limit", 0.75))
+
+    solids: list[ConvexTileSolid] = []
+    for tile_id, top in enumerate(top_tiles):
+        center = np.mean(top, axis=0)
+        planes: list[tuple[np.ndarray, float]] = []
+        for edge_id, (a, b) in enumerate(local_edges):
+            plane_normal = _normalize(side_normals[tile_id][edge_id], raw_side_normals[tile_id][edge_id])
+            midpoint = 0.5 * (top[a] + top[b])
+            plane_offset = float(np.dot(plane_normal, midpoint))
+            if float(np.dot(plane_normal, center)) > plane_offset:
+                plane_normal = -plane_normal
+                plane_offset = -plane_offset
+            planes.append((plane_normal, plane_offset))
+        try:
+            solid = build_tile_polyhedron(
+                tile_id=tile_id,
+                top=top,
+                normal=normals[tile_id],
+                side_planes=planes,
+                requested_thickness=requested,
+                minimum_thickness=min_thickness,
+                minimum_volume=minimum_volume,
+                minimum_feature_size=minimum_feature,
+                miter_jump_limit=jump_limit,
+            )
+        except T3DConstructionError as exc:
+            if not bool(mesh.metrics.get("allow_legacy_normal_prism_emergency_fallback", False)):
+                raise
+            if exc.status in {
+                "T3D_FAILED_INVALID_TOP",
+                T3D_FAILED_TOP_SURFACE_INTERSECTION,
+                T3D_FAILED_NONMANIFOLD_CONTACT,
+                T3D_FAILED_NONORIENTABLE_COMPONENT,
+            }:
+                raise
+            solid = build_emergency_normal_prism(
+                tile_id=tile_id,
+                top=top,
+                normal=normals[tile_id],
+                thickness=requested,
+                triggering_status=exc.status,
+                triggering_reason=str(exc),
+            )
+        solids.append(solid)
+
+    # A vertex shared by three or more tiles can need a common cap even when all
+    # edge-wise miters are individually valid. Apply one identical cap half-space
+    # to every incident solid, and commit only if all mandatory top polygons and
+    # manufacturing checks survive.
+    vertex_incidence: dict[int, list[tuple[int, int]]] = {}
+    for tile_id, face in enumerate(np.asarray(mesh.faces, dtype=int)):
+        for local_vertex_id, global_vertex_id in enumerate(face):
+            vertex_incidence.setdefault(int(global_vertex_id), []).append((int(tile_id), int(local_vertex_id)))
+    junction_cap_count = 0
+    for global_vertex_id, entries in vertex_incidence.items():
+        incident_tiles = sorted({tile_id for tile_id, _local_id in entries})
+        if len(incident_tiles) < 3:
+            continue
+        junction = np.mean(
+            [top_tiles[tile_id][local_id] for tile_id, local_id in entries],
+            axis=0,
+        )
+        incident_center = np.mean([np.mean(top_tiles[tile_id], axis=0) for tile_id in incident_tiles], axis=0)
+        average_normal = _normalize(np.mean(normals[np.asarray(incident_tiles, dtype=int)], axis=0), normals[incident_tiles[0]])
+        radial = junction - incident_center
+        radial -= average_normal * float(np.dot(radial, average_normal))
+        cap_normal = _normalize(radial)
+        if float(np.linalg.norm(cap_normal)) <= 1e-12:
+            continue
+        cap_offset = float(np.dot(cap_normal, junction) + jump_limit * requested)
+        if any(float(np.max(top_tiles[tile_id] @ cap_normal - cap_offset)) > 1e-9 for tile_id in incident_tiles):
+            continue
+        if not any(float(np.max(solids[tile_id].vertices @ cap_normal - cap_offset)) > 1e-9 for tile_id in incident_tiles):
+            continue
+        candidates: dict[int, tuple[np.ndarray, list[list[int]], dict[str, object], dict[str, object]]] = {}
+        valid = True
+        for tile_id in incident_tiles:
+            vertices_new, faces_new, clip_info = clip_convex_polyhedron(
+                solids[tile_id].vertices, solids[tile_id].faces, cap_normal, cap_offset, 1e-9
+            )
+            quality = polyhedron_validation(vertices_new, faces_new, minimum_volume, minimum_feature)
+            if not bool(quality["valid"]):
+                valid = False
+                break
+            candidates[tile_id] = (vertices_new, faces_new, clip_info, quality)
+        if not valid:
+            continue
+        for tile_id, (vertices_new, faces_new, clip_info, quality) in candidates.items():
+            solid = solids[tile_id]
+            solid.vertices = vertices_new
+            solid.faces = faces_new
+            solid.recovery_status = T3D_RECOVERED_JUNCTION_CAP
+            solid.recovery_reasons.append(f"shared_junction_cap_vertex_{global_vertex_id}")
+            solid.top_face_ids = [
+                face_id
+                for face_id, face in enumerate(faces_new)
+                if all(abs(float(np.dot(normals[tile_id], vertices_new[idx] - np.mean(top_tiles[tile_id], axis=0)))) <= 2e-8 for idx in face)
+            ]
+            solid.contact_face_by_edge = {}
+            solid.metrics.update(
+                {
+                    "status": solid.recovery_status,
+                    "recovery_steps": list(solid.recovery_reasons),
+                    "junction_cap_vertex_id": int(global_vertex_id),
+                    "junction_cap_plane_normal": cap_normal.tolist(),
+                    "junction_cap_plane_offset": cap_offset,
+                    "junction_cap_face_added": bool(clip_info.get("cap_added", False)),
+                    "volume": float(quality["volume"]),
+                    "minimum_feature_size": float(quality["minimum_feature_size"]),
+                    "minimum_width": float(quality["minimum_feature_size"]),
+                    "vertex_count": int(len(vertices_new)),
+                    "face_count": int(len(faces_new)),
+                    "watertight": bool(quality["watertight"]),
+                    "manifold": bool(quality["manifold"]),
+                }
+            )
+        junction_cap_count += 1
+
+    synchronized_pairs = 0
+    recovery_statuses = {solid.recovery_status for solid in solids}
+    nominal_status = T3D_OK_NOMINAL_FRUSTUM
+    for tile_a, tile_b in sorted(set(tuple(sorted(pair)) for pair in shared_pairs)):
+        if solids[tile_a].recovery_status != nominal_status or solids[tile_b].recovery_status != nominal_status:
+            synchronized_pairs += 1
+            for tile_id in (tile_a, tile_b):
+                if "shared_contact_plane_synchronized" not in solids[tile_id].recovery_reasons:
+                    solids[tile_id].recovery_reasons.append("shared_contact_plane_synchronized")
+                    solids[tile_id].metrics["recovery_steps"] = list(solids[tile_id].recovery_reasons)
+                    solids[tile_id].metrics["pair_synchronized"] = True
+
+    adjacent_pairs = {tuple(sorted(pair)) for pair in shared_pairs}
+
+    def collision_list() -> list[tuple[int, int]]:
+        found: list[tuple[int, int]] = []
+        for tile_a in range(tile_count):
+            for tile_b in range(tile_a + 1, tile_count):
+                if (tile_a, tile_b) in adjacent_pairs:
+                    continue
+                if aabb_overlap(solids[tile_a], solids[tile_b]) and convex_sat_overlap(solids[tile_a], solids[tile_b]):
+                    found.append((tile_a, tile_b))
+        return found
+
+    collision_pairs_before = collision_list()
+    for tile_a, tile_b in collision_pairs_before:
+        solids[tile_a].metrics["collision_count_before"] = int(solids[tile_a].metrics.get("collision_count_before", 0)) + 1
+        solids[tile_b].metrics["collision_count_before"] = int(solids[tile_b].metrics.get("collision_count_before", 0)) + 1
+
+    global_clip_count = 0
+    # A symmetric separating clip is allowed only when the plane leaves both
+    # mandatory K3D top polygons untouched.  Otherwise the pair is a fundamental
+    # failure rather than silently cutting the design surface.
+    for _pass in range(3):
+        active_pairs = collision_list()
+        if not active_pairs:
+            break
+        changed = False
+        for tile_a, tile_b in active_pairs:
+            solid_a, solid_b = solids[tile_a], solids[tile_b]
+            center_a = np.mean(solid_a.vertices, axis=0)
+            center_b = np.mean(solid_b.vertices, axis=0)
+            axis = _normalize(center_b - center_a, normals[tile_a] - normals[tile_b])
+            if float(np.linalg.norm(axis)) <= 1e-12:
+                continue
+            top_a = np.asarray(top_tiles[tile_a], dtype=float)
+            top_b = np.asarray(top_tiles[tile_b], dtype=float)
+            top_a_max = float(np.max(top_a @ axis))
+            top_b_min = float(np.min(top_b @ axis))
+            if top_a_max > top_b_min - 1e-9:
+                # Try the opposite labeling without changing which top is kept.
+                axis = -axis
+                top_a_max = float(np.max(top_a @ axis))
+                top_b_min = float(np.min(top_b @ axis))
+            if top_a_max > top_b_min - 1e-9:
+                continue
+            plane_offset = 0.5 * (top_a_max + top_b_min)
+            va, fa, info_a = clip_convex_polyhedron(solid_a.vertices, solid_a.faces, axis, plane_offset, 1e-9)
+            vb, fb, info_b = clip_convex_polyhedron(solid_b.vertices, solid_b.faces, -axis, -plane_offset, 1e-9)
+            quality_a = polyhedron_validation(va, fa, minimum_volume, minimum_feature)
+            quality_b = polyhedron_validation(vb, fb, minimum_volume, minimum_feature)
+            if not bool(quality_a["valid"]) or not bool(quality_b["valid"]):
+                continue
+            if np.max(top_a @ axis - plane_offset) > 1e-8 or np.max(-top_b @ axis + plane_offset) > 1e-8:
+                continue
+            for tile_id, vertices_new, faces_new, quality, info in (
+                (tile_a, va, fa, quality_a, info_a),
+                (tile_b, vb, fb, quality_b, info_b),
+            ):
+                solid = solids[tile_id]
+                solid.vertices = vertices_new
+                solid.faces = faces_new
+                solid.recovery_status = "T3D_RECOVERED_GLOBAL_CLIP"
+                if "symmetric_global_collision_clip" not in solid.recovery_reasons:
+                    solid.recovery_reasons.append("symmetric_global_collision_clip")
+                solid.top_face_ids = [
+                    face_id
+                    for face_id, face in enumerate(faces_new)
+                    if all(abs(float(np.dot(normals[tile_id], vertices_new[idx] - np.mean(top_tiles[tile_id], axis=0)))) <= 2e-8 for idx in face)
+                ]
+                solid.contact_face_by_edge = {}
+                solid.metrics.update(
+                    {
+                        "status": solid.recovery_status,
+                        "recovery_steps": list(solid.recovery_reasons),
+                        "volume": float(quality["volume"]),
+                        "minimum_feature_size": float(quality["minimum_feature_size"]),
+                        "minimum_width": float(quality["minimum_feature_size"]),
+                        "vertex_count": int(len(vertices_new)),
+                        "face_count": int(len(faces_new)),
+                        "watertight": bool(quality["watertight"]),
+                        "manifold": bool(quality["manifold"]),
+                        "global_clip_cap_added": bool(info.get("cap_added", False)),
+                    }
+                )
+            global_clip_count += 1
+            changed = True
+        if not changed:
+            break
+    collision_pairs = collision_list()
+    for solid in solids:
+        solid.metrics["collision_count_after"] = 0
+    for tile_a, tile_b in collision_pairs:
+        solids[tile_a].metrics["collision_count_after"] = int(solids[tile_a].metrics.get("collision_count_after", 0)) + 1
+        solids[tile_b].metrics["collision_count_after"] = int(solids[tile_b].metrics.get("collision_count_after", 0)) + 1
+    if collision_pairs:
+        involved = sorted({tile_id for pair in collision_pairs for tile_id in pair})
+        if bool(mesh.metrics.get("allow_legacy_normal_prism_emergency_fallback", False)):
+            for tile_id in involved:
+                if solids[tile_id].recovery_status == T3D_RECOVERED_LEGACY_EMERGENCY_PRISM:
+                    continue
+                solids[tile_id] = build_emergency_normal_prism(
+                    tile_id=tile_id,
+                    top=top_tiles[tile_id],
+                    normal=normals[tile_id],
+                    thickness=requested,
+                    triggering_status=T3D_FAILED_GLOBAL_COLLISION_INFEASIBLE,
+                    triggering_reason=f"unresolved collision pairs before emergency fallback: {collision_pairs[:8]}",
+                )
+            collision_pairs = collision_list()
+            for solid in solids:
+                solid.metrics["collision_count_after"] = 0
+            for tile_a, tile_b in collision_pairs:
+                solids[tile_a].metrics["collision_count_after"] = int(solids[tile_a].metrics.get("collision_count_after", 0)) + 1
+                solids[tile_b].metrics["collision_count_after"] = int(solids[tile_b].metrics.get("collision_count_after", 0)) + 1
+        elif bool(mesh.metrics.get("t3d_fail_on_unresolved_global_collision", True)):
+            raise T3DConstructionError(
+                T3D_FAILED_GLOBAL_COLLISION_INFEASIBLE,
+                f"nonadjacent authoritative solids collide: {collision_pairs[:8]}",
+                involved,
+            )
+
+    # Compatibility geometry: K3D remains the top and a one-sided normal prism
+    # remains the stable rigid seed used by T2D/deployment.  It is deliberately
+    # not the authoritative T3D geometry.
+    proxy = np.zeros((tile_count, 8, 3), dtype=float)
+    transforms = np.repeat(np.eye(4, dtype=float)[None, :, :], tile_count, axis=0)
+    for tile_id, top in enumerate(top_tiles):
+        proxy[tile_id, :4] = top
+        proxy[tile_id, 4:] = top - requested * normals[tile_id][None, :]
+        transforms[tile_id, :3, 3] = -requested * normals[tile_id]
+    top_faces = np.tile(np.asarray([[0, 1, 2, 3]], dtype=int), (tile_count, 1))
+    bottom_faces = np.tile(np.asarray([[4, 7, 6, 5]], dtype=int), (tile_count, 1))
+    side_faces = np.asarray([[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]], dtype=int)
+    status_counts: dict[str, int] = {}
+    for solid in solids:
+        status_counts[solid.recovery_status] = status_counts.get(solid.recovery_status, 0) + 1
+    recovered_count = sum(count for status, count in status_counts.items() if status != nominal_status)
+    emergency_count = int(status_counts.get(T3D_RECOVERED_LEGACY_EMERGENCY_PRISM, 0))
+    emergency_reasons: dict[str, int] = {}
+    for solid in solids:
+        if solid.recovery_status != T3D_RECOVERED_LEGACY_EMERGENCY_PRISM:
+            continue
+        for condition in solid.metrics.get("triggered_conditions", []):
+            key = str(condition)
+            emergency_reasons[key] = emergency_reasons.get(key, 0) + 1
+    metrics: dict[str, object] = {
+        "objective": "Variable-topology half-space T3D recovery with an 8-vertex compatibility proxy.",
+        "extrusion_model": "authoritative_convex_tile_solids_with_8_vertex_proxy",
+        "t3d_extrusion_model": "variable_topology_halfspace_recovery",
+        "t3d_authoritative_geometry": "ConvexTileSolid list",
+        "t3d_compatibility_proxy_geometry": "one-sided 8-vertex normal prism for T2D/deployment only",
+        "t3d_variable_topology_enabled": True,
+        "t3d_one_sided_extrusion": True,
+        "t3d_k3d_reference_face": "top",
+        "tile_thickness": requested,
+        "requested_thickness": requested,
+        "tile_count": tile_count,
+        "t3d_nominal_tile_count": int(status_counts.get(nominal_status, 0)),
+        "t3d_recovered_tile_count": int(recovered_count),
+        "t3d_failed_tile_count": 0,
+        "t3d_recovery_status_counts": dict(status_counts),
+        "t3d_failure_status_counts": {},
+        "t3d_cap_face_count": int(sum(int(s.metrics.get("cap_face_count", 0)) for s in solids)),
+        "t3d_pyramid_tile_count": int(status_counts.get(T3D_RECOVERED_PYRAMID, 0)),
+        "t3d_wedge_tile_count": int(status_counts.get(T3D_RECOVERED_WEDGE, 0)),
+        "t3d_local_thickness_tile_count": int(status_counts.get(T3D_RECOVERED_LOCAL_THICKNESS, 0)),
+        "t3d_pair_synchronized_recovery_count": int(synchronized_pairs),
+        "t3d_junction_cap_count": int(junction_cap_count),
+        "t3d_global_clip_count": int(global_clip_count),
+        "t3d_collision_count_before_global_clip": int(len(collision_pairs_before)),
+        "t3d_remaining_collision_count": int(len(collision_pairs)),
+        "t3d_collision_pairs": [list(pair) for pair in collision_pairs],
+        "t3d_min_volume": float(min((float(s.metrics["volume"]) for s in solids), default=0.0)),
+        "t3d_min_feature_size": float(min((float(s.metrics["minimum_feature_size"]) for s in solids), default=0.0)),
+        "t3d_tile_reports": [dict(s.metrics) for s in solids],
+        "t3d_emergency_normal_prism_tile_count": emergency_count,
+        "t3d_emergency_normal_prism_tile_ids": [
+            int(tile_id)
+            for tile_id, solid in enumerate(solids)
+            if solid.recovery_status == T3D_RECOVERED_LEGACY_EMERGENCY_PRISM
+        ],
+        "t3d_emergency_normal_prism_reasons": dict(emergency_reasons),
+        "t3d_emergency_fallback_color": "gray",
+        "t3d_emergency_fallback_manufacturing_warning": bool(emergency_count > 0),
+        "t3d_normal_translation_guard_tile_count": emergency_count,
+        "t3d_normal_translation_guard_reasons": dict(emergency_reasons),
+        "bottom_vertex_solve_fallback_count": 0,
+        "t3d_bottom_vertex_solve_fallback_count": 0,
+        "allow_legacy_normal_prism_emergency_fallback": bool(mesh.metrics.get("allow_legacy_normal_prism_emergency_fallback", False)),
+        "legacy_normal_prism_emergency_fallback_used": bool(emergency_count > 0),
+        "internal_miter_edge_count": int(internal_miter_edge_count),
+        "split_contact_miter_edge_count": int(len(split_edge_pairs)),
+        "surface_fit_error": float(mesh.metrics.get("surface_fit_error_after", 0.0)),
+        **orientation_metrics,
+    }
+    assembly = _original.TileAssembly(
+        vertices=proxy,
+        top_faces=top_faces,
+        bottom_faces=bottom_faces,
+        side_faces=side_faces,
+        stage=stage,
+        metrics=metrics,
+        transform_matrices=transforms,
+    )
+    assembly.authoritative_solids = solids
+    assembly.authoritative_geometry_model = "variable_topology_convex_solids"
+    assembly.compatibility_proxy_vertices = proxy
+    report = _original.StageReport(
+        name=f"{mesh.stage} -> {stage}",
+        objective="Construct variable-topology convex T3D solids by half-space clipping.",
+        before_error=0.0,
+        after_error=float(recovered_count),
+        constraint_violation=float(len(collision_pairs)),
+        computation_time=time.perf_counter() - started,
+        counts={
+            "tiles": tile_count,
+            "vertices": int(sum(len(s.vertices) for s in solids)),
+            "faces": int(sum(len(s.faces) for s in solids)),
+        },
+    )
+    return assembly, report
+
+
 def _extrude_tiles(mesh, thickness: float, stage: str):
     """Extrude K3D tiles using shared-edge miter/contact planes.
 
     Previous behavior:
         bottom = top - thickness * tile_normal
 
-    New behavior:
-        - top face remains K3D
+    One-sided behavior:
+        - top face remains exactly K3D (zero offset)
         - bottom vertices lie on the offset bottom plane
         - each side face lies on an edge plane
         - shared edges use a single miter/contact plane derived from the two
@@ -4453,8 +5462,14 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
     """
     import time
 
+    if bool(mesh.metrics.get("t3d_variable_topology_enabled", False)):
+        return _extrude_tiles_variable_topology(mesh, thickness, stage)
+
     start = time.perf_counter()
     top_tiles = _original._mesh_tiles(mesh)
+    extrusion_side = str(mesh.metrics.get("t3d_extrusion_side", "negative_normal_from_k3d"))
+    if extrusion_side != "negative_normal_from_k3d":
+        raise ValueError(f"unsupported T3D extrusion side: {extrusion_side}")
     tile_count = int(top_tiles.shape[0])
     vertices = np.zeros((tile_count, 8, 3), dtype=float)
     transforms = np.zeros((tile_count, 4, 4), dtype=float)
@@ -4474,6 +5489,9 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
                 "objective": "Contact-aware mitered extrusion.",
                 "extrusion_model": "mitered_contact_planes",
                 "contact_aware_extrusion": True,
+                "t3d_one_sided_extrusion": True,
+                "t3d_k3d_reference_face": "top",
+                "t3d_extrusion_side": extrusion_side,
                 "tile_thickness": float(thickness),
                 "tile_count": 0,
             },
@@ -4622,6 +5640,8 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
     planarity = _original._tile_face_planarity(vertices)
     face_planarity = _original._tile_face_planarity_by_group(vertices)
     signed_thickness = np.sum((vertices[:, :4] - vertices[:, 4:]) * normals[:, None, :], axis=2)
+    top_offsets_from_k3d = np.sum((vertices[:, :4] - top_tiles) * normals[:, None, :], axis=2)
+    bottom_offsets_from_k3d = np.sum((vertices[:, 4:] - top_tiles) * normals[:, None, :], axis=2)
     thickness_error = signed_thickness - float(thickness)
     reversed_extrusion_vertex_count = int(np.sum(signed_thickness <= 0.0))
     center_shift = np.mean(vertices[:, 4:], axis=1) - np.mean(vertices[:, :4], axis=1)
@@ -4652,6 +5672,13 @@ def _extrude_tiles(mesh, thickness: float, stage: str):
             "extrusion_model": "mitered_contact_planes",
             "t3d_extrusion_model": "experimental_mitered_contact_planes",
             "contact_aware_extrusion": True,
+            "t3d_one_sided_extrusion": True,
+            "t3d_k3d_reference_face": "top",
+            "t3d_extrusion_side": extrusion_side,
+            "t3d_extrusion_interval": "[K3D - t*n, K3D] along the oriented normal",
+            "t3d_k3d_top_face_offset_max": float(np.max(np.abs(top_offsets_from_k3d))) if top_offsets_from_k3d.size else 0.0,
+            "t3d_bottom_offset_from_k3d_min": float(np.min(bottom_offsets_from_k3d)) if bottom_offsets_from_k3d.size else 0.0,
+            "t3d_bottom_offset_from_k3d_max": float(np.max(bottom_offsets_from_k3d)) if bottom_offsets_from_k3d.size else 0.0,
             "mitered_shared_edge_planes": True,
             "legacy_normal_translation_extrusion": False,
             "t2d_transform_seed_model": "translation_only_center_shift_no_affine_shear",
@@ -5394,6 +6421,78 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
     return repaired, report
 
 
+def _split_hinge_components(tile_count: int, hinge_graph) -> list[list[int]]:
+    adjacency: list[set[int]] = [set() for _ in range(max(0, int(tile_count)))]
+    for hinge in getattr(hinge_graph, "hinges", []):
+        a, b = int(hinge.tile_a), int(hinge.tile_b)
+        if a == b or min(a, b) < 0 or max(a, b) >= tile_count:
+            continue
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+    components: list[list[int]] = []
+    unseen = set(range(tile_count))
+    while unseen:
+        seed = min(unseen)
+        unseen.remove(seed)
+        stack = [seed]
+        component: list[int] = []
+        while stack:
+            tile_id = stack.pop()
+            component.append(tile_id)
+            for neighbor in adjacency[tile_id]:
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    stack.append(neighbor)
+        components.append(sorted(component))
+    return components
+
+
+def _separate_split_hinge_components(vertices, hinge_graph, padding: float):
+    source = np.asarray(vertices, dtype=float)
+    tile_count = int(len(source))
+    components = _split_hinge_components(tile_count, hinge_graph)
+    translations = np.zeros((len(components), 2), dtype=float)
+    if len(components) <= 1 or tile_count == 0:
+        return source.copy(), components, translations
+
+    top_xy = source[:, :4, :2]
+    half_padding = 0.5 * max(float(padding), 0.0)
+    for _ in range(max(16, len(components) * len(components) * 4)):
+        moved = False
+        for ia in range(len(components)):
+            points_a = top_xy[components[ia]].reshape(-1, 2) + translations[ia]
+            min_a = np.min(points_a, axis=0) - half_padding
+            max_a = np.max(points_a, axis=0) + half_padding
+            center_a = 0.5 * (min_a + max_a)
+            for ib in range(ia + 1, len(components)):
+                points_b = top_xy[components[ib]].reshape(-1, 2) + translations[ib]
+                min_b = np.min(points_b, axis=0) - half_padding
+                max_b = np.max(points_b, axis=0) + half_padding
+                overlap = np.minimum(max_a, max_b) - np.maximum(min_a, min_b)
+                if np.any(overlap <= 1e-10):
+                    continue
+                axis = int(np.argmin(overlap))
+                center_b = 0.5 * (min_b + max_b)
+                sign = 1.0 if center_b[axis] >= center_a[axis] else -1.0
+                if abs(float(center_b[axis] - center_a[axis])) <= 1e-12:
+                    sign = 1.0 if ib > ia else -1.0
+                shift = 0.5 * (float(overlap[axis]) + 1e-8)
+                translations[ia, axis] -= sign * shift
+                translations[ib, axis] += sign * shift
+                moved = True
+        if not moved:
+            break
+
+    # Preserve the original global center while changing only component-to-
+    # component spacing.
+    weights = np.asarray([len(component) for component in components], dtype=float)
+    translations -= np.average(translations, axis=0, weights=weights)[None, :]
+    separated = source.copy()
+    for component_id, component in enumerate(components):
+        separated[component, :, :2] += translations[component_id][None, None, :]
+    return separated, components, translations
+
+
 def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_callback=None):
     hinge_faces, hinge_weld_metrics = _canonicalize_faces_by_coincident_tile_tops(
         np.asarray(t3d.vertices, dtype=float)[:, :4, :],
@@ -5407,12 +6506,39 @@ def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_call
         params,
         progress_callback,
     )
+    tile_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-9)
+    split_padding = max(float(getattr(grid, "gap_size", 0.0)), 0.20 * tile_size)
+    separated, components, translations = _separate_split_hinge_components(
+        out.vertices, hinge_graph, split_padding
+    )
+    out.vertices = separated
+    # Apply the same component translations to Top-Hinge T2D so every T2D
+    # stage and the ABD initial state share one coherent split layout.
+    for component_id, component in enumerate(components):
+        delta = translations[component_id]
+        t2d.vertices[component, :, :2] += delta[None, None, :]
+        if getattr(t2d, "transform_matrices", None) is not None:
+            t2d.transform_matrices[component, 0, 3] += float(delta[0])
+            t2d.transform_matrices[component, 1, 3] += float(delta[1])
+        if getattr(out, "transform_matrices", None) is not None:
+            out.transform_matrices[component, 0, 3] += float(delta[0])
+            out.transform_matrices[component, 1, 3] += float(delta[1])
+    for hinge in hinge_graph.hinges:
+        hinge.rest_position_2d = 0.5 * (
+            out.vertices[int(hinge.tile_a), int(hinge.local_vertex_a)]
+            + out.vertices[int(hinge.tile_b), int(hinge.local_vertex_b)]
+        )
     metrics = {
         "dual_hinge_split_virtual_weld_applied": bool(hinge_weld_metrics.get("split_virtual_weld_applied", False)),
         "dual_hinge_split_virtual_weld_group_count": int(hinge_weld_metrics.get("split_virtual_weld_group_count", 0)),
         "dual_hinge_split_virtual_weld_vertex_count": int(hinge_weld_metrics.get("split_virtual_weld_vertex_count", 0)),
         "dual_hinge_split_virtual_weld_reason": str(hinge_weld_metrics.get("split_virtual_weld_reason", "")),
         "dual_hinge_constraint_faces": "split topology preserved; coincident split vertex ids are not re-welded",
+        "split_component_spacing_applied": bool(len(components) > 1 and np.max(np.abs(translations), initial=0.0) > 1e-12),
+        "split_component_count": int(len(components)),
+        "split_component_padding": float(split_padding),
+        "split_component_max_translation": float(np.max(np.linalg.norm(translations, axis=1), initial=0.0)),
+        "split_component_layout": "rigid component translations preserving all intra-component hinges",
     }
     out.metrics.update(metrics)
     hinge_graph.metrics.update(metrics)
@@ -6024,6 +7150,65 @@ def export_t2d_stl(
         return outputs, metrics
 
     data = _ascii_stl_bytes(solid_name, triangles)
+    if output_path is not None:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return data, metrics
+
+
+def export_t3d_stl(
+    source,
+    output_path: str | Path | None = None,
+    *,
+    separate_tiles: bool = False,
+    scale: float = 1.0,
+    solid_name: str = "onestring_t3d",
+):
+    """Export authoritative variable-topology T3D solids as STL.
+
+    The eight-vertex compatibility proxy is intentionally rejected when no
+    authoritative solids are present, preventing a display/deployment seed from
+    being mistaken for recovered manufacturing geometry.
+    """
+    assembly = source.tiles_3d if hasattr(source, "tiles_3d") else source
+    solids = getattr(assembly, "authoritative_solids", None)
+    if not solids:
+        raise ValueError("authoritative variable-topology T3D solids are not available for this version")
+    scale = float(scale)
+    per_tile: list[list[np.ndarray]] = []
+    all_triangles: list[np.ndarray] = []
+    for solid in solids:
+        vertices = np.asarray(solid.vertices, dtype=float) * scale
+        triangles = [vertices[list(triangle)] for triangle in triangulate_solid(solid)]
+        per_tile.append(triangles)
+        all_triangles.extend(triangles)
+    metrics = {
+        "t3d_export_model": "authoritative_variable_topology_convex_solids",
+        "t3d_export_tile_count": int(len(solids)),
+        "t3d_export_vertex_count": int(sum(len(solid.vertices) for solid in solids)),
+        "t3d_export_polygon_face_count": int(sum(len(solid.faces) for solid in solids)),
+        "t3d_export_triangle_count": int(len(all_triangles)),
+        "t3d_export_scale": scale,
+        "t3d_export_watertight_tile_count": int(sum(bool(solid.metrics.get("watertight", False)) for solid in solids)),
+        "t3d_export_manifold_tile_count": int(sum(bool(solid.metrics.get("manifold", False)) for solid in solids)),
+    }
+    try:
+        assembly.metrics.update(metrics)
+    except Exception:
+        pass
+    if separate_tiles:
+        outputs: dict[str, bytes] = {}
+        for tile_id, triangles in enumerate(per_tile):
+            filename = f"{solid_name}_tile_{tile_id:04d}.stl"
+            outputs[filename] = _ascii_stl_bytes(filename[:-4], triangles)
+        if output_path is not None:
+            out_dir = Path(output_path)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for filename, data in outputs.items():
+                (out_dir / filename).write_bytes(data)
+        return outputs, metrics
+    data = _ascii_stl_bytes(solid_name, all_triangles)
     if output_path is not None:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -6857,10 +8042,221 @@ def _paper_local_global_se2_layout(
     }
 
 
+# Keep the unwrapped constructor so version 0.2.0 can add reference diagnostics
+# without changing the implementation order inside the legacy module.
+_ORIGINAL_BUILD_ONESTRING_DESIGN = _original.build_onestring_design
+
+
+def _finite_stats(values) -> dict[str, float | None]:
+    array = np.asarray(values, dtype=float).reshape(-1)
+    array = array[np.isfinite(array)]
+    if not len(array):
+        return {"min": None, "median": None, "mean": None, "max": None}
+    return {
+        "min": float(np.min(array)),
+        "median": float(np.median(array)),
+        "mean": float(np.mean(array)),
+        "max": float(np.max(array)),
+    }
+
+
+def _collect_reference_run_diagnostics(state, params) -> dict[str, object]:
+    parameterization_metrics = dict(state.surface_parameterization.metrics)
+    m2d_metrics = dict(state.mesh_2d_initial.metrics)
+    m3d_metrics = dict(state.mesh_3d_initial.metrics)
+    k3d_metrics = dict(state.mesh_3d_optimized.metrics)
+    fallbacks: list[str] = list(parameterization_metrics.get("fallbacks_used", []) or [])
+    if bool(k3d_metrics.get("fallback_used", False)) or bool(k3d_metrics.get("k3d_fallback_used", False)):
+        fallbacks.append(f"K3D: {k3d_metrics.get('k3d_fallback_reason', k3d_metrics.get('approximation_warning', 'fallback'))}")
+    for stage_name, report in dict(getattr(state, "stage_reports", {})).items():
+        if getattr(report, "failed_constraints", None):
+            fallbacks.append(f"{stage_name}: failed_constraints={list(report.failed_constraints)}")
+    sigma1 = parameterization_metrics.get("per_triangle_sigma1", [])
+    sigma2 = parameterization_metrics.get("per_triangle_sigma2", [])
+    anisotropy = parameterization_metrics.get("per_triangle_anisotropy", [])
+    area_scale = parameterization_metrics.get("per_triangle_area_scale", [])
+    lambda_values = parameterization_metrics.get("per_triangle_lambda", [])
+    split_diagnostics = dict(parameterization_metrics.get("split_diagnostics", {}) or m2d_metrics.get("split_diagnostics", {}) or {})
+    diagnostics: dict[str, object] = {
+        "model_version": str(getattr(params, "model_version", "0.2.0-paper-reference-bff")),
+        "parameterization_backend_name": parameterization_metrics.get("parameterization_backend_name"),
+        "parameterization_backend_version": parameterization_metrics.get("parameterization_backend_version"),
+        "parameterization_backend_commit_sha": parameterization_metrics.get("parameterization_backend_commit_sha"),
+        "parameterization_backend_sha256": parameterization_metrics.get("parameterization_backend_sha256"),
+        "boundary_policy": parameterization_metrics.get("bff_boundary_policy_effective"),
+        "onestring_boundary_condition_status": parameterization_metrics.get("onestring_boundary_condition_status"),
+        "input_topology": parameterization_metrics.get("input_topology"),
+        "boundary_loop_count": dict(parameterization_metrics.get("input_topology", {}) or {}).get("boundary_loop_count"),
+        "uv_triangle_flip_count": int(parameterization_metrics.get("uv_triangle_flip_count", 0)),
+        "uv_degenerate_triangle_count": int(parameterization_metrics.get("uv_degenerate_triangle_count", 0)),
+        "boundary_self_intersection_count": int(parameterization_metrics.get("boundary_self_intersection_count", 0)),
+        "internal_triangle_overlap_count": int(parameterization_metrics.get("internal_triangle_overlap_count", 0)),
+        "internal_triangle_overlap_status": parameterization_metrics.get("internal_triangle_overlap_status"),
+        "conformal_energy": float(parameterization_metrics.get("conformal_energy", 0.0)),
+        "per_triangle_sigma1": sigma1,
+        "per_triangle_sigma2": sigma2,
+        "anisotropy_statistics": _finite_stats(anisotropy),
+        "lambda_statistics": _finite_stats(lambda_values),
+        "lambda_normalization": parameterization_metrics.get("lambda_normalization"),
+        "lambda_normalization_status": parameterization_metrics.get("lambda_normalization_status"),
+        "area_distortion_statistics": _finite_stats(area_scale),
+        "inverse_map_failure_count": int(m3d_metrics.get("m3d_uv_lookup_failure_count", 0)),
+        "inverse_map_outside_omega_count": int(m3d_metrics.get("m3d_outside_omega_count", 0)),
+        "M2D_vertex_count": int(m2d_metrics.get("m2d_vertex_count", len(state.mesh_2d_initial.vertices))),
+        "M2D_quad_count": int(m2d_metrics.get("m2d_quad_count", len(state.mesh_2d_initial.faces))),
+        "M3D_round_trip_error": float(m3d_metrics.get("m3d_round_trip_error_rms", 0.0)),
+        "M3D_round_trip_error_max": float(m3d_metrics.get("m3d_round_trip_error_max", 0.0)),
+        "split_count": int(split_diagnostics.get("split_count", 0)),
+        "split_locations": list(split_diagnostics.get("split_locations", []) or []),
+        "split_status": split_diagnostics.get("status", "not_required"),
+        "fallbacks_used": fallbacks,
+        "scope": {
+            "S_TO_M3D": "paper-reference candidate",
+            "K3D_AND_LATER": "existing approximate implementation",
+        },
+        "grid": {
+            "spacing": parameterization_metrics.get("reference_grid_spacing"),
+            "rotation_degrees": parameterization_metrics.get("reference_grid_rotation_degrees"),
+            "origin": parameterization_metrics.get("reference_grid_origin"),
+            "crop_policy": m2d_metrics.get("m2d_crop_policy"),
+        },
+    }
+    return diagnostics
+
+
+def _collect_reference_initialization_diagnostics(parameterization, mesh_2d, mesh_3d, params) -> dict[str, object]:
+    p = dict(parameterization.metrics)
+    m2 = dict(mesh_2d.metrics)
+    m3 = dict(mesh_3d.metrics)
+    split = dict(p.get("split_diagnostics", {}) or m2.get("split_diagnostics", {}) or {})
+    fallbacks = list(p.get("fallbacks_used", []) or []) + list(m3.get("fallbacks_used", []) or [])
+    return {
+        "model_version": str(getattr(params, "model_version", "0.2.0-paper-reference-bff")),
+        "parameterization_backend_name": p.get("parameterization_backend_name"),
+        "parameterization_backend_version": p.get("parameterization_backend_version"),
+        "parameterization_backend_commit_sha": p.get("parameterization_backend_commit_sha"),
+        "parameterization_backend_sha256": p.get("parameterization_backend_sha256"),
+        "boundary_policy": p.get("bff_boundary_policy_effective"),
+        "onestring_boundary_condition_status": p.get("onestring_boundary_condition_status"),
+        "input_topology": p.get("input_topology"),
+        "boundary_loop_count": dict(p.get("input_topology", {}) or {}).get("boundary_loop_count"),
+        "uv_triangle_flip_count": int(p.get("uv_triangle_flip_count", 0)),
+        "uv_degenerate_triangle_count": int(p.get("uv_degenerate_triangle_count", 0)),
+        "boundary_self_intersection_count": int(p.get("boundary_self_intersection_count", 0)),
+        "internal_triangle_overlap_count": int(p.get("internal_triangle_overlap_count", 0)),
+        "internal_triangle_overlap_status": p.get("internal_triangle_overlap_status"),
+        "conformal_energy": float(p.get("conformal_energy", 0.0)),
+        "per_triangle_sigma1": p.get("per_triangle_sigma1", []),
+        "per_triangle_sigma2": p.get("per_triangle_sigma2", []),
+        "anisotropy_statistics": _finite_stats(p.get("per_triangle_anisotropy", [])),
+        "lambda_statistics": _finite_stats(p.get("per_triangle_lambda", [])),
+        "lambda_normalization": p.get("lambda_normalization"),
+        "lambda_normalization_status": p.get("lambda_normalization_status"),
+        "area_distortion_statistics": _finite_stats(p.get("per_triangle_area_scale", [])),
+        "inverse_map_failure_count": int(m3.get("m3d_uv_lookup_failure_count", 0)),
+        "inverse_map_outside_omega_count": int(m3.get("m3d_outside_omega_count", 0)),
+        "M2D_vertex_count": int(m2.get("m2d_vertex_count", len(mesh_2d.vertices))),
+        "M2D_quad_count": int(m2.get("m2d_quad_count", len(mesh_2d.faces))),
+        "M3D_round_trip_error": float(m3.get("m3d_round_trip_error_rms", 0.0)),
+        "M3D_round_trip_error_max": float(m3.get("m3d_round_trip_error_max", 0.0)),
+        "split_count": int(split.get("split_count", 0)),
+        "split_locations": list(split.get("split_locations", []) or []),
+        "split_status": split.get("status", "not_required"),
+        "split_diagnostics": split,
+        "fallbacks_used": fallbacks,
+        "scope": {
+            "S_TO_M3D": "paper-reference candidate",
+            "K3D_AND_LATER": "not executed by build_paper_reference_initialization",
+        },
+        "grid": {
+            "spacing": p.get("reference_grid_spacing"),
+            "rotation_degrees": p.get("reference_grid_rotation_degrees"),
+            "origin": p.get("reference_grid_origin"),
+            "crop_policy": m2.get("m2d_crop_policy"),
+        },
+    }
+
+
+def build_paper_reference_initialization(target, params=None, progress_callback=None):
+    """Run only the version-0.2.0 paper-reference candidate scope through M3D."""
+
+    active_params = params or PipelineParameters(omega_parameterization_mode="paper_reference_bff")
+    if str(getattr(active_params, "omega_parameterization_mode", "")) != "paper_reference_bff":
+        raise ValueError("build_paper_reference_initialization requires omega_parameterization_mode='paper_reference_bff'")
+    _original._validate_compute_config(active_params.compute)
+    active_params.ny = active_params.nx if active_params.ny is None else active_params.ny
+    grid = _original.create_quad_grid(active_params.nx, active_params.ny, active_params.tile_size, active_params.gap_size)
+    _original._emit_progress(progress_callback, "Initialize grid", 0.05, "explicit reference grid parameters")
+    surface = _original._build_surface_mesh(target, grid, active_params.surface_mesh_subdivisions)
+    _original._emit_progress(progress_callback, "S: target surface mesh", 0.20, f"{len(surface.vertices)} vertices")
+    parameterization = _build_surface_parameterization(surface, target, grid, active_params)
+    _original._emit_progress(progress_callback, "S -> Omega", 0.45, "official BFF backend")
+    domain = _flatten_to_domain(parameterization, grid, active_params)
+    mesh_2d = _build_m2d(grid, domain, active_params)
+    _original._emit_progress(progress_callback, "Omega -> M2D", 0.70, f"{len(mesh_2d.faces)} fully contained quads")
+    mesh_3d, _report = _lift_m2d_to_m3d(target, mesh_2d, parameterization, active_params)
+    diagnostics = _collect_reference_initialization_diagnostics(parameterization, mesh_2d, mesh_3d, active_params)
+    requested_path = str(getattr(active_params, "reference_diagnostics_path", "output/paper_reference_diagnostics.json"))
+    diagnostics_path = Path(requested_path)
+    if not diagnostics_path.is_absolute():
+        diagnostics_path = _project_root_from_this_file() / diagnostics_path
+    written = write_diagnostics_json(diagnostics_path, diagnostics)
+    parameterization.metrics["reference_diagnostics_path"] = str(written)
+    parameterization.metrics["reference_run_diagnostics"] = json_ready(diagnostics)
+    if diagnostics["fallbacks_used"]:
+        raise ReferenceBFFError(
+            "Reference initialization recorded fallbacks and is rejected: "
+            + "; ".join(str(value) for value in diagnostics["fallbacks_used"])
+        )
+    _original._emit_progress(progress_callback, "M2D -> M3D", 1.0, "strict barycentric inverse map")
+    return ReferenceInitializationState(
+        target_surface=surface,
+        surface_parameterization=parameterization,
+        conformal_domain=domain,
+        mesh_2d_initial=mesh_2d,
+        mesh_3d_initial=mesh_3d,
+        diagnostics=diagnostics,
+        diagnostics_path=str(written),
+    )
+
+
+def build_onestring_design(
+    target,
+    params=None,
+    run_simulation=False,
+    deployment_params=None,
+    progress_callback=None,
+):
+    active_params = params or PipelineParameters()
+    state = _ORIGINAL_BUILD_ONESTRING_DESIGN(
+        target,
+        active_params,
+        run_simulation=run_simulation,
+        deployment_params=deployment_params,
+        progress_callback=progress_callback,
+    )
+    if str(getattr(active_params, "omega_parameterization_mode", "")) == "paper_reference_bff":
+        diagnostics = _collect_reference_run_diagnostics(state, active_params)
+        requested_path = str(getattr(active_params, "reference_diagnostics_path", "output/paper_reference_diagnostics.json"))
+        target_path = Path(requested_path)
+        if not target_path.is_absolute():
+            target_path = _project_root_from_this_file() / target_path
+        written = write_diagnostics_json(target_path, diagnostics)
+        state.surface_parameterization.metrics["reference_diagnostics_path"] = str(written)
+        state.surface_parameterization.metrics["reference_run_diagnostics"] = json_ready(diagnostics)
+        if diagnostics["fallbacks_used"]:
+            raise ReferenceBFFError(
+                "Reference run recorded fallbacks and is therefore rejected: "
+                + "; ".join(str(value) for value in diagnostics["fallbacks_used"])
+            )
+    return state
+
+
 # Patch the original module in-place. Functions such as build_onestring_design()
 # keep their original global namespace, so this assignment is what makes them call
 # the new extrusion implementation.
 _original.PipelineParameters = PipelineParameters
+_original.DeploymentParameters = DeploymentParameters
 _original._extrude_tiles = _extrude_tiles
 _original._build_surface_parameterization = _build_surface_parameterization
 _original._flatten_to_domain = _flatten_to_domain
@@ -6912,11 +8308,15 @@ for _name, _value in _original.__dict__.items():
         "_build_string_path",
         "_optimize_dual_hinges",
         "PipelineParameters",
+        "DeploymentParameters",
+        "build_onestring_design",
     }:
         continue
     globals()[_name] = _value
 
 globals()["PipelineParameters"] = PipelineParameters
+globals()["DeploymentParameters"] = DeploymentParameters
+globals()["build_onestring_design"] = build_onestring_design
 globals()["_extrude_tiles"] = _extrude_tiles
 globals()["_build_surface_parameterization"] = _build_surface_parameterization
 globals()["_flatten_to_domain"] = _flatten_to_domain
@@ -6935,6 +8335,7 @@ globals()["_build_gap_graph"] = _build_gap_graph
 globals()["_select_lift_points"] = _select_lift_points
 globals()["_build_string_path"] = _build_string_path
 globals()["export_t2d_stl"] = export_t2d_stl
+globals()["export_t3d_stl"] = export_t3d_stl
 globals()["SIDEFACE_CONTACT_PATCH_ACTIVE"] = True
 globals()["SIDEFACE_CONTACT_PATCH_ORIGINAL_PATH"] = str(_ORIGINAL_PATH)
 
@@ -6995,6 +8396,10 @@ def simulate_onestring_deployment(state, params=None, progress_callback=None):
     simulation frames so returning to the same settings reuses the animation
     instead of recomputing it.
     """
+    params = params or DeploymentParameters()
+    backend = str(getattr(params, "physics_backend", "legacy"))
+    if backend not in {"legacy", "abd"}:
+        raise ValueError(f"unknown physics backend: {backend}")
     cache_enabled = True
     cache = None
     key = None
@@ -7012,7 +8417,53 @@ def simulate_onestring_deployment(state, params=None, progress_callback=None):
     except Exception:
         cache_enabled = False
 
-    result = _ORIGINAL_SIMULATE_ONESTRING_DEPLOYMENT(state, params, progress_callback=progress_callback)
+    if backend == "abd":
+        if progress_callback is not None:
+            progress_callback("Prepare Autodesk ABD job", 0.03, "serialize rest meshes, joints, guides, pull and shake schedules")
+        abd_gravity_z = float(getattr(params, "abd_gravity_z", 0.0))
+        config = ABDBackendConfig(
+            executable=getattr(params, "abd_executable", None),
+            timestep=float(getattr(params, "abd_timestep", 0.01)),
+            steps=int(getattr(params, "steps", 100)),
+            density=float(getattr(params, "abd_density", 1000.0)),
+            friction=float(getattr(params, "contact_friction", 0.25)),
+            gravity=(0.0, 0.0, abd_gravity_z),
+            use_desk=bool(getattr(params, "abd_use_desk", True)),
+            desk_clearance=float(getattr(params, "abd_desk_clearance", 5.0e-3)),
+            orthogonality_stiffness=float(getattr(params, "abd_orthogonality_stiffness", 1e9)),
+            minimum_separation_distance=float(getattr(params, "abd_minimum_separation_distance", 1e-6)),
+            barrier_activation_distance=float(getattr(params, "abd_barrier_activation_distance", 5e-4)),
+            newton_velocity_tolerance=float(getattr(params, "abd_newton_velocity_tolerance", 1e-3)),
+            nthreads=int(getattr(params, "abd_nthreads", 0)),
+            timeout_seconds=float(getattr(params, "abd_timeout_seconds", 600.0)),
+            pull_end_ratio=float(getattr(params, "abd_pull_end_ratio", 0.75)),
+            shake=ShakeTrajectory(
+                amplitude=float(getattr(params, "abd_shake_amplitude", 0.0)),
+                frequency_hz=float(getattr(params, "abd_shake_frequency_hz", 0.0)),
+                direction=(
+                    float(getattr(params, "abd_shake_direction_x", 1.0)),
+                    float(getattr(params, "abd_shake_direction_y", 0.0)),
+                    float(getattr(params, "abd_shake_direction_z", 0.0)),
+                ),
+                start_time=float(getattr(params, "abd_shake_start_time", 0.0)),
+                end_time=float(getattr(params, "abd_shake_end_time", 0.0)),
+            ),
+            require_onestring_extension=bool(getattr(params, "abd_require_onestring_extension", True)),
+        )
+        job_dir = Path(str(getattr(params, "abd_job_directory", "output/abd_run")))
+        if not job_dir.is_absolute():
+            job_dir = _project_root_from_this_file() / job_dir
+        result = run_abd_backend(state, config, job_dir, _project_root_from_this_file())
+        if progress_callback is not None:
+            progress_callback("Autodesk ABD complete", 1.0, "loaded official affine transforms and per-frame logs")
+    else:
+        result = _ORIGINAL_SIMULATE_ONESTRING_DEPLOYMENT(state, params, progress_callback=progress_callback)
+        try:
+            result.metrics["physics_backend"] = "legacy"
+            result.metrics["legacy_sat_collision_projection_used"] = True
+            result.metrics["abd_implementation"] = "not used"
+        except Exception:
+            pass
 
     if cache_enabled and cache is not None and key is not None:
         try:
