@@ -15,6 +15,13 @@ from .abd_backend import (
     probe_abd_capabilities,
     run_abd_backend,
 )
+from .abd_builtin_compat import install_builtin_shape_abd_compatibility
+
+# Install before onestring_pipeline imports run_abd_backend.  This preserves the
+# normal routed gap path and only supplies deterministic guides when a builtin
+# shape produces an empty or degenerate path.
+install_builtin_shape_abd_compatibility()
+
 from .input_shape import create_builtin_shape, load_target_shape, normalize_shape, sample_target_surface
 from .onestring_pipeline import (
     ComputeConfig,
