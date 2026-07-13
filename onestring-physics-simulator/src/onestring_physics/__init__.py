@@ -16,11 +16,14 @@ from .abd_backend import (
     run_abd_backend,
 )
 from .abd_builtin_compat import install_builtin_shape_abd_compatibility
+from .abd_layout_compat import install_abd_layout_compatibility
 
-# Install before onestring_pipeline imports run_abd_backend.  This preserves the
-# normal routed gap path and only supplies deterministic guides when a builtin
-# shape produces an empty or degenerate path.
+# Install before onestring_pipeline imports run_abd_backend. These patches keep
+# the normal routed gap path when valid, provide deterministic guides for
+# builtin shapes when needed, and ensure every ABD collision body starts with a
+# strictly positive gap, including bodies joined by a hinge.
 install_builtin_shape_abd_compatibility()
+install_abd_layout_compatibility()
 
 from .input_shape import create_builtin_shape, load_target_shape, normalize_shape, sample_target_surface
 from .onestring_pipeline import (
@@ -59,7 +62,7 @@ from .reference_bff import (
 )
 from .visualization_status_patch import install_status_visualization_patch
 
-# Make recovery colors independent of Plotly lighting.  In particular, clipped
+# Make recovery colors independent of Plotly lighting. In particular, clipped
 # cyan/blue solids must never appear gray like the non-authoritative emergency
 # normal prism.
 install_status_visualization_patch()
@@ -117,5 +120,6 @@ __all__ = [
     "triangle_jacobian_diagnostics",
     "validate_reference_mesh",
     "install_status_visualization_patch",
+    "install_abd_layout_compatibility",
     "__version__",
 ]
