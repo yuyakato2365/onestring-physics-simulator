@@ -31,6 +31,12 @@ src_backup_before_sideface_contact/onestring_physics/*
 *_patch.zip
 src/onestring_physics.zip
 tmp_pdf_text.txt
+.onestring_abd_upgrade_applied
+.onestring_abd_upgrade_backup/
+onestring_abd_upgrade_patch_*/
+onestring_abd_upgrade_patch_*.zip
+*.before_isfinite_fix
+*.before_onestring_predicates_fix
 
 # Autodesk ABD build outputs
 third_party/affine-body-dynamics/build/

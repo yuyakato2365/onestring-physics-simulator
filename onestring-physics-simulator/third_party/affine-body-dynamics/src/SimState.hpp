@@ -15,6 +15,7 @@ public:
     SimState();
 
     bool load_scene(const std::string& filename, const std::string& patch = "");
+    bool load_onestring_manifest(const std::string& filename);
     bool reload_scene();
     bool load_simulation(const nlohmann::json& args);
     bool init(const nlohmann::json& args);
@@ -53,7 +54,14 @@ public:
     std::vector<int> num_contacts;
     std::vector<double> step_minimum_distances;
 
+    // OneString arrays have one entry per animation state, including t=0.
+    std::vector<double> onestring_string_lengths;
+    std::vector<double> onestring_command_lengths;
+    std::vector<double> onestring_constraint_violations;
+    std::vector<int> onestring_active;
+
 protected:
+    void record_onestring_stats();
     igl::Timer step_timer;
     size_t initial_rss;
 

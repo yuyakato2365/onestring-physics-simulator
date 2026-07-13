@@ -9,12 +9,134 @@
 #include <logger.hpp>
 #include <profiler.hpp>
 
+#include <Eigen/SparseCore>
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+#include <tbb/parallel_reduce.h>
+#include <tbb/task_arena.h>
+
 // #define USE_GRADIENT_DESCENT
 
 namespace ipc::rigid {
 
+namespace {
+double parallel_dot(const Eigen::VectorXd& a, const Eigen::VectorXd& b)
+{
+    return tbb::parallel_reduce(
+        tbb::blocked_range<Eigen::Index>(0, a.size()), 0.0,
+        [&](const tbb::blocked_range<Eigen::Index>& range, double sum) {
+            for (Eigen::Index i = range.begin(); i != range.end(); ++i) {
+                sum += a[i] * b[i];
+            }
+            return sum;
+        },
+        std::plus<double>());
+}
+
+bool parallel_bicgstab_solve(
+    const Eigen::SparseMatrix<double>& matrix,
+    const Eigen::VectorXd& rhs,
+    Eigen::VectorXd& solution,
+    int max_iterations,
+    double tolerance)
+{
+    using RowSparseMatrix = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+    const RowSparseMatrix A = matrix;
+    const Eigen::Index n = A.rows();
+    if (n == 0 || A.cols() != n || rhs.size() != n) {
+        return false;
+    }
+
+    Eigen::VectorXd inverse_diagonal(n);
+    for (Eigen::Index i = 0; i < n; ++i) {
+        const double diagonal = A.coeff(i, i);
+        inverse_diagonal[i] =
+            std::isfinite(diagonal) && std::abs(diagonal) > 1e-18
+            ? 1.0 / diagonal
+            : 1.0;
+    }
+
+    auto multiply = [&](const Eigen::VectorXd& x, Eigen::VectorXd& y) {
+        y.resize(n);
+        tbb::parallel_for(
+            tbb::blocked_range<Eigen::Index>(0, n),
+            [&](const tbb::blocked_range<Eigen::Index>& range) {
+                for (Eigen::Index row = range.begin(); row != range.end(); ++row) {
+                    double value = 0.0;
+                    for (RowSparseMatrix::InnerIterator entry(A, row); entry; ++entry) {
+                        value += entry.value() * x[entry.col()];
+                    }
+                    y[row] = value;
+                }
+            });
+    };
+
+    solution.setZero(n);
+    Eigen::VectorXd residual = rhs;
+    Eigen::VectorXd shadow_residual = residual;
+    Eigen::VectorXd direction = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd direction_preconditioned(n);
+    Eigen::VectorXd product = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd intermediate(n);
+    Eigen::VectorXd intermediate_preconditioned(n);
+    Eigen::VectorXd second_product(n);
+    const double rhs_norm = std::max(std::sqrt(parallel_dot(rhs, rhs)), 1e-30);
+    double rho_previous = 1.0;
+    double alpha = 1.0;
+    double omega = 1.0;
+
+    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+        const double rho = parallel_dot(shadow_residual, residual);
+        if (!std::isfinite(rho) || std::abs(rho) <= 1e-30) {
+            return false;
+        }
+        const double beta = (rho / rho_previous) * (alpha / omega);
+        direction = residual + beta * (direction - omega * product);
+        direction_preconditioned = inverse_diagonal.cwiseProduct(direction);
+        multiply(direction_preconditioned, product);
+        const double denominator = parallel_dot(shadow_residual, product);
+        if (!std::isfinite(denominator) || std::abs(denominator) <= 1e-30) {
+            return false;
+        }
+        alpha = rho / denominator;
+        intermediate = residual - alpha * product;
+        const double intermediate_relative =
+            std::sqrt(parallel_dot(intermediate, intermediate)) / rhs_norm;
+        if (std::isfinite(intermediate_relative)
+            && intermediate_relative <= tolerance) {
+            solution += alpha * direction_preconditioned;
+            return true;
+        }
+        intermediate_preconditioned =
+            inverse_diagonal.cwiseProduct(intermediate);
+        multiply(intermediate_preconditioned, second_product);
+        const double second_norm = parallel_dot(second_product, second_product);
+        if (!std::isfinite(second_norm) || second_norm <= 1e-30) {
+            return false;
+        }
+        omega = parallel_dot(second_product, intermediate) / second_norm;
+        if (!std::isfinite(omega) || std::abs(omega) <= 1e-30) {
+            return false;
+        }
+        solution += alpha * direction_preconditioned
+            + omega * intermediate_preconditioned;
+        residual = intermediate - omega * second_product;
+        const double relative_residual =
+            std::sqrt(parallel_dot(residual, residual)) / rhs_norm;
+        if (std::isfinite(relative_residual) && relative_residual <= tolerance) {
+            return true;
+        }
+        rho_previous = rho;
+    }
+    return false;
+}
+} // namespace
+
 NewtonSolver::NewtonSolver()
     : max_iterations(1000)
+    , use_parallel_pcg(true)
+    , parallel_pcg_max_iterations(300)
+    , parallel_pcg_tolerance(1e-5)
     , iteration_number(0)
     , convergence_criteria(ConvergenceCriteria::ENERGY)
     , m_line_search_lower_bound(Constants::DEFAULT_LINE_SEARCH_LOWER_BOUND)
@@ -34,6 +156,9 @@ void NewtonSolver::settings(const nlohmann::json& json)
     velocity_conv_tol = json["velocity_conv_tol"];
     is_velocity_conv_tol_abs = json["is_velocity_conv_tol_abs"];
     m_line_search_lower_bound = json["line_search_lower_bound"];
+    use_parallel_pcg = json.value("use_parallel_pcg", true);
+    parallel_pcg_max_iterations = json.value("parallel_pcg_max_iterations", 300);
+    parallel_pcg_tolerance = json.value("parallel_pcg_tolerance", 1e-5);
 
     linear_solver_settings = json["linear_solver"];
     try {
@@ -59,6 +184,9 @@ nlohmann::json NewtonSolver::settings() const
     settings["energy_conv_tol"] = energy_conv_tol;
     settings["velocity_conv_tol"] = velocity_conv_tol;
     settings["is_velocity_conv_tol_abs"] = is_velocity_conv_tol_abs;
+    settings["use_parallel_pcg"] = use_parallel_pcg;
+    settings["parallel_pcg_max_iterations"] = parallel_pcg_max_iterations;
+    settings["parallel_pcg_tolerance"] = parallel_pcg_tolerance;
     return settings;
 }
 
@@ -78,6 +206,8 @@ nlohmann::json NewtonSolver::stats() const
              { "count_grad", num_grad_fx },
              { "count_hess", num_hessian_fx },
              { "count_ccd", num_collision_check },
+             { "parallel_bicgstab_solves", parallel_pcg_solves },
+             { "parallel_bicgstab_fallbacks", parallel_pcg_fallbacks },
              { "total_regularizations", regularization_iterations } };
 }
 
@@ -87,10 +217,12 @@ std::string NewtonSolver::stats_string() const
         "total_newton_steps={:d} total_ls_steps={:d} "
         "num_newton_ls_fails={:d} num_grad_ls_fails={:d} count_fx={:d} "
         "count_grad={:d} count_hess={:d} count_ccd={:d} "
+        "parallel_bicgstab_solves={:d} parallel_bicgstab_fallbacks={:d} "
         "total_regularizations={:d}",
         newton_iterations, ls_iterations, num_newton_ls_fails,
         num_grad_ls_fails, num_fx, num_grad_fx, num_hessian_fx,
-        num_collision_check, regularization_iterations);
+        num_collision_check, parallel_pcg_solves, parallel_pcg_fallbacks,
+        regularization_iterations);
 }
 
 void NewtonSolver::reset_stats()
@@ -103,6 +235,8 @@ void NewtonSolver::reset_stats()
     newton_iterations = 0;
     num_newton_ls_fails = 0;
     num_grad_ls_fails = 0;
+    parallel_pcg_solves = 0;
+    parallel_pcg_fallbacks = 0;
     regularization_iterations = 0;
 }
 
@@ -687,12 +821,36 @@ bool NewtonSolver::compute_direction(
     // Solve for the Newton direction (Δx = -H⁻¹∇f).
     // Return true if the solve was successful.
     bool solve_success = false;
+    bool parallel_solve_used = false;
 
     // if (hessian.rows() <= 1200) { // <= 200 bodies
     //     Eigen::MatrixXd dense_hessian(hessian);
     //     direction = dense_hessian.ldlt().solve(-gradient);
     //     solve_success = true;
     // } else {
+    if (use_parallel_pcg && hessian.rows() >= 256) {
+        direction = Eigen::VectorXd::Zero(gradient.size());
+        if (parallel_bicgstab_solve(
+                hessian, -gradient, direction,
+                parallel_pcg_max_iterations, parallel_pcg_tolerance)) {
+            parallel_pcg_solves++;
+            parallel_solve_used = true;
+            if (parallel_pcg_solves == 1) {
+                spdlog::info(
+                    "solver={} linear_solver=tbb_parallel_bicgstab "
+                    "hessian_rows={} max_concurrency={}",
+                    name(), hessian.rows(),
+                    tbb::this_task_arena::max_concurrency());
+            }
+            solve_success = true;
+        } else {
+            parallel_pcg_fallbacks++;
+            spdlog::debug(
+                "solver={} parallel BiCGSTAB did not converge; falling back to {}",
+                name(), linear_solver_settings.value("name", "configured direct solver"));
+        }
+    }
+    if (!solve_success) {
     linear_solver->analyzePattern(hessian, hessian.rows());
     linear_solver->factorize(hessian);
     nlohmann::json info;
@@ -718,17 +876,24 @@ bool NewtonSolver::compute_direction(
             "hessian\" failsafe=\"gradient descent\"",
             name(), iteration_number);
     }
+    }
     // }
 
     // Check solve residual
     if (solve_success) {
         double solve_residual = (hessian * direction + gradient).norm();
-        if (solve_residual > 1e-8) {
+        const double solve_residual_limit = parallel_solve_used
+            ? std::max(
+                  1e-8,
+                  10.0 * parallel_pcg_tolerance
+                      * std::max(gradient.norm(), 1.0))
+            : 1e-8;
+        if (solve_residual > solve_residual_limit) {
             spdlog::warn(
                 "solver={} iter={:d} "
-                "failure=\"linear solve residual ({:g}) > 1e-8; "
+                "failure=\"linear solve residual ({:g}) > {:g}; "
                 "||g||_{{L^inf}}={:g} ||H||_{{L^inf}}={:g}\"",
-                name(), iteration_number, solve_residual,
+                name(), iteration_number, solve_residual, solve_residual_limit,
                 gradient.lpNorm<Eigen::Infinity>(), norm_Linf(hessian));
         }
         solve_success = std::isfinite(solve_residual);

@@ -104,6 +104,9 @@ public:
     virtual nlohmann::json stats() const override;
 
     int max_iterations;
+    bool use_parallel_pcg;
+    int parallel_pcg_max_iterations;
+    double parallel_pcg_tolerance;
 
 protected:
     virtual bool converged();
@@ -158,6 +161,8 @@ private:
     size_t num_newton_ls_fails = 0;
     size_t num_grad_ls_fails = 0;
     size_t regularization_iterations = 0;
+    size_t parallel_pcg_solves = 0;
+    size_t parallel_pcg_fallbacks = 0;
 };
 
 /**

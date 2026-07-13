@@ -831,6 +831,7 @@ def add_tile_assembly(
             "T3D_RECOVERED_JUNCTION_CAP": "#6366f1",
             "T3D_RECOVERED_GLOBAL_CLIP": "#2563eb",
             "T3D_RECOVERED_MESH_CLEANUP": "#14b8a6",
+            "T3D_RECOVERED_LEGACY_EMERGENCY_PRISM": "#6b7280",
         }
         lighting = dict(ambient=0.82, diffuse=0.35, specular=0.05, roughness=1.0, fresnel=0.0)
         for tile_id, solid in enumerate(authoritative_solids):

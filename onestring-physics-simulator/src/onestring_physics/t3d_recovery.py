@@ -24,6 +24,7 @@ T3D_RECOVERED_SYNCHRONIZED_PAIR = "T3D_RECOVERED_SYNCHRONIZED_PAIR"
 T3D_RECOVERED_JUNCTION_CAP = "T3D_RECOVERED_JUNCTION_CAP"
 T3D_RECOVERED_GLOBAL_CLIP = "T3D_RECOVERED_GLOBAL_CLIP"
 T3D_RECOVERED_MESH_CLEANUP = "T3D_RECOVERED_MESH_CLEANUP"
+T3D_RECOVERED_LEGACY_EMERGENCY_PRISM = "T3D_RECOVERED_LEGACY_EMERGENCY_PRISM"
 T3D_FAILED_INVALID_TOP = "T3D_FAILED_INVALID_TOP"
 T3D_FAILED_TOP_SURFACE_INTERSECTION = "T3D_FAILED_TOP_SURFACE_INTERSECTION"
 T3D_FAILED_EMPTY_FEASIBLE_REGION = "T3D_FAILED_EMPTY_FEASIBLE_REGION"
@@ -513,6 +514,78 @@ def triangulate_solid(solid: ConvexTileSolid) -> list[tuple[int, int, int]]:
         for idx in range(1, len(face) - 1):
             triangles.append((int(face[0]), int(face[idx]), int(face[idx + 1])))
     return triangles
+
+
+def build_emergency_normal_prism(
+    *,
+    tile_id: int,
+    top: np.ndarray,
+    normal: np.ndarray,
+    thickness: float,
+    triggering_status: str,
+    triggering_reason: str,
+) -> ConvexTileSolid:
+    """Build the last-resort one-sided prism used only for visible recovery.
+
+    Invalid K3D top faces are deliberately rejected: this fallback may replace
+    an infeasible thickness/contact construction, but it must not invent a new
+    mandatory top polygon.
+    """
+    valid, reason = validate_top_quad(top)
+    if not valid:
+        raise T3DConstructionError(T3D_FAILED_INVALID_TOP, reason, [tile_id])
+    top = np.asarray(top, dtype=float)
+    n = _normalize(np.asarray(normal, dtype=float), _face_normal(top))
+    bottom = top - float(thickness) * n[None, :]
+    vertices = np.vstack([top, bottom])
+    faces = [
+        [0, 3, 2, 1],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ]
+    vertices, faces, _cleanup = cleanup_polyhedron(vertices, faces)
+    quality = polyhedron_validation(vertices, faces, 0.0, 0.0)
+    reasons = [
+        "all_geometric_recovery_tiers_exhausted",
+        f"trigger_status={triggering_status}",
+        triggering_reason,
+    ]
+    metrics: dict[str, object] = {
+        "tile_id": int(tile_id),
+        "status": T3D_RECOVERED_LEGACY_EMERGENCY_PRISM,
+        "triggered_conditions": [triggering_status, triggering_reason],
+        "recovery_steps": reasons,
+        "requested_thickness": float(thickness),
+        "actual_min_depth": 0.0,
+        "actual_max_depth": float(thickness),
+        "local_thickness_ratio": 1.0,
+        "volume": float(quality["volume"]),
+        "minimum_width": float(quality["minimum_feature_size"]),
+        "minimum_feature_size": float(quality["minimum_feature_size"]),
+        "vertex_count": int(len(vertices)),
+        "face_count": int(len(faces)),
+        "cap_face_count": 0,
+        "collision_count_before": 0,
+        "collision_count_after": 0,
+        "shared_plane_error": None,
+        "watertight": bool(quality["watertight"]),
+        "manifold": bool(quality["manifold"]),
+        "legacy_emergency_fallback": True,
+        "manufacturing_authoritative": False,
+        "display_color": "gray",
+    }
+    return ConvexTileSolid(
+        vertices=vertices,
+        faces=faces,
+        top_face_ids=[0],
+        contact_face_by_edge={},
+        recovery_status=T3D_RECOVERED_LEGACY_EMERGENCY_PRISM,
+        recovery_reasons=reasons,
+        metrics=metrics,
+    )
 
 
 def aabb_overlap(a: ConvexTileSolid, b: ConvexTileSolid, tolerance: float = 1e-9) -> bool:

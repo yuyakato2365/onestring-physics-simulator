@@ -19,6 +19,7 @@ from onestring_physics.onestring_pipeline import (
     _parameterization_stretch_csf,
     _surface_peak_uvs,
     _split_m2d_along_existing_grid_line,
+    _separate_split_hinge_components,
     _weld_k3d_duplicate_reference_vertices,
     build_onestring_design,
     export_t2d_stl,
@@ -31,6 +32,39 @@ from onestring_physics.visualization import figure_flat_tile_layout, figure_tile
 import numpy as np
 import pytest
 from types import SimpleNamespace
+
+
+def test_split_hinge_components_receive_rigid_inter_component_padding():
+    tile = np.asarray(
+        [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+         [0, 0, -0.1], [1, 0, -0.1], [1, 1, -0.1], [0, 1, -0.1]],
+        dtype=float,
+    )
+    vertices = np.asarray([
+        tile,
+        tile + np.asarray([1.0, 0.0, 0.0]),
+        tile,
+        tile + np.asarray([1.0, 0.0, 0.0]),
+    ])
+    hinges = [
+        SimpleNamespace(tile_a=0, tile_b=1),
+        SimpleNamespace(tile_a=2, tile_b=3),
+    ]
+    before_centers = np.mean(vertices[:, :4, :2], axis=1)
+
+    separated, components, translations = _separate_split_hinge_components(
+        vertices, SimpleNamespace(hinges=hinges), padding=0.25
+    )
+    after_centers = np.mean(separated[:, :4, :2], axis=1)
+
+    assert components == [[0, 1], [2, 3]]
+    assert np.linalg.norm(after_centers[1] - after_centers[0]) == pytest.approx(
+        np.linalg.norm(before_centers[1] - before_centers[0])
+    )
+    assert np.linalg.norm(after_centers[3] - after_centers[2]) == pytest.approx(
+        np.linalg.norm(before_centers[3] - before_centers[2])
+    )
+    assert np.linalg.norm(translations[0] - translations[1]) >= 1.25 - 1e-7
 
 
 def experimental_params(**kwargs):
@@ -51,6 +85,10 @@ def test_hinge_layout_defaults_match_streamlit_controls():
     assert params.hinge_layout_anchor_weight == 0.0
     assert params.hinge_layout_initial_expansion == 1.6
     assert params.hinge_layout_max_center_drift_tiles == 5.0
+
+    deployment = DeploymentParameters(physics_backend="abd")
+    assert deployment.abd_gravity_z == -9.81
+    assert deployment.abd_use_desk is True
 
     free = _free_layout_parameters(
         grid=SimpleNamespace(tile_size=1.0, gap_size=0.08),

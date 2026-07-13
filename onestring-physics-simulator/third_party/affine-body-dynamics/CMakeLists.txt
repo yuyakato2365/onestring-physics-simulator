@@ -28,7 +28,7 @@ endif()
 
 project(Inukshuk
         DESCRIPTION "Robust, intersection-free, simulations of rigid bodies."
-        LANGUAGES CXX CUDA)
+        LANGUAGES CXX)
 
 option(ABD_WITH_UNIT_TESTS            "Build unit-tests"      ${ABD_TOPLEVEL_PROJECT})
 option(ABD_WITH_OPENGL                "Build GUI"             ${ABD_TOPLEVEL_PROJECT})
@@ -38,7 +38,12 @@ option(ABD_WITH_COMPARISONS           "Build comparisons"                       
 option(ABD_WITH_SIMD                  "Enable SIMD"                                OFF)
 option(ABD_WITH_PYTHON                "Build Python bindings"                      OFF)
 option(ABD_WITH_DERIVATIVE_CHECK      "Check derivatives using finite differences" OFF)
-option(IPC_TOOLKIT_WITH_CUDA          "Enable CUDA CCD"                            ON)
+option(IPC_TOOLKIT_WITH_CUDA          "Enable CUDA CCD"                            OFF)
+
+# OneString defaults to a CPU-only build. CUDA remains opt-in.
+if(IPC_TOOLKIT_WITH_CUDA)
+  enable_language(CUDA)
+endif()
 
 # Set default minimum C++ standard
 if(ABD_TOPLEVEL_PROJECT)
@@ -53,8 +58,10 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/find/")
 
 # Generate position independent code by default
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
-set(CUDA_SEPARABLE_COMPILATION ON)
+if(IPC_TOOLKIT_WITH_CUDA)
+  set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+  set(CUDA_SEPARABLE_COMPILATION ON)
+endif()
 
 # Color output
 include(abd_use_colors)
@@ -140,8 +147,9 @@ add_library(abd
   # src/solvers/line_search.cpp
 
   src/problems/rigid_body_collision_constraint.cpp
-  src/problems/distance_barrier_rb_problem.cpp  
-  src/problems/problem_factory.cpp  
+  src/onestring/onestring_constraint.cpp
+  src/problems/distance_barrier_rb_problem.cpp
+  src/problems/problem_factory.cpp
 
   src/utils/tensor.cpp
   src/utils/eigen_ext.cpp
@@ -178,6 +186,9 @@ endif()
 
 # For MSVC, do not use the min and max macros.
 target_compile_definitions(abd PUBLIC NOMINMAX)
+if(IPC_TOOLKIT_WITH_CUDA)
+  target_compile_definitions(abd PUBLIC ONESTRING_ABD_CUDA_CCD=1)
+endif()
 
 ################################################################################
 # Required Libraries
@@ -278,7 +289,9 @@ target_compile_features(abd PUBLIC cxx_std_17)
 ################################################################################
 
 add_executable(abd_sim src/main.cpp)
-set_property(TARGET abd_sim PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+if(IPC_TOOLKIT_WITH_CUDA)
+  set_property(TARGET abd_sim PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+endif()
 if(ABD_WITH_OPENGL)
     target_sources(abd_sim PUBLIC
       src/viewer/imgui_ext.cpp

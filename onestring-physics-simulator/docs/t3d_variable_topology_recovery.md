@@ -26,7 +26,16 @@ manufacturing geometry.
 8. Detect nonadjacent convex-solid collisions with AABB broad phase and SAT,
    attempt a symmetric top-preserving clip, and fail explicitly if unresolved.
 
-The legacy normal-translation emergency fallback is disabled by default.
+If every geometric recovery tier fails and
+`allow_legacy_normal_prism_emergency_fallback` is enabled, only the affected
+tile is replaced by a one-sided normal prism. It receives status
+`T3D_RECOVERED_LEGACY_EMERGENCY_PRISM`, is rendered gray, and is explicitly
+marked `manufacturing_authoritative=False`. Invalid/self-intersecting K3D top
+faces are never replaced this way. Any collision remaining after the emergency
+replacement stays visible in the metrics.
+
+The API default keeps this emergency fallback disabled. The selectable
+`2026-07-12-one-sided-t3d` application version enables it explicitly.
 
 ## Diagnostics
 

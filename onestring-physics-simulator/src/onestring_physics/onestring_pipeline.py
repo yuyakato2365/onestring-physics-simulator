@@ -49,11 +49,13 @@ from .t3d_recovery import (
     T3D_OK_NOMINAL_FRUSTUM,
     T3D_RECOVERED_CAPPED_FRUSTUM,
     T3D_RECOVERED_JUNCTION_CAP,
+    T3D_RECOVERED_LEGACY_EMERGENCY_PRISM,
     T3D_RECOVERED_LOCAL_THICKNESS,
     T3D_RECOVERED_PYRAMID,
     T3D_RECOVERED_SYNCHRONIZED_PAIR,
     T3D_RECOVERED_WEDGE,
     aabb_overlap,
+    build_emergency_normal_prism,
     build_tile_polyhedron,
     clip_convex_polyhedron,
     convex_sat_overlap,
@@ -1003,10 +1005,14 @@ class DeploymentParameters(_original.DeploymentParameters):
     abd_job_directory: str = "output/abd_run"
     abd_timestep: float = 0.01
     abd_density: float = 1000.0
+    abd_gravity_z: float = -9.81
+    abd_use_desk: bool = True
+    abd_desk_clearance: float = 5.0e-3
     abd_orthogonality_stiffness: float = 1e9
     abd_minimum_separation_distance: float = 1e-6
     abd_barrier_activation_distance: float = 5e-4
     abd_newton_velocity_tolerance: float = 1e-3
+    abd_nthreads: int = 0
     abd_timeout_seconds: float = 600.0
     abd_pull_end_ratio: float = 0.75
     abd_shake_amplitude: float = 0.0
@@ -5102,17 +5108,36 @@ def _extrude_tiles_variable_topology(mesh, thickness: float, stage: str):
                 plane_normal = -plane_normal
                 plane_offset = -plane_offset
             planes.append((plane_normal, plane_offset))
-        solid = build_tile_polyhedron(
-            tile_id=tile_id,
-            top=top,
-            normal=normals[tile_id],
-            side_planes=planes,
-            requested_thickness=requested,
-            minimum_thickness=min_thickness,
-            minimum_volume=minimum_volume,
-            minimum_feature_size=minimum_feature,
-            miter_jump_limit=jump_limit,
-        )
+        try:
+            solid = build_tile_polyhedron(
+                tile_id=tile_id,
+                top=top,
+                normal=normals[tile_id],
+                side_planes=planes,
+                requested_thickness=requested,
+                minimum_thickness=min_thickness,
+                minimum_volume=minimum_volume,
+                minimum_feature_size=minimum_feature,
+                miter_jump_limit=jump_limit,
+            )
+        except T3DConstructionError as exc:
+            if not bool(mesh.metrics.get("allow_legacy_normal_prism_emergency_fallback", False)):
+                raise
+            if exc.status in {
+                "T3D_FAILED_INVALID_TOP",
+                T3D_FAILED_TOP_SURFACE_INTERSECTION,
+                T3D_FAILED_NONMANIFOLD_CONTACT,
+                T3D_FAILED_NONORIENTABLE_COMPONENT,
+            }:
+                raise
+            solid = build_emergency_normal_prism(
+                tile_id=tile_id,
+                top=top,
+                normal=normals[tile_id],
+                thickness=requested,
+                triggering_status=exc.status,
+                triggering_reason=str(exc),
+            )
         solids.append(solid)
 
     # A vertex shared by three or more tiles can need a common cap even when all
@@ -5293,13 +5318,32 @@ def _extrude_tiles_variable_topology(mesh, thickness: float, stage: str):
     for tile_a, tile_b in collision_pairs:
         solids[tile_a].metrics["collision_count_after"] = int(solids[tile_a].metrics.get("collision_count_after", 0)) + 1
         solids[tile_b].metrics["collision_count_after"] = int(solids[tile_b].metrics.get("collision_count_after", 0)) + 1
-    if collision_pairs and bool(mesh.metrics.get("t3d_fail_on_unresolved_global_collision", True)):
+    if collision_pairs:
         involved = sorted({tile_id for pair in collision_pairs for tile_id in pair})
-        raise T3DConstructionError(
-            T3D_FAILED_GLOBAL_COLLISION_INFEASIBLE,
-            f"nonadjacent authoritative solids collide: {collision_pairs[:8]}",
-            involved,
-        )
+        if bool(mesh.metrics.get("allow_legacy_normal_prism_emergency_fallback", False)):
+            for tile_id in involved:
+                if solids[tile_id].recovery_status == T3D_RECOVERED_LEGACY_EMERGENCY_PRISM:
+                    continue
+                solids[tile_id] = build_emergency_normal_prism(
+                    tile_id=tile_id,
+                    top=top_tiles[tile_id],
+                    normal=normals[tile_id],
+                    thickness=requested,
+                    triggering_status=T3D_FAILED_GLOBAL_COLLISION_INFEASIBLE,
+                    triggering_reason=f"unresolved collision pairs before emergency fallback: {collision_pairs[:8]}",
+                )
+            collision_pairs = collision_list()
+            for solid in solids:
+                solid.metrics["collision_count_after"] = 0
+            for tile_a, tile_b in collision_pairs:
+                solids[tile_a].metrics["collision_count_after"] = int(solids[tile_a].metrics.get("collision_count_after", 0)) + 1
+                solids[tile_b].metrics["collision_count_after"] = int(solids[tile_b].metrics.get("collision_count_after", 0)) + 1
+        elif bool(mesh.metrics.get("t3d_fail_on_unresolved_global_collision", True)):
+            raise T3DConstructionError(
+                T3D_FAILED_GLOBAL_COLLISION_INFEASIBLE,
+                f"nonadjacent authoritative solids collide: {collision_pairs[:8]}",
+                involved,
+            )
 
     # Compatibility geometry: K3D remains the top and a one-sided normal prism
     # remains the stable rigid seed used by T2D/deployment.  It is deliberately
@@ -5317,6 +5361,14 @@ def _extrude_tiles_variable_topology(mesh, thickness: float, stage: str):
     for solid in solids:
         status_counts[solid.recovery_status] = status_counts.get(solid.recovery_status, 0) + 1
     recovered_count = sum(count for status, count in status_counts.items() if status != nominal_status)
+    emergency_count = int(status_counts.get(T3D_RECOVERED_LEGACY_EMERGENCY_PRISM, 0))
+    emergency_reasons: dict[str, int] = {}
+    for solid in solids:
+        if solid.recovery_status != T3D_RECOVERED_LEGACY_EMERGENCY_PRISM:
+            continue
+        for condition in solid.metrics.get("triggered_conditions", []):
+            key = str(condition)
+            emergency_reasons[key] = emergency_reasons.get(key, 0) + 1
     metrics: dict[str, object] = {
         "objective": "Variable-topology half-space T3D recovery with an 8-vertex compatibility proxy.",
         "extrusion_model": "authoritative_convex_tile_solids_with_8_vertex_proxy",
@@ -5347,12 +5399,21 @@ def _extrude_tiles_variable_topology(mesh, thickness: float, stage: str):
         "t3d_min_volume": float(min((float(s.metrics["volume"]) for s in solids), default=0.0)),
         "t3d_min_feature_size": float(min((float(s.metrics["minimum_feature_size"]) for s in solids), default=0.0)),
         "t3d_tile_reports": [dict(s.metrics) for s in solids],
-        "t3d_normal_translation_guard_tile_count": 0,
-        "t3d_normal_translation_guard_reasons": {},
+        "t3d_emergency_normal_prism_tile_count": emergency_count,
+        "t3d_emergency_normal_prism_tile_ids": [
+            int(tile_id)
+            for tile_id, solid in enumerate(solids)
+            if solid.recovery_status == T3D_RECOVERED_LEGACY_EMERGENCY_PRISM
+        ],
+        "t3d_emergency_normal_prism_reasons": dict(emergency_reasons),
+        "t3d_emergency_fallback_color": "gray",
+        "t3d_emergency_fallback_manufacturing_warning": bool(emergency_count > 0),
+        "t3d_normal_translation_guard_tile_count": emergency_count,
+        "t3d_normal_translation_guard_reasons": dict(emergency_reasons),
         "bottom_vertex_solve_fallback_count": 0,
         "t3d_bottom_vertex_solve_fallback_count": 0,
         "allow_legacy_normal_prism_emergency_fallback": bool(mesh.metrics.get("allow_legacy_normal_prism_emergency_fallback", False)),
-        "legacy_normal_prism_emergency_fallback_used": False,
+        "legacy_normal_prism_emergency_fallback_used": bool(emergency_count > 0),
         "internal_miter_edge_count": int(internal_miter_edge_count),
         "split_contact_miter_edge_count": int(len(split_edge_pairs)),
         "surface_fit_error": float(mesh.metrics.get("surface_fit_error_after", 0.0)),
@@ -6360,6 +6421,78 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
     return repaired, report
 
 
+def _split_hinge_components(tile_count: int, hinge_graph) -> list[list[int]]:
+    adjacency: list[set[int]] = [set() for _ in range(max(0, int(tile_count)))]
+    for hinge in getattr(hinge_graph, "hinges", []):
+        a, b = int(hinge.tile_a), int(hinge.tile_b)
+        if a == b or min(a, b) < 0 or max(a, b) >= tile_count:
+            continue
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+    components: list[list[int]] = []
+    unseen = set(range(tile_count))
+    while unseen:
+        seed = min(unseen)
+        unseen.remove(seed)
+        stack = [seed]
+        component: list[int] = []
+        while stack:
+            tile_id = stack.pop()
+            component.append(tile_id)
+            for neighbor in adjacency[tile_id]:
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    stack.append(neighbor)
+        components.append(sorted(component))
+    return components
+
+
+def _separate_split_hinge_components(vertices, hinge_graph, padding: float):
+    source = np.asarray(vertices, dtype=float)
+    tile_count = int(len(source))
+    components = _split_hinge_components(tile_count, hinge_graph)
+    translations = np.zeros((len(components), 2), dtype=float)
+    if len(components) <= 1 or tile_count == 0:
+        return source.copy(), components, translations
+
+    top_xy = source[:, :4, :2]
+    half_padding = 0.5 * max(float(padding), 0.0)
+    for _ in range(max(16, len(components) * len(components) * 4)):
+        moved = False
+        for ia in range(len(components)):
+            points_a = top_xy[components[ia]].reshape(-1, 2) + translations[ia]
+            min_a = np.min(points_a, axis=0) - half_padding
+            max_a = np.max(points_a, axis=0) + half_padding
+            center_a = 0.5 * (min_a + max_a)
+            for ib in range(ia + 1, len(components)):
+                points_b = top_xy[components[ib]].reshape(-1, 2) + translations[ib]
+                min_b = np.min(points_b, axis=0) - half_padding
+                max_b = np.max(points_b, axis=0) + half_padding
+                overlap = np.minimum(max_a, max_b) - np.maximum(min_a, min_b)
+                if np.any(overlap <= 1e-10):
+                    continue
+                axis = int(np.argmin(overlap))
+                center_b = 0.5 * (min_b + max_b)
+                sign = 1.0 if center_b[axis] >= center_a[axis] else -1.0
+                if abs(float(center_b[axis] - center_a[axis])) <= 1e-12:
+                    sign = 1.0 if ib > ia else -1.0
+                shift = 0.5 * (float(overlap[axis]) + 1e-8)
+                translations[ia, axis] -= sign * shift
+                translations[ib, axis] += sign * shift
+                moved = True
+        if not moved:
+            break
+
+    # Preserve the original global center while changing only component-to-
+    # component spacing.
+    weights = np.asarray([len(component) for component in components], dtype=float)
+    translations -= np.average(translations, axis=0, weights=weights)[None, :]
+    separated = source.copy()
+    for component_id, component in enumerate(components):
+        separated[component, :, :2] += translations[component_id][None, None, :]
+    return separated, components, translations
+
+
 def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_callback=None):
     hinge_faces, hinge_weld_metrics = _canonicalize_faces_by_coincident_tile_tops(
         np.asarray(t3d.vertices, dtype=float)[:, :4, :],
@@ -6373,12 +6506,39 @@ def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_call
         params,
         progress_callback,
     )
+    tile_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-9)
+    split_padding = max(float(getattr(grid, "gap_size", 0.0)), 0.20 * tile_size)
+    separated, components, translations = _separate_split_hinge_components(
+        out.vertices, hinge_graph, split_padding
+    )
+    out.vertices = separated
+    # Apply the same component translations to Top-Hinge T2D so every T2D
+    # stage and the ABD initial state share one coherent split layout.
+    for component_id, component in enumerate(components):
+        delta = translations[component_id]
+        t2d.vertices[component, :, :2] += delta[None, None, :]
+        if getattr(t2d, "transform_matrices", None) is not None:
+            t2d.transform_matrices[component, 0, 3] += float(delta[0])
+            t2d.transform_matrices[component, 1, 3] += float(delta[1])
+        if getattr(out, "transform_matrices", None) is not None:
+            out.transform_matrices[component, 0, 3] += float(delta[0])
+            out.transform_matrices[component, 1, 3] += float(delta[1])
+    for hinge in hinge_graph.hinges:
+        hinge.rest_position_2d = 0.5 * (
+            out.vertices[int(hinge.tile_a), int(hinge.local_vertex_a)]
+            + out.vertices[int(hinge.tile_b), int(hinge.local_vertex_b)]
+        )
     metrics = {
         "dual_hinge_split_virtual_weld_applied": bool(hinge_weld_metrics.get("split_virtual_weld_applied", False)),
         "dual_hinge_split_virtual_weld_group_count": int(hinge_weld_metrics.get("split_virtual_weld_group_count", 0)),
         "dual_hinge_split_virtual_weld_vertex_count": int(hinge_weld_metrics.get("split_virtual_weld_vertex_count", 0)),
         "dual_hinge_split_virtual_weld_reason": str(hinge_weld_metrics.get("split_virtual_weld_reason", "")),
         "dual_hinge_constraint_faces": "split topology preserved; coincident split vertex ids are not re-welded",
+        "split_component_spacing_applied": bool(len(components) > 1 and np.max(np.abs(translations), initial=0.0) > 1e-12),
+        "split_component_count": int(len(components)),
+        "split_component_padding": float(split_padding),
+        "split_component_max_translation": float(np.max(np.linalg.norm(translations, axis=1), initial=0.0)),
+        "split_component_layout": "rigid component translations preserving all intra-component hinges",
     }
     out.metrics.update(metrics)
     hinge_graph.metrics.update(metrics)
@@ -8260,18 +8420,21 @@ def simulate_onestring_deployment(state, params=None, progress_callback=None):
     if backend == "abd":
         if progress_callback is not None:
             progress_callback("Prepare Autodesk ABD job", 0.03, "serialize rest meshes, joints, guides, pull and shake schedules")
-        gravity_value = float(getattr(params, "gravity", 9.81))
+        abd_gravity_z = float(getattr(params, "abd_gravity_z", 0.0))
         config = ABDBackendConfig(
             executable=getattr(params, "abd_executable", None),
             timestep=float(getattr(params, "abd_timestep", 0.01)),
             steps=int(getattr(params, "steps", 100)),
             density=float(getattr(params, "abd_density", 1000.0)),
             friction=float(getattr(params, "contact_friction", 0.25)),
-            gravity=(0.0, 0.0, -gravity_value),
+            gravity=(0.0, 0.0, abd_gravity_z),
+            use_desk=bool(getattr(params, "abd_use_desk", True)),
+            desk_clearance=float(getattr(params, "abd_desk_clearance", 5.0e-3)),
             orthogonality_stiffness=float(getattr(params, "abd_orthogonality_stiffness", 1e9)),
             minimum_separation_distance=float(getattr(params, "abd_minimum_separation_distance", 1e-6)),
             barrier_activation_distance=float(getattr(params, "abd_barrier_activation_distance", 5e-4)),
             newton_velocity_tolerance=float(getattr(params, "abd_newton_velocity_tolerance", 1e-3)),
+            nthreads=int(getattr(params, "abd_nthreads", 0)),
             timeout_seconds=float(getattr(params, "abd_timeout_seconds", 600.0)),
             pull_end_ratio=float(getattr(params, "abd_pull_end_ratio", 0.75)),
             shake=ShakeTrajectory(

@@ -69,6 +69,11 @@ int main(int argc, char* argv[])
     app.add_option("--patch", patch, "patch to input file (ngui only)")
         ->default_val(patch);
 
+    std::string onestring_manifest_path = "";
+    app.add_option(
+        "--onestring-manifest", onestring_manifest_path,
+        "OneString unilateral total-path-length manifest (ngui only)");
+
     CLI11_PARSE(app, argc, argv);
 
     set_logger_level(loglevel);
@@ -116,6 +121,11 @@ int main(int argc, char* argv[])
 
         bool success = sim.load_scene(scene_path, patch);
         if (!success) {
+            return 1;
+        }
+
+        if (!onestring_manifest_path.empty()
+            && !sim.load_onestring_manifest(onestring_manifest_path)) {
             return 1;
         }
 

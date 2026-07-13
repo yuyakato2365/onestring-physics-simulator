@@ -1,5 +1,23 @@
 # onestring-physics-simulator
 
+## WindowsノートPCへの導入
+
+このリポジトリは、Pythonだけで動く設計・表示機能と、別途C++ビルドが
+必要なAutodesk ABD物理シミュレーションを含みます。初回はCPU版ABDを
+ビルドし、NVIDIA GPU搭載機では必要に応じてCUDA版を追加してください。
+
+```powershell
+git clone https://github.com/yuyakato2365/onestring-physics-simulator.git
+cd .\onestring-physics-simulator\onestring-physics-simulator
+powershell -ExecutionPolicy Bypass -File .\scripts\install_python_environment.ps1 -WithDevDependencies
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+`streamlit`コマンドが見つからない場合も、上記のように仮想環境のPythonから
+`-m streamlit`で起動してください。ABDを含む完全な導入、CPU/GPUビルド、
+検証、別PCへの更新手順は
+[WindowsノートPC導入ガイド](docs/windows_laptop_setup_ja.md)を参照してください。
+
 ## Version 0.3.0: variable-topology T3D and Autodesk ABD bridge
 
 Version 0.3.0 adds two independent changes:
@@ -7,19 +25,38 @@ Version 0.3.0 adds two independent changes:
 - T3D can use authoritative variable-topology convex solids with classified
   cap/wedge/pyramid/local-thickness recovery. The old eight-vertex tile is kept
   only as a T2D/deployment compatibility proxy.
+- If all valid-solid recovery tiers fail, the new selectable version shows only
+  the affected panel as a gray one-sided emergency prism and records that it is
+  not manufacturing-authoritative. Invalid K3D top faces still fail explicitly.
 - Actuation exposes `legacy` and `abd` physics backends. `abd` invokes an
   external Autodesk `affine-body-dynamics` executable; it is not a Python
   reimplementation and never falls back to the legacy SAT projection.
 
 ### Autodesk ABD prerequisites (Windows)
 
-The upstream project currently requires a C++ compiler, CMake, and CUDA because
-its CMake project declares both `CXX` and `CUDA` languages. Build it as a
-separate project:
+The vendored ABD extension can be built as CPU-only or with CUDA CCD. Both
+variants also use a TBB-parallel BiCGSTAB Newton linear solve (with the original
+Eigen direct solver as a numerical fallback). Build the CPU variant with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build_autodesk_abd.ps1
 ```
+
+For an NVIDIA GPU, install a CUDA Toolkit supported by the local compiler and
+build for the GPU architecture. An RTX 4060 Ti uses architecture `89`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_autodesk_abd.ps1 `
+  -EnableCuda -CudaArchitectures 89 `
+  -BuildDir third_party\affine-body-dynamics\build-gpu
+```
+
+The app searches `build-gpu\Release\abd_sim.exe` first, then
+`build-parallel\Release\abd_sim.exe`, followed by the legacy `build` folder.
+`ONESTRING_ABD_EXECUTABLE` or the executable-path setting still overrides this
+order. CUDA accelerates the IPC broad phase/CCD; Hessian assembly, constraints,
+line search, and parts of Newton remain CPU work, so GPU utilization is
+intermittent rather than continuously high.
 
 Then verify the unmodified official `cube_drop` scene before using OneString:
 

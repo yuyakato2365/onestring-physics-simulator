@@ -61,6 +61,7 @@ MODEL_VERSIONS = [
         "description": "K3Dを上面として固定し、法線の負方向の片側だけへ厚み1tを押し出します。隣接辺はmiter/contact planeで接続します。",
         "t3d_extrusion_side": "negative_normal_from_k3d",
         "t3d_variable_topology_enabled": True,
+        "allow_legacy_normal_prism_emergency_fallback": True,
         "t3d_intersection_trim_enabled": False,
     },
     {
@@ -562,7 +563,12 @@ with st.sidebar:
     abd_executable = ""
     abd_timestep = 0.01
     abd_density = 1000.0
+    abd_gravity_z = -9.81
+    abd_use_desk = True
+    abd_desk_clearance = 5.0e-3
     abd_stiffness = 1e9
+    abd_nthreads = 0
+    abd_timeout_seconds = 600.0
     abd_pull_end_ratio = 0.75
     abd_shake_amplitude = 0.0
     abd_shake_frequency_hz = 0.0
@@ -582,7 +588,30 @@ with st.sidebar:
             )
             abd_timestep = st.number_input("ABD timestep", min_value=0.0001, max_value=0.1, value=0.01, step=0.001, format="%.4f")
             abd_density = st.number_input("tile density", min_value=1.0, max_value=50000.0, value=1000.0, step=100.0)
+            abd_gravity_z = st.number_input(
+                "ABD gravity Z",
+                min_value=-20.0,
+                max_value=20.0,
+                value=-9.81,
+                step=0.1,
+                help="Gravity remains enabled. The desk supplies an upward one-sided support reaction at each panel's bottom vertices.",
+            )
+            abd_use_desk = st.toggle(
+                "support panels on fixed desk plane",
+                value=True,
+                help="Keeps panels from falling below a fixed horizontal desk while allowing horizontal sliding.",
+            )
+            abd_desk_clearance = st.number_input(
+                "desk initial clearance",
+                min_value=0.000001,
+                max_value=0.1,
+                value=0.005,
+                step=0.0001,
+                format="%.6f",
+            )
             abd_stiffness = st.number_input("ABD orthogonality stiffness", min_value=1e5, max_value=1e12, value=1e9, step=1e8, format="%.3e")
+            abd_nthreads = int(st.number_input("ABD CPU threads (0 = automatic)", min_value=0, max_value=128, value=0, step=1))
+            abd_timeout_seconds = float(st.number_input("ABD timeout (seconds)", min_value=60, max_value=14400, value=600, step=60))
             abd_pull_end_ratio = st.slider("final string command / initial length", 0.05, 1.0, 0.75, 0.01)
             abd_shake_amplitude = st.number_input("shake amplitude", min_value=0.0, max_value=10.0, value=0.0, step=0.01)
             abd_shake_frequency_hz = st.number_input("shake frequency (Hz)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
@@ -597,7 +626,7 @@ with st.sidebar:
             abd_shake_end_time = float(time_cols[1].number_input("shake end time", min_value=0.0, value=0.0, step=0.1))
     run_actuation = _param_row(
         "現在のT2Dから snap/lift のProjective Dynamics風シミュレーションを実行する。",
-        lambda: st.button("Run snap/lift actuation"),
+        lambda: st.button("Run ABD OneString assembly" if physics_backend == "abd" else "Run snap/lift actuation"),
         tight_note=True,
     )
     sim_steps = _param_row(
@@ -957,7 +986,12 @@ def current_actuation_key() -> tuple:
         abd_executable,
         abd_timestep,
         abd_density,
+        abd_gravity_z,
+        abd_use_desk,
+        abd_desk_clearance,
         abd_stiffness,
+        abd_nthreads,
+        abd_timeout_seconds,
         abd_pull_end_ratio,
         abd_shake_amplitude,
         abd_shake_frequency_hz,
@@ -1048,6 +1082,9 @@ pipeline_params = PipelineParameters(
     model_version=selected_model_version["id"],
     t3d_extrusion_side=str(selected_model_version.get("t3d_extrusion_side", "negative_normal_from_k3d")),
     t3d_variable_topology_enabled=bool(selected_model_version.get("t3d_variable_topology_enabled", False)),
+    allow_legacy_normal_prism_emergency_fallback=bool(
+        selected_model_version.get("allow_legacy_normal_prism_emergency_fallback", False)
+    ),
     t3d_intersection_trim_enabled=bool(selected_model_version.get("t3d_intersection_trim_enabled", False)),
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
@@ -1093,7 +1130,12 @@ deployment_params = DeploymentParameters(
     abd_executable=abd_executable or None,
     abd_timestep=abd_timestep,
     abd_density=abd_density,
+    abd_gravity_z=abd_gravity_z,
+    abd_use_desk=abd_use_desk,
+    abd_desk_clearance=abd_desk_clearance,
     abd_orthogonality_stiffness=abd_stiffness,
+    abd_nthreads=abd_nthreads,
+    abd_timeout_seconds=abd_timeout_seconds,
     abd_pull_end_ratio=abd_pull_end_ratio,
     abd_shake_amplitude=abd_shake_amplitude,
     abd_shake_frequency_hz=abd_shake_frequency_hz,
@@ -1141,7 +1183,8 @@ elif st.session_state.get("actuation_key") != actuation_key:
     st.warning("Actuation settings changed. Run snap/lift actuation again to refresh the simulation.")
 
 if run_actuation:
-    with st.spinner("Solving Projective-Dynamics-style snap/lift actuation"):
+    run_label = "Autodesk ABD OneString assembly" if physics_backend == "abd" else "Projective-Dynamics-style snap/lift actuation"
+    with st.spinner(f"Solving {run_label}"):
         progress_bar = st.progress(0.0, text="Preparing deployment simulation…")
         progress_status = st.empty()
         progress_log: list[dict[str, object]] = []
@@ -1431,6 +1474,13 @@ elif view_stage == "K2D":
         "m2d_cropped_quad_count": state.mesh_2d_initial.metrics.get("m2d_cropped_quad_count"),
     })
 elif view_stage == "T3D":
+    emergency_tile_ids = state.tiles_3d.metrics.get("t3d_emergency_normal_prism_tile_ids", [])
+    if emergency_tile_ids:
+        st.warning(
+            "Geometric recovery was exhausted for the gray emergency tiles. "
+            f"A one-sided normal prism is shown for inspection only: tile ids={emergency_tile_ids}. "
+            "These tiles are not certified manufacturing geometry."
+        )
     t3d_view_columns = st.columns(3)
     show_recovery_status = t3d_view_columns[0].toggle("Show recovery status", value=True)
     show_generated_caps = t3d_view_columns[1].toggle("Show generated cap faces", value=True)
@@ -1524,10 +1574,13 @@ elif view_stage in {"Lift Points", "String Path"}:
 elif view_stage == "Assembly Animation":
     st.subheader("Assembly Animation")
     total_tiles = int(state.tiles_2d_dual_hinge.tile_count)
-    st.caption(
-        "This view shows only the physical Projective-Dynamics-style deployment: rigid tiles + collision + simultaneous gap contraction + lift constraints. "
-        "The design morph preview is disabled for physical checking."
-    )
+    selected_simulation_name = "Autodesk ABD + IPC/CCD + unilateral OneString constraint" if physics_backend == "abd" else "legacy Projective Dynamics + SAT"
+    st.caption(f"Selected simulation: {selected_simulation_name}. This view displays solver output frames, not design interpolation.")
+    if physics_backend == "abd":
+        st.info(
+            "ABD mode exports the thick T3D panel meshes, hinge pin joints, guide points and pull schedule to abd_sim. "
+            "Only frames returned by that executable are shown here; legacy PD/SAT is not used as fallback."
+        )
 
     frame_count = st.slider("animation frames", 8, 96, 40, 4)
     preview_default = min(total_tiles, 900)
@@ -1559,45 +1612,39 @@ elif view_stage == "Assembly Animation":
     else:
         st.success("T2D and T3D are nearly congruent under the current metric.")
 
-    source_label = "Paper Projective Dynamics simulation"
-    st.caption("Animation source: physical PD simulation only. Morph/interpolation preview is intentionally hidden.")
+    source_label = "Autodesk ABD simulation" if physics_backend == "abd" else "Paper Projective Dynamics simulation"
+    st.caption(f"Animation source: {source_label}.")
 
-    if source_label.startswith("Paper"):
-        st.info(
-            "Physical model used here: the string is not simulated as rope particles. It is encoded as positional constraints. "
-            "Only gaps on the computed string path receive snap constraints; selected lift gaps move toward prescribed 3D lift targets. "
-            "Rigid and collision projections keep tiles rigid and non-overlapping."
-        )
+    if physics_backend in {"legacy", "abd"}:
+        if physics_backend == "abd":
+            st.info(
+                "Physical model used here: affine bodies with IPC/CCD contact, pin-joint hinges, gravity and friction. "
+                "The routed guide points are coupled by a unilateral total-length constraint, and its commanded length decreases over time."
+            )
+        else:
+            st.info(
+                "Physical model used here: the string is not simulated as rope particles. It is encoded as positional constraints. "
+                "Only gaps on the computed string path receive snap constraints; selected lift gaps move toward prescribed 3D lift targets. "
+                "Rigid and collision projections keep tiles rigid and non-overlapping."
+            )
         c0, c1, c2, c3 = st.columns([1.3, 1.3, 1, 3])
         if "paper_pd_frame" not in st.session_state:
             st.session_state.paper_pd_frame = 0
 
         paper_sim_key = (
-            "paper_pd_animation",
+            "assembly_solver_animation",
             actuation_key,
             frame_count,
-            sim_steps,
-            solver_iterations,
-            solver_substeps,
-            rigid_weight,
-            rigid_projection_passes,
-            rigid_guard_final_projection,
-            snap_weight,
-            lift_weight,
-            collision_weight,
-            hinge_weight,
-            damping_ratio,
-            high_fidelity,
-            gravity,
-            compute_backend,
-            tensor_dtype,
         )
+        current_result_backend = str(getattr(state.simulation_result, "metrics", {}).get("physics_backend", "")) if state.simulation_result is not None else ""
         need_sim_frames = (
             state.simulation_result is None
-            or st.session_state.get("paper_pd_animation_key") != paper_sim_key
+            or current_result_backend != physics_backend
             or len(getattr(state.simulation_result, "frames", [])) < 2
+            or (physics_backend != "abd" and st.session_state.get("paper_pd_animation_key") != paper_sim_key)
         )
-        refresh_sim = c0.button("Run / refresh paper simulation", type="primary")
+        refresh_label = "Run / refresh ABD simulation" if physics_backend == "abd" else "Run / refresh paper simulation"
+        refresh_sim = c0.button(refresh_label, type="primary")
         player_mode = c1.radio(
             "player mode",
             ["Smooth browser player", "Server frame player", "Scrubber"],
@@ -1607,48 +1654,45 @@ elif view_stage == "Assembly Animation":
         if c2.button("⏮ Reset"):
             st.session_state.paper_pd_frame = 0
 
-        if refresh_sim or need_sim_frames:
-            paper_params = DeploymentParameters(
+        if need_sim_frames and physics_backend == "abd" and not refresh_sim:
+            st.warning("No ABD result matching the current settings is loaded. Press 'Run / refresh ABD simulation'.")
+
+        if refresh_sim or (need_sim_frames and physics_backend != "abd"):
+            paper_params = replace(
+                deployment_params,
                 steps=max(sim_steps, frame_count),
-                solver_iterations=solver_iterations,
-                rigid_weight=rigid_weight,
-                rigid_projection_passes=rigid_projection_passes,
-                rigid_guard_final_projection=rigid_guard_final_projection,
-                hinge_weight=hinge_weight,
-                snap_weight=snap_weight,
-                lift_weight=lift_weight,
-                collision_weight=collision_weight,
-                damping_ratio=damping_ratio,
-                quasi_static_pull_speed=quasi_static_pulling_speed,
-                high_fidelity=high_fidelity,
-                hinge_rotational_stiffness=hinge_rotational_stiffness,
-                hinge_damping=hinge_damping,
-                tile_mass=tile_mass,
-                gravity=gravity,
-                contact_friction=contact_friction,
-                string_channel_friction=channel_friction,
-                solver_substeps=solver_substeps,
-                debug_all_pair_collision=debug_all_pair_collision,
                 store_animation_frames=True,
                 max_animation_frames=frame_count,
-                snap_scope="all_internal_gaps",
-                use_target_gap_contraction=True,
-                compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
             )
-            backend_info = compute_backend_info(paper_params.compute)
-            st.write(
-                {
-                    "requested_backend": backend_info.get("requested_backend"),
-                    "selected_backend": backend_info.get("current_backend"),
-                    "cuda_available": backend_info.get("cuda_available"),
-                    "gpu_name": backend_info.get("gpu_name"),
-                    "use_gpu_for_simulation": bool(paper_params.compute.use_gpu_for_simulation),
-                    "simulation_frames": int(paper_params.max_animation_frames),
-                    "simulation_steps": int(paper_params.steps),
-                    "solver_iterations": int(paper_params.solver_iterations),
-                    "solver_substeps": int(paper_params.solver_substeps),
-                }
-            )
+            if physics_backend == "abd":
+                st.write(
+                    {
+                        "physics_backend": "abd",
+                        "executable": paper_params.abd_executable or "auto-detect project Release build",
+                        "timestep": paper_params.abd_timestep,
+                        "simulation_steps": paper_params.steps,
+                        "cpu_threads": paper_params.abd_nthreads if paper_params.abd_nthreads > 0 else "automatic (ABD default)",
+                        "timeout_seconds": paper_params.abd_timeout_seconds,
+                        "pull_end_ratio": paper_params.abd_pull_end_ratio,
+                        "collision_model": "Autodesk ABD IPC barrier + CCD",
+                        "legacy_fallback": False,
+                    }
+                )
+            else:
+                backend_info = compute_backend_info(paper_params.compute)
+                st.write(
+                    {
+                        "physics_backend": "legacy",
+                        "requested_backend": backend_info.get("requested_backend"),
+                        "selected_backend": backend_info.get("current_backend"),
+                        "cuda_available": backend_info.get("cuda_available"),
+                        "gpu_name": backend_info.get("gpu_name"),
+                        "simulation_frames": int(paper_params.max_animation_frames),
+                        "simulation_steps": int(paper_params.steps),
+                        "solver_iterations": int(paper_params.solver_iterations),
+                        "solver_substeps": int(paper_params.solver_substeps),
+                    }
+                )
             progress_text = st.empty()
             progress_bar = st.progress(0.0)
 
@@ -1656,7 +1700,7 @@ elif view_stage == "Assembly Animation":
                 progress_bar.progress(max(0.0, min(1.0, float(progress_value))))
                 progress_text.caption(f"{stage}: {detail}")
 
-            with st.spinner("Running paper-style snap/lift Projective Dynamics simulation"):
+            with st.spinner(f"Running {selected_simulation_name}"):
                 try:
                     state.simulation_result = simulate_onestring_deployment(
                         state,
@@ -1667,15 +1711,21 @@ elif view_stage == "Assembly Animation":
                     st.error(str(exc))
                     st.stop()
             progress_bar.progress(1.0)
+            runtime = state.simulation_result.metrics.get("simulation_runtime_seconds", state.simulation_result.metrics.get("elapsed_time"))
+            runtime_text = f"{float(runtime):.3f}s" if runtime is not None else "not reported"
             progress_text.caption(
-                f"Done: actual_backend={state.simulation_result.metrics.get('actual_backend')}, "
-                f"elapsed={state.simulation_result.metrics.get('elapsed_time'):.3f}s"
+                f"Done: physics_backend={state.simulation_result.metrics.get('physics_backend')}, "
+                f"actual_backend={state.simulation_result.metrics.get('actual_backend', physics_backend)}, elapsed={runtime_text}"
             )
             st.session_state.paper_pd_animation_key = paper_sim_key
             st.session_state.actuation_key = actuation_key
             st.session_state.paper_pd_frame = 0
 
         result = state.simulation_result
+        if result is not None and str(result.metrics.get("physics_backend", "")) != physics_backend:
+            result = None
+        if result is None and physics_backend == "abd":
+            st.stop()
         frames = result.frames if result is not None and result.frames else [state.tiles_2d_dual_hinge.vertices]
         max_frame = max(0, len(frames) - 1)
         current_frame = st.slider(
@@ -1700,11 +1750,11 @@ elif view_stage == "Assembly Animation":
                 top_faces=state.tiles_3d.top_faces[:limit],
                 bottom_faces=state.tiles_3d.bottom_faces[:limit],
                 side_faces=state.tiles_3d.side_faces[:limit],
-                stage="paper Projective Dynamics snap/lift simulation",
+                stage=source_label,
             )
             fig = figure_tile_assembly(
                 frame_assembly,
-                title=f"Paper PD snap/lift simulation frame {frame_id + 1}/{max_frame + 1}",
+                title=f"{source_label} frame {frame_id + 1}/{max_frame + 1}",
                 hinge_graph=state.hinge_graph if show_hinges_preview and limit == total_tiles else None,
             )
             if show_target_preview:
@@ -1729,7 +1779,7 @@ elif view_stage == "Assembly Animation":
                 max_tiles=preview_tiles,
                 show_target=show_target_preview,
                 fps=fps,
-                title=f"Smooth paper PD snap/lift simulation ({len(frames)} frames)",
+                title=f"Smooth {source_label} ({len(frames)} frames)",
             )
             st.plotly_chart(
                 smooth_fig,
@@ -1756,7 +1806,8 @@ elif view_stage == "Assembly Animation":
         if result is not None:
             st.write(
                 {
-                    "simulation_model": "paper-style Projective Dynamics: E = w_rigid E_rigid + w_collision E_collision + w_actuation(E_snap + E_lift)",
+                    "physics_backend": result.metrics.get("physics_backend"),
+                    "simulation_model": "Autodesk ABD affine bodies + IPC/CCD + unilateral total-path-length string" if physics_backend == "abd" else "paper-style Projective Dynamics: E = w_rigid E_rigid + w_collision E_collision + w_actuation(E_snap + E_lift)",
                     "actual_backend": result.metrics.get("actual_backend"),
                     "dominant_backend": result.metrics.get("dominant_backend"),
                     "elapsed_time": result.metrics.get("elapsed_time"),
@@ -1770,8 +1821,26 @@ elif view_stage == "Assembly Animation":
                     "snap_scope": result.metrics.get("snap_scope"),
                     "actuated_snap_gap_count": result.metrics.get("actuated_snap_gap_count"),
                     "use_target_gap_contraction": result.metrics.get("use_target_gap_contraction"),
+                    "legacy_sat_collision_projection_used": result.metrics.get("legacy_sat_collision_projection_used"),
                 }
             )
+            if physics_backend == "abd":
+                st.subheader("ABD OneString solver log")
+                st.write(
+                    {
+                        "result_json": getattr(result, "result_json_path", None),
+                        "gltf": getattr(result, "gltf_path", None),
+                        "npz": getattr(result, "npz_path", None),
+                        "frame_count": len(frames),
+                        "final_active_contacts": result.metrics.get("final_collision_count"),
+                        "initial_layout": result.metrics.get("abd_initial_layout"),
+                        "rest_collision_geometry": result.metrics.get("abd_rest_collision_geometry"),
+                        "collision_skin": result.metrics.get("abd_collision_skin"),
+                        "legacy_fallback_used": bool(result.metrics.get("legacy_sat_collision_projection_used", False)),
+                    }
+                )
+                if getattr(result, "frame_logs", None):
+                    st.dataframe(result.frame_logs, width="stretch")
 
     else:
         st.warning("This is only a design morph preview. It is not the paper simulation and should not be used to judge physical actuation.")
@@ -1879,9 +1948,9 @@ elif view_stage == "Assembly Animation":
 
     st.write(
         {
-            "paper_simulation": "Projective Dynamics with rigid, collision, snap, and lift constraints. String is abstracted as geometry constraints, not rope particles.",
-            "snap": "paired side-face midpoints along the routed string path are pulled together",
-            "lift": "selected lift gaps are pulled toward prescribed 3D lift targets",
+            "selected_physics_backend": physics_backend,
+            "simulation": "Autodesk ABD affine-body dynamics with IPC/CCD contact and unilateral guided string." if physics_backend == "abd" else "Projective Dynamics with rigid, collision, snap, and lift constraints.",
+            "actuation": "unilateral guided-string total length command" if physics_backend == "abd" else "paired side-face midpoint snap plus selected lift targets",
             "preview_limit": preview_tiles,
             "tiles": total_tiles,
             "string_route_nodes": len(state.string_path.gap_ids),
@@ -1890,9 +1959,13 @@ elif view_stage == "Assembly Animation":
     )
 
 elif view_stage == "Final Deployed":
-    if state.simulation_result is None:
+    displayed_result_backend = str(getattr(state.simulation_result, "metrics", {}).get("physics_backend", "")) if state.simulation_result is not None else ""
+    if state.simulation_result is None or displayed_result_backend != physics_backend:
+        if state.simulation_result is not None:
+            st.warning(f"Loaded result uses '{displayed_result_backend}', but '{physics_backend}' is selected. Run the selected simulation before viewing its result.")
         st.plotly_chart(figure_tile_assembly(state.tiles_2d_dual_hinge, title="T2D start state"), width="stretch", key="actuation_start")
     else:
+        st.caption(f"Result source: {displayed_result_backend}")
         frame_index = st.slider("frame", 0, len(state.simulation_result.frames) - 1, len(state.simulation_result.frames) - 1)
         frame_assembly = TileAssembly(
             vertices=state.simulation_result.frames[frame_index],

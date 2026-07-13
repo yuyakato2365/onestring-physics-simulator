@@ -17,6 +17,7 @@
 #include <io/write_gltf.hpp>
 #include <io/write_obj.hpp>
 #include <physics/rigid_body_problem.hpp>
+#include <problems/distance_barrier_rb_problem.hpp>
 #include <problems/problem_factory.hpp>
 #include <utils/get_rss.hpp>
 #include <utils/regular_2d_grid.hpp>
@@ -91,6 +92,27 @@ bool SimState::load_scene(const std::string& filename, const std::string& patch)
     return false;
 }
 
+bool SimState::load_onestring_manifest(const std::string& filename)
+{
+    std::shared_ptr<DistanceBarrierRBProblem> problem =
+        std::dynamic_pointer_cast<DistanceBarrierRBProblem>(problem_ptr);
+    if (!problem) {
+        spdlog::error(
+            "OneString manifest requires distance_barrier_rb_problem");
+        return false;
+    }
+    if (!problem->load_onestring_manifest(filename)) {
+        return false;
+    }
+
+    onestring_string_lengths.clear();
+    onestring_command_lengths.clear();
+    onestring_constraint_violations.clear();
+    onestring_active.clear();
+    record_onestring_stats();
+    return true;
+}
+
 bool SimState::reload_scene() { return load_scene(scene_file); }
 
 bool SimState::load_simulation(const nlohmann::json& input_args)
@@ -160,7 +182,10 @@ bool SimState::init(const nlohmann::json& args_in)
                 "tolerance": 1e-10,
                 "pre_max_iter": 1,
                 "mtype": 2
-            }
+            },
+            "use_parallel_pcg": true,
+            "parallel_pcg_max_iterations": 300,
+            "parallel_pcg_tolerance": 1e-5
         },
         "ipc_solver": {
             "dhat_epsilon": 1e-9,
@@ -264,6 +289,10 @@ bool SimState::init(const nlohmann::json& args_in)
     solver_iterations.clear();
     num_contacts.clear();
     step_minimum_distances.clear();
+    onestring_string_lengths.clear();
+    onestring_command_lengths.clear();
+    onestring_constraint_violations.clear();
+    onestring_active.clear();
 
     return true;
 }
@@ -375,6 +404,11 @@ void SimState::simulation_step()
     PROFILE_POINT("SimState::simulation_step");
     PROFILE_START();
     m_num_simulation_steps += 1;
+    if (std::shared_ptr<DistanceBarrierRBProblem> problem =
+            std::dynamic_pointer_cast<DistanceBarrierRBProblem>(problem_ptr)) {
+        problem->set_onestring_time(
+            double(m_num_simulation_steps) * problem_ptr->timestep());
+    }
     m_step_has_collision = false;
     m_step_has_intersections = false;
 
@@ -407,6 +441,21 @@ void SimState::simulation_step()
     PROFILE_END();
 }
 
+void SimState::record_onestring_stats()
+{
+    std::shared_ptr<DistanceBarrierRBProblem> problem =
+        std::dynamic_pointer_cast<DistanceBarrierRBProblem>(problem_ptr);
+    if (!problem || !problem->has_onestring_constraint()) {
+        return;
+    }
+    const nlohmann::json metrics = problem->onestring_metrics();
+    onestring_string_lengths.push_back(metrics.at("string_length").get<double>());
+    onestring_command_lengths.push_back(metrics.at("command_length").get<double>());
+    onestring_constraint_violations.push_back(
+        metrics.at("constraint_violation").get<double>());
+    onestring_active.push_back(metrics.at("active").get<bool>() ? 1 : 0);
+}
+
 void SimState::save_simulation_step()
 {
     PROFILE_POINT("SimState::save_simulation_step");
@@ -417,6 +466,7 @@ void SimState::save_simulation_step()
     solver_iterations.push_back(problem_ptr->opt_result.num_iterations);
     num_contacts.push_back(problem_ptr->num_contacts());
     step_minimum_distances.push_back(problem_ptr->compute_min_distance());
+    record_onestring_stats();
 
     PROFILE_END();
 }
@@ -445,6 +495,27 @@ bool SimState::save_simulation(const std::string& filename)
     stats["step_minimum_distances"] = step_minimum_distances;
     stats["solve_stats"] = problem_ptr->solver().stats();
     results["stats"] = stats;
+
+    if (!onestring_string_lengths.empty()) {
+        nlohmann::json onestring_stats;
+        onestring_stats["string_length"] = onestring_string_lengths;
+        onestring_stats["command_length"] = onestring_command_lengths;
+        onestring_stats["constraint_violation"] =
+            onestring_constraint_violations;
+        onestring_stats["active"] = onestring_active;
+        onestring_stats["ccd_seconds"] = nlohmann::json::array();
+        onestring_stats["linear_solve_seconds"] = nlohmann::json::array();
+        onestring_stats["device_report"] = {
+#ifdef ONESTRING_ABD_CUDA_CCD
+            { "ccd", "CUDA IPC Toolkit CCD" },
+#else
+            { "ccd", "CPU IPC Toolkit CCD" },
+#endif
+            { "hessian", "TBB parallel CPU assembly" },
+            { "newton_solve", "TBB parallel BiCGSTAB with Eigen SimplicialLDLT fallback" }
+        };
+        results["onestring_stats"] = onestring_stats;
+    }
 
     std::ofstream file(filename);
     if (!file) {

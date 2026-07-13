@@ -8,6 +8,7 @@
 #include <autodiff/autodiff_types.hpp>
 #include <opt/distance_barrier_constraint.hpp>
 #include <opt/optimization_problem.hpp>
+#include <onestring/onestring_constraint.hpp>
 #include <physics/rigid_body_problem.hpp>
 #include <problems/barrier_problem.hpp>
 #include <problems/rigid_body_collision_constraint.hpp>
@@ -43,6 +44,14 @@ public:
     nlohmann::json settings() const override;
 
     nlohmann::json state() const override;
+
+    bool load_onestring_manifest(const std::string& filename);
+    void set_onestring_time(double time) { m_onestring_time = time; }
+    bool has_onestring_constraint() const
+    {
+        return m_onestring_constraint && m_onestring_constraint->enabled();
+    }
+    nlohmann::json onestring_metrics() const;
 
     static std::string problem_name() { return "distance_barrier_rb_problem"; }
 
@@ -312,6 +321,10 @@ public:
 
     // Linear constraints
     LinearConstraintHandler m_linear_cons;
+
+    // OneString unilateral path-length constraint.
+    std::shared_ptr<OneStringConstraint> m_onestring_constraint;
+    double m_onestring_time = 0.0;
 
 protected:
     /// Update problem using current status of bodies.

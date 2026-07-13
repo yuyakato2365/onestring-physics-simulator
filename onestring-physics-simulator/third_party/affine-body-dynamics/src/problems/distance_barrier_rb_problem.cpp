@@ -119,6 +119,43 @@ nlohmann::json DistanceBarrierRBProblem::state() const
     return json;
 }
 
+bool DistanceBarrierRBProblem::load_onestring_manifest(
+    const std::string& filename)
+{
+    std::shared_ptr<OneStringConstraint> constraint =
+        std::make_shared<OneStringConstraint>();
+    std::string error_message;
+    if (!constraint->load(filename, num_bodies(), error_message)) {
+        spdlog::error("Unable to load OneString manifest: {}", error_message);
+        return false;
+    }
+    m_onestring_constraint = constraint;
+    m_onestring_time = 0.0;
+    spdlog::info("Loaded OneString unilateral path constraint: {}", filename);
+    return true;
+}
+
+nlohmann::json DistanceBarrierRBProblem::onestring_metrics() const
+{
+    if (!has_onestring_constraint()) {
+        return {
+            { "string_length", 0.0 },
+            { "command_length", 0.0 },
+            { "constraint_violation", 0.0 },
+            { "active", false }
+        };
+    }
+    const Eigen::VectorXd x = PoseD::poses_to_dofs(m_assembler.rb_poses_t1());
+    const OneStringMetrics metrics =
+        m_onestring_constraint->metrics(x, dim(), m_onestring_time);
+    return {
+        { "string_length", metrics.string_length },
+        { "command_length", metrics.command_length },
+        { "constraint_violation", metrics.constraint_violation },
+        { "active", metrics.active }
+    };
+}
+
 Eigen::VectorXi DistanceBarrierRBProblem::free_dof() const
 {
 
@@ -628,6 +665,7 @@ double DistanceBarrierRBProblem::compute_energy_term(
     int trans_ndof = PoseD::dim_to_trans_ndof(dim());
     // std::cout << "before energy initiation \n";
     Eigen::VectorXd energies = Eigen::VectorXd::Zero(num_bodies());
+    double onestring_energy = 0.0;
     if (compute_grad) {
         grad.setZero(x.size());
     }
@@ -688,6 +726,26 @@ double DistanceBarrierRBProblem::compute_energy_term(
         // PROFILE_END(ASSEMBLE_ENERGY_HESS);
     }
 
+    if (has_onestring_constraint()) {
+        Eigen::VectorXd onestring_grad;
+        Eigen::SparseMatrix<double> onestring_hess;
+        onestring_energy = m_onestring_constraint->compute_energy(
+            x,
+            dim(),
+            m_onestring_time,
+            timestep() * timestep(),
+            onestring_grad,
+            onestring_hess,
+            compute_grad,
+            compute_hess);
+        if (compute_grad) {
+            grad += onestring_grad;
+        }
+        if (compute_hess) {
+            hess += onestring_hess;
+        }
+    }
+
 #ifdef ABD_WITH_DERIVATIVE_CHECK
     if (!is_checking_derivative) {
         is_checking_derivative = true;
@@ -712,7 +770,7 @@ double DistanceBarrierRBProblem::compute_energy_term(
     }
 #endif
     PROFILE_END();
-    return energies.sum();
+    return energies.sum() + onestring_energy;
 }
 
 // @javidf: theses are the added methods. Most of them are supposed to replace

@@ -30,6 +30,16 @@ FetchContent_Populate(libigl)
 
 include(eigen)
 
+# ONESTRING: prefetch predicates with modern FetchContent
+# Avoid the legacy libigl DownloadProject child build on modern Windows/CMake.
+FetchContent_Declare(
+    predicates
+    GIT_REPOSITORY https://github.com/libigl/libigl-predicates.git
+    GIT_TAG 488242fa2b1f98a9c5bd1441297fb4a99a6a9ae4
+    GIT_SHALLOW FALSE
+)
+FetchContent_MakeAvailable(predicates)
+
 set(LIBIGL_WITH_PREDICATES ON CACHE BOOL "Use exact predicates" FORCE)
 
 list(APPEND CMAKE_MODULE_PATH ${libigl_SOURCE_DIR}/cmake)

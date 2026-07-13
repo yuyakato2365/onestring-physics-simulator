@@ -9,6 +9,7 @@ from onestring_physics.t3d_recovery import (
     T3D_OK_NOMINAL_FRUSTUM,
     T3D_RECOVERED_CAPPED_FRUSTUM,
     T3D_RECOVERED_LOCAL_THICKNESS,
+    T3D_RECOVERED_LEGACY_EMERGENCY_PRISM,
     T3D_RECOVERED_PYRAMID,
     T3D_RECOVERED_WEDGE,
     build_tile_polyhedron,
@@ -156,3 +157,30 @@ def test_nonmanifold_contact_fails_without_explicit_junction_design():
     with pytest.raises(T3DConstructionError) as caught:
         _extrude_tiles(mesh, 0.2, "T3D")
     assert caught.value.status == T3D_FAILED_NONMANIFOLD_CONTACT
+
+
+def test_exhausted_recovery_uses_visible_emergency_prism_when_enabled():
+    vertices = np.asarray(
+        [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]],
+        dtype=float,
+    )
+    mesh = QuadMesh(
+        vertices,
+        np.asarray([[0, 1, 2, 3]], dtype=int),
+        None,
+        "K3D",
+        {
+            "t3d_variable_topology_enabled": True,
+            "allow_legacy_normal_prism_emergency_fallback": True,
+            "t3d_minimum_volume_ratio": 100.0,
+        },
+    )
+    assembly, _report = _extrude_tiles(mesh, 0.2, "T3D")
+    solid = assembly.authoritative_solids[0]
+    assert solid.recovery_status == T3D_RECOVERED_LEGACY_EMERGENCY_PRISM
+    assert solid.metrics["display_color"] == "gray"
+    assert solid.metrics["manufacturing_authoritative"] is False
+    assert assembly.metrics["t3d_emergency_normal_prism_tile_ids"] == [0]
+    assert assembly.metrics["legacy_normal_prism_emergency_fallback_used"] is True
+    assert np.allclose(solid.vertices[:4], vertices)
+    assert np.allclose(solid.vertices[4:, 2], -0.2)
