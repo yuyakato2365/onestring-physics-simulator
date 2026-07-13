@@ -57,6 +57,12 @@ from .reference_bff import (
     triangle_jacobian_diagnostics,
     validate_reference_mesh,
 )
+from .visualization_status_patch import install_status_visualization_patch
+
+# Make recovery colors independent of Plotly lighting.  In particular, clipped
+# cyan/blue solids must never appear gray like the non-authoritative emergency
+# normal prism.
+install_status_visualization_patch()
 
 __all__ = [
     "DesignParameters",
@@ -110,5 +116,6 @@ __all__ = [
     "run_official_bff",
     "triangle_jacobian_diagnostics",
     "validate_reference_mesh",
+    "install_status_visualization_patch",
     "__version__",
 ]
