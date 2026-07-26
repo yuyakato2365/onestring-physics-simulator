@@ -9,6 +9,7 @@ on:
       - "onestring-physics-simulator/src/onestring_physics/discrete_bff.py"
       - "onestring-physics-simulator/src/onestring_physics/__init__.py"
       - "onestring-physics-simulator/tests/test_discrete_bff.py"
+      - "onestring-physics-simulator/scripts/verify_discrete_bff.py"
       - ".github/workflows/discrete-bff.yml"
 
 jobs:
@@ -28,5 +29,7 @@ jobs:
         run: python -m pip install --upgrade pip pytest numpy scipy
       - name: Run discrete BFF tests
         run: python -m pytest tests/test_discrete_bff.py -q
+      - name: Run discrete BFF smoke verifier
+        run: python scripts/verify_discrete_bff.py
       - name: Compile BFF integration
-        run: python -m py_compile src/onestring_physics/discrete_bff.py src/onestring_physics/__init__.py
+        run: python -m py_compile src/onestring_physics/discrete_bff.py src/onestring_physics/__init__.py scripts/verify_discrete_bff.py
