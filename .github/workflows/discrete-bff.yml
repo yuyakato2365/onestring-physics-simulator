@@ -1,0 +1,32 @@
+name: Discrete BFF validation
+
+on:
+  push:
+    branches:
+      - codex/discrete-bff-rectangle
+  pull_request:
+    paths:
+      - "onestring-physics-simulator/src/onestring_physics/discrete_bff.py"
+      - "onestring-physics-simulator/src/onestring_physics/__init__.py"
+      - "onestring-physics-simulator/tests/test_discrete_bff.py"
+      - ".github/workflows/discrete-bff.yml"
+
+jobs:
+  test-discrete-bff:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: onestring-physics-simulator/pyproject.toml
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest numpy scipy
+      - name: Run discrete BFF tests
+        run: python -m pytest tests/test_discrete_bff.py -q
+      - name: Compile BFF integration
+        run: python -m py_compile src/onestring_physics/discrete_bff.py src/onestring_physics/__init__.py
