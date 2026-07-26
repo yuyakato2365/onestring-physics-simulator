@@ -18,7 +18,7 @@ _discrete_bff_build = _onestring_pipeline._build_surface_parameterization
 
 def _build_surface_parameterization_with_bff_rectangle_semantics(surface, target, grid, params):
     result = _discrete_bff_build(surface, target, grid, params)
-    if str(getattr(params, "omega_parameterization_mode", "bff")) == "bff":
+    if result.metrics.get("bff_backend_used") == "local_discrete_bff":
         result.metrics["omega_boundary_forced_rectangle"] = True
         result.metrics["omega_boundary_fixed"] = False
         result.metrics["omega_boundary_shape"] = "rectangular"
