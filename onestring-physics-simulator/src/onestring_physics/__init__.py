@@ -1,5 +1,14 @@
 """Design and deployment tools for a OneString-inspired simulator."""
 
+# Import and patch the compatibility-wrapper pipeline before re-exporting its
+# public symbols.  Python executes a package's __init__ before resolving
+# ``onestring_physics.onestring_pipeline``, so this also covers direct submodule
+# imports used by the Streamlit application and tests.
+from . import onestring_pipeline as _onestring_pipeline
+from .discrete_bff import install_discrete_bff
+
+install_discrete_bff(_onestring_pipeline)
+
 from .design_optimizer import DesignParameters, DesignResult, optimize_design
 from .input_shape import create_builtin_shape, load_target_shape, normalize_shape, sample_target_surface
 from .onestring_pipeline import (
