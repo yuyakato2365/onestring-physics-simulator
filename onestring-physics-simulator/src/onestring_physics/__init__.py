@@ -1,13 +1,32 @@
 """Design and deployment tools for a OneString-inspired simulator."""
 
 # Import and patch the compatibility-wrapper pipeline before re-exporting its
-# public symbols.  Python executes a package's __init__ before resolving
+# public symbols. Python executes a package's __init__ before resolving
 # ``onestring_physics.onestring_pipeline``, so this also covers direct submodule
 # imports used by the Streamlit application and tests.
 from . import onestring_pipeline as _onestring_pipeline
 from .discrete_bff import install_discrete_bff
 
 install_discrete_bff(_onestring_pipeline)
+
+# The discrete BFF boundary is not a fixed Dirichlet rectangle, but the four
+# prescribed 90-degree corners plus exact closure still produce a rectangular
+# Omega. Preserve the downstream strict-rectangle crop semantics while keeping
+# omega_boundary_fixed=False.
+_discrete_bff_build = _onestring_pipeline._build_surface_parameterization
+
+
+def _build_surface_parameterization_with_bff_rectangle_semantics(surface, target, grid, params):
+    result = _discrete_bff_build(surface, target, grid, params)
+    if str(getattr(params, "omega_parameterization_mode", "bff")) == "bff":
+        result.metrics["omega_boundary_forced_rectangle"] = True
+        result.metrics["omega_boundary_fixed"] = False
+        result.metrics["omega_boundary_shape"] = "rectangular"
+    return result
+
+
+_onestring_pipeline._build_surface_parameterization = _build_surface_parameterization_with_bff_rectangle_semantics
+_onestring_pipeline._original._build_surface_parameterization = _build_surface_parameterization_with_bff_rectangle_semantics
 
 from .design_optimizer import DesignParameters, DesignResult, optimize_design
 from .input_shape import create_builtin_shape, load_target_shape, normalize_shape, sample_target_surface
