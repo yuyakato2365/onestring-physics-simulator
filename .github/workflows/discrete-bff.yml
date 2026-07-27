@@ -1,25 +1,9 @@
 name: BFF and CEPS validation
 
+# Disabled automatic execution while CEPS integration is under active development.
+# Run manually from the GitHub Actions page when validation is needed.
 on:
-  push:
-    branches:
-      - codex/discrete-bff-rectangle
-  pull_request:
-    paths:
-      - "onestring-physics-simulator/src/onestring_physics/discrete_bff.py"
-      - "onestring-physics-simulator/src/onestring_physics/official_ceps.py"
-      - "onestring-physics-simulator/src/onestring_physics/ceps_paired_output.py"
-      - "onestring-physics-simulator/src/onestring_physics/ceps_outer_boundary.py"
-      - "onestring-physics-simulator/src/onestring_physics/ceps_strict_adapter.py"
-      - "onestring-physics-simulator/src/onestring_physics/__init__.py"
-      - "onestring-physics-simulator/tests/test_discrete_bff.py"
-      - "onestring-physics-simulator/tests/test_official_ceps.py"
-      - "onestring-physics-simulator/tests/test_ceps_paired_output.py"
-      - "onestring-physics-simulator/tests/test_ceps_outer_boundary.py"
-      - "onestring-physics-simulator/tests/test_ceps_strict_adapter.py"
-      - "onestring-physics-simulator/scripts/verify_discrete_bff.py"
-      - "onestring-physics-simulator/scripts/verify_ceps_integration.py"
-      - ".github/workflows/discrete-bff.yml"
+  workflow_dispatch:
 
 jobs:
   test-parameterization-backends:
