@@ -8,60 +8,34 @@ from onestring_physics.official_ceps import _omega_boundary
 from onestring_physics.onestring_pipeline import _clip_m2d_faces_to_omega_boundary
 
 
-def test_ceps_outer_boundary_ignores_internal_seam_vertices() -> None:
-    # Four exterior rectangle corners plus points belonging to an internal CEPS
-    # cut seam. The external Omega polygon must be the rectangle hull, not an
-    # arbitrary boundary loop formed by the duplicated seam connectivity.
+def test_ceps_boundary_uses_true_concave_topological_loop_not_convex_hull() -> None:
+    # L-shaped disk. The physical boundary contains the concave corner (1, 1),
+    # which a convex hull would delete and thereby invent UV coverage.
     uv = np.asarray(
-        [
-            [-2.0, -1.0],
-            [2.0, -1.0],
-            [2.0, 1.0],
-            [-2.0, 1.0],
-            [-0.2, -0.1],
-            [0.2, -0.1],
-            [0.0, 0.2],
-        ],
-        dtype=float,
+        [[0, 0], [2, 0], [2, 1], [1, 1], [1, 2], [0, 2]], dtype=float
     )
     faces = np.asarray(
-        [
-            [0, 1, 4],
-            [1, 2, 5],
-            [2, 3, 6],
-            [3, 0, 4],
-            [4, 5, 6],
-        ],
-        dtype=int,
+        [[0, 1, 3], [1, 2, 3], [0, 3, 5], [3, 4, 5]], dtype=int
     )
 
     boundary, metrics = _omega_boundary(uv, faces)
 
     assert np.allclose(boundary[0], boundary[-1])
-    assert np.allclose(np.min(boundary[:-1], axis=0), [-2.0, -1.0])
-    assert np.allclose(np.max(boundary[:-1], axis=0), [2.0, 1.0])
-    assert metrics["ceps_omega_boundary_source"] == "convex_hull_of_all_paired_ceps_uv_vertices"
-    assert metrics["ceps_omega_boundary_convex"] is True
-    assert metrics["ceps_internal_uv_seams_excluded_from_omega_boundary"] is True
+    assert any(np.allclose(point, [1.0, 1.0]) for point in boundary[:-1])
+    assert metrics["ceps_omega_boundary_source"] == "physical_boundary_loop_of_stitched_common_refinement"
+    assert metrics["ceps_omega_boundary_convex_hull_used"] is False
+    assert metrics["ceps_input_open_boundary_preserved"] is True
+    assert metrics["ceps_surface_boundary_loop_count"] == 1
 
 
-def test_ceps_outer_boundary_keeps_regular_m2d_quads() -> None:
+def test_ceps_physical_boundary_keeps_regular_m2d_quads() -> None:
     uv = np.asarray(
-        [
-            [-2.0, -1.0],
-            [2.0, -1.0],
-            [2.0, 1.0],
-            [-2.0, 1.0],
-            [0.0, 0.0],
-        ],
+        [[-2.0, -1.0], [2.0, -1.0], [2.0, 1.0], [-2.0, 1.0], [0.0, 0.0]],
         dtype=float,
     )
     faces = np.asarray([[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]], dtype=int)
     boundary, _metrics = _omega_boundary(uv, faces)
 
-    # A 4x2 regular grid exactly covering the CEPS rectangle. Strict rectangular
-    # clipping must retain all eight quads rather than raising the user's
-    # "removed all quads" failure.
     xs = np.linspace(-2.0, 2.0, 5)
     ys = np.linspace(-1.0, 1.0, 3)
     xx, yy = np.meshgrid(xs, ys, indexing="xy")
