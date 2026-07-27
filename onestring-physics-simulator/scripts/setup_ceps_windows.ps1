@@ -11,6 +11,20 @@ function Require-Command([string]$Name) {
     }
 }
 
+function Invoke-CheckedNative {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+        [string[]]$Arguments = @()
+    )
+
+    & $Command @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        $rendered = @($Command) + $Arguments
+        throw "Native command failed with exit code $LASTEXITCODE`: $($rendered -join ' ')"
+    }
+}
+
 Require-Command git
 Require-Command cmake
 
@@ -22,10 +36,10 @@ if (Test-Path -LiteralPath $source) {
         throw "$source already exists but is not a CEPS git checkout. Choose another -InstallRoot."
     }
     Write-Host "Updating existing CEPS checkout: $source"
-    git -C $source fetch origin
-    git -C $source checkout main
-    git -C $source pull --ff-only origin main
-    git -C $source submodule update --init --recursive
+    Invoke-CheckedNative -Command "git" -Arguments @("-C", $source, "fetch", "origin")
+    Invoke-CheckedNative -Command "git" -Arguments @("-C", $source, "checkout", "main")
+    Invoke-CheckedNative -Command "git" -Arguments @("-C", $source, "pull", "--ff-only", "origin", "main")
+    Invoke-CheckedNative -Command "git" -Arguments @("-C", $source, "submodule", "update", "--init", "--recursive")
 } else {
     $parent = Split-Path -Path $source -Parent
     # For a root-level install such as C:\CEPS, $parent is C:\. The drive root
@@ -35,18 +49,33 @@ if (Test-Path -LiteralPath $source) {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
     Write-Host "Cloning official CEPS into $source"
-    git clone --recursive https://github.com/MarkGillespie/CEPS.git $source
+    Invoke-CheckedNative -Command "git" -Arguments @("clone", "--recursive", "https://github.com/MarkGillespie/CEPS.git", $source)
 }
 
 if ($ForceReconfigure -and (Test-Path -LiteralPath $build)) {
-    Remove-Item $build -Recurse -Force
+    Write-Host "Removing previous CEPS build tree: $build"
+    Remove-Item -LiteralPath $build -Recurse -Force
 }
 
 Write-Host "Configuring CEPS Release build..."
-cmake -S $source -B $build -DCMAKE_BUILD_TYPE=Release
+# CEPS pins an older Polyscope whose cmake_minimum_required() predates 3.5.
+# CMake 4.x removed that compatibility. This cache variable is the supported
+# external compatibility override recommended by CMake for unmodified legacy
+# third-party projects.
+Invoke-CheckedNative -Command "cmake" -Arguments @(
+    "-S", $source,
+    "-B", $build,
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+)
 
 Write-Host "Building parameterize.exe..."
-cmake --build $build --config Release --target parameterize --parallel
+Invoke-CheckedNative -Command "cmake" -Arguments @(
+    "--build", $build,
+    "--config", "Release",
+    "--target", "parameterize",
+    "--parallel"
+)
 
 $candidates = @(
     (Join-Path $build "bin\Release\parameterize.exe"),
@@ -55,7 +84,7 @@ $candidates = @(
 )
 $executable = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $executable) {
-    $executable = Get-ChildItem $build -Filter parameterize.exe -Recurse -File |
+    $executable = Get-ChildItem -LiteralPath $build -Filter parameterize.exe -Recurse -File |
         Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $executable) {
