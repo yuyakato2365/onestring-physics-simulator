@@ -1,18 +1,16 @@
-"""Recover the external CEPS Omega boundary in the presence of UV seams.
+"""Use the true physical boundary of the stitched CEPS common refinement.
 
-The official common-refinement OBJ may contain duplicated seam vertices. After
-pairing 3D and UV vertices, those seams appear as additional topological boundary
-loops. The OneString M2D crop stage needs the external polygonal domain, not one
-of the internal cut loops. CEPS is invoked here with four positive pi/2 boundary
-exterior angles and zero elsewhere, so the intended domain is convex. Its outer
-convex hull is therefore the appropriate Omega clipping boundary.
+The CEPS cut graph is stitched before this module runs, so the surface topology
+must again be one disk with one boundary loop. The Omega crop boundary is that
+loop itself. A convex hull is deliberately forbidden because it can include UV
+regions with no CEPS triangles and can make OneString panels bridge the open
+bottom boundary.
 """
 from __future__ import annotations
 
 from typing import Any
 
 import numpy as np
-from scipy.spatial import ConvexHull
 
 
 def _polygon_area(points: np.ndarray) -> float:
@@ -25,54 +23,71 @@ def _polygon_area(points: np.ndarray) -> float:
     )
 
 
+def _remove_consecutive_duplicates(points: np.ndarray, tolerance: float = 1e-10) -> np.ndarray:
+    values = np.asarray(points, dtype=float)
+    if len(values) == 0:
+        return values.reshape(0, 2)
+    kept = [values[0]]
+    for point in values[1:]:
+        if float(np.linalg.norm(point - kept[-1])) > tolerance:
+            kept.append(point)
+    if len(kept) > 1 and float(np.linalg.norm(kept[0] - kept[-1])) <= tolerance:
+        kept.pop()
+    return np.asarray(kept, dtype=float)
+
+
 def _outer_boundary(module: Any, uv: np.ndarray, faces: np.ndarray):
     points = np.asarray(uv, dtype=float)
+    triangles = np.asarray(faces, dtype=int)[:, :3]
     if points.ndim != 2 or points.shape[1] < 2:
         raise RuntimeError("official CEPS UV output must be an Nx2 array")
-    points = points[:, :2]
-    finite = points[np.all(np.isfinite(points), axis=1)]
-    unique = np.unique(np.round(finite, 12), axis=0)
-    if len(unique) < 3:
-        raise RuntimeError("official CEPS UV output has fewer than three unique points")
+    if len(points) == 0 or len(triangles) == 0:
+        raise RuntimeError("official CEPS stitched chart is empty")
 
-    try:
-        hull = ConvexHull(unique)
-    except Exception as exc:
-        raise RuntimeError("official CEPS UV output has no valid two-dimensional outer hull") from exc
+    loops = module._boundary_loops(triangles)
+    if len(loops) != 1:
+        raise RuntimeError(
+            "stitched official CEPS output must be one topological disk with one "
+            f"physical boundary loop; found {len(loops)} loops"
+        )
 
-    polygon = unique[np.asarray(hull.vertices, dtype=int)]
+    loop = [int(value) for value in loops[0]]
+    polygon = _remove_consecutive_duplicates(points[np.asarray(loop, dtype=int), :2])
+    if len(polygon) < 4:
+        raise RuntimeError("official CEPS physical boundary collapsed below four vertices")
     area = _polygon_area(polygon)
     if abs(area) <= 1e-14:
-        raise RuntimeError("official CEPS outer UV hull is degenerate")
+        raise RuntimeError("official CEPS physical UV boundary is degenerate")
     if area < 0.0:
         polygon = polygon[::-1]
+        loop = loop[::-1]
         area = -area
-
-    loops = []
-    try:
-        loops = module._boundary_loops(np.asarray(faces, dtype=int))
-    except Exception:
-        loops = []
 
     span = np.ptp(polygon, axis=0)
     if float(np.min(span)) <= 1e-12:
-        raise RuntimeError("official CEPS outer UV hull collapsed along one axis")
+        raise RuntimeError("official CEPS physical UV boundary collapsed along one axis")
 
-    boundary = np.vstack([polygon, polygon[0]])
-    return boundary, {
-        "ceps_uv_boundary_loop_count": int(len(loops)),
-        "ceps_omega_boundary_source": "convex_hull_of_all_paired_ceps_uv_vertices",
-        "ceps_omega_boundary_vertex_count": int(len(polygon)),
-        "ceps_omega_boundary_convex": True,
-        "ceps_internal_uv_seams_excluded_from_omega_boundary": True,
-        "ceps_omega_boundary_area": float(area),
-        "ceps_omega_boundary_span_u": float(span[0]),
-        "ceps_omega_boundary_span_v": float(span[1]),
-    }
+    metrics = dict(getattr(module, "_CEPS_LAST_CHART_METRICS", {}) or {})
+    metrics.update(
+        {
+            "ceps_uv_boundary_loop_count": 1,
+            "ceps_surface_boundary_loop_count": 1,
+            "ceps_omega_boundary_source": "physical_boundary_loop_of_stitched_common_refinement",
+            "ceps_omega_boundary_vertex_count": int(len(polygon)),
+            "ceps_omega_boundary_convex_hull_used": False,
+            "ceps_internal_uv_seams_excluded_from_omega_boundary": True,
+            "ceps_input_open_boundary_preserved": True,
+            "ceps_omega_boundary_area": float(area),
+            "ceps_omega_boundary_span_u": float(span[0]),
+            "ceps_omega_boundary_span_v": float(span[1]),
+            "ceps_physical_boundary_loop_vertex_ids": loop,
+        }
+    )
+    return np.vstack([polygon, polygon[0]]), metrics
 
 
 def install_ceps_outer_boundary(module: Any) -> None:
-    """Replace CEPS loop-based boundary extraction with outer-hull recovery."""
+    """Replace convex-hull recovery with the stitched physical boundary loop."""
     if getattr(module, "_CEPS_OUTER_BOUNDARY_INSTALLED", False):
         return
 
