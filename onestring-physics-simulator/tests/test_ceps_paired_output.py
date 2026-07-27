@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from onestring_physics import official_ceps
 from onestring_physics.official_ceps import _parse_ceps_obj
 
 
-def test_ceps_obj_duplicates_surface_vertex_across_uv_seam(tmp_path: Path) -> None:
+def test_ceps_obj_stitches_translated_cut_copies_into_one_chart(tmp_path: Path) -> None:
     path = tmp_path / "seam.obj"
     path.write_text(
         "\n".join(
@@ -19,10 +21,10 @@ def test_ceps_obj_duplicates_surface_vertex_across_uv_seam(tmp_path: Path) -> No
                 "vt 0 0",
                 "vt 1 0",
                 "vt 1 1",
-                # The same 3D vertex 1 has a different UV on the second face.
-                "vt 0.2 0",
-                "vt 1 1",
-                "vt 0 1",
+                # Same second triangle, translated in the CEPS cut layout.
+                "vt 3 0",
+                "vt 4 1",
+                "vt 3 1",
                 "f 1/1 2/2 3/3",
                 "f 1/4 3/5 4/6",
             ]
@@ -33,25 +35,23 @@ def test_ceps_obj_duplicates_surface_vertex_across_uv_seam(tmp_path: Path) -> No
 
     result = _parse_ceps_obj(path)
 
-    assert len(result.surface_vertices) == len(result.uv_vertices)
+    assert result.surface_vertices.shape == (4, 3)
+    assert result.uv_vertices.shape == (4, 2)
     assert np.array_equal(result.surface_faces, result.uv_faces)
-    assert result.surface_vertices.shape == (5, 3)
-    assert result.uv_vertices.shape == (5, 2)
-
-    duplicate_origin = np.flatnonzero(
-        np.all(np.isclose(result.surface_vertices, np.asarray([0.0, 0.0, 0.0])), axis=1)
+    assert np.allclose(
+        result.uv_vertices,
+        np.asarray([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+        atol=1e-10,
     )
-    assert len(duplicate_origin) == 2
-    assert not np.allclose(
-        result.uv_vertices[duplicate_origin[0]],
-        result.uv_vertices[duplicate_origin[1]],
-    )
-    # Corner alignment must use the exterior copy (0, 0), not the average of
-    # the exterior corner and the internal seam copy (0.2, 0).
     assert np.allclose(result.vertex_uv[0], [0.0, 0.0])
+    metrics = official_ceps._CEPS_LAST_CHART_METRICS
+    assert metrics["ceps_continuous_chart_reconstructed"] is True
+    assert metrics["ceps_internal_cut_seam_edge_count"] == 1
+    assert metrics["ceps_convex_hull_boundary_used"] is False
+    assert metrics["ceps_artificial_cap_faces_added"] == 0
 
 
-def test_ceps_obj_without_seam_keeps_shared_vertices(tmp_path: Path) -> None:
+def test_ceps_obj_without_cut_keeps_original_surface_connectivity(tmp_path: Path) -> None:
     path = tmp_path / "plain.obj"
     path.write_text(
         "\n".join(
@@ -79,3 +79,32 @@ def test_ceps_obj_without_seam_keeps_shared_vertices(tmp_path: Path) -> None:
     assert result.surface_vertices.shape == (4, 3)
     assert result.uv_vertices.shape == (4, 2)
     assert np.array_equal(result.surface_faces, result.uv_faces)
+    assert official_ceps._CEPS_LAST_CHART_METRICS["ceps_internal_cut_seam_edge_count"] == 0
+
+
+def test_ceps_obj_rejects_non_isometric_cut_instead_of_hiding_it(tmp_path: Path) -> None:
+    path = tmp_path / "invalid-seam.obj"
+    path.write_text(
+        "\n".join(
+            [
+                "v 0 0 0",
+                "v 1 0 0",
+                "v 1 1 0",
+                "v 0 1 0",
+                "vt 0 0",
+                "vt 1 0",
+                "vt 1 1",
+                # Shared diagonal length no longer matches the first copy.
+                "vt 3 0",
+                "vt 5 1",
+                "vt 3 1",
+                "f 1/1 2/2 3/3",
+                "f 1/4 3/5 4/6",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="not consistently stitchable"):
+        _parse_ceps_obj(path)
