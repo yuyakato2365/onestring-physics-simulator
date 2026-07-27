@@ -9,10 +9,12 @@ on:
       - "onestring-physics-simulator/src/onestring_physics/discrete_bff.py"
       - "onestring-physics-simulator/src/onestring_physics/official_ceps.py"
       - "onestring-physics-simulator/src/onestring_physics/ceps_paired_output.py"
+      - "onestring-physics-simulator/src/onestring_physics/ceps_outer_boundary.py"
       - "onestring-physics-simulator/src/onestring_physics/__init__.py"
       - "onestring-physics-simulator/tests/test_discrete_bff.py"
       - "onestring-physics-simulator/tests/test_official_ceps.py"
       - "onestring-physics-simulator/tests/test_ceps_paired_output.py"
+      - "onestring-physics-simulator/tests/test_ceps_outer_boundary.py"
       - "onestring-physics-simulator/scripts/verify_discrete_bff.py"
       - "onestring-physics-simulator/scripts/verify_ceps_integration.py"
       - ".github/workflows/discrete-bff.yml"
@@ -33,8 +35,8 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install --upgrade pip pytest numpy scipy
       - name: Run BFF and CEPS bridge tests
-        run: python -m pytest tests/test_discrete_bff.py tests/test_official_ceps.py tests/test_ceps_paired_output.py -q
+        run: python -m pytest tests/test_discrete_bff.py tests/test_official_ceps.py tests/test_ceps_paired_output.py tests/test_ceps_outer_boundary.py -q
       - name: Run discrete BFF smoke verifier
         run: python scripts/verify_discrete_bff.py
       - name: Compile parameterization integration
-        run: python -m py_compile src/onestring_physics/discrete_bff.py src/onestring_physics/official_ceps.py src/onestring_physics/ceps_paired_output.py src/onestring_physics/__init__.py scripts/verify_discrete_bff.py scripts/verify_ceps_integration.py
+        run: python -m py_compile src/onestring_physics/discrete_bff.py src/onestring_physics/official_ceps.py src/onestring_physics/ceps_paired_output.py src/onestring_physics/ceps_outer_boundary.py src/onestring_physics/__init__.py scripts/verify_discrete_bff.py scripts/verify_ceps_integration.py
