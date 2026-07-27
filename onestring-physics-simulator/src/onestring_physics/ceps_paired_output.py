@@ -1,23 +1,27 @@
-"""Normalize official CEPS OBJ output to a paired 3D/UV vertex mesh.
+"""Convert official CEPS per-corner UV output into one continuous disk chart.
 
-CEPS writes ordinary texture coordinates per face corner. Around parameterization
-cuts, one common-refinement surface vertex can therefore have several UV values.
-The OneString pipeline and its diagnostics are simplest and safest when each array
-index denotes one paired ``(surface position, UV position)`` sample. This module
-replaces the raw OBJ parser with a seam-aware parser that duplicates the 3D vertex
-where required and gives ``surface_faces`` and ``uv_faces`` identical connectivity.
+CEPS lays out the doubled surface after inserting a cut graph. Its OBJ therefore
+stores texture coordinates per face corner, and an internal cut can give one
+common-refinement surface vertex several UV copies. OneString cannot treat those
+copies as independent charts: its M2D grid assumes one continuous map from the
+input disk to Omega. This module stitches the CEPS cut copies back together by
+walking the *surface* face adjacency and aligning adjacent target triangles by a
+2D similarity across every shared edge.
+
+The result keeps the official CEPS common-refinement surface connectivity, uses
+one UV coordinate per common-refinement surface vertex, and preserves the true
+physical boundary. No convex hull and no artificial cap faces are introduced.
 """
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-try:
-    from scipy.spatial import ConvexHull
-except Exception:  # pragma: no cover - scipy is already a runtime dependency
-    ConvexHull = None
+
+_EPS = 1e-12
 
 
 def _obj_index(value: str, count: int) -> int:
@@ -25,53 +29,11 @@ def _obj_index(value: str, count: int) -> int:
     return index - 1 if index > 0 else count + index
 
 
-def _exterior_sample_map(
-    samples: dict[int, list[np.ndarray]], raw_uv: np.ndarray
-) -> dict[int, np.ndarray]:
-    """Choose the exterior UV copy of each CEPS surface vertex when available.
-
-    The four original boundary-corner vertices are later used to align the CEPS
-    rectangle. Averaging all UV copies of a seam vertex can move a true corner
-    into the interior and leave the rectangle rotated or nearly collapsed. We
-    therefore prefer samples on the global UV convex hull and, among ties, the
-    sample farthest from the UV centroid. Interior vertices retain their mean.
-    """
-
-    all_uv = np.asarray(raw_uv, dtype=float)[:, :2]
-    center = np.mean(all_uv, axis=0) if len(all_uv) else np.zeros(2, dtype=float)
-    hull_keys: set[tuple[float, float]] = set()
-    if ConvexHull is not None and len(all_uv) >= 3:
-        rounded = np.round(all_uv, 12)
-        unique = np.unique(rounded, axis=0)
-        if len(unique) >= 3:
-            try:
-                hull = ConvexHull(unique)
-                hull_keys = {
-                    (float(point[0]), float(point[1]))
-                    for point in unique[np.asarray(hull.vertices, dtype=int)]
-                }
-            except Exception:
-                hull_keys = set()
-
-    selected: dict[int, np.ndarray] = {}
-    for vertex_id, values in samples.items():
-        candidates = np.asarray(values, dtype=float)[:, :2]
-        exterior = [
-            point
-            for point in candidates
-            if (float(np.round(point[0], 12)), float(np.round(point[1], 12)))
-            in hull_keys
-        ]
-        if exterior:
-            pool = np.asarray(exterior, dtype=float)
-            index = int(np.argmax(np.linalg.norm(pool - center, axis=1)))
-            selected[vertex_id] = pool[index].copy()
-        else:
-            selected[vertex_id] = np.mean(candidates, axis=0)
-    return selected
+def _cross2(a: np.ndarray, b: np.ndarray) -> float:
+    return float(a[0] * b[1] - a[1] * b[0])
 
 
-def _paired_parser(module: Any, path: Path) -> Any:
+def _triangulate_obj(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     vertices: list[list[float]] = []
     textures: list[list[float]] = []
     polygons: list[list[tuple[int, int]]] = []
@@ -105,8 +67,6 @@ def _paired_parser(module: Any, path: Path) -> Any:
     if not vertices or not textures or not polygons:
         raise RuntimeError("official CEPS output OBJ is incomplete")
 
-    original_vertices = np.asarray(vertices, dtype=float)
-    raw_uv = np.asarray(textures, dtype=float)
     surface_faces: list[list[int]] = []
     texture_faces: list[list[int]] = []
     for polygon in polygons:
@@ -115,71 +75,247 @@ def _paired_parser(module: Any, path: Path) -> Any:
             surface_faces.append([item[0] for item in triangle])
             texture_faces.append([item[1] for item in triangle])
 
-    sf = np.asarray(surface_faces, dtype=int)
-    tf = np.asarray(texture_faces, dtype=int)
+    surface = np.asarray(vertices, dtype=float)
+    raw_uv = np.asarray(textures, dtype=float)[:, :2]
+    faces = np.asarray(surface_faces, dtype=int)
+    texture_ids = np.asarray(texture_faces, dtype=int)
     if (
-        np.min(sf) < 0
-        or np.max(sf) >= len(original_vertices)
-        or np.min(tf) < 0
-        or np.max(tf) >= len(raw_uv)
+        np.min(faces) < 0
+        or np.max(faces) >= len(surface)
+        or np.min(texture_ids) < 0
+        or np.max(texture_ids) >= len(raw_uv)
     ):
         raise RuntimeError("official CEPS output OBJ contains an invalid index")
+    return surface, faces, raw_uv[texture_ids], texture_ids, len(raw_uv)
 
-    # Preserve the original CEPS surface-vertex -> UV samples used to locate the
-    # four input corner vertices during alignment. A seam vertex can have more
-    # than one UV sample, so prefer its exterior copy rather than averaging a true
-    # boundary corner with an interior cut copy.
-    samples: dict[int, list[np.ndarray]] = {}
-    for surface_face, texture_face in zip(sf, tf):
-        for surface_id, texture_id in zip(surface_face, texture_face):
-            samples.setdefault(int(surface_id), []).append(raw_uv[int(texture_id)])
-    vertex_uv = _exterior_sample_map(samples, raw_uv)
 
-    # A UV seam must duplicate the corresponding 3D vertex. Pairing by original
-    # surface ID and rounded UV coordinates keeps ordinary shared vertices welded,
-    # while preserving distinct copies on the two sides of a cut.
-    paired_surface_vertices: list[np.ndarray] = []
-    paired_uv_vertices: list[np.ndarray] = []
-    paired_faces = np.empty_like(sf)
-    lookup: dict[tuple[int, float, float], int] = {}
+def _edge_incidence(faces: np.ndarray) -> dict[tuple[int, int], list[int]]:
+    incidence: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for face_id, face in enumerate(np.asarray(faces, dtype=int)[:, :3]):
+        for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+            incidence[tuple(sorted((int(a), int(b))))].append(int(face_id))
+    bad = [edge for edge, incident in incidence.items() if len(incident) > 2]
+    if bad:
+        raise RuntimeError(
+            f"official CEPS common refinement is non-manifold at {len(bad)} edges"
+        )
+    return incidence
 
-    for face_index, (surface_face, texture_face) in enumerate(zip(sf, tf)):
-        for corner_index, (surface_id, texture_id) in enumerate(
-            zip(surface_face, texture_face)
-        ):
-            uv = raw_uv[int(texture_id), :2]
-            rounded = np.round(uv, 12)
-            key = (int(surface_id), float(rounded[0]), float(rounded[1]))
-            paired_id = lookup.get(key)
-            if paired_id is None:
-                paired_id = len(paired_surface_vertices)
-                lookup[key] = paired_id
-                paired_surface_vertices.append(original_vertices[int(surface_id)].copy())
-                paired_uv_vertices.append(uv.copy())
-            paired_faces[face_index, corner_index] = paired_id
 
-    paired_surface = np.asarray(paired_surface_vertices, dtype=float)
-    paired_uv = np.asarray(paired_uv_vertices, dtype=float)
-    if len(paired_surface) != len(paired_uv):
-        raise RuntimeError("CEPS paired 3D/UV vertex construction failed")
+def _candidate_transform(
+    local_triangle: np.ndarray,
+    face: np.ndarray,
+    edge: tuple[int, int],
+    global_uv: np.ndarray,
+    reference_face: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    a, b = map(int, edge)
+    local_a = int(np.flatnonzero(face == a)[0])
+    local_b = int(np.flatnonzero(face == b)[0])
+    qa, qb = local_triangle[local_a], local_triangle[local_b]
+    pa, pb = global_uv[a], global_uv[b]
 
+    local_length = float(np.linalg.norm(qb - qa))
+    global_length = float(np.linalg.norm(pb - pa))
+    if local_length <= _EPS or global_length <= _EPS:
+        raise RuntimeError("official CEPS produced a degenerate cut edge")
+
+    local_axis = (qb - qa) / local_length
+    local_perp = np.asarray([-local_axis[1], local_axis[0]], dtype=float)
+    global_axis = (pb - pa) / global_length
+    global_perp = np.asarray([-global_axis[1], global_axis[0]], dtype=float)
+    scale = global_length / local_length
+
+    reference_third = next(int(v) for v in reference_face if int(v) not in edge)
+    reference_side = _cross2(pb - pa, global_uv[reference_third] - pa)
+
+    candidates: list[tuple[float, np.ndarray]] = []
+    for reflection in (1.0, -1.0):
+        transformed: list[np.ndarray] = []
+        for point in local_triangle:
+            relative = point - qa
+            x = float(np.dot(relative, local_axis))
+            y = float(np.dot(relative, local_perp))
+            transformed.append(
+                pa + scale * (x * global_axis + reflection * y * global_perp)
+            )
+        transformed_array = np.asarray(transformed, dtype=float)
+        neighbor_third_local = next(
+            index for index, vertex in enumerate(face) if int(vertex) not in edge
+        )
+        neighbor_side = _cross2(
+            pb - pa, transformed_array[neighbor_third_local] - pa
+        )
+        score = reference_side * neighbor_side
+        candidates.append((score, transformed_array))
+
+    opposite = [item for item in candidates if item[0] < -1e-14]
+    chosen = min(opposite or candidates, key=lambda item: item[0])
+    relative_edge_error = abs(local_length - global_length) / max(
+        local_length, global_length, _EPS
+    )
+    return chosen[1], float(relative_edge_error)
+
+
+def _stitch_cut_chart(
+    surface_vertices: np.ndarray,
+    surface_faces: np.ndarray,
+    face_uv: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    faces = np.asarray(surface_faces, dtype=int)[:, :3]
+    local_uv = np.asarray(face_uv, dtype=float)[:, :3, :2]
+    if len(faces) == 0:
+        raise RuntimeError("official CEPS common refinement has no triangles")
+
+    incidence = _edge_incidence(faces)
+    adjacency: list[list[tuple[int, tuple[int, int]]]] = [
+        [] for _ in range(len(faces))
+    ]
+    seam_edge_count = 0
+    for edge, incident in incidence.items():
+        if len(incident) == 2:
+            a, b = incident
+            adjacency[a].append((b, edge))
+            adjacency[b].append((a, edge))
+            samples: list[np.ndarray] = []
+            for face_id in incident:
+                face = faces[face_id]
+                samples.append(
+                    np.asarray(
+                        [
+                            local_uv[face_id, int(np.flatnonzero(face == edge[0])[0])],
+                            local_uv[face_id, int(np.flatnonzero(face == edge[1])[0])],
+                        ]
+                    )
+                )
+            direct = max(
+                float(np.linalg.norm(samples[0][0] - samples[1][0])),
+                float(np.linalg.norm(samples[0][1] - samples[1][1])),
+            )
+            swapped = max(
+                float(np.linalg.norm(samples[0][0] - samples[1][1])),
+                float(np.linalg.norm(samples[0][1] - samples[1][0])),
+            )
+            if min(direct, swapped) > 1e-9:
+                seam_edge_count += 1
+
+    global_uv = np.full((len(surface_vertices), 2), np.nan, dtype=float)
+    placed_faces = np.zeros(len(faces), dtype=bool)
+    queue: deque[int] = deque([0])
+    root = local_uv[0].copy()
+    if _cross2(root[1] - root[0], root[2] - root[0]) < 0.0:
+        root[:, 1] *= -1.0
+    global_uv[faces[0]] = root
+    placed_faces[0] = True
+
+    max_edge_relative_error = 0.0
+    max_cycle_closure_error = 0.0
+    while queue:
+        face_id = queue.popleft()
+        for neighbor_id, edge in adjacency[face_id]:
+            if placed_faces[neighbor_id]:
+                continue
+            transformed, edge_error = _candidate_transform(
+                local_uv[neighbor_id],
+                faces[neighbor_id],
+                edge,
+                global_uv,
+                faces[face_id],
+            )
+            max_edge_relative_error = max(max_edge_relative_error, edge_error)
+            for local_index, vertex_id in enumerate(faces[neighbor_id]):
+                vertex_id = int(vertex_id)
+                if np.all(np.isfinite(global_uv[vertex_id])):
+                    max_cycle_closure_error = max(
+                        max_cycle_closure_error,
+                        float(np.linalg.norm(global_uv[vertex_id] - transformed[local_index])),
+                    )
+                else:
+                    global_uv[vertex_id] = transformed[local_index]
+            placed_faces[neighbor_id] = True
+            queue.append(neighbor_id)
+
+    if not bool(np.all(placed_faces)) or not bool(np.all(np.isfinite(global_uv))):
+        raise RuntimeError(
+            "official CEPS common refinement could not be stitched into one connected disk chart"
+        )
+
+    span = float(np.max(np.ptp(global_uv, axis=0)))
+    scale_reference = max(span, 1.0)
+    normalized_cycle_error = max_cycle_closure_error / scale_reference
+    if max_edge_relative_error > 5e-5 or normalized_cycle_error > 5e-5:
+        raise RuntimeError(
+            "official CEPS cut chart is not consistently stitchable: "
+            f"edge_error={max_edge_relative_error:.3e}, "
+            f"cycle_error={normalized_cycle_error:.3e}. "
+            "The OneString adapter will not replace this inconsistency with a convex hull."
+        )
+
+    signed = np.asarray(
+        [
+            0.5
+            * _cross2(
+                global_uv[face[1]] - global_uv[face[0]],
+                global_uv[face[2]] - global_uv[face[0]],
+            )
+            for face in faces
+        ],
+        dtype=float,
+    )
+    if float(np.median(signed)) < 0.0:
+        global_uv[:, 1] *= -1.0
+        signed *= -1.0
+    flipped = int(np.count_nonzero(signed < -1e-12))
+    degenerate = int(np.count_nonzero(np.abs(signed) <= 1e-12))
+    if flipped or degenerate:
+        raise RuntimeError(
+            "stitched official CEPS chart contains invalid triangles: "
+            f"flipped={flipped}, degenerate={degenerate}"
+        )
+
+    boundary_edges = sum(1 for incident in incidence.values() if len(incident) == 1)
+    return global_uv, {
+        "ceps_continuous_chart_reconstructed": True,
+        "ceps_internal_cut_seam_edge_count": int(seam_edge_count),
+        "ceps_internal_cut_seams_stitched": True,
+        "ceps_stitch_max_edge_relative_error": float(max_edge_relative_error),
+        "ceps_stitch_max_cycle_closure_error": float(max_cycle_closure_error),
+        "ceps_stitch_max_cycle_closure_error_normalized": float(normalized_cycle_error),
+        "ceps_common_refinement_surface_vertex_count_before_stitch": int(len(surface_vertices)),
+        "ceps_common_refinement_surface_vertex_count_after_stitch": int(len(surface_vertices)),
+        "ceps_physical_boundary_edge_count": int(boundary_edges),
+        "ceps_convex_hull_boundary_used": False,
+        "ceps_artificial_cap_faces_added": 0,
+    }
+
+
+def _continuous_parser(module: Any, path: Path) -> Any:
+    surface, faces, face_uv, _texture_ids, raw_texture_count = _triangulate_obj(path)
+    stitched_uv, metrics = _stitch_cut_chart(surface, faces, face_uv)
+    module._CEPS_LAST_CHART_METRICS = dict(metrics)
+    vertex_uv = {int(index): stitched_uv[index].copy() for index in range(len(stitched_uv))}
     return module.CepsObjResult(
-        paired_surface,
-        paired_faces,
-        paired_uv,
-        paired_faces.copy(),
+        surface,
+        faces,
+        stitched_uv,
+        faces.copy(),
         vertex_uv,
-        len(raw_uv),
+        raw_texture_count,
     )
 
 
 def install_ceps_paired_output(module: Any) -> None:
-    """Install the seam-aware parser into ``onestring_physics.official_ceps``."""
+    """Install continuous-chart reconstruction into ``official_ceps``.
+
+    The historical function name is retained for import compatibility. The
+    implementation no longer duplicates seam vertices; it stitches CEPS cut
+    copies into one UV coordinate per common-refinement surface vertex.
+    """
     if getattr(module, "_CEPS_PAIRED_OUTPUT_INSTALLED", False):
         return
 
     def parse(path: Path) -> Any:
-        return _paired_parser(module, path)
+        return _continuous_parser(module, path)
 
     module._parse_ceps_obj = parse
     module._CEPS_PAIRED_OUTPUT_INSTALLED = True
