@@ -46,6 +46,9 @@ def test_ceps_obj_duplicates_surface_vertex_across_uv_seam(tmp_path: Path) -> No
         result.uv_vertices[duplicate_origin[0]],
         result.uv_vertices[duplicate_origin[1]],
     )
+    # Corner alignment must use the exterior copy (0, 0), not the average of
+    # the exterior corner and the internal seam copy (0.2, 0).
+    assert np.allclose(result.vertex_uv[0], [0.0, 0.0])
 
 
 def test_ceps_obj_without_seam_keeps_shared_vertices(tmp_path: Path) -> None:
