@@ -6,15 +6,19 @@ from typing import Any
 
 from . import onestring_pipeline as _onestring_pipeline
 from . import official_ceps as _official_ceps
+from .ceps_outer_boundary import install_ceps_outer_boundary
 from .ceps_paired_output import install_ceps_paired_output
 from .discrete_bff import install_discrete_bff
 from .official_ceps import install_official_ceps
 
 
-# Official CEPS ordinary OBJ output stores UV coordinates per face corner.  Pair
+# Official CEPS ordinary OBJ output stores UV coordinates per face corner. Pair
 # seam UVs with duplicated 3D vertices before any backend call so downstream
-# code can safely use one common vertex index for S and Omega.
+# code can safely use one common vertex index for S and Omega. The same seams
+# appear as extra topological boundary loops, so recover the external convex
+# CEPS polygon from all paired UV vertices instead of selecting a cut loop.
 install_ceps_paired_output(_official_ceps)
+install_ceps_outer_boundary(_official_ceps)
 
 
 def _install_parameterization_backends(module: Any) -> None:
