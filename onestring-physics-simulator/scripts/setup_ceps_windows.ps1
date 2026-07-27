@@ -17,8 +17,8 @@ Require-Command cmake
 $source = [System.IO.Path]::GetFullPath($InstallRoot)
 $build = Join-Path $source "build"
 
-if (Test-Path $source) {
-    if (-not (Test-Path (Join-Path $source ".git"))) {
+if (Test-Path -LiteralPath $source) {
+    if (-not (Test-Path -LiteralPath (Join-Path $source ".git"))) {
         throw "$source already exists but is not a CEPS git checkout. Choose another -InstallRoot."
     }
     Write-Host "Updating existing CEPS checkout: $source"
@@ -27,13 +27,18 @@ if (Test-Path $source) {
     git -C $source pull --ff-only origin main
     git -C $source submodule update --init --recursive
 } else {
-    $parent = Split-Path $source -Parent
-    New-Item -ItemType Directory -Force $parent | Out-Null
+    $parent = Split-Path -Path $source -Parent
+    # For a root-level install such as C:\CEPS, $parent is C:\. The drive root
+    # already exists and New-Item on it can raise "The path format is invalid"
+    # in Windows PowerShell, so create the parent only when it is actually absent.
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
     Write-Host "Cloning official CEPS into $source"
     git clone --recursive https://github.com/MarkGillespie/CEPS.git $source
 }
 
-if ($ForceReconfigure -and (Test-Path $build)) {
+if ($ForceReconfigure -and (Test-Path -LiteralPath $build)) {
     Remove-Item $build -Recurse -Force
 }
 
@@ -48,7 +53,7 @@ $candidates = @(
     (Join-Path $build "bin\parameterize.exe"),
     (Join-Path $build "Release\parameterize.exe")
 )
-$executable = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+$executable = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $executable) {
     $executable = Get-ChildItem $build -Filter parameterize.exe -Recurse -File |
         Select-Object -First 1 -ExpandProperty FullName
