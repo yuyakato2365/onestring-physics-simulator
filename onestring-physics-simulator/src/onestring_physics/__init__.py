@@ -13,11 +13,11 @@ from .discrete_bff import install_discrete_bff
 from .official_ceps import install_official_ceps
 
 
-# The official CEPS OBJ stores the target layout per face corner because its
-# doubled-surface layout contains a cut graph. Reconstruct one continuous disk
-# chart on the official common-refinement surface before exposing CEPS to the
-# LSCM/BFF-shaped OneString interface. The physical boundary loop is then used
-# directly; a convex hull is never substituted for missing UV coverage.
+# CEPS ordinary UV is stored per face corner. The current OneString inverse map
+# can consume it only when those corner values already form one single-valued disk
+# chart. Internal CEPS cut seams are rejected explicitly; they are not stitched,
+# replaced by a convex hull, or hidden with nearest-triangle fallback. When the
+# chart is valid, its true physical boundary loop is used directly.
 install_ceps_paired_output(_official_ceps)
 install_ceps_outer_boundary(_official_ceps)
 
