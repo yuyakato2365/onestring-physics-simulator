@@ -8,15 +8,16 @@ from . import onestring_pipeline as _onestring_pipeline
 from . import official_ceps as _official_ceps
 from .ceps_outer_boundary import install_ceps_outer_boundary
 from .ceps_paired_output import install_ceps_paired_output
+from .ceps_strict_adapter import install_ceps_strict_adapter
 from .discrete_bff import install_discrete_bff
 from .official_ceps import install_official_ceps
 
 
-# Official CEPS ordinary OBJ output stores UV coordinates per face corner. Pair
-# seam UVs with duplicated 3D vertices before any backend call so downstream
-# code can safely use one common vertex index for S and Omega. The same seams
-# appear as extra topological boundary loops, so recover the external convex
-# CEPS polygon from all paired UV vertices instead of selecting a cut loop.
+# The official CEPS OBJ stores the target layout per face corner because its
+# doubled-surface layout contains a cut graph. Reconstruct one continuous disk
+# chart on the official common-refinement surface before exposing CEPS to the
+# LSCM/BFF-shaped OneString interface. The physical boundary loop is then used
+# directly; a convex hull is never substituted for missing UV coverage.
 install_ceps_paired_output(_official_ceps)
 install_ceps_outer_boundary(_official_ceps)
 
@@ -27,8 +28,10 @@ def _install_parameterization_backends(module: Any) -> None:
     # markers because the re-executed compatibility wrapper replaced the patch.
     module._DISCRETE_BFF_PATCH_INSTALLED = False
     module._OFFICIAL_CEPS_PATCH_INSTALLED = False
+    module._CEPS_STRICT_ADAPTER_INSTALLED = False
     install_discrete_bff(module)
     install_official_ceps(module)
+    install_ceps_strict_adapter(module)
 
     backend_build = module._build_surface_parameterization
 
@@ -43,7 +46,7 @@ def _install_parameterization_backends(module: Any) -> None:
             metrics["omega_boundary_forced_rectangle"] = True
             metrics["omega_boundary_fixed"] = False
             metrics["omega_boundary_shape"] = "rectangular"
-            metrics["ceps_paired_surface_uv_vertices"] = (
+            metrics["ceps_continuous_surface_uv_vertices"] = (
                 len(result.surface_vertices_3d) == len(result.uv_vertices_2d)
             )
             metrics["ceps_surface_uv_face_connectivity_equal"] = bool(
@@ -51,6 +54,10 @@ def _install_parameterization_backends(module: Any) -> None:
                 == getattr(result.uv_faces, "shape", None)
                 and (result.surface_faces == result.uv_faces).all()
             )
+            # Backward-compatible metric name used by the existing UI/tests.
+            metrics["ceps_paired_surface_uv_vertices"] = metrics[
+                "ceps_continuous_surface_uv_vertices"
+            ]
         return result
 
     module._build_surface_parameterization = with_rectangle_semantics
