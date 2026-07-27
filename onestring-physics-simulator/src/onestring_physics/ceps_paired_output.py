@@ -1,9 +1,9 @@
 """Normalize official CEPS OBJ output to a paired 3D/UV vertex mesh.
 
-CEPS writes ordinary texture coordinates per face corner.  Around parameterization
+CEPS writes ordinary texture coordinates per face corner. Around parameterization
 cuts, one common-refinement surface vertex can therefore have several UV values.
 The OneString pipeline and its diagnostics are simplest and safest when each array
-index denotes one paired ``(surface position, UV position)`` sample.  This module
+index denotes one paired ``(surface position, UV position)`` sample. This module
 replaces the raw OBJ parser with a seam-aware parser that duplicates the 3D vertex
 where required and gives ``surface_faces`` and ``uv_faces`` identical connectivity.
 """
@@ -14,10 +14,61 @@ from typing import Any
 
 import numpy as np
 
+try:
+    from scipy.spatial import ConvexHull
+except Exception:  # pragma: no cover - scipy is already a runtime dependency
+    ConvexHull = None
+
 
 def _obj_index(value: str, count: int) -> int:
     index = int(value)
     return index - 1 if index > 0 else count + index
+
+
+def _exterior_sample_map(
+    samples: dict[int, list[np.ndarray]], raw_uv: np.ndarray
+) -> dict[int, np.ndarray]:
+    """Choose the exterior UV copy of each CEPS surface vertex when available.
+
+    The four original boundary-corner vertices are later used to align the CEPS
+    rectangle. Averaging all UV copies of a seam vertex can move a true corner
+    into the interior and leave the rectangle rotated or nearly collapsed. We
+    therefore prefer samples on the global UV convex hull and, among ties, the
+    sample farthest from the UV centroid. Interior vertices retain their mean.
+    """
+
+    all_uv = np.asarray(raw_uv, dtype=float)[:, :2]
+    center = np.mean(all_uv, axis=0) if len(all_uv) else np.zeros(2, dtype=float)
+    hull_keys: set[tuple[float, float]] = set()
+    if ConvexHull is not None and len(all_uv) >= 3:
+        rounded = np.round(all_uv, 12)
+        unique = np.unique(rounded, axis=0)
+        if len(unique) >= 3:
+            try:
+                hull = ConvexHull(unique)
+                hull_keys = {
+                    (float(point[0]), float(point[1]))
+                    for point in unique[np.asarray(hull.vertices, dtype=int)]
+                }
+            except Exception:
+                hull_keys = set()
+
+    selected: dict[int, np.ndarray] = {}
+    for vertex_id, values in samples.items():
+        candidates = np.asarray(values, dtype=float)[:, :2]
+        exterior = [
+            point
+            for point in candidates
+            if (float(np.round(point[0], 12)), float(np.round(point[1], 12)))
+            in hull_keys
+        ]
+        if exterior:
+            pool = np.asarray(exterior, dtype=float)
+            index = int(np.argmax(np.linalg.norm(pool - center, axis=1)))
+            selected[vertex_id] = pool[index].copy()
+        else:
+            selected[vertex_id] = np.mean(candidates, axis=0)
+    return selected
 
 
 def _paired_parser(module: Any, path: Path) -> Any:
@@ -75,18 +126,16 @@ def _paired_parser(module: Any, path: Path) -> Any:
         raise RuntimeError("official CEPS output OBJ contains an invalid index")
 
     # Preserve the original CEPS surface-vertex -> UV samples used to locate the
-    # four input corner vertices during alignment.  A seam vertex can have more
-    # than one UV sample, matching the behavior of the previous parser.
+    # four input corner vertices during alignment. A seam vertex can have more
+    # than one UV sample, so prefer its exterior copy rather than averaging a true
+    # boundary corner with an interior cut copy.
     samples: dict[int, list[np.ndarray]] = {}
     for surface_face, texture_face in zip(sf, tf):
         for surface_id, texture_id in zip(surface_face, texture_face):
             samples.setdefault(int(surface_id), []).append(raw_uv[int(texture_id)])
-    vertex_uv = {
-        vertex_id: np.mean(np.asarray(values, dtype=float), axis=0)
-        for vertex_id, values in samples.items()
-    }
+    vertex_uv = _exterior_sample_map(samples, raw_uv)
 
-    # A UV seam must duplicate the corresponding 3D vertex.  Pairing by original
+    # A UV seam must duplicate the corresponding 3D vertex. Pairing by original
     # surface ID and rounded UV coordinates keeps ordinary shared vertices welded,
     # while preserving distinct copies on the two sides of a cut.
     paired_surface_vertices: list[np.ndarray] = []
