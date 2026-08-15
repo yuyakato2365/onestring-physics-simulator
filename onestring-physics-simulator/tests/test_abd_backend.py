@@ -61,7 +61,7 @@ def test_abd_job_contains_official_scene_and_onestring_extension_manifest(tmp_pa
     assert manifest["string"]["compression_force_when_slack"] == 0.0
     assert manifest["shake_trajectory"]["frequency_hz"] == 3.0
     assert job.guide_count == 2
-    assert job.initial_layout == "t2d_dual_hinge_exact_initial_layout"
+    assert job.initial_layout == "t2d_dual_hinge_exact_positive_clearance"
     assert manifest["collision_skin"] > 0.0
     assert manifest["rest_collision_geometry"] == "exact_t2d_thick_panel_proxy"
 
@@ -75,7 +75,7 @@ def test_abd_prefers_dual_hinge_t2d_layout_over_top_hinge_layout(tmp_path):
     job = prepare_abd_job(state, ABDBackendConfig(steps=2), tmp_path / "abd_top_hinge")
     scene = json.loads(job.scene_path.read_text(encoding="utf-8"))
 
-    assert job.initial_layout == "t2d_dual_hinge_exact_initial_layout"
+    assert job.initial_layout == "t2d_dual_hinge_exact_positive_clearance"
     positions = np.asarray([body["position"] for body in scene["rigid_body_problem"]["rigid_bodies"]])
     assert np.linalg.norm(positions[1, :2] - positions[0, :2]) == pytest.approx(1.2)
 

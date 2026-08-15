@@ -18,6 +18,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_python_environment.ps
 検証、別PCへの更新手順は
 [WindowsノートPC導入ガイド](docs/windows_laptop_setup_ja.md)を参照してください。
 
+## Version 0.4.0: integrated ABD, discrete BFF, and official CEPS support
+
+Version 0.4.0 combines the variable-topology T3D and Autodesk ABD work from
+the 0.3.0 line with the latest discrete BFF and official CEPS integration.
+The package metadata and runtime `__version__` use the same semantic version.
+
 ## Version 0.3.0: variable-topology T3D and Autodesk ABD bridge
 
 Version 0.3.0 adds two independent changes:
@@ -116,7 +122,7 @@ The optional `boundary_sliding_lscm` mode is LSCM with a prescribed rectangular 
 
 For a reproducible Windows/CUDA setup, including the wrapper-to-base runtime path that must be present in a clone, follow [docs/home_pc_codex_handoff_ja.md](docs/home_pc_codex_handoff_ja.md) and run `python scripts/verify_home_environment.py --require-cuda` before comparing performance.
 
-This simulator is a paper-audited OneString research prototype, not a complete paper implementation. For backward compatibility, bare `PipelineParameters()` still accepts the deprecated `bff` alias, but that alias now resolves to `rectangular_harmonic_legacy` and always reports: `This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.` Use `paper_reference_bff` explicitly for the official backend. If that backend is missing, the run fails with `ReferenceBFFUnavailableError`; it does not fall back.
+This simulator is a paper-audited OneString research prototype, not a complete paper implementation. Bare `PipelineParameters()` now selects the local discrete `bff` backend, which implements the Cherrier/NtD and best-fit boundary path for a single-disk mesh. `rectangular_harmonic_legacy` remains available explicitly for compatibility, `paper_reference_bff` invokes the official BFF CLI, and `ceps` invokes the optional official CEPS CLI. Unsupported topology and unavailable official backends fail explicitly; they do not silently substitute LSCM.
 
 The default Streamlit workflow is:
 
@@ -424,7 +430,7 @@ The default demo uses:
 
 - target: dome
 - grid: 3x3
-- selectable `rectangular_harmonic_legacy`, `lscm_free_boundary`, and official-backend `paper_reference_bff` modes
+- selectable local `bff`, `rectangular_harmonic_legacy`, `lscm_free_boundary`, official `paper_reference_bff`, and official `ceps` modes
 - inverse parameterization lift `c^-1` from `M2D` in `Omega` back to `M3D` on `S`
 - 3D optimization for `K3D` with planarity, square, and surface objectives
 - 2D edge matching for `K2D`

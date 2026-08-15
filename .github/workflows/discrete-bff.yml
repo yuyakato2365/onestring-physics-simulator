@@ -1,0 +1,28 @@
+name: BFF and CEPS validation
+
+# Disabled automatic execution while CEPS integration is under active development.
+# Run manually from the GitHub Actions page when validation is needed.
+on:
+  workflow_dispatch:
+
+jobs:
+  test-parameterization-backends:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: onestring-physics-simulator/pyproject.toml
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest numpy scipy
+      - name: Run BFF and CEPS bridge tests
+        run: python -m pytest tests/test_discrete_bff.py tests/test_official_ceps.py tests/test_ceps_paired_output.py tests/test_ceps_outer_boundary.py tests/test_ceps_strict_adapter.py -q
+      - name: Run discrete BFF smoke verifier
+        run: python scripts/verify_discrete_bff.py
+      - name: Compile parameterization integration
+        run: python -m py_compile src/onestring_physics/discrete_bff.py src/onestring_physics/official_ceps.py src/onestring_physics/ceps_paired_output.py src/onestring_physics/ceps_outer_boundary.py src/onestring_physics/ceps_strict_adapter.py src/onestring_physics/__init__.py scripts/verify_discrete_bff.py scripts/verify_ceps_integration.py

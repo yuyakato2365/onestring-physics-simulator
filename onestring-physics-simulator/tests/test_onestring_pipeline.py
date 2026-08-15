@@ -706,20 +706,22 @@ def test_export_t2d_stl_can_return_per_tile_files():
 def test_omega_rectangular_debug_and_paper_default_are_explicit():
     target = create_builtin_shape("dome", {"amplitude": 0.35, "radius": 2.0})
     default_state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
-    assert default_state.surface_parameterization.method == "rectangular_harmonic_legacy"
+    assert default_state.surface_parameterization.method == "bff"
     assert default_state.surface_parameterization.metrics["requested_omega_parameterization_mode"] == "bff"
-    assert default_state.surface_parameterization.metrics["deprecated_alias_used"] is True
-    assert default_state.surface_parameterization.metrics["flattening_backend"] == "rectangular_boundary_cotangent_harmonic_legacy"
-    assert default_state.surface_parameterization.metrics["bff_implemented"] is False
+    assert default_state.surface_parameterization.metrics["flattening_backend"] == "local_discrete_bff_cherrier_ps_best_fit_curve"
+    assert default_state.surface_parameterization.metrics["bff_implemented"] is True
+    assert default_state.surface_parameterization.metrics["bff_backend_used"] == "local_discrete_bff"
     assert default_state.surface_parameterization.metrics["bff_reference_backend_available"] is False
     assert default_state.surface_parameterization.metrics["omega_boundary_forced_rectangle"] is True
     assert default_state.surface_parameterization.metrics["omega_boundary_shape"] == "rectangular"
-    assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == "bff_prescribed_rectangular_boundary_by_3d_arclength"
-    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "rectangular_boundary_harmonic_legacy"
-    assert default_state.surface_parameterization.metrics["parameterization_warning"] == (
-        "This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization."
+    assert default_state.surface_parameterization.metrics["omega_boundary_constraint_model"] == (
+        "target_exterior_angles_plus_BFF_compatible_scale_factors_and_minimum_closure_correction"
     )
-    assert default_state.surface_parameterization.metrics["bff_boundary_rectangular_correction_applied"] is True
+    assert default_state.surface_parameterization.metrics["parameterization_exactness_label"] == "discrete_bff_rectangular_target"
+    assert default_state.surface_parameterization.metrics["parameterization_warning"] == ""
+    assert default_state.surface_parameterization.metrics["bff_cherrier_formula_implemented"] is True
+    assert default_state.surface_parameterization.metrics["bff_best_fit_curve_implemented"] is True
+    assert default_state.surface_parameterization.metrics["bff_uses_lscm"] is False
     assert default_state.surface_parameterization.metrics["harmonic_solve_performed"] is True
     assert default_state.surface_parameterization.metrics["uv_triangle_flip_count"] == 0
     boundary = default_state.surface_parameterization.omega_boundary[:-1]
@@ -789,9 +791,17 @@ def test_omega_rectangular_debug_and_paper_default_are_explicit():
         raise AssertionError("unimplemented paper mode must not silently fallback")
 
 
-def test_deprecated_bff_alias_is_rectangular_harmonic_and_never_claims_reference_backend():
+def test_explicit_rectangular_harmonic_legacy_never_claims_reference_backend():
     target = create_builtin_shape("half_gourd", {"amplitude": 0.35, "radius": 2.0})
-    state = build_onestring_design(target, PipelineParameters(nx=2, max_3d_iterations=2, max_2d_iterations=2))
+    state = build_onestring_design(
+        target,
+        PipelineParameters(
+            nx=2,
+            max_3d_iterations=2,
+            max_2d_iterations=2,
+            omega_parameterization_mode="rectangular_harmonic_legacy",
+        ),
+    )
     metrics = state.surface_parameterization.metrics
     boundary = state.surface_parameterization.omega_boundary[:-1]
     lo = np.min(boundary, axis=0)
@@ -804,8 +814,8 @@ def test_deprecated_bff_alias_is_rectangular_harmonic_and_never_claims_reference
     )
 
     assert state.surface_parameterization.method == "rectangular_harmonic_legacy"
-    assert metrics["requested_omega_parameterization_mode"] == "bff"
-    assert metrics["deprecated_alias_used"] is True
+    assert metrics["requested_omega_parameterization_mode"] == "rectangular_harmonic_legacy"
+    assert metrics["deprecated_alias_used"] is False
     assert metrics["flattening_backend"] == "rectangular_boundary_cotangent_harmonic_legacy"
     assert metrics["bff_implemented"] is False
     assert metrics["bff_reference_backend_available"] is False
