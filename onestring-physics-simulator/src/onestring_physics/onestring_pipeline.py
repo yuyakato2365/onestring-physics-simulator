@@ -936,6 +936,8 @@ class PipelineParameters(_original.PipelineParameters):
     omega_boundary_mode: Literal["rectangular_debug", "shape_preserving_experimental", "paper_default"] = "paper_default"
     omega_parameterization_mode: Literal[
         "bff",
+        "bijective_free_boundary",
+        "ceps",
         "rectangular_harmonic_legacy",
         "lscm_free_boundary",
         "paper_reference_bff",
@@ -978,6 +980,12 @@ class PipelineParameters(_original.PipelineParameters):
     boundary_sliding_spacing_weight: float = 0.002
     boundary_sliding_flip_area_epsilon: float = 1e-10
     boundary_sliding_line_search_max_steps: int = 14
+    bijective_free_boundary_max_iterations: int = 60
+    bijective_free_boundary_gradient_tolerance: float = 1e-7
+    bijective_free_boundary_energy_tolerance: float = 1e-8
+    bijective_free_boundary_line_search_max_steps: int = 20
+    bijective_free_boundary_line_search_safety: float = 0.8
+    bijective_free_boundary_boundary_barrier_weight: float = 1.0
     allow_experimental_pipeline: bool = False
     enable_csf_splits: bool = True
     enable_heuristic_csf_split: bool = True

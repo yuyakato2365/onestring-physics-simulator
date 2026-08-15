@@ -9,6 +9,11 @@ from . import official_ceps as _official_ceps
 from .ceps_outer_boundary import install_ceps_outer_boundary
 from .ceps_paired_output import install_ceps_paired_output
 from .ceps_strict_adapter import install_ceps_strict_adapter
+from .bijective_free_boundary import (
+    BijectiveFreeBoundaryConfig,
+    bijective_free_boundary_parameterization,
+    install_bijective_free_boundary,
+)
 from .discrete_bff import install_discrete_bff
 from .official_ceps import install_official_ceps
 
@@ -27,9 +32,11 @@ def _install_parameterization_backends(module: Any) -> None:
     # importlib.reload() preserves a module dictionary. Clear old installation
     # markers because the re-executed compatibility wrapper replaced the patch.
     module._DISCRETE_BFF_PATCH_INSTALLED = False
+    module._BIJECTIVE_FREE_BOUNDARY_PATCH_INSTALLED = False
     module._OFFICIAL_CEPS_PATCH_INSTALLED = False
     module._CEPS_STRICT_ADAPTER_INSTALLED = False
     install_discrete_bff(module)
+    install_bijective_free_boundary(module)
     install_official_ceps(module)
     install_ceps_strict_adapter(module)
 
@@ -84,8 +91,8 @@ def _install_reload_guard() -> None:
     importlib._onestring_parameterization_reload_guard = True
 
 
-def _install_streamlit_ceps_option() -> None:
-    """Expose ``ceps`` in the compatibility app without rewriting the large app."""
+def _install_streamlit_parameterization_options() -> None:
+    """Expose separately installed parameterization modes in the legacy app."""
     try:
         import streamlit as st
     except Exception:
@@ -94,7 +101,7 @@ def _install_streamlit_ceps_option() -> None:
         return
     original_selectbox = st.selectbox
 
-    def selectbox_with_ceps(*args: Any, **kwargs: Any) -> Any:
+    def selectbox_with_installed_modes(*args: Any, **kwargs: Any) -> Any:
         label = args[0] if args else kwargs.get("label")
         if label == "Omega parameterization mode":
             if len(args) >= 2:
@@ -102,23 +109,29 @@ def _install_streamlit_ceps_option() -> None:
                 if "ceps" not in options:
                     insertion = options.index("bff") + 1 if "bff" in options else 0
                     options.insert(insertion, "ceps")
+                if "bijective_free_boundary" not in options:
+                    insertion = options.index("bff") + 1 if "bff" in options else 0
+                    options.insert(insertion, "bijective_free_boundary")
                 args = (args[0], options, *args[2:])
             elif "options" in kwargs:
                 options = list(kwargs["options"])
                 if "ceps" not in options:
                     insertion = options.index("bff") + 1 if "bff" in options else 0
                     options.insert(insertion, "ceps")
+                if "bijective_free_boundary" not in options:
+                    insertion = options.index("bff") + 1 if "bff" in options else 0
+                    options.insert(insertion, "bijective_free_boundary")
                 kwargs = {**kwargs, "options": options}
         return original_selectbox(*args, **kwargs)
 
-    st.selectbox = selectbox_with_ceps
+    st.selectbox = selectbox_with_installed_modes
     st._onestring_ceps_selectbox_patch = True
 
 
 _install_reload_guard()
-_install_streamlit_ceps_option()
+_install_streamlit_parameterization_options()
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from .design_optimizer import DesignParameters, DesignResult, optimize_design
 from .abd_backend import (
@@ -188,6 +201,7 @@ install_status_visualization_patch()
 __all__ = [
     "DesignParameters",
     "DesignResult",
+    "BijectiveFreeBoundaryConfig",
     "ABDBackendConfig",
     "ABDBackendError",
     "ABDBackendUnavailableError",
@@ -211,6 +225,7 @@ __all__ = [
     "ReferenceInverseMapError",
     "ReferenceMeshValidationError",
     "build_onestring_design",
+    "bijective_free_boundary_parameterization",
     "build_paper_reference_initialization",
     "complexity_metrics",
     "compute_backend_info",
@@ -239,5 +254,6 @@ __all__ = [
     "validate_reference_mesh",
     "install_status_visualization_patch",
     "install_abd_layout_compatibility",
+    "install_bijective_free_boundary",
     "__version__",
 ]

@@ -18,6 +18,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_python_environment.ps
 検証、別PCへの更新手順は
 [WindowsノートPC導入ガイド](docs/windows_laptop_setup_ja.md)を参照してください。
 
+## Version 0.5.0: bijective free-boundary parameterization
+
+Version 0.5.0 adds an explicit `bijective_free_boundary` comparison mode without
+changing the existing BFF or CEPS paths. It starts from a valid Tutte embedding,
+minimizes a symmetric Dirichlet distortion, and accepts only steps that remain
+flip-free, overlap-free, and boundary-self-intersection-free. The implementation
+is Smith & Schaefer 2015-inspired rather than a reproduction of the authors'
+complete optimizer. See
+[docs/bijective_free_boundary_ja.md](docs/bijective_free_boundary_ja.md).
+
 ## Version 0.4.0: integrated ABD, discrete BFF, and official CEPS support
 
 Version 0.4.0 combines the variable-topology T3D and Autodesk ABD work from
@@ -430,7 +440,7 @@ The default demo uses:
 
 - target: dome
 - grid: 3x3
-- selectable local `bff`, `rectangular_harmonic_legacy`, `lscm_free_boundary`, official `paper_reference_bff`, and official `ceps` modes
+- selectable local `bff`, `bijective_free_boundary`, `rectangular_harmonic_legacy`, `lscm_free_boundary`, official `paper_reference_bff`, and official `ceps` modes
 - inverse parameterization lift `c^-1` from `M2D` in `Omega` back to `M3D` on `S`
 - 3D optimization for `K3D` with planarity, square, and surface objectives
 - 2D edge matching for `K2D`

@@ -653,8 +653,50 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
 
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     uv_faces = np.asarray(parameterization.uv_faces, dtype=int)[:, :3]
+    if len(uv_faces):
+        uv_mesh_x: list[float | None] = []
+        uv_mesh_y: list[float | None] = []
+        for face in uv_faces:
+            triangle = uv[np.asarray([face[0], face[1], face[2], face[0]], dtype=int)]
+            uv_mesh_x.extend([*triangle[:, 0].tolist(), None])
+            uv_mesh_y.extend([*triangle[:, 1].tolist(), None])
+        fig.add_trace(
+            go.Scattergl(
+                x=uv_mesh_x,
+                y=uv_mesh_y,
+                mode="lines",
+                line=dict(color="rgba(71,85,105,0.45)", width=1),
+                name="parameterized UV mesh",
+                hoverinfo="skip",
+            )
+        )
+
+    face_log_lambda = np.asarray(metrics.get("per_triangle_log_lambda", []), dtype=float)
+    if len(uv_faces) and len(face_log_lambda) == len(uv_faces):
+        centers = np.mean(uv[uv_faces], axis=1)
+        fig.add_trace(
+            go.Scattergl(
+                x=centers[:, 0],
+                y=centers[:, 1],
+                mode="markers",
+                marker=dict(
+                    size=8,
+                    color=face_log_lambda,
+                    colorscale="RdBu",
+                    colorbar=dict(title="log lambda"),
+                    opacity=0.82,
+                ),
+                text=[
+                    f"triangle {index}<br>log(lambda)={value:.5g}"
+                    for index, value in enumerate(face_log_lambda)
+                ],
+                hoverinfo="text",
+                name="local log(lambda)",
+            )
+        )
+
     face_distortion = np.asarray(metrics.get("uv_face_angle_distortion_deg", []), dtype=float)
-    if len(uv_faces) and len(face_distortion) == len(uv_faces):
+    if len(uv_faces) and len(face_distortion) == len(uv_faces) and len(face_log_lambda) != len(uv_faces):
         centers = np.mean(uv[uv_faces], axis=1)
         fig.add_trace(
             go.Scattergl(
@@ -752,7 +794,12 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
         else:
             fig.add_vline(x=value, line=dict(color="#ef4444", dash="dash"))
     fig.update_layout(
-        title="Omega boundary correspondence and distortion diagnostics",
+        title=(
+            "Omega boundary and distortion diagnostics"
+            f" | flips={int(metrics.get('uv_triangle_flip_count', 0))}"
+            f", overlaps={int(metrics.get('internal_triangle_overlap_count', 0))}"
+            f", boundary crossings={int(metrics.get('boundary_self_intersection_count', 0))}"
+        ),
         height=620,
         margin=dict(l=20, r=40, t=44, b=120),
         xaxis_title="u",
