@@ -448,6 +448,55 @@ def test_t3d_extrusion_normals_are_oriented_across_shared_edges():
     assert metrics["t3d_extrusion_normal_inconsistent_edge_count"] == 0
 
 
+def test_t3d_geometric_normal_frustration_is_not_reported_as_nonorientable():
+    raw_normals = np.asarray(
+        [
+            [1.0, 0.0, 0.1],
+            [-1.0, 0.0, 0.1],
+            [0.0, 1.0, 0.1],
+        ],
+        dtype=float,
+    )
+    raw_normals /= np.linalg.norm(raw_normals, axis=1, keepdims=True)
+    faces = np.asarray(
+        [
+            [0, 1, 2, 3],
+            [1, 0, 4, 5],
+            [3, 2, 5, 4],
+        ],
+        dtype=int,
+    )
+
+    oriented, metrics = _orient_tile_normals_consistently(raw_normals, faces)
+
+    assert metrics["t3d_extrusion_normal_inconsistent_edge_count"] == 0
+    assert metrics["t3d_extrusion_normal_geometric_frustrated_edge_count"] > 0
+    assert np.all(oriented[:, 2] > 0.0)
+
+
+def test_t3d_true_face_winding_conflict_is_reported_as_nonorientable():
+    raw_normals = np.asarray(
+        [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray(
+        [
+            [0, 1, 2, 3],
+            [1, 0, 4, 5],
+            [2, 3, 5, 4],
+        ],
+        dtype=int,
+    )
+
+    _oriented, metrics = _orient_tile_normals_consistently(raw_normals, faces)
+
+    assert metrics["t3d_extrusion_normal_inconsistent_edge_count"] > 0
+
+
 def test_t3d_extrudes_exactly_one_thickness_to_one_side_of_k3d():
     vertices = np.asarray(
         [

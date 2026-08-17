@@ -129,6 +129,55 @@ def test_circle_initialization_gets_real_boundary_updates_on_anisotropic_disk():
     assert metrics["boundary_candidate_harmonic_interior_response"] is True
     assert metrics["optimization_boundary_update_count"] > 0
     assert metrics["boundary_nonsimilarity_change_relative_rms"] > 1.0e-5
+    attempts = metrics["optimization_boundary_attempt_log"]
+    accepted_attempts = [attempt for attempt in attempts if attempt["accepted"]]
+    assert accepted_attempts
+    required_diagnostics = {
+        "boundary_directional_derivative",
+        "energy_before_relax",
+        "energy_after_harmonic_predictor",
+        "energy_after_interior_relax",
+        "accepted",
+        "reject_reason",
+    }
+    assert all(required_diagnostics <= set(attempt) for attempt in attempts)
+    assert all(
+        attempt["boundary_directional_derivative"] < 0.0
+        and attempt["energy_after_interior_relax"] < attempt["energy_before_relax"]
+        for attempt in accepted_attempts
+    )
+
+
+def test_rectangle_initialization_accepts_reduced_objective_boundary_update():
+    vertices, faces = _rectangular_disk()
+    config = BijectiveFreeBoundaryConfig(
+        max_iterations=12,
+        line_search_max_steps=12,
+        initial_boundary_shape="rectangle",
+        initial_step_scale=3.0,
+        conformal_weight=2.0,
+        shrink_weight=4.0,
+        minimum_isotropic_scale=0.65,
+        interior_steps_per_boundary=1,
+        boundary_normal_smoothing=0.10,
+    )
+
+    _uv, _loop, metrics = bijective_free_boundary_parameterization(
+        vertices,
+        faces,
+        config,
+    )
+
+    assert metrics["optimization_boundary_update_count"] > 0
+    assert metrics["final_energy"] < metrics["initial_energy"]
+    assert metrics["boundary_displacement_rms"] > 0.0
+    assert metrics["uv_triangle_flip_count"] == 0
+    assert metrics["boundary_self_intersection_count"] == 0
+    assert metrics["internal_triangle_overlap_count"] == 0
+    assert any(
+        attempt["accepted"]
+        for attempt in metrics["optimization_boundary_attempt_log"]
+    )
 
 
 def test_aabb_sweep_broad_phase_keeps_only_overlapping_boxes():

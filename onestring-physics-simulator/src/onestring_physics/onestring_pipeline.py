@@ -4695,10 +4695,12 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
             "t3d_extrusion_normal_component_count": 0,
             "t3d_extrusion_normal_component_global_flip_count": 0,
             "t3d_extrusion_normal_inconsistent_edge_count": 0,
+            "t3d_extrusion_normal_geometric_frustrated_edge_count": 0,
         }
 
     incidence = _build_edge_incidence(faces)
     adjacency: list[list[tuple[int, bool]]] = [[] for _ in range(len(normals))]
+    geometric_constraints: list[tuple[int, int, bool]] = []
     for entries in incidence.values():
         if len(entries) != 2:
             continue
@@ -4707,11 +4709,80 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
         same_sign = dot >= 0.0
         adjacency[tile_a].append((tile_b, same_sign))
         adjacency[tile_b].append((tile_a, same_sign))
+        geometric_constraints.append((tile_a, tile_b, same_sign))
+
+    # True orientability is a topological property of directed shared edges;
+    # it cannot be inferred from whether two normals form an acute angle.  On a
+    # steep but orientable surface, an odd cycle of obtuse adjacent normals can
+    # frustrate the geometric sign heuristic even though the face winding is
+    # perfectly consistent.
+    directed_incidence: dict[
+        tuple[int, int],
+        list[tuple[int, int, int]],
+    ] = {}
+    local_edges = ((0, 1), (1, 2), (2, 3), (3, 0))
+    for tile_id, face in enumerate(np.asarray(faces, dtype=int)):
+        for a, b in local_edges:
+            first = int(face[a])
+            second = int(face[b])
+            directed_incidence.setdefault(
+                tuple(sorted((first, second))),
+                [],
+            ).append((int(tile_id), first, second))
+    topology_adjacency: list[list[tuple[int, bool]]] = [
+        [] for _ in range(len(normals))
+    ]
+    topology_constraints: list[tuple[int, int, bool]] = []
+    for entries in directed_incidence.values():
+        if len(entries) != 2:
+            continue
+        tile_a, first_a, second_a = entries[0]
+        tile_b, first_b, second_b = entries[1]
+        opposite_directions = (
+            first_a == second_b and second_a == first_b
+        )
+        topology_adjacency[tile_a].append(
+            (tile_b, opposite_directions)
+        )
+        topology_adjacency[tile_b].append(
+            (tile_a, opposite_directions)
+        )
+        topology_constraints.append(
+            (tile_a, tile_b, opposite_directions)
+        )
+
+    topology_signs = np.zeros(len(normals), dtype=float)
+    for root in range(len(normals)):
+        if topology_signs[root] != 0.0:
+            continue
+        topology_signs[root] = 1.0
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            for neighbor, same_sign in topology_adjacency[current]:
+                wanted = (
+                    topology_signs[current]
+                    if same_sign
+                    else -topology_signs[current]
+                )
+                if topology_signs[neighbor] == 0.0:
+                    topology_signs[neighbor] = wanted
+                    stack.append(neighbor)
+    topology_inconsistent = sum(
+        int(
+            topology_signs[tile_b]
+            != (
+                topology_signs[tile_a]
+                if same_sign
+                else -topology_signs[tile_a]
+            )
+        )
+        for tile_a, tile_b, same_sign in topology_constraints
+    )
 
     signs = np.zeros(len(normals), dtype=float)
     component_count = 0
     components: list[list[int]] = []
-    inconsistent = 0
     for root in range(len(normals)):
         if signs[root] != 0.0:
             continue
@@ -4727,11 +4798,23 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
                 if signs[neighbor] == 0.0:
                     signs[neighbor] = wanted
                     stack.append(neighbor)
-                elif signs[neighbor] != wanted:
-                    inconsistent += 1
         components.append(component_ids)
 
     signs[signs == 0.0] = 1.0
+    geometric_frustrated = sum(
+        int(
+            signs[tile_b]
+            != (signs[tile_a] if same_sign else -signs[tile_a])
+        )
+        for tile_a, tile_b, same_sign in geometric_constraints
+    )
+    if geometric_frustrated:
+        # The normals used here already follow the OneString top-surface
+        # reference convention.  If pairwise acute-angle synchronization is
+        # frustrated, preserve that reference orientation instead of inventing
+        # a non-orientable topology failure or flipping an arbitrary subtree.
+        signs[:] = 1.0
+
     component_means: list[np.ndarray] = []
     for ids in components:
         component_normal = np.mean(normals[np.asarray(ids, dtype=int)] * signs[np.asarray(ids, dtype=int), None], axis=0)
@@ -4757,7 +4840,10 @@ def _orient_tile_normals_consistently(raw_normals: np.ndarray, faces: np.ndarray
         "t3d_extrusion_normal_flip_count": int(np.sum(signs < 0.0)),
         "t3d_extrusion_normal_component_count": int(component_count),
         "t3d_extrusion_normal_component_global_flip_count": int(component_global_flip_count),
-        "t3d_extrusion_normal_inconsistent_edge_count": int(inconsistent),
+        "t3d_extrusion_normal_inconsistent_edge_count": int(topology_inconsistent),
+        "t3d_extrusion_normal_geometric_frustrated_edge_count": int(
+            geometric_frustrated
+        ),
     }
 
 

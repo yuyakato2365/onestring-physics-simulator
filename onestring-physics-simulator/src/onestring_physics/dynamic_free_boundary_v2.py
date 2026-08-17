@@ -1,15 +1,17 @@
 """Free-boundary optimizer with coupled boundary/interior motion.
 
-This corrects the first dynamic_free_boundary experiment.  A boundary proposal is
-no longer judged while all interior vertices are frozen.  Instead, every local
-boundary displacement is extended harmonically through the interior before the
-safe-step and energy tests are performed.  The expensive sparse factorization is
-built once and reused for all boundary proposals.
+This corrects the first dynamic_free_boundary experiment.  Boundary motion is
+optimized against an approximation of the reduced objective F(B)=min_I E(B,I).
+A local boundary step is extended harmonically only as an interior predictor,
+then the interior is relaxed nonlinearly while the trial boundary stays fixed.
+The expensive harmonic factorization is built once and reused for all trials.
 """
 from __future__ import annotations
 
+import json
 import math
 import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -29,6 +31,80 @@ _boundary_direction = previous._boundary_direction
 _masked_lbfgs = previous._masked_lbfgs
 _triangle_safe_step = previous._triangle_safe_step
 _area_valid = previous._area_valid
+
+
+_DEBUG_METRIC_KEYS = (
+    "optimization_termination_reason",
+    "optimization_iteration_count",
+    "optimization_boundary_update_count",
+    "optimization_interior_update_count",
+    "optimization_rejected_line_search_step_count",
+    "maximum_consecutive_boundary_line_search_failures",
+    "armijo_rejected_candidate_count",
+    "local_validity_rejected_candidate_count",
+    "initial_energy",
+    "final_energy",
+    "initial_shrink_energy",
+    "final_shrink_energy",
+    "boundary_displacement_rms",
+    "boundary_displacement_max",
+    "boundary_nonsimilarity_change_relative_rms",
+    "boundary_update_accepted_displacement_rms_mean",
+    "boundary_update_accepted_displacement_rms_max",
+    "boundary_update_coupled_interior_displacement_rms_mean",
+    "boundary_update_coupled_interior_displacement_rms_max",
+    "boundary_harmonic_response_call_count",
+    "boundary_harmonic_response_total_seconds",
+    "energy_gradient_total_seconds",
+    "safe_step_total_seconds",
+    "optimization_iteration_log",
+    "optimization_boundary_attempt_log",
+)
+
+
+def _json_safe_metric(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe_metric(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_metric(item) for item in value]
+    if hasattr(value, "tolist"):
+        return _json_safe_metric(value.tolist())
+    if hasattr(value, "item"):
+        return _json_safe_metric(value.item())
+    return str(value)
+
+
+def _dump_parameterization_metrics(
+    metrics: dict[str, Any],
+    output_path: Path | None = None,
+) -> Path:
+    """Persist completed Omega metrics before any downstream T3D work starts."""
+
+    destination = output_path or (
+        Path(__file__).resolve().parents[2]
+        / "debug_logs"
+        / "omega"
+        / "current_session_metrics.json"
+    )
+    payload = {
+        str(key): _json_safe_metric(value)
+        for key, value in metrics.items()
+    }
+    for key in _DEBUG_METRIC_KEYS:
+        payload.setdefault(key, None)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(destination)
+    return destination
 
 
 class HarmonicBoundaryResponse:
@@ -194,6 +270,9 @@ def bijective_free_boundary_parameterization(
         "candidates": 0,
         "armijo": 0,
         "validity": 0,
+        "boundary_attempts": 0,
+        "boundary_reduced_rejects": 0,
+        "boundary_relax_steps": 0,
     }
 
     def evaluate(values):
@@ -239,6 +318,7 @@ def bijective_free_boundary_parameterization(
     rejected = 0
     boundary_moves = []
     coupled_interior_moves = []
+    boundary_attempt_log = []
     log = []
     converged = False
     reason = "maximum_iterations"
@@ -247,6 +327,130 @@ def bijective_free_boundary_parameterization(
     max_boundary_failures = 0
     schedule = max(1, int(cfg.interior_steps_per_boundary)) + 1
     max_iterations = max(1, int(cfg.max_iterations))
+
+    def relax_interior_with_fixed_boundary(
+        start,
+        boundary_target,
+        start_data=None,
+    ):
+        """Approximately minimize E(B, I) while keeping B exactly fixed."""
+
+        nonlocal rejected
+        candidate = np.asarray(start, dtype=float).copy()
+        candidate[boundary_ids] = np.asarray(boundary_target, dtype=float)
+        data = evaluate(candidate) if start_data is None else start_data
+        relaxation_history = []
+        accepted_steps = 0
+        maximum_relaxations = max(1, min(2, int(cfg.interior_steps_per_boundary)))
+
+        if not np.any(interior_mask):
+            return candidate, data, accepted_steps
+
+        for _ in range(maximum_relaxations):
+            local_gradient = np.asarray(data[1], dtype=float)
+            direction = _masked_lbfgs(
+                local_gradient,
+                interior_mask,
+                relaxation_history,
+            )
+            direction[boundary_mask] = 0.0
+            derivative = float(np.sum(local_gradient * direction))
+            if not np.isfinite(derivative) or derivative >= -1e-14:
+                relaxation_history.clear()
+                direction[:] = 0.0
+                direction[interior_mask] = -local_gradient[interior_mask]
+                derivative = float(np.sum(local_gradient * direction))
+            if not np.isfinite(derivative) or derivative >= -1e-14:
+                break
+
+            rms = float(
+                np.linalg.norm(direction[interior_mask])
+                / math.sqrt(max(1, direction[interior_mask].size))
+            )
+            if rms <= EPS:
+                break
+            direction /= rms
+            derivative /= rms
+
+            _, _, local_edge_scale = _boundary_frame(candidate, loop)
+            requested_relaxation = max(
+                0.20 * float(cfg.interior_initial_step_scale) * local_edge_scale,
+                np.finfo(float).eps,
+            )
+            t = time.perf_counter()
+            safe_relaxation, _safe_relaxation_reason = _triangle_safe_step(
+                candidate,
+                direction,
+                tris,
+                cfg.minimum_signed_double_area,
+            )
+            timing["safe"] += time.perf_counter() - t
+            counts["safe"] += 1
+            relaxation_step = (
+                requested_relaxation
+                if not np.isfinite(safe_relaxation)
+                else min(
+                    requested_relaxation,
+                    float(cfg.line_search_safety) * safe_relaxation,
+                )
+            )
+
+            accepted_relaxation = None
+            for _ in range(max(1, int(cfg.line_search_max_steps))):
+                if relaxation_step <= np.finfo(float).eps:
+                    break
+                counts["candidates"] += 1
+                relaxed = candidate + relaxation_step * direction
+                relaxed[boundary_ids] = boundary_target
+                if not _area_valid(
+                    relaxed,
+                    tris,
+                    cfg.minimum_signed_double_area,
+                ):
+                    counts["validity"] += 1
+                    rejected += 1
+                    relaxation_step *= 0.5
+                    continue
+                relaxed_data = evaluate(relaxed)
+                if (
+                    not np.isfinite(relaxed_data[0])
+                    or float(relaxed_data[0])
+                    > float(data[0]) + 1e-4 * relaxation_step * derivative
+                ):
+                    counts["armijo"] += 1
+                    rejected += 1
+                    relaxation_step *= 0.5
+                    continue
+                accepted_relaxation = (
+                    relaxed,
+                    relaxed_data,
+                    float(relaxation_step),
+                )
+                break
+
+            if accepted_relaxation is None:
+                break
+
+            relaxed, relaxed_data, _used_relaxation_step = accepted_relaxation
+            ids = np.flatnonzero(interior_mask)
+            s = (relaxed[ids] - candidate[ids]).reshape(-1)
+            y = (
+                np.asarray(relaxed_data[1], dtype=float)[ids]
+                - local_gradient[ids]
+            ).reshape(-1)
+            sy = float(np.dot(s, y))
+            if sy > 1e-12:
+                relaxation_history.append((s, y, 1.0 / sy))
+                relaxation_history[:] = relaxation_history[
+                    -max(1, int(cfg.lbfgs_history_size)) :
+                ]
+            candidate = relaxed
+            data = relaxed_data
+            accepted_steps += 1
+            counts["boundary_relax_steps"] += 1
+
+        candidate[boundary_ids] = boundary_target
+        return candidate, data, accepted_steps
 
     for iteration in range(max_iterations):
         gradient = np.asarray(gradient, dtype=float)
@@ -258,25 +462,32 @@ def bijective_free_boundary_parameterization(
         )
 
         if phase == "boundary":
-            # 1) Build the desired *local boundary* motion from the boundary
-            # gradient.  2) Extend that displacement harmonically through all
-            # interior vertices.  The candidate is therefore judged only after
-            # the interior has already responded to the boundary change.
+            # The local boundary seed is the optimization direction for the
+            # reduced objective.  Its harmonic extension is only an interior
+            # predictor; it is deliberately excluded from the descent test.
             boundary_seed, requested, edge_scale = _boundary_direction(
                 uv, gradient, loop, cfg
             )
-            direction = harmonic_response.extend(boundary_seed)
+            boundary_directional_derivative = float(
+                np.sum(
+                    gradient[boundary_ids]
+                    * boundary_seed[boundary_ids]
+                )
+            )
+            predictor_direction = harmonic_response.extend(boundary_seed)
+            direction = boundary_seed
             phase_mask = boundary_mask
             t = time.perf_counter()
             safe, safe_reason = base._safe_step_limit(
                 uv,
-                direction,
+                predictor_direction,
                 tris,
                 loop,
                 cfg.minimum_signed_double_area,
             )
             timing["safe"] += time.perf_counter() - t
             counts["safe"] += 1
+            derivative = boundary_directional_derivative
         else:
             direction = _masked_lbfgs(gradient, interior_mask, history)
             direction[boundary_mask] = 0.0
@@ -298,6 +509,7 @@ def bijective_free_boundary_parameterization(
             )
             timing["safe"] += time.perf_counter() - t
             counts["safe"] += 1
+            derivative = float(np.sum(gradient * direction))
 
         phase_rms = float(
             np.linalg.norm(gradient[phase_mask])
@@ -313,15 +525,28 @@ def bijective_free_boundary_parameterization(
                 break
             continue
 
-        derivative = float(np.sum(gradient * direction))
         if not np.isfinite(derivative) or derivative >= -1e-14:
             if phase == "interior":
                 history.clear()
                 continue
+            boundary_attempt_log.append(
+                {
+                    "iteration": int(iteration),
+                    "attempt": 0,
+                    "trial_step": None,
+                    "boundary_directional_derivative": float(derivative),
+                    "energy_before_relax": float(energy),
+                    "energy_after_harmonic_predictor": None,
+                    "energy_after_interior_relax": None,
+                    "interior_relaxation_step_count": 0,
+                    "accepted": False,
+                    "reject_reason": "boundary_direction_not_descent",
+                }
+            )
             boundary_failures += 1
             max_boundary_failures = max(max_boundary_failures, boundary_failures)
             if boundary_failures >= 5:
-                reason = "repeated_coupled_boundary_not_descent"
+                reason = "repeated_boundary_direction_not_descent"
                 break
             continue
 
@@ -331,38 +556,143 @@ def bijective_free_boundary_parameterization(
             else min(requested, float(cfg.line_search_safety) * safe)
         )
         result = None
-        for _ in range(max(1, int(cfg.line_search_max_steps))):
-            if step <= np.finfo(float).eps:
-                break
-            counts["candidates"] += 1
-            candidate = uv + step * direction
-            candidate -= np.mean(candidate, axis=0, keepdims=True)
-            valid = (
-                _area_valid(candidate, tris, cfg.minimum_signed_double_area)
-                if phase == "interior"
-                else boundary_valid(candidate)
-            )
-            if not valid:
-                counts["validity"] += 1
-                rejected += 1
-                step *= 0.5
-                continue
+        if phase == "boundary":
+            for attempt in range(max(1, int(cfg.line_search_max_steps))):
+                if step <= np.finfo(float).eps:
+                    break
+                counts["candidates"] += 1
+                counts["boundary_attempts"] += 1
+                boundary_target = (
+                    uv[boundary_ids]
+                    + step * boundary_seed[boundary_ids]
+                )
+                predictor_displacement = harmonic_response.extend(
+                    step * boundary_seed
+                )
+                predictor = uv + predictor_displacement
+                predictor[boundary_ids] = boundary_target
+                attempt_record = {
+                    "iteration": int(iteration),
+                    "attempt": int(attempt),
+                    "trial_step": float(step),
+                    "boundary_directional_derivative": float(
+                        boundary_directional_derivative
+                    ),
+                    "energy_before_relax": float(energy),
+                    "energy_after_harmonic_predictor": None,
+                    "energy_after_interior_relax": None,
+                    "interior_relaxation_step_count": 0,
+                    "accepted": False,
+                    "reject_reason": "",
+                }
 
-            data = evaluate(candidate)
-            if (
-                not np.isfinite(data[0])
-                or float(data[0]) > float(energy) + 1e-4 * step * derivative
-            ):
-                counts["armijo"] += 1
-                rejected += 1
-                step *= 0.5
-                continue
-            if cfg.validate_global_overlap_each_step and overlap(candidate):
-                rejected += 1
-                step *= 0.5
-                continue
-            result = (candidate, *data, float(step))
-            break
+                if not boundary_valid(predictor):
+                    counts["validity"] += 1
+                    rejected += 1
+                    attempt_record["reject_reason"] = (
+                        "harmonic_predictor_invalid"
+                    )
+                    boundary_attempt_log.append(attempt_record)
+                    step *= 0.5
+                    continue
+
+                predictor_data = evaluate(predictor)
+                attempt_record["energy_after_harmonic_predictor"] = float(
+                    predictor_data[0]
+                )
+                relaxed, relaxed_data, relaxation_steps = (
+                    relax_interior_with_fixed_boundary(
+                        predictor,
+                        boundary_target,
+                        predictor_data,
+                    )
+                )
+                attempt_record["energy_after_interior_relax"] = float(
+                    relaxed_data[0]
+                )
+                attempt_record["interior_relaxation_step_count"] = int(
+                    relaxation_steps
+                )
+
+                if np.any(interior_mask) and relaxation_steps < 1:
+                    rejected += 1
+                    attempt_record["reject_reason"] = (
+                        "interior_relaxation_failed"
+                    )
+                    boundary_attempt_log.append(attempt_record)
+                    step *= 0.5
+                    continue
+                if not boundary_valid(relaxed):
+                    counts["validity"] += 1
+                    rejected += 1
+                    attempt_record["reject_reason"] = (
+                        "relaxed_candidate_invalid"
+                    )
+                    boundary_attempt_log.append(attempt_record)
+                    step *= 0.5
+                    continue
+                if (
+                    cfg.validate_global_overlap_each_step
+                    and overlap(relaxed)
+                ):
+                    rejected += 1
+                    attempt_record["reject_reason"] = (
+                        "global_overlap"
+                    )
+                    boundary_attempt_log.append(attempt_record)
+                    step *= 0.5
+                    continue
+                if (
+                    not np.isfinite(relaxed_data[0])
+                    or float(relaxed_data[0]) >= float(energy)
+                ):
+                    counts["boundary_reduced_rejects"] += 1
+                    rejected += 1
+                    attempt_record["reject_reason"] = (
+                        "reduced_energy_not_decreased"
+                    )
+                    boundary_attempt_log.append(attempt_record)
+                    step *= 0.5
+                    continue
+
+                attempt_record["accepted"] = True
+                attempt_record["reject_reason"] = ""
+                boundary_attempt_log.append(attempt_record)
+                result = (relaxed, *relaxed_data, float(step))
+                break
+        else:
+            for _ in range(max(1, int(cfg.line_search_max_steps))):
+                if step <= np.finfo(float).eps:
+                    break
+                counts["candidates"] += 1
+                candidate = uv + step * direction
+                candidate -= np.mean(candidate, axis=0, keepdims=True)
+                if not _area_valid(
+                    candidate,
+                    tris,
+                    cfg.minimum_signed_double_area,
+                ):
+                    counts["validity"] += 1
+                    rejected += 1
+                    step *= 0.5
+                    continue
+
+                data = evaluate(candidate)
+                if (
+                    not np.isfinite(data[0])
+                    or float(data[0])
+                    > float(energy) + 1e-4 * step * derivative
+                ):
+                    counts["armijo"] += 1
+                    rejected += 1
+                    step *= 0.5
+                    continue
+                if cfg.validate_global_overlap_each_step and overlap(candidate):
+                    rejected += 1
+                    step *= 0.5
+                    continue
+                result = (candidate, *data, float(step))
+                break
 
         if result is None:
             if phase == "interior":
@@ -371,7 +701,7 @@ def bijective_free_boundary_parameterization(
             boundary_failures += 1
             max_boundary_failures = max(max_boundary_failures, boundary_failures)
             if boundary_failures >= 5:
-                reason = "repeated_coupled_boundary_line_search_exhausted"
+                reason = "repeated_reduced_boundary_line_search_exhausted"
                 break
             continue
 
@@ -398,9 +728,9 @@ def bijective_free_boundary_parameterization(
                 history[:] = history[-max(1, int(cfg.lbfgs_history_size)) :]
             accepted_interior += 1
         else:
-            # Boundary proposal already contains a harmonic interior response.
-            # Clear the interior L-BFGS history because the interior has moved by
-            # a different model; subsequent interior phases refine this state.
+            # The accepted state includes a harmonic predictor and nonlinear
+            # fixed-boundary interior relaxation.  Reset the outer L-BFGS memory
+            # because this is a reduced-objective boundary update.
             history.clear()
             accepted_boundary += 1
             boundary_failures = 0
@@ -500,18 +830,23 @@ def bijective_free_boundary_parameterization(
         **topology,
         "parameterization_method": "bijective_free_boundary",
         "parameterization_exactness_label": "coupled_dynamic_local_boundary_experiment",
-        "flattening_backend": "coupled_boundary_harmonic_response_plus_interior_lbfgs",
-        "omega_parameterization_solver": "floater_then_interior_lbfgs_and_coupled_local_boundary_harmonic_response",
+        "flattening_backend": "reduced_boundary_objective_with_harmonic_predictor_and_fixed_boundary_interior_lbfgs",
+        "omega_parameterization_solver": "floater_then_interior_lbfgs_and_reduced_objective_boundary_trials",
         "parameterization_runtime_seconds": float(time.perf_counter() - started),
         "parameterization_warning": "" if converged else f"Stopped with {reason}; final UV remains bijective.",
         "initialization_boundary_shape": cfg.initial_boundary_shape,
         "omega_boundary_fixed": False,
         "omega_boundary_forced_rectangle": False,
         "omega_boundary_shape": "free",
-        "omega_boundary_model": "independent local boundary proposal with harmonic interior response before acceptance",
-        "boundary_update_model": "local_normal_dominant_boundary_seed_plus_cached_harmonic_interior_extension",
+        "omega_boundary_model": "reduced objective F(B)=min_I E(B,I) approximated by harmonic prediction and fixed-boundary nonlinear interior relaxation",
+        "boundary_update_model": "local boundary descent seed plus cached harmonic interior predictor plus fixed-boundary interior lbfgs",
+        "boundary_descent_test_model": "boundary_gradient_dot_boundary_direction_only",
+        "boundary_acceptance_model": "strict relaxed_energy_decrease",
         "boundary_candidate_interior_fixed": False,
         "boundary_candidate_harmonic_interior_response": True,
+        "boundary_harmonic_response_role": "interior_predictor_not_energy_descent_direction",
+        "boundary_interior_relaxation_model": "one_or_two_fixed_boundary_masked_lbfgs_steps",
+        "boundary_attempt_energy_before_relax_definition": "current_accepted_energy_before_boundary_trial",
         "boundary_harmonic_response_laplacian": "combinatorial_dirichlet_displacement_laplacian",
         "boundary_harmonic_factorization_reused": True,
         "boundary_harmonic_factorization_seconds": float(harmonic_response.factorization_seconds),
@@ -564,6 +899,13 @@ def bijective_free_boundary_parameterization(
         "line_search_candidate_count": counts["candidates"],
         "armijo_rejected_candidate_count": counts["armijo"],
         "local_validity_rejected_candidate_count": counts["validity"],
+        "boundary_reduced_objective_attempt_count": counts["boundary_attempts"],
+        "boundary_reduced_objective_rejected_candidate_count": counts[
+            "boundary_reduced_rejects"
+        ],
+        "boundary_interior_relaxation_step_count": counts[
+            "boundary_relax_steps"
+        ],
         "boundary_update_accepted_displacement_rms_mean": float(np.mean(boundary_moves)) if boundary_moves else 0.0,
         "boundary_update_accepted_displacement_rms_max": float(np.max(boundary_moves)) if boundary_moves else 0.0,
         "boundary_update_coupled_interior_displacement_rms_mean": float(np.mean(coupled_interior_moves)) if coupled_interior_moves else 0.0,
@@ -580,6 +922,7 @@ def bijective_free_boundary_parameterization(
         "tutte_initialization_seconds": init_seconds,
         "surface_differentials_seconds": diff_seconds,
         "optimization_iteration_log": log,
+        "optimization_boundary_attempt_log": boundary_attempt_log,
         "lambda_min": float(np.min(valid_l)) if len(valid_l) else 0.0,
         "lambda_median": float(np.median(valid_l)) if len(valid_l) else 0.0,
         "lambda_max": float(np.max(valid_l)) if len(valid_l) else 0.0,
@@ -659,6 +1002,10 @@ def install_bijective_free_boundary(pipeline_module: Any) -> None:
                 "omega_warning": str(metrics.get("parameterization_warning", "")),
             }
         )
+        # Save the completed S -> Omega result before K3D/T3D begins.  This is
+        # deliberately independent of Streamlit session state, so diagnostics
+        # survive a later construction exception without rerunning Omega.
+        _dump_parameterization_metrics(metrics)
         output = pipeline_module._original.SurfaceParameterization(
             method="bijective_free_boundary",
             surface_vertices_3d=vertices,
