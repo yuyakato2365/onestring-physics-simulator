@@ -21,11 +21,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_python_environment.ps
 ## Version 0.5.0: bijective free-boundary parameterization
 
 Version 0.5.0 adds an explicit `bijective_free_boundary` comparison mode without
-changing the existing BFF or CEPS paths. It starts from a valid Tutte embedding,
+changing the existing BFF or CEPS paths. It starts from a valid mean-value Floater embedding,
 minimizes a symmetric Dirichlet distortion, and accepts only steps that remain
 flip-free, overlap-free, and boundary-self-intersection-free. The implementation
-is Smith & Schaefer 2015-inspired rather than a reproduction of the authors'
-complete optimizer. See
+follows Smith & Schaefer 2015 as an independent implementation rather than a
+binary reproduction of the authors' optimizer. See
 [docs/bijective_free_boundary_ja.md](docs/bijective_free_boundary_ja.md).
 
 ## Version 0.4.0: integrated ABD, discrete BFF, and official CEPS support
@@ -547,7 +547,7 @@ Legacy rope/tendon code remains in the package for compatibility with earlier te
 
 ## Performance And GPU Notes
 
-The app avoids generating every stage figure on each Streamlit rerun. Use the `View stage` selector to render only one stage at a time. Animation is generated on demand from the final deployment view.
+The app avoids generating every stage figure on each Streamlit rerun. Use the `View stage` selector to render only one stage at a time. Changing that selector displays the result saved in session state and does not rebuild the pipeline. Changed calculation settings take effect only after `Run OneString pipeline` is clicked. Animation is generated on demand from the final deployment view.
 
 GPU acceleration is used for tensorized optimization when PyTorch CUDA is available and the compute backend is set to `auto` or `cuda`. UI rendering, Plotly visualization, file I/O, and graph routing remain CPU-side. If `cuda` is explicitly requested but CUDA is unavailable in the Streamlit Python environment, the app raises a visible error instead of silently falling back to CPU.
 

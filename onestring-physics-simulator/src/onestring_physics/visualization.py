@@ -625,6 +625,8 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
     fig = go.Figure()
     parameterization = state.surface_parameterization
     metrics = getattr(parameterization, "metrics", {}) or {}
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    boundary_loop = [int(value) for value in (metrics.get("boundary_loop", []) or [])]
     target_corners = np.asarray(metrics.get("boundary_target_corners", np.zeros((0, 2))), dtype=float)
     if target_corners.shape == (4, 2):
         target_boundary = np.vstack([target_corners, target_corners[0]])
@@ -638,20 +640,24 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
             )
         )
 
-    boundary = np.asarray(parameterization.omega_boundary, dtype=float)
-    if boundary.size == 0:
-        boundary = np.asarray(state.conformal_domain.boundary, dtype=float)
-    fig.add_trace(
-        go.Scatter(
-            x=boundary[:, 0],
-            y=boundary[:, 1],
-            mode="lines",
-            line=dict(color="#0f766e", width=3),
-            name="final Omega boundary",
+    if boundary_loop and max(boundary_loop) < len(uv):
+        boundary = uv[np.asarray(boundary_loop + [boundary_loop[0]], dtype=int)]
+    else:
+        boundary = np.asarray(parameterization.omega_boundary, dtype=float)
+        if boundary.size == 0:
+            boundary = np.asarray(state.conformal_domain.boundary, dtype=float)
+    initial_boundary = np.asarray(metrics.get("initial_omega_boundary", []), dtype=float)
+    if initial_boundary.ndim == 2 and initial_boundary.shape[1:] == (2,) and len(initial_boundary) >= 2:
+        fig.add_trace(
+            go.Scatter(
+                x=initial_boundary[:, 0],
+                y=initial_boundary[:, 1],
+                mode="lines",
+                line=dict(color="#94a3b8", width=2, dash="dash"),
+                name="initial Omega boundary",
+            )
         )
-    )
 
-    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     uv_faces = np.asarray(parameterization.uv_faces, dtype=int)[:, :3]
     if len(uv_faces):
         uv_mesh_x: list[float | None] = []
@@ -716,7 +722,6 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
             )
         )
 
-    boundary_loop = [int(value) for value in (metrics.get("boundary_loop", []) or [])]
     if boundary_loop and max(boundary_loop) < len(uv):
         boundary_vertices = uv[np.asarray(boundary_loop, dtype=int)]
         fig.add_trace(
@@ -793,9 +798,21 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
             fig.add_hline(y=value, line=dict(color="#ef4444", dash="dash"))
         else:
             fig.add_vline(x=value, line=dict(color="#ef4444", dash="dash"))
+    # Draw the optimized boundary last so the result is not hidden by the
+    # dense UV mesh or cropped quad overlay.
+    fig.add_trace(
+        go.Scatter(
+            x=boundary[:, 0],
+            y=boundary[:, 1],
+            mode="lines",
+            line=dict(color="#0f766e", width=5),
+            name="final optimized Omega boundary",
+        )
+    )
     fig.update_layout(
         title=(
-            "Omega boundary and distortion diagnostics"
+            "Final optimized Omega boundary and distortion diagnostics"
+            f" | iterations={metrics.get('optimization_iteration_count', 'n/a')}"
             f" | flips={int(metrics.get('uv_triangle_flip_count', 0))}"
             f", overlaps={int(metrics.get('internal_triangle_overlap_count', 0))}"
             f", boundary crossings={int(metrics.get('boundary_self_intersection_count', 0))}"

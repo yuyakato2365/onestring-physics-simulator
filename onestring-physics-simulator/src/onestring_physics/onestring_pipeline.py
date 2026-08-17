@@ -980,7 +980,7 @@ class PipelineParameters(_original.PipelineParameters):
     boundary_sliding_spacing_weight: float = 0.002
     boundary_sliding_flip_area_epsilon: float = 1e-10
     boundary_sliding_line_search_max_steps: int = 14
-    bijective_free_boundary_max_iterations: int = 60
+    bijective_free_boundary_max_iterations: int = 1000
     bijective_free_boundary_gradient_tolerance: float = 1e-7
     bijective_free_boundary_energy_tolerance: float = 1e-8
     bijective_free_boundary_line_search_max_steps: int = 20
@@ -8236,13 +8236,29 @@ def build_onestring_design(
     progress_callback=None,
 ):
     active_params = params or PipelineParameters()
-    state = _ORIGINAL_BUILD_ONESTRING_DESIGN(
-        target,
-        active_params,
-        run_simulation=run_simulation,
-        deployment_params=deployment_params,
-        progress_callback=progress_callback,
-    )
+    progress_attribute = "_bijective_free_boundary_progress_callback"
+    missing_progress = object()
+    previous_progress = getattr(active_params, progress_attribute, missing_progress)
+    if str(getattr(active_params, "omega_parameterization_mode", "")) == "bijective_free_boundary":
+        setattr(
+            active_params,
+            progress_attribute,
+            _original._subprogress(progress_callback, 0.08, 0.16, "S -> Omega: "),
+        )
+    try:
+        state = _ORIGINAL_BUILD_ONESTRING_DESIGN(
+            target,
+            active_params,
+            run_simulation=run_simulation,
+            deployment_params=deployment_params,
+            progress_callback=progress_callback,
+        )
+    finally:
+        if previous_progress is missing_progress:
+            if hasattr(active_params, progress_attribute):
+                delattr(active_params, progress_attribute)
+        else:
+            setattr(active_params, progress_attribute, previous_progress)
     if str(getattr(active_params, "omega_parameterization_mode", "")) == "paper_reference_bff":
         diagnostics = _collect_reference_run_diagnostics(state, active_params)
         requested_path = str(getattr(active_params, "reference_diagnostics_path", "output/paper_reference_diagnostics.json"))

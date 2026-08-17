@@ -480,14 +480,12 @@ def triangle_jacobian_diagnostics(
     }
 
 
-def count_internal_triangle_overlaps(uv_vertices: np.ndarray, faces: np.ndarray, tolerance: float = 1e-12) -> int:
-    """Count positive-area overlaps between non-adjacent UV triangles."""
-
-    uv = np.asarray(uv_vertices, dtype=float)
-    tris = np.asarray(faces, dtype=int)
-    points = uv[tris]
-    minimum = np.min(points, axis=1)
-    maximum = np.max(points, axis=1)
+def _triangle_pair_has_positive_area_overlap(
+    first: np.ndarray,
+    second: np.ndarray,
+    tolerance: float,
+) -> bool:
+    """Apply the original exact narrow-phase predicate to one triangle pair."""
 
     def orient(a, b, c) -> float:
         return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
@@ -497,27 +495,204 @@ def count_internal_triangle_overlaps(uv_vertices: np.ndarray, faces: np.ndarray,
         return bool(o1 * o2 < -tolerance and o3 * o4 < -tolerance)
 
     def strictly_inside(point, triangle) -> bool:
-        signs = np.asarray([orient(triangle[0], triangle[1], point), orient(triangle[1], triangle[2], point), orient(triangle[2], triangle[0], point)])
+        signs = np.asarray(
+            [
+                orient(triangle[0], triangle[1], point),
+                orient(triangle[1], triangle[2], point),
+                orient(triangle[2], triangle[0], point),
+            ]
+        )
         return bool(np.all(signs > tolerance) or np.all(signs < -tolerance))
 
+    intersects = any(
+        proper_intersection(first[i], first[(i + 1) % 3], second[j], second[(j + 1) % 3])
+        for i in range(3)
+        for j in range(3)
+    )
+    contained = any(strictly_inside(point, second) for point in first) or any(
+        strictly_inside(point, first) for point in second
+    )
+    return bool(intersects or contained)
+
+
+def _triangle_pair_overlap_mask(
+    first: np.ndarray,
+    second: np.ndarray,
+    tolerance: float,
+) -> np.ndarray:
+    """Vectorized equivalent of the exact positive-area overlap predicate."""
+
+    def orient(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+        return (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (
+            b[:, 1] - a[:, 1]
+        ) * (c[:, 0] - a[:, 0])
+
+    intersects = np.zeros(len(first), dtype=bool)
+    for first_edge in range(3):
+        a = first[:, first_edge]
+        b = first[:, (first_edge + 1) % 3]
+        for second_edge in range(3):
+            c = second[:, second_edge]
+            d = second[:, (second_edge + 1) % 3]
+            o1 = orient(a, b, c)
+            o2 = orient(a, b, d)
+            o3 = orient(c, d, a)
+            o4 = orient(c, d, b)
+            intersects |= (o1 * o2 < -tolerance) & (o3 * o4 < -tolerance)
+
+    contained = np.zeros(len(first), dtype=bool)
+    for points, triangles in ((first, second), (second, first)):
+        for point_index in range(3):
+            point = points[:, point_index]
+            signs = np.column_stack(
+                [
+                    orient(triangles[:, edge], triangles[:, (edge + 1) % 3], point)
+                    for edge in range(3)
+                ]
+            )
+            contained |= np.all(signs > tolerance, axis=1) | np.all(signs < -tolerance, axis=1)
+    return intersects | contained
+
+
+def count_internal_triangle_overlaps_bruteforce(
+    uv_vertices: np.ndarray,
+    faces: np.ndarray,
+    tolerance: float = 1e-12,
+) -> int:
+    """Reference O(F^2) implementation retained for regression testing."""
+
+    uv = np.asarray(uv_vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)
+    if len(tris) < 2:
+        return 0
+    points = uv[tris]
+    minimum = np.min(points, axis=1)
+    maximum = np.max(points, axis=1)
     overlaps = 0
     for first in range(len(tris)):
         ids_first = set(int(value) for value in tris[first])
         for second in range(first + 1, len(tris)):
             if ids_first.intersection(int(value) for value in tris[second]):
                 continue
-            if np.any(maximum[first] < minimum[second] - tolerance) or np.any(maximum[second] < minimum[first] - tolerance):
+            if np.any(maximum[first] < minimum[second] - tolerance) or np.any(
+                maximum[second] < minimum[first] - tolerance
+            ):
                 continue
-            a = points[first]
-            b = points[second]
-            intersects = any(
-                proper_intersection(a[i], a[(i + 1) % 3], b[j], b[(j + 1) % 3])
-                for i in range(3)
-                for j in range(3)
-            )
-            contained = any(strictly_inside(point, b) for point in a) or any(strictly_inside(point, a) for point in b)
-            if intersects or contained:
+            if _triangle_pair_has_positive_area_overlap(points[first], points[second], tolerance):
                 overlaps += 1
+    return int(overlaps)
+
+
+def _spatial_hash_triangle_pairs(
+    minimum: np.ndarray,
+    maximum: np.ndarray,
+    tolerance: float,
+) -> tuple[set[tuple[int, int]], dict[str, int | float]]:
+    """Return AABB candidates using a conservative uniform-grid broad phase."""
+
+    triangle_count = len(minimum)
+    if triangle_count < 2:
+        return set(), {
+            "spatial_hash_cell_count": 0,
+            "spatial_hash_resolution": 0,
+            "broad_phase_candidate_pair_count": 0,
+        }
+    global_minimum = np.min(minimum, axis=0)
+    global_maximum = np.max(maximum, axis=0)
+    span = global_maximum - global_minimum
+    resolution = max(1, int(math.ceil(math.sqrt(triangle_count))))
+    fallback_width = max(float(np.max(span)), 1.0) / resolution
+    cell_width = np.where(span > tolerance, span / resolution, fallback_width)
+    cell_width = np.maximum(cell_width, max(float(tolerance), np.finfo(float).eps))
+
+    cells: dict[tuple[int, int], list[int]] = {}
+    expanded_minimum = minimum - tolerance
+    expanded_maximum = maximum + tolerance
+    lower = np.floor((expanded_minimum - global_minimum) / cell_width).astype(np.int64)
+    upper = np.floor((expanded_maximum - global_minimum) / cell_width).astype(np.int64)
+    for triangle_id, (first_cell, last_cell) in enumerate(zip(lower, upper)):
+        for cell_x in range(int(first_cell[0]), int(last_cell[0]) + 1):
+            for cell_y in range(int(first_cell[1]), int(last_cell[1]) + 1):
+                cells.setdefault((cell_x, cell_y), []).append(triangle_id)
+
+    pairs: set[tuple[int, int]] = set()
+    for triangle_ids in cells.values():
+        for first_index in range(len(triangle_ids)):
+            first = triangle_ids[first_index]
+            for second in triangle_ids[first_index + 1 :]:
+                pairs.add((first, second) if first < second else (second, first))
+    return pairs, {
+        "spatial_hash_cell_count": len(cells),
+        "spatial_hash_resolution": resolution,
+        "broad_phase_candidate_pair_count": len(pairs),
+    }
+
+
+def count_internal_triangle_overlaps(
+    uv_vertices: np.ndarray,
+    faces: np.ndarray,
+    tolerance: float = 1e-12,
+    *,
+    stats: dict[str, int | float] | None = None,
+) -> int:
+    """Count positive-area overlaps using a conservative spatial-hash broad phase.
+
+    Candidate discovery is accelerated, while adjacency filtering, AABB checks,
+    edge intersection, and containment use the same predicates as the retained
+    brute-force implementation.
+    """
+
+    uv = np.asarray(uv_vertices, dtype=float)
+    tris = np.asarray(faces, dtype=int)
+    if len(tris) < 2:
+        if stats is not None:
+            stats.update(
+                {
+                    "total_possible_pair_count": 0,
+                    "broad_phase_candidate_pair_count": 0,
+                    "nonadjacent_narrow_phase_pair_count": 0,
+                }
+            )
+        return 0
+    points = uv[tris]
+    minimum = np.min(points, axis=1)
+    maximum = np.max(points, axis=1)
+    candidates, broad_phase_stats = _spatial_hash_triangle_pairs(minimum, maximum, tolerance)
+    candidate_array = np.asarray(list(candidates), dtype=np.int64).reshape(-1, 2)
+    if len(candidate_array):
+        first_ids = candidate_array[:, 0]
+        second_ids = candidate_array[:, 1]
+        adjacent = np.any(tris[first_ids, :, None] == tris[second_ids, None, :], axis=(1, 2))
+        aabb_disjoint = np.any(maximum[first_ids] < minimum[second_ids] - tolerance, axis=1) | np.any(
+            maximum[second_ids] < minimum[first_ids] - tolerance, axis=1
+        )
+        narrow_mask = ~adjacent & ~aabb_disjoint
+        narrow_pairs = candidate_array[narrow_mask]
+        overlaps = int(
+            np.count_nonzero(
+                _triangle_pair_overlap_mask(
+                    points[narrow_pairs[:, 0]],
+                    points[narrow_pairs[:, 1]],
+                    tolerance,
+                )
+            )
+        )
+        adjacent_pair_count = int(np.count_nonzero(adjacent))
+        narrow_phase_count = int(len(narrow_pairs))
+    else:
+        overlaps = 0
+        adjacent_pair_count = 0
+        narrow_phase_count = 0
+    if stats is not None:
+        stats.update(broad_phase_stats)
+        stats.update(
+            {
+                "total_possible_pair_count": len(tris) * (len(tris) - 1) // 2,
+                "adjacent_candidate_pair_count": adjacent_pair_count,
+                "nonadjacent_narrow_phase_pair_count": narrow_phase_count,
+                "overlap_count": overlaps,
+            }
+        )
     return int(overlaps)
 
 

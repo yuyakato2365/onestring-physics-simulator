@@ -367,6 +367,29 @@ with st.sidebar:
             "stop when lambda > 2 requires unspecified reparameterization",
             value=True,
         )
+    with st.expander(
+        "Bijective free-boundary settings",
+        expanded=omega_parameterization_mode == "bijective_free_boundary",
+    ):
+        bijective_free_boundary_max_iterations = int(
+            st.number_input(
+                "bijective max iterations",
+                min_value=1,
+                max_value=2000,
+                value=1000,
+                step=50,
+                help="Lower this for a quick safe preview. Final local and global validity checks still run.",
+            )
+        )
+        bijective_free_boundary_line_search_max_steps = int(
+            st.number_input(
+                "bijective line-search max steps",
+                min_value=1,
+                max_value=30,
+                value=20,
+                step=1,
+            )
+        )
     with st.expander("Boundary-sliding LSCM advanced settings", expanded=False):
         boundary_target_aspect_mode = st.selectbox(
             "rectangle aspect mode",
@@ -938,6 +961,8 @@ def current_pipeline_key() -> tuple:
         reference_grid_origin_v,
         reference_csf_normalization,
         reference_stop_on_required_split,
+        bijective_free_boundary_max_iterations,
+        bijective_free_boundary_line_search_max_steps,
         boundary_target_aspect_mode,
         boundary_target_aspect_ratio,
         boundary_sliding_max_iterations,
@@ -1061,6 +1086,8 @@ pipeline_params = PipelineParameters(
     boundary_sliding_spacing_weight=boundary_sliding_spacing_weight,
     boundary_sliding_flip_area_epsilon=boundary_sliding_flip_area_epsilon,
     boundary_sliding_line_search_max_steps=boundary_sliding_line_search_max_steps,
+    bijective_free_boundary_max_iterations=bijective_free_boundary_max_iterations,
+    bijective_free_boundary_line_search_max_steps=bijective_free_boundary_line_search_max_steps,
     allow_experimental_pipeline=allow_experimental_pipeline,
     strict_k2d_time_budget_sec=strict_k2d_time_budget_sec,
     strict_k2d_scipy_vertex_limit=strict_k2d_scipy_vertex_limit,
@@ -1094,7 +1121,17 @@ if "onestring_state" not in st.session_state and not run_pipeline:
     st.info("Set parameters, then click Run OneString pipeline. The paper-default path stops at unimplemented stages; enable the experimental pipeline explicitly to run the old prototype path.")
     st.stop()
 
-if run_pipeline or st.session_state.get("pipeline_key") != pipeline_key:
+stored_pipeline_key = st.session_state.get("pipeline_key")
+if stored_pipeline_key is not None and stored_pipeline_key != pipeline_key and not run_pipeline:
+    st.warning(
+        "Calculation settings changed. The existing result is still displayed; "
+        "click Run OneString pipeline when you want to recompute it."
+    )
+
+# Streamlit reruns this script for display-only widgets such as View stage.
+# Rebuild only on the explicit Run button; the completed state remains in the
+# session and changing the view never repeats the expensive pipeline.
+if run_pipeline:
     with st.spinner("Building OneString pipeline state"):
         progress_bar = st.progress(0.0, text="Preparing pipeline…")
         progress_status = st.empty()
@@ -1312,6 +1349,16 @@ elif view_stage == "Omega":
         "lambda_normalization_status": state.surface_parameterization.metrics.get("lambda_normalization_status", ""),
         "anisotropy_max": max(state.surface_parameterization.metrics.get("per_triangle_anisotropy", [0.0]) or [0.0]),
         "internal_triangle_overlap_count": state.surface_parameterization.metrics.get("internal_triangle_overlap_count", 0),
+        "optimization_requested_max_iterations": state.surface_parameterization.metrics.get("optimization_requested_max_iterations", ""),
+        "optimization_iteration_count": state.surface_parameterization.metrics.get("optimization_iteration_count", ""),
+        "optimization_termination_reason": state.surface_parameterization.metrics.get("optimization_termination_reason", ""),
+        "optimization_converged": state.surface_parameterization.metrics.get("optimization_converged", ""),
+        "initial_energy": state.surface_parameterization.metrics.get("initial_energy", ""),
+        "final_energy": state.surface_parameterization.metrics.get("final_energy", ""),
+        "boundary_displacement_rms": state.surface_parameterization.metrics.get("boundary_displacement_rms", ""),
+        "boundary_displacement_max": state.surface_parameterization.metrics.get("boundary_displacement_max", ""),
+        "initial_boundary_radius_cv": state.surface_parameterization.metrics.get("initial_boundary_radius_cv", ""),
+        "final_boundary_radius_cv": state.surface_parameterization.metrics.get("final_boundary_radius_cv", ""),
         "boundary_target_shape": state.surface_parameterization.metrics.get("boundary_target_shape", ""),
         "boundary_target_aspect_ratio": state.surface_parameterization.metrics.get("boundary_target_aspect_ratio", ""),
         "boundary_corner_vertex_ids": state.surface_parameterization.metrics.get("boundary_corner_vertex_ids", []),
@@ -1348,6 +1395,22 @@ elif view_stage == "Omega":
         st.info("Boundary-controlled LSCM approximation is active. This mode is intentionally separate from reference BFF.")
     elif not omega_info["bff_implemented"]:
         st.warning("Omega is not a reference Boundary First Flattening implementation. No BFF claim is made for this mode.")
+    if state.surface_parameterization.method == "bijective_free_boundary":
+        accepted = int(state.surface_parameterization.metrics.get("optimization_iteration_count", 0))
+        requested = int(state.surface_parameterization.metrics.get("optimization_requested_max_iterations", 0))
+        boundary_rms = float(state.surface_parameterization.metrics.get("boundary_displacement_rms", 0.0))
+        st.caption(
+            f"Final optimized Ω: accepted iterations {accepted}/{requested}; "
+            f"boundary RMS displacement from initialization {boundary_rms:.6g}. "
+            "The gray dashed outline is the initial boundary and the thick green outline is the final boundary."
+        )
+        if accepted == 0:
+            st.error("Ω optimization accepted no update; the displayed final boundary equals the initialization.")
+        elif boundary_rms <= 1.0e-5:
+            st.warning(
+                "Ω interior energy improved, but the optimized boundary moved only a negligible amount. "
+                "The final outline can therefore remain visually indistinguishable from the initialization."
+            )
     st.write(omega_info)
 elif view_stage == "Mode Comparison":
     st.caption(
