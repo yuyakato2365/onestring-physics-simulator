@@ -9,7 +9,7 @@ from . import official_ceps as _official_ceps
 from .ceps_outer_boundary import install_ceps_outer_boundary
 from .ceps_paired_output import install_ceps_paired_output
 from .ceps_strict_adapter import install_ceps_strict_adapter
-from .dynamic_free_boundary import (
+from .dynamic_free_boundary_v2 import (
     BijectiveFreeBoundaryConfig,
     bijective_free_boundary_parameterization,
     install_bijective_free_boundary,
