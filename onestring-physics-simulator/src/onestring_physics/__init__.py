@@ -9,12 +9,13 @@ from . import official_ceps as _official_ceps
 from .ceps_outer_boundary import install_ceps_outer_boundary
 from .ceps_paired_output import install_ceps_paired_output
 from .ceps_strict_adapter import install_ceps_strict_adapter
-from .bijective_free_boundary import (
+from .dynamic_free_boundary import (
     BijectiveFreeBoundaryConfig,
     bijective_free_boundary_parameterization,
     install_bijective_free_boundary,
 )
 from .discrete_bff import install_discrete_bff
+from .fast_t3d_preview import install_fast_t3d_preview
 from .official_ceps import install_official_ceps
 
 
@@ -28,17 +29,19 @@ install_ceps_outer_boundary(_official_ceps)
 
 
 def _install_parameterization_backends(module: Any) -> None:
-    """Install BFF and optional official CEPS after every pipeline load/reload."""
+    """Install parameterization backends and runtime acceleration patches."""
     # importlib.reload() preserves a module dictionary. Clear old installation
     # markers because the re-executed compatibility wrapper replaced the patch.
     module._DISCRETE_BFF_PATCH_INSTALLED = False
     module._BIJECTIVE_FREE_BOUNDARY_PATCH_INSTALLED = False
     module._OFFICIAL_CEPS_PATCH_INSTALLED = False
     module._CEPS_STRICT_ADAPTER_INSTALLED = False
+    module._FAST_T3D_PREVIEW_PATCH_INSTALLED = False
     install_discrete_bff(module)
     install_bijective_free_boundary(module)
     install_official_ceps(module)
     install_ceps_strict_adapter(module)
+    install_fast_t3d_preview(module)
 
     backend_build = module._build_surface_parameterization
 
