@@ -987,6 +987,7 @@ class PipelineParameters(_original.PipelineParameters):
     bijective_free_boundary_line_search_safety: float = 0.9
     bijective_free_boundary_initial_step_scale: float = 3.0
     bijective_free_boundary_conformal_weight: float = 4.0
+    bijective_free_boundary_minimum_isotropic_scale: float = 0.90
     bijective_free_boundary_boundary_barrier_weight: float = 1.0
     bijective_free_boundary_initial_boundary_shape: str = "circle"
     allow_experimental_pipeline: bool = False

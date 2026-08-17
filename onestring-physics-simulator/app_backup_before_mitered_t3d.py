@@ -409,6 +409,16 @@ with st.sidebar:
                 help="Penalty for scale-invariant angular distortion. Zero disables the explicit conformal condition.",
             )
         )
+        bijective_free_boundary_minimum_isotropic_scale = float(
+            st.number_input(
+                "minimum isotropic scale (s_min)",
+                min_value=0.0,
+                max_value=2.0,
+                value=0.90,
+                step=0.05,
+                help="Triangles below this local isotropic scale receive the shrink penalty.",
+            )
+        )
         bijective_free_boundary_initial_step_scale = float(
             st.number_input(
                 "bijective initial step scale",
@@ -994,6 +1004,7 @@ def current_pipeline_key() -> tuple:
         bijective_free_boundary_max_iterations,
         bijective_free_boundary_line_search_max_steps,
         bijective_free_boundary_conformal_weight,
+        bijective_free_boundary_minimum_isotropic_scale,
         bijective_free_boundary_initial_step_scale,
         boundary_target_aspect_mode,
         boundary_target_aspect_ratio,
@@ -1121,6 +1132,7 @@ pipeline_params = PipelineParameters(
     bijective_free_boundary_max_iterations=bijective_free_boundary_max_iterations,
     bijective_free_boundary_line_search_max_steps=bijective_free_boundary_line_search_max_steps,
     bijective_free_boundary_conformal_weight=bijective_free_boundary_conformal_weight,
+    bijective_free_boundary_minimum_isotropic_scale=bijective_free_boundary_minimum_isotropic_scale,
     bijective_free_boundary_initial_step_scale=bijective_free_boundary_initial_step_scale,
     bijective_free_boundary_initial_boundary_shape=bijective_free_boundary_initial_boundary_shape,
     allow_experimental_pipeline=allow_experimental_pipeline,

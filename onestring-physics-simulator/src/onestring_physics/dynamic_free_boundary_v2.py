@@ -968,7 +968,7 @@ def install_bijective_free_boundary(pipeline_module: Any) -> None:
             initial_step_scale=float(getattr(params, "bijective_free_boundary_initial_step_scale", 3.0)),
             conformal_weight=float(getattr(params, "bijective_free_boundary_conformal_weight", 4.0)),
             shrink_weight=float(getattr(params, "bijective_free_boundary_shrink_weight", 8.0)),
-            minimum_isotropic_scale=float(getattr(params, "bijective_free_boundary_minimum_isotropic_scale", 0.70)),
+            minimum_isotropic_scale=float(getattr(params, "bijective_free_boundary_minimum_isotropic_scale", 0.90)),
             boundary_barrier_weight=float(getattr(params, "bijective_free_boundary_boundary_barrier_weight", 1.0)),
             initial_boundary_shape=str(getattr(params, "bijective_free_boundary_initial_boundary_shape", "circle")),
             interior_steps_per_boundary=int(getattr(params, "bijective_free_boundary_interior_steps_per_boundary", 2)),

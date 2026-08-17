@@ -31,6 +31,10 @@ def _rectangular_disk(nx: int = 8, ny: int = 5):
     return vertices, np.asarray(faces, dtype=int)
 
 
+def test_default_shrink_penalty_threshold_is_point_nine():
+    assert BijectiveFreeBoundaryConfig().minimum_isotropic_scale == 0.9
+
+
 def test_boundary_direction_is_local_not_global_polynomial_mode():
     count = 20
     angles = np.linspace(0.0, 2.0 * np.pi, count, endpoint=False)

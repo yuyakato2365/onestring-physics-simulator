@@ -30,7 +30,7 @@ class BijectiveFreeBoundaryConfig:
     initial_step_scale: float = 3.0
     conformal_weight: float = 4.0
     shrink_weight: float = 8.0
-    minimum_isotropic_scale: float = 0.70
+    minimum_isotropic_scale: float = 0.90
     boundary_barrier_weight: float = 1.0
     minimum_signed_double_area: float = 1e-12
     initial_boundary_shape: str = "circle"
@@ -338,7 +338,7 @@ def install_bijective_free_boundary(pipeline_module: Any) -> None:
             relative_energy_tolerance=float(getattr(params, "bijective_free_boundary_energy_tolerance", 1e-9)),
             line_search_max_steps=int(getattr(params, "bijective_free_boundary_line_search_max_steps", 16)), line_search_safety=float(getattr(params, "bijective_free_boundary_line_search_safety", 0.9)),
             initial_step_scale=float(getattr(params, "bijective_free_boundary_initial_step_scale", 3.0)), conformal_weight=float(getattr(params, "bijective_free_boundary_conformal_weight", 4.0)),
-            shrink_weight=float(getattr(params, "bijective_free_boundary_shrink_weight", 8.0)), minimum_isotropic_scale=float(getattr(params, "bijective_free_boundary_minimum_isotropic_scale", 0.70)),
+            shrink_weight=float(getattr(params, "bijective_free_boundary_shrink_weight", 8.0)), minimum_isotropic_scale=float(getattr(params, "bijective_free_boundary_minimum_isotropic_scale", 0.90)),
             boundary_barrier_weight=float(getattr(params, "bijective_free_boundary_boundary_barrier_weight", 1.0)), initial_boundary_shape=str(getattr(params, "bijective_free_boundary_initial_boundary_shape", "circle")),
             interior_steps_per_boundary=int(getattr(params, "bijective_free_boundary_interior_steps_per_boundary", 2)), interior_initial_step_scale=float(getattr(params, "bijective_free_boundary_interior_step_scale", 1.0)),
             boundary_step_fraction=float(getattr(params, "bijective_free_boundary_boundary_step_fraction", 0.12)), boundary_tangent_weight=float(getattr(params, "bijective_free_boundary_boundary_tangent_weight", 0.20)), boundary_normal_smoothing=float(getattr(params, "bijective_free_boundary_boundary_normal_smoothing", 0.18)),

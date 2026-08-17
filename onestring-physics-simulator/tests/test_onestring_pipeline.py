@@ -35,6 +35,10 @@ import pytest
 from types import SimpleNamespace
 
 
+def test_pipeline_default_shrink_penalty_threshold_is_point_nine():
+    assert PipelineParameters().bijective_free_boundary_minimum_isotropic_scale == 0.9
+
+
 def test_split_hinge_components_receive_rigid_inter_component_padding():
     tile = np.asarray(
         [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
