@@ -371,6 +371,15 @@ with st.sidebar:
         "Bijective free-boundary settings",
         expanded=omega_parameterization_mode == "bijective_free_boundary",
     ):
+        bijective_free_boundary_initial_boundary_shape = st.selectbox(
+            "initial Omega boundary shape",
+            ["circle", "rectangle"],
+            index=0,
+            help=(
+                "Both choices use equal-area convex Floater initialization. "
+                "Compare their final boundaries to measure initialization dependence."
+            ),
+        )
         bijective_free_boundary_max_iterations = int(
             st.number_input(
                 "bijective max iterations",
@@ -388,6 +397,26 @@ with st.sidebar:
                 max_value=30,
                 value=20,
                 step=1,
+            )
+        )
+        bijective_free_boundary_conformal_weight = float(
+            st.number_input(
+                "bijective conformal weight",
+                min_value=0.0,
+                max_value=50.0,
+                value=4.0,
+                step=0.5,
+                help="Penalty for scale-invariant angular distortion. Zero disables the explicit conformal condition.",
+            )
+        )
+        bijective_free_boundary_initial_step_scale = float(
+            st.number_input(
+                "bijective initial step scale",
+                min_value=0.1,
+                max_value=10.0,
+                value=3.0,
+                step=0.25,
+                help="Larger values request stronger boundary/interior updates; validity and energy line search still limit unsafe moves.",
             )
         )
     with st.expander("Boundary-sliding LSCM advanced settings", expanded=False):
@@ -961,8 +990,11 @@ def current_pipeline_key() -> tuple:
         reference_grid_origin_v,
         reference_csf_normalization,
         reference_stop_on_required_split,
+        bijective_free_boundary_initial_boundary_shape,
         bijective_free_boundary_max_iterations,
         bijective_free_boundary_line_search_max_steps,
+        bijective_free_boundary_conformal_weight,
+        bijective_free_boundary_initial_step_scale,
         boundary_target_aspect_mode,
         boundary_target_aspect_ratio,
         boundary_sliding_max_iterations,
@@ -1088,6 +1120,9 @@ pipeline_params = PipelineParameters(
     boundary_sliding_line_search_max_steps=boundary_sliding_line_search_max_steps,
     bijective_free_boundary_max_iterations=bijective_free_boundary_max_iterations,
     bijective_free_boundary_line_search_max_steps=bijective_free_boundary_line_search_max_steps,
+    bijective_free_boundary_conformal_weight=bijective_free_boundary_conformal_weight,
+    bijective_free_boundary_initial_step_scale=bijective_free_boundary_initial_step_scale,
+    bijective_free_boundary_initial_boundary_shape=bijective_free_boundary_initial_boundary_shape,
     allow_experimental_pipeline=allow_experimental_pipeline,
     strict_k2d_time_budget_sec=strict_k2d_time_budget_sec,
     strict_k2d_scipy_vertex_limit=strict_k2d_scipy_vertex_limit,
@@ -1137,10 +1172,14 @@ if run_pipeline:
         progress_status = st.empty()
         progress_log: list[dict[str, object]] = []
         progress_started = time.perf_counter()
+        last_progress_rendered = [-1.0]
 
         def _build_progress(stage: str, fraction: float, detail: str = "") -> None:
             fraction = max(0.0, min(1.0, float(fraction)))
             elapsed = time.perf_counter() - progress_started
+            if fraction < 1.0 and elapsed - last_progress_rendered[0] < 0.25:
+                return
+            last_progress_rendered[0] = elapsed
             progress_bar.progress(fraction, text=f"{fraction * 100:5.1f}%  {stage}")
             progress_status.caption(f"{elapsed:7.2f}s  {stage}" + (f" — {detail}" if detail else ""))
             progress_log.append({"elapsed_sec": elapsed, "progress_%": fraction * 100.0, "stage": stage, "detail": detail})
@@ -1355,6 +1394,10 @@ elif view_stage == "Omega":
         "optimization_converged": state.surface_parameterization.metrics.get("optimization_converged", ""),
         "initial_energy": state.surface_parameterization.metrics.get("initial_energy", ""),
         "final_energy": state.surface_parameterization.metrics.get("final_energy", ""),
+        "initial_conformal_energy": state.surface_parameterization.metrics.get("initial_conformal_energy", ""),
+        "final_conformal_energy": state.surface_parameterization.metrics.get("final_conformal_energy", ""),
+        "conformal_energy_weight": state.surface_parameterization.metrics.get("conformal_energy_weight", ""),
+        "line_search_initial_step_scale": state.surface_parameterization.metrics.get("line_search_initial_step_scale", ""),
         "boundary_displacement_rms": state.surface_parameterization.metrics.get("boundary_displacement_rms", ""),
         "boundary_displacement_max": state.surface_parameterization.metrics.get("boundary_displacement_max", ""),
         "initial_boundary_radius_cv": state.surface_parameterization.metrics.get("initial_boundary_radius_cv", ""),
@@ -1399,9 +1442,17 @@ elif view_stage == "Omega":
         accepted = int(state.surface_parameterization.metrics.get("optimization_iteration_count", 0))
         requested = int(state.surface_parameterization.metrics.get("optimization_requested_max_iterations", 0))
         boundary_rms = float(state.surface_parameterization.metrics.get("boundary_displacement_rms", 0.0))
+        initial_shape = str(
+            state.surface_parameterization.metrics.get("initialization_boundary_shape", "circle")
+        )
+        final_circle_residual = float(
+            state.surface_parameterization.metrics.get("final_boundary_circle_fit_relative_rms", 0.0)
+        )
         st.caption(
-            f"Final optimized Ω: accepted iterations {accepted}/{requested}; "
+            f"Final optimized Ω: initial shape={initial_shape}; "
+            f"accepted iterations {accepted}/{requested}; "
             f"boundary RMS displacement from initialization {boundary_rms:.6g}. "
+            f"Final best-circle residual={100.0 * final_circle_residual:.4f}%. "
             "The gray dashed outline is the initial boundary and the thick green outline is the final boundary."
         )
         if accepted == 0:

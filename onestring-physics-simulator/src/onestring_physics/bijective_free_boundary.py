@@ -57,12 +57,15 @@ class BijectiveFreeBoundaryConfig:
     gradient_tolerance: float = 1.0e-7
     relative_energy_tolerance: float = 1.0e-8
     line_search_max_steps: int = 20
-    line_search_safety: float = 0.8
+    line_search_safety: float = 0.9
+    initial_step_scale: float = 3.0
+    conformal_weight: float = 4.0
     boundary_barrier_weight: float = 1.0
     lbfgs_history_size: int = 8
     minimum_signed_double_area: float = 1.0e-12
     validate_global_overlap_each_step: bool = False
     low_frequency_metric_weight: float = 8.0
+    initial_boundary_shape: str = "circle"
 
 
 def _cross2(a: np.ndarray, b: np.ndarray) -> float:
@@ -216,6 +219,7 @@ def _tutte_embedding(
     vertices: np.ndarray,
     faces: np.ndarray,
     boundary_loop: list[int],
+    boundary_shape: str = "circle",
 ) -> np.ndarray:
     """Create a valid convex-boundary Floater mean-value embedding.
 
@@ -262,9 +266,59 @@ def _tutte_embedding(
     # symmetric Dirichlet solve near its globally preferred scale and avoids
     # letting inverse-Jacobian gradients from a few tiny triangles freeze the
     # otherwise free boundary.
-    radius = math.sqrt(surface_area / np.pi)
     uv = np.zeros((n, 2), dtype=float)
-    uv[loop] = radius * np.column_stack([np.cos(angles), np.sin(angles)])
+    if boundary_shape == "circle":
+        boundary_uv = np.column_stack([np.cos(angles), np.sin(angles)])
+        polygon_area = 0.5 * abs(
+            float(
+                np.sum(
+                    boundary_uv[:, 0] * np.roll(boundary_uv[:, 1], -1)
+                    - boundary_uv[:, 1] * np.roll(boundary_uv[:, 0], -1)
+                )
+            )
+        )
+        uv[loop] = boundary_uv * math.sqrt(surface_area / max(polygon_area, _EPS))
+    elif boundary_shape == "rectangle":
+        # A literal square has collinear boundary vertices and can create zero
+        # area boundary triangles.  A p=8 superellipse is visibly rectangular
+        # but strictly convex, preserving Floater's positive-area guarantee.
+        exponent = 8.0
+        dense_angle = np.linspace(0.0, 2.0 * np.pi, 4097)
+        cosine = np.cos(dense_angle)
+        sine = np.sin(dense_angle)
+        dense_rectangle = np.column_stack(
+            [
+                np.sign(cosine) * np.abs(cosine) ** (2.0 / exponent),
+                np.sign(sine) * np.abs(sine) ** (2.0 / exponent),
+            ]
+        )
+        dense_arclength = np.concatenate(
+            [
+                [0.0],
+                np.cumsum(np.linalg.norm(np.diff(dense_rectangle, axis=0), axis=1)),
+            ]
+        )
+        target_arclength = cumulative / perimeter * dense_arclength[-1]
+        boundary_uv = np.column_stack(
+            [
+                np.interp(target_arclength, dense_arclength, dense_rectangle[:, 0]),
+                np.interp(target_arclength, dense_arclength, dense_rectangle[:, 1]),
+            ]
+        )
+        polygon_area = 0.5 * abs(
+            float(
+                np.sum(
+                    boundary_uv[:, 0] * np.roll(boundary_uv[:, 1], -1)
+                    - boundary_uv[:, 1] * np.roll(boundary_uv[:, 0], -1)
+                )
+            )
+        )
+        uv[loop] = boundary_uv * math.sqrt(surface_area / max(polygon_area, _EPS))
+    else:
+        raise ValueError(
+            "initial_boundary_shape must be 'circle' or 'rectangle'; "
+            f"got {boundary_shape!r}"
+        )
 
     neighbors: list[set[int]] = [set() for _ in range(n)]
     mean_value_numerators: list[dict[int, float]] = [dict() for _ in range(n)]
@@ -386,6 +440,7 @@ def _energy_and_gradient_bruteforce(
     boundary_loop: list[int],
     barrier_epsilon: float,
     barrier_weight: float,
+    conformal_weight: float = 0.0,
 ) -> tuple[float, np.ndarray, float, float]:
     tris = np.asarray(faces, dtype=int)[:, :3]
     gradient = np.zeros_like(uv)
@@ -399,15 +454,23 @@ def _energy_and_gradient_bruteforce(
             return math.inf, gradient, math.inf, math.inf
         inverse_jacobian = np.linalg.inv(jacobian)
         area = float(surface_areas[face_id])
+        frobenius_squared = float(np.sum(jacobian * jacobian))
         face_energy = area * (
-            float(np.sum(jacobian * jacobian))
+            frobenius_squared
             + float(np.sum(inverse_jacobian * inverse_jacobian))
         )
+        conformal_energy = area * (frobenius_squared / determinant - 2.0)
+        face_energy += float(conformal_weight) * conformal_energy
         distortion += face_energy
         jacobian_gradient = 2.0 * area * (
             jacobian
             - inverse_jacobian.T @ inverse_jacobian @ inverse_jacobian.T
         )
+        if conformal_weight:
+            jacobian_gradient += float(conformal_weight) * area * (
+                2.0 * jacobian / determinant
+                - (frobenius_squared / determinant) * inverse_jacobian.T
+            )
         uv_gradient = jacobian_gradient @ inverse_surface[face_id].T
         gradient[int(face[1])] += uv_gradient[:, 0]
         gradient[int(face[2])] += uv_gradient[:, 1]
@@ -444,6 +507,7 @@ def _energy_and_gradient(
     boundary_loop: list[int],
     barrier_epsilon: float,
     barrier_weight: float,
+    conformal_weight: float = 0.0,
 ) -> tuple[float, np.ndarray, float, float]:
     """Vectorized equivalent of the retained scalar reference implementation."""
 
@@ -464,19 +528,28 @@ def _energy_and_gradient(
     inverse_jacobian[:, 0, 1] = -jacobian[:, 0, 1] / determinant
     inverse_jacobian[:, 1, 0] = -jacobian[:, 1, 0] / determinant
     inverse_jacobian[:, 1, 1] = jacobian[:, 0, 0] / determinant
+    frobenius_squared = np.sum(jacobian * jacobian, axis=(1, 2))
+    symmetric_dirichlet = np.sum(inverse_jacobian * inverse_jacobian, axis=(1, 2))
+    conformal_per_face = np.maximum(frobenius_squared / determinant - 2.0, 0.0)
     distortion = float(
         np.sum(
             surface_areas
-            * (
-                np.sum(jacobian * jacobian, axis=(1, 2))
-                + np.sum(inverse_jacobian * inverse_jacobian, axis=(1, 2))
-            )
+            * (frobenius_squared + symmetric_dirichlet + float(conformal_weight) * conformal_per_face)
         )
     )
     inverse_transpose = np.swapaxes(inverse_jacobian, 1, 2)
     jacobian_gradient = 2.0 * surface_areas[:, None, None] * (
         jacobian - inverse_transpose @ inverse_jacobian @ inverse_transpose
     )
+    if conformal_weight:
+        jacobian_gradient += (
+            float(conformal_weight)
+            * surface_areas[:, None, None]
+            * (
+                2.0 * jacobian / determinant[:, None, None]
+                - (frobenius_squared / determinant)[:, None, None] * inverse_transpose
+            )
+        )
     uv_gradient = jacobian_gradient @ np.swapaxes(inverse_surface, 1, 2)
     gradient = np.zeros_like(coordinates)
     np.add.at(gradient, tris[:, 1], uv_gradient[:, :, 0])
@@ -526,6 +599,28 @@ def _energy_and_gradient(
     return float(total), gradient, distortion, float(boundary_energy)
 
 
+def _conformal_energy(
+    uv: np.ndarray,
+    faces: np.ndarray,
+    inverse_surface: np.ndarray,
+    surface_areas: np.ndarray,
+) -> float:
+    """Scale-invariant conformal distortion; zero iff both singular values agree."""
+
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    triangle_uv = np.asarray(uv, dtype=float)[tris]
+    d_uv = np.stack(
+        [triangle_uv[:, 1] - triangle_uv[:, 0], triangle_uv[:, 2] - triangle_uv[:, 0]],
+        axis=2,
+    )
+    jacobian = np.matmul(d_uv, inverse_surface)
+    determinant = jacobian[:, 0, 0] * jacobian[:, 1, 1] - jacobian[:, 0, 1] * jacobian[:, 1, 0]
+    if np.any(determinant <= _EPS) or not np.all(np.isfinite(determinant)):
+        return math.inf
+    frobenius_squared = np.sum(jacobian * jacobian, axis=(1, 2))
+    return float(np.sum(surface_areas * np.maximum(frobenius_squared / determinant - 2.0, 0.0)))
+
+
 def _signed_double_areas(uv: np.ndarray, faces: np.ndarray) -> np.ndarray:
     tri = np.asarray(uv, dtype=float)[np.asarray(faces, dtype=int)[:, :3]]
     first = tri[:, 1] - tri[:, 0]
@@ -564,17 +659,52 @@ def _segments_intersect(
 
 
 def boundary_self_intersection_count(uv: np.ndarray, boundary_loop: list[int]) -> int:
-    loop = [int(value) for value in boundary_loop]
-    count = 0
-    for first in range(len(loop)):
-        a0, a1 = loop[first], loop[(first + 1) % len(loop)]
-        for second in range(first + 1, len(loop)):
-            b0, b1 = loop[second], loop[(second + 1) % len(loop)]
-            if {a0, a1}.intersection({b0, b1}):
-                continue
-            if _segments_intersect(uv[a0], uv[a1], uv[b0], uv[b1]):
-                count += 1
-    return int(count)
+    loop = np.asarray(boundary_loop, dtype=int)
+    edge_count = len(loop)
+    if edge_count < 4:
+        return 0
+
+    first_edge, second_edge = np.triu_indices(edge_count, k=1)
+    nonadjacent = (second_edge != first_edge + 1) & ~(
+        (first_edge == 0) & (second_edge == edge_count - 1)
+    )
+    first_edge = first_edge[nonadjacent]
+    second_edge = second_edge[nonadjacent]
+    coordinates = np.asarray(uv, dtype=float)[loop]
+    starts = coordinates
+    ends = np.roll(coordinates, -1, axis=0)
+    a = starts[first_edge]
+    b = ends[first_edge]
+    c = starts[second_edge]
+    d = ends[second_edge]
+
+    def orient(start: np.ndarray, end: np.ndarray, point: np.ndarray) -> np.ndarray:
+        edge = end - start
+        relative = point - start
+        return edge[:, 0] * relative[:, 1] - edge[:, 1] * relative[:, 0]
+
+    def on_segment(start: np.ndarray, end: np.ndarray, point: np.ndarray) -> np.ndarray:
+        tolerance = 1.0e-12
+        return (
+            (np.minimum(start[:, 0], end[:, 0]) - tolerance <= point[:, 0])
+            & (point[:, 0] <= np.maximum(start[:, 0], end[:, 0]) + tolerance)
+            & (np.minimum(start[:, 1], end[:, 1]) - tolerance <= point[:, 1])
+            & (point[:, 1] <= np.maximum(start[:, 1], end[:, 1]) + tolerance)
+        )
+
+    tolerance = 1.0e-12
+    o1 = orient(a, b, c)
+    o2 = orient(a, b, d)
+    o3 = orient(c, d, a)
+    o4 = orient(c, d, b)
+    proper = (o1 * o2 < -tolerance) & (o3 * o4 < -tolerance)
+    touching = (
+        ((np.abs(o1) <= tolerance) & on_segment(a, b, c))
+        | ((np.abs(o2) <= tolerance) & on_segment(a, b, d))
+        | ((np.abs(o3) <= tolerance) & on_segment(c, d, a))
+        | ((np.abs(o4) <= tolerance) & on_segment(c, d, b))
+    )
+    return int(np.count_nonzero(proper | touching))
 
 
 def _positive_quadratic_roots(c0: float, c1: float, c2: float) -> list[float]:
@@ -912,7 +1042,7 @@ def bijective_free_boundary_parameterization(
     loop, topology = _extract_single_disk_boundary(tris, len(xyz))
     initialization_started = time.perf_counter()
     _emit_progress(progress_callback, "Floater initialization", 0.08, f"boundary vertices={len(loop)}")
-    uv = _tutte_embedding(xyz, tris, loop)
+    uv = _tutte_embedding(xyz, tris, loop, settings.initial_boundary_shape)
     initial_uv = uv.copy()
     initialization_seconds = time.perf_counter() - initialization_started
     surface_differentials_started = time.perf_counter()
@@ -979,6 +1109,7 @@ def bijective_free_boundary_parameterization(
             loop,
             barrier_epsilon,
             settings.boundary_barrier_weight,
+            settings.conformal_weight,
         )
         energy_gradient_total_seconds += time.perf_counter() - evaluation_started
         energy_gradient_call_count += 1
@@ -1016,6 +1147,7 @@ def bijective_free_boundary_parameterization(
     energy, gradient, distortion_energy, boundary_energy = timed_energy_gradient(uv)
     initial_energy = float(energy)
     initial_distortion_energy = float(distortion_energy)
+    initial_conformal_energy = _conformal_energy(uv, tris, inverse_surface, surface_areas)
     history: list[tuple[np.ndarray, np.ndarray, float]] = []
     converged = False
     termination_reason = "maximum_iterations"
@@ -1031,6 +1163,7 @@ def bijective_free_boundary_parameterization(
     maximum_iterations = max(0, int(settings.max_iterations))
     boundary_mask = np.zeros(len(xyz), dtype=bool)
     boundary_mask[np.asarray(loop, dtype=int)] = True
+    progress_iteration_stride = max(1, maximum_iterations // 200)
 
     for _iteration in range(maximum_iterations):
         iteration_started = time.perf_counter()
@@ -1041,15 +1174,21 @@ def bijective_free_boundary_parameterization(
         gradient -= np.mean(gradient, axis=0, keepdims=True)
         gradient_rms = float(np.linalg.norm(gradient) / math.sqrt(max(1, gradient.size)))
         iteration_fraction = 0.25 + 0.65 * ((_iteration + 1) / max(1, maximum_iterations))
-        _emit_progress(
-            progress_callback,
-            f"Optimization iteration {_iteration + 1} / {maximum_iterations}",
-            iteration_fraction,
-            (
-                f"energy={energy:.6g}, distortion={distortion_energy:.6g}, "
-                f"boundary={boundary_energy:.6g}, gradient RMS={gradient_rms:.3g}"
-            ),
+        report_iteration_progress = (
+            _iteration == 0
+            or _iteration + 1 == maximum_iterations
+            or _iteration % progress_iteration_stride == 0
         )
+        if report_iteration_progress:
+            _emit_progress(
+                progress_callback,
+                f"Optimization iteration {_iteration + 1} / {maximum_iterations}",
+                iteration_fraction,
+                (
+                    f"energy={energy:.6g}, distortion={distortion_energy:.6g}, "
+                    f"boundary={boundary_energy:.6g}, gradient RMS={gradient_rms:.3g}"
+                ),
+            )
         if gradient_rms <= settings.gradient_tolerance:
             converged = True
             termination_reason = "gradient_tolerance"
@@ -1105,7 +1244,12 @@ def bijective_free_boundary_parameterization(
         for attempt in range(2):
             safe_limit, safe_reason = timed_safe_step(uv, direction)
             last_safe_step_reason = safe_reason
-            step = 1.0 if not np.isfinite(safe_limit) else min(1.0, settings.line_search_safety * safe_limit)
+            requested_step = max(float(settings.initial_step_scale), np.finfo(float).eps)
+            step = (
+                requested_step
+                if not np.isfinite(safe_limit)
+                else min(requested_step, settings.line_search_safety * safe_limit)
+            )
             for _line_search in range(max(1, int(settings.line_search_max_steps))):
                 # A very large gradient on a skinny valid triangle can require
                 # a tiny scalar step while still producing a meaningful UV
@@ -1115,15 +1259,16 @@ def bijective_free_boundary_parameterization(
                     break
                 iteration_line_search_attempts += 1
                 line_search_candidate_count += 1
-                _emit_progress(
-                    progress_callback,
-                    f"Optimization iteration {_iteration + 1} / {maximum_iterations}",
-                    iteration_fraction,
-                    (
-                        f"line-search candidate {iteration_line_search_attempts}; step={step:.3g}; "
-                        f"safe limit={safe_limit:.3g}; reason={safe_reason}"
-                    ),
-                )
+                if report_iteration_progress or iteration_line_search_attempts > 1:
+                    _emit_progress(
+                        progress_callback,
+                        f"Optimization iteration {_iteration + 1} / {maximum_iterations}",
+                        iteration_fraction,
+                        (
+                            f"line-search candidate {iteration_line_search_attempts}; step={step:.3g}; "
+                            f"safe limit={safe_limit:.3g}; reason={safe_reason}"
+                        ),
+                    )
                 candidate = uv + step * direction
                 candidate -= np.mean(candidate, axis=0, keepdims=True)
                 locally_valid, _boundary_count = timed_local_validity(candidate)
@@ -1169,12 +1314,13 @@ def bijective_free_boundary_parameterization(
                 accepted = True
                 accepted_step = float(step)
                 line_search_accepted_candidate_count += 1
-                _emit_progress(
-                    progress_callback,
-                    f"Optimization iteration {_iteration + 1} / {maximum_iterations}",
-                    iteration_fraction,
-                    f"candidate accepted; overlap check={overlap_seconds:.3f}s",
-                )
+                if report_iteration_progress:
+                    _emit_progress(
+                        progress_callback,
+                        f"Optimization iteration {_iteration + 1} / {maximum_iterations}",
+                        iteration_fraction,
+                        f"candidate accepted; overlap check={overlap_seconds:.3f}s",
+                    )
                 break
             if accepted:
                 break
@@ -1265,6 +1411,7 @@ def bijective_free_boundary_parameterization(
             f"boundary_intersections={boundary_intersections}, overlaps={overlaps}"
         )
     diagnostics = triangle_jacobian_diagnostics(xyz, uv, tris)
+    final_conformal_energy = _conformal_energy(uv, tris, inverse_surface, surface_areas)
     lambda_values = np.asarray(diagnostics["raw_lambda_uv_to_surface_sigma_max"], dtype=float)
     log_lambda = np.log(lambda_values)
     anisotropy = np.asarray(diagnostics["anisotropy"], dtype=float)
@@ -1293,6 +1440,7 @@ def bijective_free_boundary_parameterization(
         "flattening_backend": "local_bijective_free_boundary_symmetric_dirichlet",
         "omega_parameterization_solver": "floater_then_validity_preserving_lbfgs_symmetric_dirichlet",
         "initialization_method": "floater_mean_value_equal_area_convex_boundary",
+        "initialization_boundary_shape": str(settings.initial_boundary_shape),
         "lbfgs_initial_inverse_hessian": "positive_vertex_diagonal_plus_low_frequency_chart_metric",
         "lbfgs_low_frequency_metric_weight": float(settings.low_frequency_metric_weight),
         "omega_boundary_mode": "paper_default",
@@ -1320,6 +1468,11 @@ def bijective_free_boundary_parameterization(
         "final_energy": float(energy),
         "initial_distortion_energy": initial_distortion_energy,
         "final_distortion_energy": float(distortion_energy),
+        "initial_conformal_energy": float(initial_conformal_energy),
+        "final_conformal_energy": float(final_conformal_energy),
+        "conformal_energy_definition": "area * (frobenius_norm(J)^2 / det(J) - 2); zero iff sigma1 == sigma2",
+        "conformal_energy_weight": float(settings.conformal_weight),
+        "conformal_constraint_enabled": bool(settings.conformal_weight > 0.0),
         "final_boundary_barrier_energy": float(boundary_energy),
         "boundary_displacement_rms": float(np.sqrt(np.mean(boundary_displacement**2))),
         "boundary_displacement_max": float(np.max(boundary_displacement)),
@@ -1387,6 +1540,8 @@ def bijective_free_boundary_parameterization(
         "line_search_last_safe_step_reason": last_safe_step_reason,
         "boundary_barrier_epsilon": float(barrier_epsilon),
         "boundary_barrier_weight": float(settings.boundary_barrier_weight),
+        "line_search_initial_step_scale": float(settings.initial_step_scale),
+        "line_search_safety": float(settings.line_search_safety),
         "lambda_definition": "sigma_max of UV-to-surface Jacobian, matching reference_bff.triangle_jacobian_diagnostics",
         "mapping_direction": diagnostics["mapping_direction"],
         "lambda_min": float(np.min(valid_lambda)),
@@ -1405,6 +1560,7 @@ def bijective_free_boundary_parameterization(
         "smith_schaefer_components": [
             "valid Floater mean-value initialization",
             "area-weighted symmetric isometric/Dirichlet barrier distortion",
+            "scale-invariant conformal distortion penalty",
             "whole-chart L-BFGS including unconstrained boundary vertices",
             "first triangle-degeneracy step bound",
             "first moving boundary edge/vertex collision step bound",
@@ -1456,9 +1612,18 @@ def install_bijective_free_boundary(pipeline_module: Any) -> None:
             line_search_max_steps=int(
                 getattr(params, "bijective_free_boundary_line_search_max_steps", 20)
             ),
-            line_search_safety=float(getattr(params, "bijective_free_boundary_line_search_safety", 0.8)),
+            line_search_safety=float(getattr(params, "bijective_free_boundary_line_search_safety", 0.9)),
+            initial_step_scale=float(
+                getattr(params, "bijective_free_boundary_initial_step_scale", 3.0)
+            ),
+            conformal_weight=float(
+                getattr(params, "bijective_free_boundary_conformal_weight", 4.0)
+            ),
             boundary_barrier_weight=float(
                 getattr(params, "bijective_free_boundary_boundary_barrier_weight", 1.0)
+            ),
+            initial_boundary_shape=str(
+                getattr(params, "bijective_free_boundary_initial_boundary_shape", "circle")
             ),
         )
         uv, loop, metrics = bijective_free_boundary_parameterization(

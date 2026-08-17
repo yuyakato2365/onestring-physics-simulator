@@ -11,8 +11,10 @@ from onestring_physics.bijective_free_boundary import (
     _lbfgs_direction,
     _safe_step_limit,
     _safe_step_limit_bruteforce,
+    _segments_intersect,
     _signed_double_areas,
     _surface_differentials,
+    _tutte_embedding,
     bijective_free_boundary_parameterization,
     boundary_self_intersection_count,
 )
@@ -95,6 +97,46 @@ def test_curved_grid_stays_bijective_with_a_free_boundary() -> None:
     assert len(metrics["optimization_iteration_log"]) <= 60
 
 
+def test_rectangle_initialization_is_equal_area_strictly_convex_and_optimizable() -> None:
+    vertices, faces = _grid_mesh(curved=True)
+    loop, _topology = _extract_single_disk_boundary(faces, len(vertices))
+    initial_uv = _tutte_embedding(vertices, faces, loop, "rectangle")
+    boundary = initial_uv[np.asarray(loop, dtype=int)]
+    minimum = np.min(boundary, axis=0)
+    maximum = np.max(boundary, axis=0)
+    boundary_area = 0.5 * abs(
+        np.sum(
+            boundary[:, 0] * np.roll(boundary[:, 1], -1)
+            - boundary[:, 1] * np.roll(boundary[:, 0], -1)
+        )
+    )
+    boundary_edges = np.roll(boundary, -1, axis=0) - boundary
+    boundary_turns = (
+        boundary_edges[:, 0] * np.roll(boundary_edges[:, 1], -1)
+        - boundary_edges[:, 1] * np.roll(boundary_edges[:, 0], -1)
+    )
+    triangle = vertices[faces[:, :3]]
+    surface_area = 0.5 * np.linalg.norm(
+        np.cross(triangle[:, 1] - triangle[:, 0], triangle[:, 2] - triangle[:, 0]),
+        axis=1,
+    ).sum()
+
+    assert maximum[0] - minimum[0] == pytest.approx(maximum[1] - minimum[1])
+    assert boundary_area == pytest.approx(surface_area)
+    assert np.all(boundary_turns > 0.0)
+
+    _uv, _loop, metrics = bijective_free_boundary_parameterization(
+        vertices,
+        faces,
+        BijectiveFreeBoundaryConfig(max_iterations=10, initial_boundary_shape="rectangle"),
+    )
+    assert metrics["initialization_boundary_shape"] == "rectangle"
+    assert metrics["optimization_iteration_count"] > 0
+    assert metrics["final_energy"] < metrics["initial_energy"]
+    assert metrics["uv_triangle_flip_count"] == 0
+    assert metrics["internal_triangle_overlap_count"] == 0
+
+
 def test_spatial_hash_matches_bruteforce_for_random_deformations() -> None:
     vertices, faces = _grid_mesh(nx=7, ny=6, curved=False)
     base_uv = vertices[:, :2]
@@ -150,6 +192,23 @@ def test_local_validity_rejects_boundary_crossing_flip_and_degeneracy() -> None:
     assert _check_local_validity(degenerate_uv, valid_faces, loop, 1.0e-12)[0] is False
 
 
+def test_vectorized_boundary_intersections_match_scalar_reference() -> None:
+    vertices, faces = _grid_mesh(nx=8, ny=7, curved=False)
+    loop, _topology = _extract_single_disk_boundary(faces, len(vertices))
+    base_uv = vertices[:, :2]
+    for seed in range(20):
+        uv = base_uv + np.random.default_rng(seed).normal(scale=0.35, size=base_uv.shape)
+        scalar_count = 0
+        for first in range(len(loop)):
+            a0, a1 = loop[first], loop[(first + 1) % len(loop)]
+            for second in range(first + 1, len(loop)):
+                b0, b1 = loop[second], loop[(second + 1) % len(loop)]
+                if {a0, a1}.intersection({b0, b1}):
+                    continue
+                scalar_count += int(_segments_intersect(uv[a0], uv[a1], uv[b0], uv[b1]))
+        assert boundary_self_intersection_count(uv, loop) == scalar_count
+
+
 def test_progress_callback_reports_optimizer_stages_without_changing_result() -> None:
     vertices, faces = _grid_mesh(nx=5, ny=4, curved=True)
     progress: list[tuple[str, float, str]] = []
@@ -180,7 +239,7 @@ def test_vectorized_energy_and_gradient_matches_scalar_reference() -> None:
     loop, _topology = _extract_single_disk_boundary(faces, len(vertices))
     inverse_surface, surface_areas = _surface_differentials(vertices, faces)
     uv = vertices[:, :2].copy()
-    arguments = (uv, faces, inverse_surface, surface_areas, loop, 0.8, 0.7)
+    arguments = (uv, faces, inverse_surface, surface_areas, loop, 0.8, 0.7, 3.5)
 
     vectorized = _energy_and_gradient(*arguments)
     reference = _energy_and_gradient_bruteforce(*arguments)
@@ -188,6 +247,37 @@ def test_vectorized_energy_and_gradient_matches_scalar_reference() -> None:
     np.testing.assert_allclose(vectorized[0], reference[0], rtol=1.0e-12, atol=1.0e-12)
     np.testing.assert_allclose(vectorized[1], reference[1], rtol=1.0e-11, atol=1.0e-11)
     np.testing.assert_allclose(vectorized[2:], reference[2:], rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_explicit_conformal_energy_gradient_matches_finite_difference() -> None:
+    vertices, faces = _grid_mesh(nx=3, ny=3, curved=True)
+    loop, _topology = _extract_single_disk_boundary(faces, len(vertices))
+    inverse_surface, surface_areas = _surface_differentials(vertices, faces)
+    uv = vertices[:, :2].copy()
+    uv[:, 0] *= 1.17
+    uv[:, 1] += 0.04 * uv[:, 0] ** 2
+    energy, gradient, _distortion, _boundary = _energy_and_gradient(
+        uv, faces, inverse_surface, surface_areas, loop, 0.0, 0.0, 4.0
+    )
+
+    epsilon = 1.0e-6
+    numerical = np.zeros_like(uv)
+    for vertex_id in range(len(uv)):
+        for axis in range(2):
+            plus = uv.copy()
+            minus = uv.copy()
+            plus[vertex_id, axis] += epsilon
+            minus[vertex_id, axis] -= epsilon
+            plus_energy = _energy_and_gradient(
+                plus, faces, inverse_surface, surface_areas, loop, 0.0, 0.0, 4.0
+            )[0]
+            minus_energy = _energy_and_gradient(
+                minus, faces, inverse_surface, surface_areas, loop, 0.0, 0.0, 4.0
+            )[0]
+            numerical[vertex_id, axis] = (plus_energy - minus_energy) / (2.0 * epsilon)
+
+    assert np.isfinite(energy)
+    np.testing.assert_allclose(gradient, numerical, rtol=2.0e-5, atol=2.0e-5)
 
 
 def test_vectorized_safe_step_matches_scalar_reference() -> None:

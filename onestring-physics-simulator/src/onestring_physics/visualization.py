@@ -812,6 +812,7 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
     fig.update_layout(
         title=(
             "Final optimized Omega boundary and distortion diagnostics"
+            f" | initial={metrics.get('initialization_boundary_shape', 'circle')}"
             f" | iterations={metrics.get('optimization_iteration_count', 'n/a')}"
             f" | flips={int(metrics.get('uv_triangle_flip_count', 0))}"
             f", overlaps={int(metrics.get('internal_triangle_overlap_count', 0))}"

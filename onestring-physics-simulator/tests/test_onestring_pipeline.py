@@ -1,4 +1,5 @@
 from onestring_physics.input_shape import create_builtin_shape
+from onestring_physics import onestring_pipeline as pipeline
 from onestring_physics.onestring_pipeline import (
     DeploymentParameters,
     PipelineParameters,
@@ -613,6 +614,28 @@ def test_t2d_preserves_t3d_tile_shape_for_animation_and_has_frustum_geometry():
     assert state.tiles_2d_top_hinge.side_faces.shape == (4, 4)
     assert state.tiles_2d_top_hinge.metrics["side_faces_count"] == state.tiles_2d_top_hinge.tile_count * 4
     assert state.tiles_2d_top_hinge.metrics["t2d_gap_count"] == len(state.k2d_flat_layout.gap_polygons)
+
+
+def test_large_t2d_layout_skips_unbounded_se2_footprint_solve():
+    grid = pipeline.create_quad_grid(23, 23, 1.0, 0.08)
+    faces = np.asarray([tile.vertex_ids for tile in grid.tiles], dtype=int)
+    vertices_2d = np.asarray(grid.vertex_positions, dtype=float)
+    mesh_2d = QuadMesh(vertices_2d.copy(), faces, grid, "K2D", {}, [])
+    vertices_3d = vertices_2d.copy()
+    vertices_3d[:, 2] = 0.4 * np.exp(-0.01 * (vertices_3d[:, 0] ** 2 + vertices_3d[:, 1] ** 2))
+    mesh_3d = QuadMesh(vertices_3d, faces, grid, "K3D", {}, [])
+    params = PipelineParameters(nx=23, ny=23)
+
+    flat_layout = pipeline._make_flat_tile_layout(mesh_2d, params)
+    tiles_3d, _ = pipeline._extrude_tiles(mesh_3d, 0.08, "T3D")
+    tiles_2d, _ = pipeline._make_t2d_from_transforms(
+        mesh_2d, flat_layout, mesh_3d, tiles_3d, "T2D top hinge", params
+    )
+
+    assert len(faces) > tiles_2d.metrics["t2d_fast_top_hinge_direct_tile_threshold"]
+    assert tiles_2d.metrics["t2d_fast_top_hinge_path"] is True
+    assert tiles_2d.metrics["t2d_fast_top_hinge_expensive_se2_solve_skipped"] is True
+    assert tiles_2d.metrics["tile_shape_max_error_to_T3D"] < 1e-10
 
 
 def test_k2d_flat_layout_rendering_has_independent_tile_gaps():

@@ -984,8 +984,11 @@ class PipelineParameters(_original.PipelineParameters):
     bijective_free_boundary_gradient_tolerance: float = 1e-7
     bijective_free_boundary_energy_tolerance: float = 1e-8
     bijective_free_boundary_line_search_max_steps: int = 20
-    bijective_free_boundary_line_search_safety: float = 0.8
+    bijective_free_boundary_line_search_safety: float = 0.9
+    bijective_free_boundary_initial_step_scale: float = 3.0
+    bijective_free_boundary_conformal_weight: float = 4.0
     bijective_free_boundary_boundary_barrier_weight: float = 1.0
+    bijective_free_boundary_initial_boundary_shape: str = "circle"
     allow_experimental_pipeline: bool = False
     enable_csf_splits: bool = True
     enable_heuristic_csf_split: bool = True
@@ -6174,7 +6177,9 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
         )
 
     tile_count = int(len(np.asarray(mesh_2d.faces, dtype=int)))
-    fast_t2d = False
+    fast_t2d_threshold = 150
+    fast_t2d_direct_threshold = 500
+    fast_t2d = tile_count > fast_t2d_threshold
     if fast_t2d:
         flat_layout_tops = np.asarray(flat_layout.tile_top_vertices_3d, dtype=float)
         count = min(len(flat_layout_tops), len(tiles_3d.vertices))
@@ -6182,7 +6187,24 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
             "t2d_fast_top_hinge_optimization_applied": False,
             "t2d_fast_top_hinge_optimization_reason": "not_enough_tiles",
         }
-        if count > 1:
+        if count > fast_t2d_direct_threshold:
+            # A single local/global iteration evaluates the full thick-panel
+            # footprint several times.  On meshes such as Bunny this means
+            # thousands of small Python SVD/SAT calls before the outer-loop
+            # time guard can run again, so a nominal 12 s budget can take many
+            # minutes.  The preceding large-K2D path has already produced a
+            # rigid independent-tile layout; preserve it directly here and
+            # defer any residual collision cleanup to the bounded Dual-Hinge
+            # stage instead of repeating an effectively unbounded solve.
+            optimization_metrics = {
+                "t2d_fast_top_hinge_optimization_applied": False,
+                "t2d_fast_top_hinge_optimization_accepted": False,
+                "t2d_fast_top_hinge_optimization_elapsed_sec": 0.0,
+                "t2d_fast_top_hinge_optimization_reason": "large layout uses direct rigid placement; residual cleanup deferred to Dual Hinge",
+                "t2d_fast_top_hinge_direct_tile_threshold": int(fast_t2d_direct_threshold),
+                "t2d_fast_top_hinge_expensive_se2_solve_skipped": True,
+            }
+        elif count > 1:
             opt_start = time.perf_counter()
             previous_thick_footprint_tiles = _T2D_THICK_FOOTPRINT_TILES
             try:
@@ -6292,8 +6314,13 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
         metrics = {
             "objective": "Fast T2D top-hinge construction: rigidly place T3D tiles at the independent K2D top layout.",
             "t2d_fast_top_hinge_path": True,
-            "t2d_fast_top_hinge_reason": "large K2D independent layout; run bounded T2D footprint solve before rigid T3D placement",
-            "t2d_fast_top_hinge_tile_threshold": 150,
+            "t2d_fast_top_hinge_reason": (
+                "very large K2D independent layout; direct rigid T3D placement"
+                if count > fast_t2d_direct_threshold
+                else "large K2D independent layout; bounded T2D footprint solve before rigid T3D placement"
+            ),
+            "t2d_fast_top_hinge_tile_threshold": int(fast_t2d_threshold),
+            "t2d_fast_top_hinge_direct_tile_threshold": int(fast_t2d_direct_threshold),
             **optimization_metrics,
             **alignment_metrics,
             "face_planarity_error": _original._tile_face_planarity(placed_vertices),

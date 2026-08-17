@@ -8,8 +8,9 @@ OneString固有grid-loss、lambdaの直接最適化は行いません。
 ## 処理
 
 1. 入力が1つのconnected diskであることをEuler標数と境界ループで検証する。
-2. 3D境界弧長に比例して境界を等面積円へ置き、正のmean-value weightで内部を解く
-   Floater embeddingを有効な初期写像として作る。円の面積を3D表面積へ合わせることで、
+2. 3D境界弧長に比例して境界を等面積円（比較実験では等面積矩形）へ置き、
+   正のmean-value weightで内部を解くFloater embeddingを有効な初期写像として作る。
+   初期境界の面積を3D表面積へ合わせることで、
    seamが短いBunnyのような入力を初期状態で過度に圧縮しない。
 3. 各3D三角形を局所2D座標へ剛体展開し、面積重み付きSymmetric
    Dirichlet energyを計算する。
@@ -47,6 +48,13 @@ flip、degeneracy、boundary self-intersection、internal overlapを再検査し
 
 性能内訳は `surface_parameterization.metrics` の `overlap_check_*`、
 `energy_gradient_*`、`safe_step_*`、`optimization_iteration_log` で確認できます。
+境界自己交差検査は全非隣接edge pairをNumPy配列で一括判定します。100境界頂点の
+Bunnyでは、旧Python pair loopと同一結果を保ったまま1000反復のparameterizationが
+約41.25秒から22.32秒へ短縮されました。逐次依存するL-BFGS反復をGPUへ分割するのではなく、
+各反復内の独立edge pairをネイティブ配列演算へまとめています。
+
+Streamlitへの進捗通知は数値反復とは分離して間引き、画面描画を最大4回/秒に制限します。
+これにより1000反復すべてを実行したまま、進捗ログとブラウザ更新の待ち時間を抑えます。
 再現可能な3規模benchmarkは次で実行します。
 
 ```powershell
@@ -59,6 +67,20 @@ Streamlitでは計算結果をsession stateに保持します。`View stage`を�
 
 `View stage = Omega` は初期円を灰色破線、最終的な自由境界を緑実線で表示します。
 表示は再構築した円ではなく、最適化後の `uv_vertices_2d[boundary_loop]` そのものです。
+
+### 円／矩形初期値の比較
+
+`initial Omega boundary shape` で `circle`（既定）または `rectangle` を選択できます。
+矩形は3D境界弧長の順序を等面積の角丸矩形（指数8のsuperellipse）へ割り当てた
+厳密凸Floater初期値です。完全な正方形は辺上の境界頂点が共線になり、入力によって
+面積0の境界三角形を作るため使用しません。
+これは最終境界を矩形へ拘束する設定ではありません。最適化開始後は円の場合と同様、
+全境界頂点が自由に移動します。両者の最終境界と最終energyが一致するかを比較することで、
+円に近い結果が目的関数の解なのか、初期値依存または未収束なのかを判別できます。
+
+```powershell
+python scripts/diagnose_iteration_propagation.py --mesh bunny.stl --iterations 1000 --initial-boundary-shape rectangle
+```
 
 ## lambda
 

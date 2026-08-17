@@ -393,6 +393,7 @@ def build_onestring_design(
             "flat_layout_type": str(k2d_flat_layout.metrics["layout_type"]),
         }
     )
+    _emit_progress(progress_callback, "K2D -> T2D Top Hinge", 0.731, "Starting rigid flat-tile construction")
     tiles_2d_top, reports["K2D -> T2D top hinge"] = _make_t2d_from_transforms(
         mesh_2d_optimized,
         k2d_flat_layout,

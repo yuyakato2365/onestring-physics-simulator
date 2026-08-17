@@ -60,6 +60,7 @@ def _run(iterations: int, args: argparse.Namespace):
         omega_parameterization_mode="bijective_free_boundary",
         bijective_free_boundary_max_iterations=iterations,
         bijective_free_boundary_line_search_max_steps=20,
+        bijective_free_boundary_initial_boundary_shape=args.initial_boundary_shape,
         allow_experimental_pipeline=True,
     )
     started = time.perf_counter()
@@ -86,6 +87,7 @@ def _run(iterations: int, args: argparse.Namespace):
     metrics = state.surface_parameterization.metrics
     summary = {
         "requested_iterations": iterations,
+        "initial_boundary_shape": metrics.get("initialization_boundary_shape"),
         "accepted_iterations": metrics.get("optimization_iteration_count"),
         "termination_reason": metrics.get("optimization_termination_reason"),
         "line_search_candidate_count": metrics.get("line_search_candidate_count"),
@@ -159,6 +161,11 @@ def main() -> None:
     parser.add_argument("--surface-mesh-subdivisions", type=int, default=2)
     parser.add_argument("--max-3d-iterations", type=int, default=40)
     parser.add_argument("--max-2d-iterations", type=int, default=40)
+    parser.add_argument(
+        "--initial-boundary-shape",
+        choices=["circle", "rectangle"],
+        default="circle",
+    )
     args = parser.parse_args()
 
     states_and_summaries = [_run(iterations, args) for iterations in args.iterations]
