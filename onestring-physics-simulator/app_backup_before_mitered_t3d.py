@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import time
+import os
+from dataclasses import replace
 from pathlib import Path
 import sys
 import importlib
+from types import SimpleNamespace
 
 import numpy as np
 import plotly.graph_objects as go
@@ -30,6 +33,7 @@ from onestring_physics.onestring_pipeline import (
     gpu_self_test,
     nvidia_smi_probe,
     export_t2d_stl,
+    export_t3d_stl,
     run_simulator_gpu_benchmark,
     simulate_onestring_deployment,
     paper_consistency_report,
@@ -49,10 +53,19 @@ from onestring_physics.visualization import (
 
 
 st.set_page_config(page_title="OneString Paper-Faithful Simulator", layout="wide")
-MODEL_VERSION = "2026-07-10-basic-implementation"
+MODEL_VERSION = "2026-07-12-one-sided-t3d"
 MODEL_VERSIONS = [
     {
         "id": MODEL_VERSION,
+        "label": "2026-07-12 T3D one-sided 1t extrusion",
+        "description": "K3Dを上面として固定し、法線の負方向の片側だけへ厚み1tを押し出します。隣接辺はmiter/contact planeで接続します。",
+        "t3d_extrusion_side": "negative_normal_from_k3d",
+        "t3d_variable_topology_enabled": True,
+        "allow_legacy_normal_prism_emergency_fallback": True,
+        "t3d_intersection_trim_enabled": False,
+    },
+    {
+        "id": "2026-07-10-basic-implementation",
         "label": "2026-07-10 基礎実装",
         "description": "周囲との法線整合だけを使うT3D押し出しを含む基礎実装。",
         "t3d_intersection_trim_enabled": False,
@@ -62,6 +75,12 @@ MODEL_VERSIONS = [
         "label": "2026-07-10 T3D大パネル交差除去",
         "description": "T3D押し出し後、ほかのパネルと交差する部分を大きい方のパネルの表示メッシュから除去します。",
         "t3d_intersection_trim_enabled": True,
+    },
+    {
+        "id": "0.2.0-paper-reference-bff",
+        "label": "0.2.0 Paper Reference BFF",
+        "description": "公式BFF CLI、厳密Jacobian/CSF、規則grid、厳密barycentric inverse mapを追加。K3D以降は既存近似。",
+        "t3d_intersection_trim_enabled": False,
     },
 ]
 # Future version additions: append a new entry to MODEL_VERSIONS when the user
@@ -313,14 +332,103 @@ with st.sidebar:
         ),
     )
     omega_parameterization_mode = _param_row(
-        "S→Omega のパラメータ化。boundary_sliding_lscm は矩形上で境界対応を滑らせるLSCM近似で、BFFではない。",
+        "S→Omega のパラメータ化。paper_reference_bff だけが公式BFF CLIを使用し、代替fallbackを禁止する。",
         lambda: st.selectbox(
             "Omega parameterization mode",
-            ["bff", "lscm_paper_like", "boundary_sliding_lscm", "rect_harmonic", "fallback", "paper_like_unimplemented", "pca_debug", "arap_paper_like"],
-            index=0,
-            help="boundary_sliding_lscm keeps the boundary on a rectangle while optimizing correspondence order. It is not reference BFF.",
+            ["rectangular_harmonic_legacy", "lscm_free_boundary", "paper_reference_bff", "bff", "boundary_sliding_lscm", "pca_debug"],
+            index=2 if selected_model_version["id"] == "0.2.0-paper-reference-bff" else 0,
+            help="bff is a deprecated alias of rectangular_harmonic_legacy. paper_reference_bff requires the official CLI.",
         ),
     )
+    if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
+        st.warning("This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.")
+    with st.expander("Paper-reference BFF settings", expanded=omega_parameterization_mode == "paper_reference_bff"):
+        bff_boundary_policy = st.selectbox(
+            "BFF boundary policy",
+            ["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle", "custom_boundary_curvature"],
+            index=0,
+            help="OneStringの正確な境界条件はUNSPECIFIED_IN_PAPER。CLI非対応のpolicyは明示失敗します。",
+        )
+        bff_executable = st.text_input(
+            "official bff-command-line path",
+            value=os.environ.get("ONESTRING_BFF_EXECUTABLE", ""),
+            help="空ならONESTRING_BFF_EXECUTABLE、third_party、PATHの順に探索します。",
+        )
+        reference_grid_spacing_value = float(st.number_input("reference grid spacing (0 = derive hypothesis_a)", min_value=0.0, value=0.0, step=0.05))
+        reference_grid_rotation_degrees = float(st.number_input("reference grid rotation (degrees)", value=0.0, step=1.0))
+        reference_grid_origin_u = float(st.number_input("reference grid origin u", value=0.0, step=0.05))
+        reference_grid_origin_v = float(st.number_input("reference grid origin v", value=0.0, step=0.05))
+        reference_csf_normalization = st.selectbox(
+            "lambda normalization",
+            ["min_to_one_hypothesis_a", "none_unspecified"],
+            index=0,
+        )
+        reference_stop_on_required_split = st.checkbox(
+            "stop when lambda > 2 requires unspecified reparameterization",
+            value=True,
+        )
+    with st.expander(
+        "Bijective free-boundary settings",
+        expanded=omega_parameterization_mode == "bijective_free_boundary",
+    ):
+        bijective_free_boundary_initial_boundary_shape = st.selectbox(
+            "initial Omega boundary shape",
+            ["circle", "rectangle"],
+            index=0,
+            help=(
+                "Both choices use equal-area convex Floater initialization. "
+                "Compare their final boundaries to measure initialization dependence."
+            ),
+        )
+        bijective_free_boundary_max_iterations = int(
+            st.number_input(
+                "bijective max iterations",
+                min_value=1,
+                max_value=2000,
+                value=1000,
+                step=50,
+                help="Lower this for a quick safe preview. Final local and global validity checks still run.",
+            )
+        )
+        bijective_free_boundary_line_search_max_steps = int(
+            st.number_input(
+                "bijective line-search max steps",
+                min_value=1,
+                max_value=30,
+                value=20,
+                step=1,
+            )
+        )
+        bijective_free_boundary_conformal_weight = float(
+            st.number_input(
+                "bijective conformal weight",
+                min_value=0.0,
+                max_value=50.0,
+                value=4.0,
+                step=0.5,
+                help="Penalty for scale-invariant angular distortion. Zero disables the explicit conformal condition.",
+            )
+        )
+        bijective_free_boundary_minimum_isotropic_scale = float(
+            st.number_input(
+                "minimum isotropic scale (s_min)",
+                min_value=0.0,
+                max_value=2.0,
+                value=0.90,
+                step=0.05,
+                help="Triangles below this local isotropic scale receive the shrink penalty.",
+            )
+        )
+        bijective_free_boundary_initial_step_scale = float(
+            st.number_input(
+                "bijective initial step scale",
+                min_value=0.1,
+                max_value=10.0,
+                value=3.0,
+                step=0.25,
+                help="Larger values request stronger boundary/interior updates; validity and energy line search still limit unsafe moves.",
+            )
+        )
     with st.expander("Boundary-sliding LSCM advanced settings", expanded=False):
         boundary_target_aspect_mode = st.selectbox(
             "rectangle aspect mode",
@@ -508,9 +616,79 @@ with st.sidebar:
     )
 
     st.header("Actuation Simulation")
+    physics_backend = st.selectbox(
+        "physics backend",
+        ["legacy", "abd"],
+        index=0,
+        help="legacy uses the existing rigid/SAT projection. abd invokes an external Autodesk affine-body-dynamics executable and never falls back to SAT.",
+    )
+    abd_executable = ""
+    abd_timestep = 0.01
+    abd_density = 1000.0
+    abd_gravity_z = -9.81
+    abd_use_desk = True
+    abd_desk_clearance = 5.0e-3
+    abd_stiffness = 1e9
+    abd_nthreads = 0
+    abd_timeout_seconds = 600.0
+    abd_pull_end_ratio = 0.75
+    abd_shake_amplitude = 0.0
+    abd_shake_frequency_hz = 0.0
+    abd_shake_direction = (1.0, 0.0, 0.0)
+    abd_shake_start_time = 0.0
+    abd_shake_end_time = 0.0
+    if physics_backend == "abd":
+        st.warning(
+            "ABD requires a Release build of Autodesk/affine-body-dynamics plus the OneString unilateral-string extension. "
+            "If unavailable, execution stops explicitly; legacy SAT is not used as fallback."
+        )
+        with st.expander("Autodesk ABD settings", expanded=True):
+            abd_executable = st.text_input(
+                "abd_sim executable",
+                value=os.environ.get("ONESTRING_ABD_EXECUTABLE", ""),
+                help="Path to the Autodesk ABD Release executable. The full OneString run requires --onestring-manifest capability.",
+            )
+            abd_timestep = st.number_input("ABD timestep", min_value=0.0001, max_value=0.1, value=0.01, step=0.001, format="%.4f")
+            abd_density = st.number_input("tile density", min_value=1.0, max_value=50000.0, value=1000.0, step=100.0)
+            abd_gravity_z = st.number_input(
+                "ABD gravity Z",
+                min_value=-20.0,
+                max_value=20.0,
+                value=-9.81,
+                step=0.1,
+                help="Gravity remains enabled. The desk supplies an upward one-sided support reaction at each panel's bottom vertices.",
+            )
+            abd_use_desk = st.toggle(
+                "support panels on fixed desk plane",
+                value=True,
+                help="Keeps panels from falling below a fixed horizontal desk while allowing horizontal sliding.",
+            )
+            abd_desk_clearance = st.number_input(
+                "desk initial clearance",
+                min_value=0.000001,
+                max_value=0.1,
+                value=0.005,
+                step=0.0001,
+                format="%.6f",
+            )
+            abd_stiffness = st.number_input("ABD orthogonality stiffness", min_value=1e5, max_value=1e12, value=1e9, step=1e8, format="%.3e")
+            abd_nthreads = int(st.number_input("ABD CPU threads (0 = automatic)", min_value=0, max_value=128, value=0, step=1))
+            abd_timeout_seconds = float(st.number_input("ABD timeout (seconds)", min_value=60, max_value=14400, value=600, step=60))
+            abd_pull_end_ratio = st.slider("final string command / initial length", 0.05, 1.0, 0.75, 0.01)
+            abd_shake_amplitude = st.number_input("shake amplitude", min_value=0.0, max_value=10.0, value=0.0, step=0.01)
+            abd_shake_frequency_hz = st.number_input("shake frequency (Hz)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+            shake_cols = st.columns(3)
+            abd_shake_direction = (
+                float(shake_cols[0].number_input("shake dir X", value=1.0, step=0.1)),
+                float(shake_cols[1].number_input("shake dir Y", value=0.0, step=0.1)),
+                float(shake_cols[2].number_input("shake dir Z", value=0.0, step=0.1)),
+            )
+            time_cols = st.columns(2)
+            abd_shake_start_time = float(time_cols[0].number_input("shake start time", min_value=0.0, value=0.0, step=0.1))
+            abd_shake_end_time = float(time_cols[1].number_input("shake end time", min_value=0.0, value=0.0, step=0.1))
     run_actuation = _param_row(
         "現在のT2Dから snap/lift のProjective Dynamics風シミュレーションを実行する。",
-        lambda: st.button("Run snap/lift actuation"),
+        lambda: st.button("Run ABD OneString assembly" if physics_backend == "abd" else "Run snap/lift actuation"),
         tight_note=True,
     )
     sim_steps = _param_row(
@@ -814,6 +992,20 @@ def current_pipeline_key() -> tuple:
         m2d_crop_policy,
         omega_boundary_mode,
         omega_parameterization_mode,
+        bff_boundary_policy,
+        bff_executable,
+        reference_grid_spacing_value,
+        reference_grid_rotation_degrees,
+        reference_grid_origin_u,
+        reference_grid_origin_v,
+        reference_csf_normalization,
+        reference_stop_on_required_split,
+        bijective_free_boundary_initial_boundary_shape,
+        bijective_free_boundary_max_iterations,
+        bijective_free_boundary_line_search_max_steps,
+        bijective_free_boundary_conformal_weight,
+        bijective_free_boundary_minimum_isotropic_scale,
+        bijective_free_boundary_initial_step_scale,
         boundary_target_aspect_mode,
         boundary_target_aspect_ratio,
         boundary_sliding_max_iterations,
@@ -858,6 +1050,22 @@ def current_pipeline_key() -> tuple:
 def current_actuation_key() -> tuple:
     return (
         current_pipeline_key(),
+        physics_backend,
+        abd_executable,
+        abd_timestep,
+        abd_density,
+        abd_gravity_z,
+        abd_use_desk,
+        abd_desk_clearance,
+        abd_stiffness,
+        abd_nthreads,
+        abd_timeout_seconds,
+        abd_pull_end_ratio,
+        abd_shake_amplitude,
+        abd_shake_frequency_hz,
+        abd_shake_direction,
+        abd_shake_start_time,
+        abd_shake_end_time,
         sim_steps,
         solver_iterations,
         solver_substeps,
@@ -902,6 +1110,14 @@ pipeline_params = PipelineParameters(
     m2d_crop_policy=m2d_crop_policy,
     omega_boundary_mode=omega_boundary_mode,
     omega_parameterization_mode=omega_parameterization_mode,
+    bff_executable=bff_executable or None,
+    bff_boundary_policy=bff_boundary_policy,
+    reference_grid_spacing=reference_grid_spacing_value if reference_grid_spacing_value > 0.0 else None,
+    reference_grid_rotation_degrees=reference_grid_rotation_degrees,
+    reference_grid_origin_u=reference_grid_origin_u,
+    reference_grid_origin_v=reference_grid_origin_v,
+    reference_csf_normalization=reference_csf_normalization,
+    reference_stop_on_required_split=reference_stop_on_required_split,
     boundary_target_shape="rectangle",
     boundary_target_aspect_mode=boundary_target_aspect_mode,
     boundary_target_aspect_ratio=boundary_target_aspect_ratio,
@@ -913,6 +1129,12 @@ pipeline_params = PipelineParameters(
     boundary_sliding_spacing_weight=boundary_sliding_spacing_weight,
     boundary_sliding_flip_area_epsilon=boundary_sliding_flip_area_epsilon,
     boundary_sliding_line_search_max_steps=boundary_sliding_line_search_max_steps,
+    bijective_free_boundary_max_iterations=bijective_free_boundary_max_iterations,
+    bijective_free_boundary_line_search_max_steps=bijective_free_boundary_line_search_max_steps,
+    bijective_free_boundary_conformal_weight=bijective_free_boundary_conformal_weight,
+    bijective_free_boundary_minimum_isotropic_scale=bijective_free_boundary_minimum_isotropic_scale,
+    bijective_free_boundary_initial_step_scale=bijective_free_boundary_initial_step_scale,
+    bijective_free_boundary_initial_boundary_shape=bijective_free_boundary_initial_boundary_shape,
     allow_experimental_pipeline=allow_experimental_pipeline,
     strict_k2d_time_budget_sec=strict_k2d_time_budget_sec,
     strict_k2d_scipy_vertex_limit=strict_k2d_scipy_vertex_limit,
@@ -932,6 +1154,11 @@ pipeline_params = PipelineParameters(
     hinge_layout_collision_sweeps_per_iteration=hinge_layout_collision_sweeps_per_iteration,
     strict_paper_flow=True,
     model_version=selected_model_version["id"],
+    t3d_extrusion_side=str(selected_model_version.get("t3d_extrusion_side", "negative_normal_from_k3d")),
+    t3d_variable_topology_enabled=bool(selected_model_version.get("t3d_variable_topology_enabled", False)),
+    allow_legacy_normal_prism_emergency_fallback=bool(
+        selected_model_version.get("allow_legacy_normal_prism_emergency_fallback", False)
+    ),
     t3d_intersection_trim_enabled=bool(selected_model_version.get("t3d_intersection_trim_enabled", False)),
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
@@ -941,16 +1168,30 @@ if "onestring_state" not in st.session_state and not run_pipeline:
     st.info("Set parameters, then click Run OneString pipeline. The paper-default path stops at unimplemented stages; enable the experimental pipeline explicitly to run the old prototype path.")
     st.stop()
 
-if run_pipeline or st.session_state.get("pipeline_key") != pipeline_key:
+stored_pipeline_key = st.session_state.get("pipeline_key")
+if stored_pipeline_key is not None and stored_pipeline_key != pipeline_key and not run_pipeline:
+    st.warning(
+        "Calculation settings changed. The existing result is still displayed; "
+        "click Run OneString pipeline when you want to recompute it."
+    )
+
+# Streamlit reruns this script for display-only widgets such as View stage.
+# Rebuild only on the explicit Run button; the completed state remains in the
+# session and changing the view never repeats the expensive pipeline.
+if run_pipeline:
     with st.spinner("Building OneString pipeline state"):
         progress_bar = st.progress(0.0, text="Preparing pipeline…")
         progress_status = st.empty()
         progress_log: list[dict[str, object]] = []
         progress_started = time.perf_counter()
+        last_progress_rendered = [-1.0]
 
         def _build_progress(stage: str, fraction: float, detail: str = "") -> None:
             fraction = max(0.0, min(1.0, float(fraction)))
             elapsed = time.perf_counter() - progress_started
+            if fraction < 1.0 and elapsed - last_progress_rendered[0] < 0.25:
+                return
+            last_progress_rendered[0] = elapsed
             progress_bar.progress(fraction, text=f"{fraction * 100:5.1f}%  {stage}")
             progress_status.caption(f"{elapsed:7.2f}s  {stage}" + (f" — {detail}" if detail else ""))
             progress_log.append({"elapsed_sec": elapsed, "progress_%": fraction * 100.0, "stage": stage, "detail": detail})
@@ -973,6 +1214,24 @@ if run_pipeline or st.session_state.get("pipeline_key") != pipeline_key:
 state = st.session_state.onestring_state
 
 deployment_params = DeploymentParameters(
+    physics_backend=physics_backend,
+    abd_executable=abd_executable or None,
+    abd_timestep=abd_timestep,
+    abd_density=abd_density,
+    abd_gravity_z=abd_gravity_z,
+    abd_use_desk=abd_use_desk,
+    abd_desk_clearance=abd_desk_clearance,
+    abd_orthogonality_stiffness=abd_stiffness,
+    abd_nthreads=abd_nthreads,
+    abd_timeout_seconds=abd_timeout_seconds,
+    abd_pull_end_ratio=abd_pull_end_ratio,
+    abd_shake_amplitude=abd_shake_amplitude,
+    abd_shake_frequency_hz=abd_shake_frequency_hz,
+    abd_shake_direction_x=abd_shake_direction[0],
+    abd_shake_direction_y=abd_shake_direction[1],
+    abd_shake_direction_z=abd_shake_direction[2],
+    abd_shake_start_time=abd_shake_start_time,
+    abd_shake_end_time=abd_shake_end_time,
     steps=sim_steps,
     solver_iterations=solver_iterations,
     rigid_weight=rigid_weight,
@@ -1012,7 +1271,8 @@ elif st.session_state.get("actuation_key") != actuation_key:
     st.warning("Actuation settings changed. Run snap/lift actuation again to refresh the simulation.")
 
 if run_actuation:
-    with st.spinner("Solving Projective-Dynamics-style snap/lift actuation"):
+    run_label = "Autodesk ABD OneString assembly" if physics_backend == "abd" else "Projective-Dynamics-style snap/lift actuation"
+    with st.spinner(f"Solving {run_label}"):
         progress_bar = st.progress(0.0, text="Preparing deployment simulation…")
         progress_status = st.empty()
         progress_log: list[dict[str, object]] = []
@@ -1046,6 +1306,7 @@ view_stage = st.selectbox(
         "S",
         "Split Map",
         "Omega",
+        "Mode Comparison",
         "M2D",
         "M3D",
         "K3D",
@@ -1133,6 +1394,26 @@ elif view_stage == "Omega":
         "csf_median": state.surface_parameterization.metrics.get("csf_median", 0.0),
         "csf_p95": state.surface_parameterization.metrics.get("csf_p95", 0.0),
         "csf_max": state.surface_parameterization.metrics.get("csf_max", 0.0),
+        "lambda_min": state.surface_parameterization.metrics.get("lambda_min", ""),
+        "lambda_median": state.surface_parameterization.metrics.get("lambda_median", ""),
+        "lambda_max": state.surface_parameterization.metrics.get("lambda_max", ""),
+        "lambda_normalization_status": state.surface_parameterization.metrics.get("lambda_normalization_status", ""),
+        "anisotropy_max": max(state.surface_parameterization.metrics.get("per_triangle_anisotropy", [0.0]) or [0.0]),
+        "internal_triangle_overlap_count": state.surface_parameterization.metrics.get("internal_triangle_overlap_count", 0),
+        "optimization_requested_max_iterations": state.surface_parameterization.metrics.get("optimization_requested_max_iterations", ""),
+        "optimization_iteration_count": state.surface_parameterization.metrics.get("optimization_iteration_count", ""),
+        "optimization_termination_reason": state.surface_parameterization.metrics.get("optimization_termination_reason", ""),
+        "optimization_converged": state.surface_parameterization.metrics.get("optimization_converged", ""),
+        "initial_energy": state.surface_parameterization.metrics.get("initial_energy", ""),
+        "final_energy": state.surface_parameterization.metrics.get("final_energy", ""),
+        "initial_conformal_energy": state.surface_parameterization.metrics.get("initial_conformal_energy", ""),
+        "final_conformal_energy": state.surface_parameterization.metrics.get("final_conformal_energy", ""),
+        "conformal_energy_weight": state.surface_parameterization.metrics.get("conformal_energy_weight", ""),
+        "line_search_initial_step_scale": state.surface_parameterization.metrics.get("line_search_initial_step_scale", ""),
+        "boundary_displacement_rms": state.surface_parameterization.metrics.get("boundary_displacement_rms", ""),
+        "boundary_displacement_max": state.surface_parameterization.metrics.get("boundary_displacement_max", ""),
+        "initial_boundary_radius_cv": state.surface_parameterization.metrics.get("initial_boundary_radius_cv", ""),
+        "final_boundary_radius_cv": state.surface_parameterization.metrics.get("final_boundary_radius_cv", ""),
         "boundary_target_shape": state.surface_parameterization.metrics.get("boundary_target_shape", ""),
         "boundary_target_aspect_ratio": state.surface_parameterization.metrics.get("boundary_target_aspect_ratio", ""),
         "boundary_corner_vertex_ids": state.surface_parameterization.metrics.get("boundary_corner_vertex_ids", []),
@@ -1156,6 +1437,8 @@ elif view_stage == "Omega":
         "m3d_surface_distance_mean": state.mesh_3d_initial.metrics.get("m3d_surface_distance_mean", 0.0),
         "m3d_surface_distance_max": state.mesh_3d_initial.metrics.get("m3d_surface_distance_max", 0.0),
         "m3d_surface_triangle_hit_fraction": state.mesh_3d_initial.metrics.get("m3d_surface_triangle_hit_fraction", 0.0),
+        "m3d_round_trip_error_rms": state.mesh_3d_initial.metrics.get("m3d_round_trip_error_rms", ""),
+        "fallbacks_used": state.surface_parameterization.metrics.get("fallbacks_used", []),
         "max_csf_before_split": state.mesh_2d_initial.metrics["max_csf_before_split"],
         "max_csf_after_split": state.mesh_2d_initial.metrics["max_csf_after_split"],
         "number_of_splits": state.mesh_2d_initial.metrics["number_of_splits"],
@@ -1166,8 +1449,124 @@ elif view_stage == "Omega":
     elif state.surface_parameterization.method == "boundary_sliding_lscm":
         st.info("Boundary-controlled LSCM approximation is active. This mode is intentionally separate from reference BFF.")
     elif not omega_info["bff_implemented"]:
-        st.warning("Omega uses the reported fallback backend, not a reference Boundary First Flattening implementation.")
+        st.warning("Omega is not a reference Boundary First Flattening implementation. No BFF claim is made for this mode.")
+    if state.surface_parameterization.method == "bijective_free_boundary":
+        accepted = int(state.surface_parameterization.metrics.get("optimization_iteration_count", 0))
+        requested = int(state.surface_parameterization.metrics.get("optimization_requested_max_iterations", 0))
+        boundary_rms = float(state.surface_parameterization.metrics.get("boundary_displacement_rms", 0.0))
+        initial_shape = str(
+            state.surface_parameterization.metrics.get("initialization_boundary_shape", "circle")
+        )
+        final_circle_residual = float(
+            state.surface_parameterization.metrics.get("final_boundary_circle_fit_relative_rms", 0.0)
+        )
+        st.caption(
+            f"Final optimized Ω: initial shape={initial_shape}; "
+            f"accepted iterations {accepted}/{requested}; "
+            f"boundary RMS displacement from initialization {boundary_rms:.6g}. "
+            f"Final best-circle residual={100.0 * final_circle_residual:.4f}%. "
+            "The gray dashed outline is the initial boundary and the thick green outline is the final boundary."
+        )
+        if accepted == 0:
+            st.error("Ω optimization accepted no update; the displayed final boundary equals the initialization.")
+        elif boundary_rms <= 1.0e-5:
+            st.warning(
+                "Ω interior energy improved, but the optimized boundary moved only a negligible amount. "
+                "The final outline can therefore remain visually indistinguishable from the initialization."
+            )
     st.write(omega_info)
+elif view_stage == "Mode Comparison":
+    st.caption(
+        "S→M3Dの3モード比較です。spacing / rotation / origin と fully-contained crop を共通化します。"
+        "K3D以降は現行選択モードだけが下流ビューに表示され、paper-referenceとは扱いません。"
+    )
+    comparison_key = (
+        "paper_reference_mode_comparison_v1",
+        pipeline_key,
+        reference_grid_spacing_value,
+        reference_grid_rotation_degrees,
+        reference_grid_origin_u,
+        reference_grid_origin_v,
+        bff_boundary_policy,
+        bff_executable,
+    )
+    if st.session_state.get("mode_comparison_key") != comparison_key:
+        comparison_states = {}
+        comparison_target = build_target()
+        comparison_grid = _onestring_pipeline.create_quad_grid(grid_size, grid_size, tile_size, gap_size)
+        comparison_surface = _onestring_pipeline._build_surface_mesh(
+            comparison_target,
+            comparison_grid,
+            effective_surface_mesh_subdivisions,
+        )
+        with st.spinner("Building shared-grid S→M3D comparison"):
+            for comparison_mode in ("rectangular_harmonic_legacy", "lscm_free_boundary", "paper_reference_bff"):
+                try:
+                    comparison_params = replace(
+                        pipeline_params,
+                        omega_parameterization_mode=comparison_mode,
+                        reference_stop_on_required_split=False,
+                        enable_csf_splits=False,
+                        enable_heuristic_csf_split=False,
+                        enable_peak_guided_split=False,
+                        enable_mirror_split=False,
+                    )
+                    parameterization = _onestring_pipeline._build_surface_parameterization(
+                        comparison_surface,
+                        comparison_target,
+                        comparison_grid,
+                        comparison_params,
+                    )
+                    if comparison_mode == "paper_reference_bff":
+                        domain = _onestring_pipeline._flatten_to_domain(parameterization, comparison_grid, comparison_params)
+                    else:
+                        parameterization.metrics["per_triangle_lambda"] = np.ones(len(comparison_surface.faces), dtype=float).tolist()
+                        domain = _onestring_pipeline._reference_flatten_to_domain(parameterization, comparison_grid, comparison_params)
+                    mesh_2d = _onestring_pipeline._build_reference_m2d(comparison_grid, domain, comparison_params)
+                    mesh_3d, _ = _onestring_pipeline._lift_m2d_to_m3d(
+                        comparison_target,
+                        mesh_2d,
+                        parameterization,
+                        comparison_params,
+                    )
+                    comparison_states[comparison_mode] = SimpleNamespace(
+                        target_surface=comparison_surface,
+                        surface_parameterization=parameterization,
+                        conformal_domain=domain,
+                        mesh_2d_initial=mesh_2d,
+                        mesh_3d_initial=mesh_3d,
+                    )
+                except Exception as exc:
+                    comparison_states[comparison_mode] = exc
+        st.session_state.mode_comparison_states = comparison_states
+        st.session_state.mode_comparison_key = comparison_key
+    comparison_states = st.session_state.mode_comparison_states
+    for column, comparison_mode in zip(
+        st.columns(3),
+        ("rectangular_harmonic_legacy", "lscm_free_boundary", "paper_reference_bff"),
+    ):
+        with column:
+            st.subheader(comparison_mode)
+            comparison = comparison_states[comparison_mode]
+            if isinstance(comparison, Exception):
+                st.error(f"{type(comparison).__name__}: {comparison}")
+                continue
+            st.plotly_chart(figure_domain(comparison), width="stretch", key=f"compare_omega_{comparison_mode}")
+            st.plotly_chart(figure_quad_mesh(comparison.mesh_2d_initial, title="M2D"), width="stretch", key=f"compare_m2d_{comparison_mode}")
+            st.plotly_chart(figure_m3d_overlay(comparison), width="stretch", key=f"compare_m3d_{comparison_mode}")
+            metrics = comparison.surface_parameterization.metrics
+            st.write(
+                {
+                    "backend": metrics.get("flattening_backend"),
+                    "flip_count": metrics.get("uv_triangle_flip_count", 0),
+                    "boundary_intersections": metrics.get("boundary_self_intersection_count", 0),
+                    "internal_overlaps": metrics.get("internal_triangle_overlap_count", 0),
+                    "lambda_max": metrics.get("lambda_max", "not available in legacy mode"),
+                    "anisotropy_max": max(metrics.get("per_triangle_anisotropy", [0.0]) or [0.0]),
+                    "M3D_round_trip_error": comparison.mesh_3d_initial.metrics.get("m3d_round_trip_error_rms", "legacy diagnostic unavailable"),
+                    "M3D_surface_error": comparison.mesh_3d_initial.metrics.get("m3d_surface_distance_max", 0.0),
+                }
+            )
 elif view_stage in {"M2D", "K3D"}:
     mesh = {"M2D": state.mesh_2d_initial, "M3D": state.mesh_3d_initial, "K3D": state.mesh_3d_optimized}[view_stage]
     st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")
@@ -1201,7 +1600,39 @@ elif view_stage == "K2D":
         "m2d_cropped_quad_count": state.mesh_2d_initial.metrics.get("m2d_cropped_quad_count"),
     })
 elif view_stage == "T3D":
-    st.plotly_chart(figure_tile_assembly(state.tiles_3d), width="stretch", key="t3d")
+    emergency_tile_ids = state.tiles_3d.metrics.get("t3d_emergency_normal_prism_tile_ids", [])
+    if emergency_tile_ids:
+        st.warning(
+            "Geometric recovery was exhausted for the gray emergency tiles. "
+            f"A one-sided normal prism is shown for inspection only: tile ids={emergency_tile_ids}. "
+            "These tiles are not certified manufacturing geometry."
+        )
+    t3d_view_columns = st.columns(3)
+    show_recovery_status = t3d_view_columns[0].toggle("Show recovery status", value=True)
+    show_generated_caps = t3d_view_columns[1].toggle("Show generated cap faces", value=True)
+    show_fundamental_only = t3d_view_columns[2].toggle("Show fundamental failures only", value=False)
+    st.plotly_chart(
+        figure_tile_assembly(
+            state.tiles_3d,
+            show_recovery_status=show_recovery_status,
+            show_generated_cap_faces=show_generated_caps,
+            show_fundamental_failures_only=show_fundamental_only,
+        ),
+        width="stretch",
+        key="t3d",
+    )
+    if getattr(state.tiles_3d, "authoritative_solids", None):
+        t3d_stl_bytes, t3d_stl_metrics = export_t3d_stl(state.tiles_3d)
+        st.download_button(
+            "Download authoritative T3D STL",
+            data=t3d_stl_bytes,
+            file_name="onestring_t3d_authoritative.stl",
+            mime="model/stl",
+        )
+        st.caption(
+            f"Authoritative variable-topology export: {t3d_stl_metrics['t3d_export_tile_count']} tiles, "
+            f"{t3d_stl_metrics['t3d_export_triangle_count']} triangles."
+        )
     st.write(state.tiles_3d.metrics)
 elif view_stage == "T2D Top Hinge":
     st.plotly_chart(figure_tile_assembly(state.tiles_2d_top_hinge, hinge_graph=state.hinge_graph), width="stretch", key="t2d_top")
@@ -1269,10 +1700,13 @@ elif view_stage in {"Lift Points", "String Path"}:
 elif view_stage == "Assembly Animation":
     st.subheader("Assembly Animation")
     total_tiles = int(state.tiles_2d_dual_hinge.tile_count)
-    st.caption(
-        "This view shows only the physical Projective-Dynamics-style deployment: rigid tiles + collision + simultaneous gap contraction + lift constraints. "
-        "The design morph preview is disabled for physical checking."
-    )
+    selected_simulation_name = "Autodesk ABD + IPC/CCD + unilateral OneString constraint" if physics_backend == "abd" else "legacy Projective Dynamics + SAT"
+    st.caption(f"Selected simulation: {selected_simulation_name}. This view displays solver output frames, not design interpolation.")
+    if physics_backend == "abd":
+        st.info(
+            "ABD mode exports the thick T3D panel meshes, hinge pin joints, guide points and pull schedule to abd_sim. "
+            "Only frames returned by that executable are shown here; legacy PD/SAT is not used as fallback."
+        )
 
     frame_count = st.slider("animation frames", 8, 96, 40, 4)
     preview_default = min(total_tiles, 900)
@@ -1304,45 +1738,39 @@ elif view_stage == "Assembly Animation":
     else:
         st.success("T2D and T3D are nearly congruent under the current metric.")
 
-    source_label = "Paper Projective Dynamics simulation"
-    st.caption("Animation source: physical PD simulation only. Morph/interpolation preview is intentionally hidden.")
+    source_label = "Autodesk ABD simulation" if physics_backend == "abd" else "Paper Projective Dynamics simulation"
+    st.caption(f"Animation source: {source_label}.")
 
-    if source_label.startswith("Paper"):
-        st.info(
-            "Physical model used here: the string is not simulated as rope particles. It is encoded as positional constraints. "
-            "Only gaps on the computed string path receive snap constraints; selected lift gaps move toward prescribed 3D lift targets. "
-            "Rigid and collision projections keep tiles rigid and non-overlapping."
-        )
+    if physics_backend in {"legacy", "abd"}:
+        if physics_backend == "abd":
+            st.info(
+                "Physical model used here: affine bodies with IPC/CCD contact, pin-joint hinges, gravity and friction. "
+                "The routed guide points are coupled by a unilateral total-length constraint, and its commanded length decreases over time."
+            )
+        else:
+            st.info(
+                "Physical model used here: the string is not simulated as rope particles. It is encoded as positional constraints. "
+                "Only gaps on the computed string path receive snap constraints; selected lift gaps move toward prescribed 3D lift targets. "
+                "Rigid and collision projections keep tiles rigid and non-overlapping."
+            )
         c0, c1, c2, c3 = st.columns([1.3, 1.3, 1, 3])
         if "paper_pd_frame" not in st.session_state:
             st.session_state.paper_pd_frame = 0
 
         paper_sim_key = (
-            "paper_pd_animation",
+            "assembly_solver_animation",
             actuation_key,
             frame_count,
-            sim_steps,
-            solver_iterations,
-            solver_substeps,
-            rigid_weight,
-            rigid_projection_passes,
-            rigid_guard_final_projection,
-            snap_weight,
-            lift_weight,
-            collision_weight,
-            hinge_weight,
-            damping_ratio,
-            high_fidelity,
-            gravity,
-            compute_backend,
-            tensor_dtype,
         )
+        current_result_backend = str(getattr(state.simulation_result, "metrics", {}).get("physics_backend", "")) if state.simulation_result is not None else ""
         need_sim_frames = (
             state.simulation_result is None
-            or st.session_state.get("paper_pd_animation_key") != paper_sim_key
+            or current_result_backend != physics_backend
             or len(getattr(state.simulation_result, "frames", [])) < 2
+            or (physics_backend != "abd" and st.session_state.get("paper_pd_animation_key") != paper_sim_key)
         )
-        refresh_sim = c0.button("Run / refresh paper simulation", type="primary")
+        refresh_label = "Run / refresh ABD simulation" if physics_backend == "abd" else "Run / refresh paper simulation"
+        refresh_sim = c0.button(refresh_label, type="primary")
         player_mode = c1.radio(
             "player mode",
             ["Smooth browser player", "Server frame player", "Scrubber"],
@@ -1352,48 +1780,45 @@ elif view_stage == "Assembly Animation":
         if c2.button("⏮ Reset"):
             st.session_state.paper_pd_frame = 0
 
-        if refresh_sim or need_sim_frames:
-            paper_params = DeploymentParameters(
+        if need_sim_frames and physics_backend == "abd" and not refresh_sim:
+            st.warning("No ABD result matching the current settings is loaded. Press 'Run / refresh ABD simulation'.")
+
+        if refresh_sim or (need_sim_frames and physics_backend != "abd"):
+            paper_params = replace(
+                deployment_params,
                 steps=max(sim_steps, frame_count),
-                solver_iterations=solver_iterations,
-                rigid_weight=rigid_weight,
-                rigid_projection_passes=rigid_projection_passes,
-                rigid_guard_final_projection=rigid_guard_final_projection,
-                hinge_weight=hinge_weight,
-                snap_weight=snap_weight,
-                lift_weight=lift_weight,
-                collision_weight=collision_weight,
-                damping_ratio=damping_ratio,
-                quasi_static_pull_speed=quasi_static_pulling_speed,
-                high_fidelity=high_fidelity,
-                hinge_rotational_stiffness=hinge_rotational_stiffness,
-                hinge_damping=hinge_damping,
-                tile_mass=tile_mass,
-                gravity=gravity,
-                contact_friction=contact_friction,
-                string_channel_friction=channel_friction,
-                solver_substeps=solver_substeps,
-                debug_all_pair_collision=debug_all_pair_collision,
                 store_animation_frames=True,
                 max_animation_frames=frame_count,
-                snap_scope="all_internal_gaps",
-                use_target_gap_contraction=True,
-                compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
             )
-            backend_info = compute_backend_info(paper_params.compute)
-            st.write(
-                {
-                    "requested_backend": backend_info.get("requested_backend"),
-                    "selected_backend": backend_info.get("current_backend"),
-                    "cuda_available": backend_info.get("cuda_available"),
-                    "gpu_name": backend_info.get("gpu_name"),
-                    "use_gpu_for_simulation": bool(paper_params.compute.use_gpu_for_simulation),
-                    "simulation_frames": int(paper_params.max_animation_frames),
-                    "simulation_steps": int(paper_params.steps),
-                    "solver_iterations": int(paper_params.solver_iterations),
-                    "solver_substeps": int(paper_params.solver_substeps),
-                }
-            )
+            if physics_backend == "abd":
+                st.write(
+                    {
+                        "physics_backend": "abd",
+                        "executable": paper_params.abd_executable or "auto-detect project Release build",
+                        "timestep": paper_params.abd_timestep,
+                        "simulation_steps": paper_params.steps,
+                        "cpu_threads": paper_params.abd_nthreads if paper_params.abd_nthreads > 0 else "automatic (ABD default)",
+                        "timeout_seconds": paper_params.abd_timeout_seconds,
+                        "pull_end_ratio": paper_params.abd_pull_end_ratio,
+                        "collision_model": "Autodesk ABD IPC barrier + CCD",
+                        "legacy_fallback": False,
+                    }
+                )
+            else:
+                backend_info = compute_backend_info(paper_params.compute)
+                st.write(
+                    {
+                        "physics_backend": "legacy",
+                        "requested_backend": backend_info.get("requested_backend"),
+                        "selected_backend": backend_info.get("current_backend"),
+                        "cuda_available": backend_info.get("cuda_available"),
+                        "gpu_name": backend_info.get("gpu_name"),
+                        "simulation_frames": int(paper_params.max_animation_frames),
+                        "simulation_steps": int(paper_params.steps),
+                        "solver_iterations": int(paper_params.solver_iterations),
+                        "solver_substeps": int(paper_params.solver_substeps),
+                    }
+                )
             progress_text = st.empty()
             progress_bar = st.progress(0.0)
 
@@ -1401,7 +1826,7 @@ elif view_stage == "Assembly Animation":
                 progress_bar.progress(max(0.0, min(1.0, float(progress_value))))
                 progress_text.caption(f"{stage}: {detail}")
 
-            with st.spinner("Running paper-style snap/lift Projective Dynamics simulation"):
+            with st.spinner(f"Running {selected_simulation_name}"):
                 try:
                     state.simulation_result = simulate_onestring_deployment(
                         state,
@@ -1412,15 +1837,21 @@ elif view_stage == "Assembly Animation":
                     st.error(str(exc))
                     st.stop()
             progress_bar.progress(1.0)
+            runtime = state.simulation_result.metrics.get("simulation_runtime_seconds", state.simulation_result.metrics.get("elapsed_time"))
+            runtime_text = f"{float(runtime):.3f}s" if runtime is not None else "not reported"
             progress_text.caption(
-                f"Done: actual_backend={state.simulation_result.metrics.get('actual_backend')}, "
-                f"elapsed={state.simulation_result.metrics.get('elapsed_time'):.3f}s"
+                f"Done: physics_backend={state.simulation_result.metrics.get('physics_backend')}, "
+                f"actual_backend={state.simulation_result.metrics.get('actual_backend', physics_backend)}, elapsed={runtime_text}"
             )
             st.session_state.paper_pd_animation_key = paper_sim_key
             st.session_state.actuation_key = actuation_key
             st.session_state.paper_pd_frame = 0
 
         result = state.simulation_result
+        if result is not None and str(result.metrics.get("physics_backend", "")) != physics_backend:
+            result = None
+        if result is None and physics_backend == "abd":
+            st.stop()
         frames = result.frames if result is not None and result.frames else [state.tiles_2d_dual_hinge.vertices]
         max_frame = max(0, len(frames) - 1)
         current_frame = st.slider(
@@ -1445,11 +1876,11 @@ elif view_stage == "Assembly Animation":
                 top_faces=state.tiles_3d.top_faces[:limit],
                 bottom_faces=state.tiles_3d.bottom_faces[:limit],
                 side_faces=state.tiles_3d.side_faces[:limit],
-                stage="paper Projective Dynamics snap/lift simulation",
+                stage=source_label,
             )
             fig = figure_tile_assembly(
                 frame_assembly,
-                title=f"Paper PD snap/lift simulation frame {frame_id + 1}/{max_frame + 1}",
+                title=f"{source_label} frame {frame_id + 1}/{max_frame + 1}",
                 hinge_graph=state.hinge_graph if show_hinges_preview and limit == total_tiles else None,
             )
             if show_target_preview:
@@ -1474,7 +1905,7 @@ elif view_stage == "Assembly Animation":
                 max_tiles=preview_tiles,
                 show_target=show_target_preview,
                 fps=fps,
-                title=f"Smooth paper PD snap/lift simulation ({len(frames)} frames)",
+                title=f"Smooth {source_label} ({len(frames)} frames)",
             )
             st.plotly_chart(
                 smooth_fig,
@@ -1501,7 +1932,8 @@ elif view_stage == "Assembly Animation":
         if result is not None:
             st.write(
                 {
-                    "simulation_model": "paper-style Projective Dynamics: E = w_rigid E_rigid + w_collision E_collision + w_actuation(E_snap + E_lift)",
+                    "physics_backend": result.metrics.get("physics_backend"),
+                    "simulation_model": "Autodesk ABD affine bodies + IPC/CCD + unilateral total-path-length string" if physics_backend == "abd" else "paper-style Projective Dynamics: E = w_rigid E_rigid + w_collision E_collision + w_actuation(E_snap + E_lift)",
                     "actual_backend": result.metrics.get("actual_backend"),
                     "dominant_backend": result.metrics.get("dominant_backend"),
                     "elapsed_time": result.metrics.get("elapsed_time"),
@@ -1515,8 +1947,26 @@ elif view_stage == "Assembly Animation":
                     "snap_scope": result.metrics.get("snap_scope"),
                     "actuated_snap_gap_count": result.metrics.get("actuated_snap_gap_count"),
                     "use_target_gap_contraction": result.metrics.get("use_target_gap_contraction"),
+                    "legacy_sat_collision_projection_used": result.metrics.get("legacy_sat_collision_projection_used"),
                 }
             )
+            if physics_backend == "abd":
+                st.subheader("ABD OneString solver log")
+                st.write(
+                    {
+                        "result_json": getattr(result, "result_json_path", None),
+                        "gltf": getattr(result, "gltf_path", None),
+                        "npz": getattr(result, "npz_path", None),
+                        "frame_count": len(frames),
+                        "final_active_contacts": result.metrics.get("final_collision_count"),
+                        "initial_layout": result.metrics.get("abd_initial_layout"),
+                        "rest_collision_geometry": result.metrics.get("abd_rest_collision_geometry"),
+                        "collision_skin": result.metrics.get("abd_collision_skin"),
+                        "legacy_fallback_used": bool(result.metrics.get("legacy_sat_collision_projection_used", False)),
+                    }
+                )
+                if getattr(result, "frame_logs", None):
+                    st.dataframe(result.frame_logs, width="stretch")
 
     else:
         st.warning("This is only a design morph preview. It is not the paper simulation and should not be used to judge physical actuation.")
@@ -1624,9 +2074,9 @@ elif view_stage == "Assembly Animation":
 
     st.write(
         {
-            "paper_simulation": "Projective Dynamics with rigid, collision, snap, and lift constraints. String is abstracted as geometry constraints, not rope particles.",
-            "snap": "paired side-face midpoints along the routed string path are pulled together",
-            "lift": "selected lift gaps are pulled toward prescribed 3D lift targets",
+            "selected_physics_backend": physics_backend,
+            "simulation": "Autodesk ABD affine-body dynamics with IPC/CCD contact and unilateral guided string." if physics_backend == "abd" else "Projective Dynamics with rigid, collision, snap, and lift constraints.",
+            "actuation": "unilateral guided-string total length command" if physics_backend == "abd" else "paired side-face midpoint snap plus selected lift targets",
             "preview_limit": preview_tiles,
             "tiles": total_tiles,
             "string_route_nodes": len(state.string_path.gap_ids),
@@ -1635,9 +2085,13 @@ elif view_stage == "Assembly Animation":
     )
 
 elif view_stage == "Final Deployed":
-    if state.simulation_result is None:
+    displayed_result_backend = str(getattr(state.simulation_result, "metrics", {}).get("physics_backend", "")) if state.simulation_result is not None else ""
+    if state.simulation_result is None or displayed_result_backend != physics_backend:
+        if state.simulation_result is not None:
+            st.warning(f"Loaded result uses '{displayed_result_backend}', but '{physics_backend}' is selected. Run the selected simulation before viewing its result.")
         st.plotly_chart(figure_tile_assembly(state.tiles_2d_dual_hinge, title="T2D start state"), width="stretch", key="actuation_start")
     else:
+        st.caption(f"Result source: {displayed_result_backend}")
         frame_index = st.slider("frame", 0, len(state.simulation_result.frames) - 1, len(state.simulation_result.frames) - 1)
         frame_assembly = TileAssembly(
             vertices=state.simulation_result.frames[frame_index],
@@ -1671,6 +2125,9 @@ elif view_stage == "Metrics":
     if state.simulation_result is not None:
         design_metrics.update(state.simulation_result.metrics)
     st.dataframe({k: [v] for k, v in design_metrics.items()}, width="stretch")
+    if state.simulation_result is not None and getattr(state.simulation_result, "frame_logs", None):
+        st.subheader("ABD per-frame solver log")
+        st.dataframe(state.simulation_result.frame_logs, width="stretch")
 elif view_stage == "Paper Consistency Audit":
     st.subheader("Paper Consistency Audit")
     st.caption("This table is intentionally strict. It compares the currently generated state with the paper's S→Ω→M2D→M3D→K3D/T3D and M2D→K2D→T2D→hinge optimization pipeline.")

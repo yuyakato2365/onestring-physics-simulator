@@ -1,12 +1,138 @@
 # onestring-physics-simulator
 
+## WindowsノートPCへの導入
+
+このリポジトリは、Pythonだけで動く設計・表示機能と、別途C++ビルドが
+必要なAutodesk ABD物理シミュレーションを含みます。初回はCPU版ABDを
+ビルドし、NVIDIA GPU搭載機では必要に応じてCUDA版を追加してください。
+
+```powershell
+git clone https://github.com/yuyakato2365/onestring-physics-simulator.git
+cd .\onestring-physics-simulator\onestring-physics-simulator
+powershell -ExecutionPolicy Bypass -File .\scripts\install_python_environment.ps1 -WithDevDependencies
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+`streamlit`コマンドが見つからない場合も、上記のように仮想環境のPythonから
+`-m streamlit`で起動してください。ABDを含む完全な導入、CPU/GPUビルド、
+検証、別PCへの更新手順は
+[WindowsノートPC導入ガイド](docs/windows_laptop_setup_ja.md)を参照してください。
+
+## Version 0.5.0: bijective free-boundary parameterization
+
+Version 0.5.0 adds an explicit `bijective_free_boundary` comparison mode without
+changing the existing BFF or CEPS paths. It starts from a valid mean-value Floater embedding,
+minimizes a symmetric Dirichlet distortion, and accepts only steps that remain
+flip-free, overlap-free, and boundary-self-intersection-free. The implementation
+follows Smith & Schaefer 2015 as an independent implementation rather than a
+binary reproduction of the authors' optimizer. See
+[docs/bijective_free_boundary_ja.md](docs/bijective_free_boundary_ja.md).
+
+## Version 0.4.0: integrated ABD, discrete BFF, and official CEPS support
+
+Version 0.4.0 combines the variable-topology T3D and Autodesk ABD work from
+the 0.3.0 line with the latest discrete BFF and official CEPS integration.
+The package metadata and runtime `__version__` use the same semantic version.
+
+## Version 0.3.0: variable-topology T3D and Autodesk ABD bridge
+
+Version 0.3.0 adds two independent changes:
+
+- T3D can use authoritative variable-topology convex solids with classified
+  cap/wedge/pyramid/local-thickness recovery. The old eight-vertex tile is kept
+  only as a T2D/deployment compatibility proxy.
+- If all valid-solid recovery tiers fail, the new selectable version shows only
+  the affected panel as a gray one-sided emergency prism and records that it is
+  not manufacturing-authoritative. Invalid K3D top faces still fail explicitly.
+- Actuation exposes `legacy` and `abd` physics backends. `abd` invokes an
+  external Autodesk `affine-body-dynamics` executable; it is not a Python
+  reimplementation and never falls back to the legacy SAT projection.
+
+### Autodesk ABD prerequisites (Windows)
+
+The vendored ABD extension can be built as CPU-only or with CUDA CCD. Both
+variants also use a TBB-parallel BiCGSTAB Newton linear solve (with the original
+Eigen direct solver as a numerical fallback). Build the CPU variant with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_autodesk_abd.ps1
+```
+
+For an NVIDIA GPU, install a CUDA Toolkit supported by the local compiler and
+build for the GPU architecture. An RTX 4060 Ti uses architecture `89`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_autodesk_abd.ps1 `
+  -EnableCuda -CudaArchitectures 89 `
+  -BuildDir third_party\affine-body-dynamics\build-gpu
+```
+
+The app searches `build-gpu\Release\abd_sim.exe` first, then
+`build-parallel\Release\abd_sim.exe`, followed by the legacy `build` folder.
+`ONESTRING_ABD_EXECUTABLE` or the executable-path setting still overrides this
+order. CUDA accelerates the IPC broad phase/CCD; Hessian assembly, constraints,
+line search, and parts of Newton remain CPU work, so GPU utilization is
+intermittent rather than continuously high.
+
+Then verify the unmodified official `cube_drop` scene before using OneString:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\verify_autodesk_abd.ps1
+```
+
+Set the verified executable:
+
+```powershell
+$env:ONESTRING_ABD_EXECUTABLE = "C:\path\to\affine-body-dynamics\build\Release\abd_sim.exe"
+python -m streamlit run app.py
+```
+
+The stock Autodesk executable supports headless IPC/CCD/friction/Newton contact
+and pin joints, but does not expose the unilateral OneString guide-length
+constraint required by this project. A full OneString ABD run therefore also
+requires an Autodesk-derived extension advertising `--onestring-manifest`.
+Without that capability, the `abd` backend stops with an explicit error. It does
+not silently run stock ABD without the string and does not switch to `legacy`.
+
+The bridge writes:
+
+- `scene.json`: official Autodesk ABD scene (rest meshes, density, initial
+  poses, IPC contact, friction, gravity, stiffness, and pin joints);
+- `onestring_manifest.json`: guide points, unilateral pull schedule, prescribed
+  shake trajectory, and required per-frame logs;
+- `sim.json` / `sim.glb`: official headless outputs;
+- `onestring_abd_frames.npz`: Streamlit-ready affine-body frames and logs.
+
+See [ABD backend details](docs/abd_backend.md) and
+[T3D recovery details](docs/t3d_variable_topology_recovery.md).
+
+## Version 2026-07-12: one-sided T3D extrusion
+
+The selectable `2026-07-12-one-sided-t3d` version keeps every K3D quad as the
+T3D top face and creates the opposite face only on the negative-normal side at
+distance `t`. Shared edges continue to use the miter/contact-plane construction
+so adjacent non-coplanar panels meet instead of being treated as unrelated
+normal-translation prisms.
+
 A Python research prototype inspired by **One String to Pull Them All: Fast Assembly of Curved Structures from Flat Auxetic Linkages**.
+
+## Version 0.2.0: paper-reference initialization
+
+Version 0.2.0 adds `paper_reference_bff`, a fail-fast S-to-M3D path backed by
+the official GeometryCollective `bff-command-line` executable. It includes
+strict triangle-disk validation, exact per-triangle Jacobian/SVD diagnostics,
+an explicit regular square grid, fully-contained-cell cropping, strict
+containing-triangle barycentric lifting, split diagnostics, and JSON output.
+It never calls LSCM, PCA, harmonic mapping, or nearest geometry as a BFF
+fallback. See [BFF backend](docs/bff_backend.md),
+[conformal scale factor](docs/conformal_scale_factor.md), and
+[traceability](docs/paper_traceability.md).
 
 The optional `boundary_sliding_lscm` mode is LSCM with a prescribed rectangular target boundary and order-preserving sliding boundary correspondence. It is explicitly not Boundary First Flattening: it does not implement the Cherrier formula or a Poincare-Steklov operator. See [docs/boundary_sliding_lscm_ja.md](docs/boundary_sliding_lscm_ja.md).
 
 For a reproducible Windows/CUDA setup, including the wrapper-to-base runtime path that must be present in a clone, follow [docs/home_pc_codex_handoff_ja.md](docs/home_pc_codex_handoff_ja.md) and run `python scripts/verify_home_environment.py --require-cuda` before comparing performance.
 
-This simulator is a paper-audited OneString research prototype, not a complete paper implementation. The default `PipelineParameters()` path requests `omega_parameterization_mode="bff"`, but the active flattening backend is reported explicitly. If no wired reference BFF backend is available, the pipeline uses an explicit free-boundary conformal LSCM fallback instead of pretending that rectangular-boundary harmonic UVs are BFF. PCA remains available only as an explicit debug/experimental path with `allow_experimental_pipeline=True`.
+This simulator is a paper-audited OneString research prototype, not a complete paper implementation. Bare `PipelineParameters()` now selects the local discrete `bff` backend, which implements the Cherrier/NtD and best-fit boundary path for a single-disk mesh. `rectangular_harmonic_legacy` remains available explicitly for compatibility, `paper_reference_bff` invokes the official BFF CLI, and `ceps` invokes the optional official CEPS CLI. Unsupported topology and unavailable official backends fail explicitly; they do not silently substitute LSCM.
 
 The default Streamlit workflow is:
 
@@ -22,7 +148,7 @@ The deployed physical error is evaluated against the designed assembled tile con
 
 ## 論文の流れと、この実装の流れ
 
-このリポジトリは、OneString 論文の処理順と物理的な意図を観察するための **paper-audited prototype** です。論文と同じ概念的パイプラインを追いますが、論文の ShapeOp / libigl / fabrication solver を完全移植したものではありません。現在の `bff` は参照BFF backendを要求するモードであり、この環境で参照backendが無い場合は `local_free_boundary_lscm_fallback` として明示されます。長方形境界固定の調和写像は `rect_harmonic` として分離され、BFFとは表示しません。
+このリポジトリは、OneString 論文の処理順と物理的な意図を観察するための **paper-audited prototype** です。`paper_reference_bff` は公式BFF CLIを要求し、利用できなければ明示的に失敗します。旧 `bff` 名は `rectangular_harmonic_legacy` のdeprecated aliasであり、BFFとは表示しません。K3D以降は既存近似のままなので、0.2.0全体を完全なOneString再現とは呼びません。
 
 ### 論文側の大きな流れ
 
@@ -290,6 +416,8 @@ cd onestring-physics-simulator
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
+$env:ONESTRING_BFF_EXECUTABLE = "C:\path\to\boundary-first-flattening\binaries\windows-v1.6\bff-command-line.exe"
+python scripts\verify_reference_bff.py
 streamlit run app.py
 ```
 
@@ -312,7 +440,7 @@ The default demo uses:
 
 - target: dome
 - grid: 3x3
-- explicit debug/experimental surface parameterization to `Omega`; paper-default conformal parameterization is not implemented
+- selectable local `bff`, `bijective_free_boundary`, `rectangular_harmonic_legacy`, `lscm_free_boundary`, official `paper_reference_bff`, and official `ceps` modes
 - inverse parameterization lift `c^-1` from `M2D` in `Omega` back to `M3D` on `S`
 - 3D optimization for `K3D` with planarity, square, and surface objectives
 - 2D edge matching for `K2D`
@@ -402,7 +530,7 @@ Legacy rope/tendon code remains in the package for compatibility with earlier te
 
 - The default M3D construction uses the stored `Omega` map: M2D vertices live in `Omega`, then each UV point is mapped back to `S` using UV triangle lookup and barycentric interpolation on the corresponding surface triangle. This depends on the reported `flattening_backend` and is tracked with quality metrics rather than treated as exact paper equivalence.
 - Direct height-field lifting `[u, v, z=f(u,v)]` is available only through the explicit `analytic_scaled_heightfield_debug` M3D construction mode and is tracked as a debug shortcut.
-- The default parameterization is `omega_parameterization_mode="bff"` with `omega_boundary_mode="paper_default"`. In this environment, no libigl/geometry-central BFF backend is wired, so the active backend is `local_free_boundary_lscm_fallback`. This is a free-boundary conformal approximation, not BFF, and it is reported with `bff_implemented=False`, `bff_reference_backend_available=False`, and `flattening_backend`. The rectangular fixed-boundary harmonic method is separated as `omega_parameterization_mode="rect_harmonic"` and must not be described as BFF.
+- Version 0.2.0 exposes `rectangular_harmonic_legacy`, `lscm_free_boundary`, and `paper_reference_bff`. The deprecated `bff` alias selects the legacy rectangular harmonic method and emits the mandatory non-BFF warning. `paper_reference_bff` uses only the official CLI and raises `ReferenceBFFUnavailableError` if it cannot run.
 - M2D overlays a grid on `Omega` and then clips whole quads against the Omega boundary polygon. Free-boundary Omega domains may be non-rectangular, so the overlay is rebuilt at a slightly higher density when needed. `rectangular_debug` and `rect_harmonic` remain explicit non-BFF alternatives.
 - CSF estimation uses local 3D/UV edge-stretch ratios. Regions whose normalized stretch exceeds `2.0` generate a coarse Omega split line. The implementation detects simple reflection symmetry in both `S` and `Omega`; when symmetry is detected, M2D crop results and CSF split lines are mirrored across the detected axis before the split is applied. The split is snapped to an existing M2D grid line and duplicates the vertices on one side of the line, so the topology is cut without deleting neighboring quads. This is still a lightweight approximation of the paper's split strategy, not a full BFF/CSF segmentation implementation.
 - When a dominant surface peak is detected, the Omega overlay grid is shifted so the peak's UV position lands on an M2D grid vertex. This makes the corresponding K3D peak occur at a shared corner where four panels can meet; CSF split lines are allowed to pass through that vertex.
@@ -419,7 +547,7 @@ Legacy rope/tendon code remains in the package for compatibility with earlier te
 
 ## Performance And GPU Notes
 
-The app avoids generating every stage figure on each Streamlit rerun. Use the `View stage` selector to render only one stage at a time. Animation is generated on demand from the final deployment view.
+The app avoids generating every stage figure on each Streamlit rerun. Use the `View stage` selector to render only one stage at a time. Changing that selector displays the result saved in session state and does not rebuild the pipeline. Changed calculation settings take effect only after `Run OneString pipeline` is clicked. Animation is generated on demand from the final deployment view.
 
 GPU acceleration is used for tensorized optimization when PyTorch CUDA is available and the compute backend is set to `auto` or `cuda`. UI rendering, Plotly visualization, file I/O, and graph routing remain CPU-side. If `cuda` is explicitly requested but CUDA is unavailable in the Streamlit Python environment, the app raises a visible error instead of silently falling back to CPU.
 

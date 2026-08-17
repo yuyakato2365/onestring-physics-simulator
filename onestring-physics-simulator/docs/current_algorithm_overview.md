@@ -40,20 +40,16 @@ where `J` is the local differential of the map and `lambda` is a local scale
 factor. This means angles are approximately preserved, while lengths and areas
 may scale.
 
-The requested main mode is `bff`, but the implementation does not silently call
-the rectangular-boundary harmonic substitute BFF. Instead it uses this dispatch:
+Version 0.2.0 exposes three explicit modes:
 
-1. Try an optional external conformal backend. A wired reference BFF backend
-   would report `bff_implemented=True` and `flattening_backend` such as
-   `libigl_bff` or `geometry_central_bff`.
-2. If no reference BFF backend is available, use an explicit free-boundary LSCM
-   fallback. This reports `bff_implemented=False`,
-   `bff_reference_backend_available=False`, and
-   `flattening_backend="local_free_boundary_lscm_fallback"`.
-3. Keep rectangular-boundary cotangent harmonic parameterization separate as
-   `omega_parameterization_mode="rect_harmonic"`.
+1. `paper_reference_bff` calls the official GeometryCollective BFF CLI and
+   fails if it is unavailable; there is no LSCM/PCA/harmonic fallback.
+2. `lscm_free_boundary` is the existing two-pin free-boundary LSCM.
+3. `rectangular_harmonic_legacy` is the fixed rectangular-boundary cotangent
+   harmonic method. The deprecated `bff` alias selects this legacy method and
+   emits the mandatory non-BFF warning.
 
-The local fallback solves a least-squares conformal map. In each triangle it
+The explicit LSCM mode solves a least-squares conformal map. In each triangle it
 minimizes the discrete Cauchy-Riemann residual
 
 ```math

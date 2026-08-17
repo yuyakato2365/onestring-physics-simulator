@@ -1,0 +1,15 @@
+﻿Upstream repository: https://github.com/Autodesk/affine-body-dynamics
+Upstream commit: fb65c94a5ea895405bc0f537e9f53e08381c32ba
+License: MIT
+
+This source tree is vendored for the OneString ABD integration.
+
+Excluded from this repository:
+- meshes/
+- inputs/
+- comparisons/
+- docs/
+- notebooks/
+
+The OneString backend generates its own scene JSON, tile OBJ files,
+guide constraints, rope manifest, pull schedule, and output files.
