@@ -8,6 +8,7 @@ from onestring_physics.dynamic_free_boundary import (
     _boundary_direction,
     _energy_gradient,
 )
+from onestring_physics.dynamic_free_boundary_v2 import HarmonicBoundaryResponse
 from onestring_physics import bijective_free_boundary as legacy_free_boundary
 from onestring_physics.fast_t3d_preview import _aabb_sweep_candidates
 
@@ -52,6 +53,36 @@ def test_boundary_direction_is_local_not_global_polynomial_mode():
     assert requested < 0.40 * characteristic
 
 
+def test_harmonic_boundary_proposal_moves_interior_before_energy_test():
+    # 3x3 grid: vertex 4 is the only interior vertex.
+    nx = ny = 3
+    faces = []
+    for j in range(ny - 1):
+        for i in range(nx - 1):
+            a = j * nx + i
+            b = a + 1
+            c = a + nx
+            d = c + 1
+            faces.append((a, b, d))
+            faces.append((a, d, c))
+    faces = np.asarray(faces, dtype=int)
+    boundary = np.asarray([0, 1, 2, 5, 8, 7, 6, 3], dtype=int)
+    response = HarmonicBoundaryResponse(faces, 9, boundary)
+
+    seed = np.zeros((9, 2), dtype=float)
+    seed[2, 0] = 1.0
+    seed[5, 0] = 1.0
+    seed[8, 0] = 1.0
+    coupled = response.extend(seed)
+
+    # Boundary values are preserved exactly, while the center follows the right
+    # boundary instead of remaining frozen.
+    assert np.allclose(coupled[boundary], seed[boundary])
+    assert coupled[4, 0] > 0.0
+    assert abs(coupled[4, 1]) < 1.0e-12
+    assert response.call_count == 1
+
+
 def test_shrink_penalty_detects_isotropic_uv_collapse():
     vertices = np.asarray(
         [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
@@ -94,6 +125,8 @@ def test_circle_initialization_gets_real_boundary_updates_on_anisotropic_disk():
     assert metrics["boundary_self_intersection_count"] == 0
     assert metrics["internal_triangle_overlap_count"] == 0
     assert metrics["boundary_global_low_frequency_basis_used"] is False
+    assert metrics["boundary_candidate_interior_fixed"] is False
+    assert metrics["boundary_candidate_harmonic_interior_response"] is True
     assert metrics["optimization_boundary_update_count"] > 0
     assert metrics["boundary_nonsimilarity_change_relative_rms"] > 1.0e-5
 
