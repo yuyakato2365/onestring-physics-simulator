@@ -16,29 +16,29 @@ from .dynamic_free_boundary_v2 import (
 )
 from .discrete_bff import install_discrete_bff
 from .fast_t3d_preview import install_fast_t3d_preview
+from .large_steps_mesh_conditioning import (
+    LargeStepsMeshConditioningConfig,
+    condition_mesh_with_large_steps,
+)
+from .large_steps_pipeline_patch import install_large_steps_conditioning
 from .official_ceps import install_official_ceps
 
 
-# CEPS ordinary UV is stored per face corner. The current OneString inverse map
-# can consume it only when those corner values already form one single-valued disk
-# chart. Internal CEPS cut seams are rejected explicitly; they are not stitched,
-# replaced by a convex hull, or hidden with nearest-triangle fallback. When the
-# chart is valid, its true physical boundary loop is used directly.
 install_ceps_paired_output(_official_ceps)
 install_ceps_outer_boundary(_official_ceps)
 
 
 def _install_parameterization_backends(module: Any) -> None:
     """Install parameterization backends and runtime acceleration patches."""
-    # importlib.reload() preserves a module dictionary. Clear old installation
-    # markers because the re-executed compatibility wrapper replaced the patch.
     module._DISCRETE_BFF_PATCH_INSTALLED = False
     module._BIJECTIVE_FREE_BOUNDARY_PATCH_INSTALLED = False
     module._OFFICIAL_CEPS_PATCH_INSTALLED = False
     module._CEPS_STRICT_ADAPTER_INSTALLED = False
     module._FAST_T3D_PREVIEW_PATCH_INSTALLED = False
+    module._LARGE_STEPS_CONDITIONING_PATCH_INSTALLED = False
     install_discrete_bff(module)
     install_bijective_free_boundary(module)
+    install_large_steps_conditioning(module)
     install_official_ceps(module)
     install_ceps_strict_adapter(module)
     install_fast_t3d_preview(module)
@@ -64,7 +64,6 @@ def _install_parameterization_backends(module: Any) -> None:
                 == getattr(result.uv_faces, "shape", None)
                 and (result.surface_faces == result.uv_faces).all()
             )
-            # Backward-compatible metric name used by the existing UI/tests.
             metrics["ceps_paired_surface_uv_vertices"] = metrics[
                 "ceps_continuous_surface_uv_vertices"
             ]
@@ -79,7 +78,6 @@ _install_parameterization_backends(_onestring_pipeline)
 
 
 def _install_reload_guard() -> None:
-    """Reinstall the backends after the legacy Streamlit app reloads the wrapper."""
     if getattr(importlib, "_onestring_parameterization_reload_guard", False):
         return
     original_reload = importlib.reload
@@ -95,7 +93,7 @@ def _install_reload_guard() -> None:
 
 
 def _install_streamlit_parameterization_options() -> None:
-    """Expose separately installed parameterization modes in the legacy app."""
+    """Expose installed modes and the conditioned-S inspection stage."""
     try:
         import streamlit as st
     except Exception:
@@ -125,7 +123,70 @@ def _install_streamlit_parameterization_options() -> None:
                     insertion = options.index("bff") + 1 if "bff" in options else 0
                     options.insert(insertion, "bijective_free_boundary")
                 kwargs = {**kwargs, "options": options}
-        return original_selectbox(*args, **kwargs)
+        elif label == "View stage":
+            if len(args) >= 2:
+                options = list(args[1])
+                if "Conditioned S" not in options:
+                    insertion = options.index("S") + 1 if "S" in options else 1
+                    options.insert(insertion, "Conditioned S")
+                args = (args[0], options, *args[2:])
+            elif "options" in kwargs:
+                options = list(kwargs["options"])
+                if "Conditioned S" not in options:
+                    insertion = options.index("S") + 1 if "S" in options else 1
+                    options.insert(insertion, "Conditioned S")
+                kwargs = {**kwargs, "options": options}
+
+        selected = original_selectbox(*args, **kwargs)
+
+        if label == "Omega parameterization mode" and selected == "bijective_free_boundary":
+            try:
+                with st.expander("Large Steps mesh conditioning", expanded=False):
+                    st.checkbox(
+                        "condition input mesh before S -> Omega",
+                        value=True,
+                        key="large_steps_conditioning_enabled",
+                        help=(
+                            "Automatically redistributes sampled input vertices with the "
+                            "Large Steps u=(I+lambda L)v parameterization before the "
+                            "bijective free-boundary solve. Connectivity and the 3D boundary stay fixed."
+                        ),
+                    )
+                    st.number_input(
+                        "Large Steps lambda",
+                        min_value=0.0,
+                        max_value=500.0,
+                        value=10.0,
+                        step=1.0,
+                        key="large_steps_conditioning_lambda",
+                    )
+                    st.number_input(
+                        "Large Steps conditioning iterations",
+                        min_value=1,
+                        max_value=1000,
+                        value=120,
+                        step=20,
+                        key="large_steps_conditioning_max_iterations",
+                    )
+                    st.number_input(
+                        "Large Steps learning rate",
+                        min_value=0.001,
+                        max_value=1.0,
+                        value=0.06,
+                        step=0.01,
+                        key="large_steps_conditioning_learning_rate",
+                    )
+                    st.caption(
+                        "This is an in-pipeline Large-Steps conditioning stage, not an external Mitsuba preprocessing step. "
+                        "Use View stage -> Conditioned S to inspect the result."
+                    )
+            except Exception:
+                pass
+
+        if label == "View stage":
+            st.session_state["_onestring_show_conditioned_surface"] = selected == "Conditioned S"
+            return "S" if selected == "Conditioned S" else selected
+        return selected
 
     st.selectbox = selectbox_with_installed_modes
     st._onestring_ceps_selectbox_patch = True
@@ -152,10 +213,6 @@ from .abd_backend import (
 from .abd_builtin_compat import install_builtin_shape_abd_compatibility
 from .abd_layout_compat import install_abd_layout_compatibility
 
-# Install before onestring_pipeline imports run_abd_backend. These patches keep
-# the normal routed gap path when valid, provide deterministic guides for
-# builtin shapes when needed, and ensure every ABD collision body starts with a
-# strictly positive gap, including bodies joined by a hinge.
 install_builtin_shape_abd_compatibility()
 install_abd_layout_compatibility()
 
@@ -194,17 +251,17 @@ from .reference_bff import (
     triangle_jacobian_diagnostics,
     validate_reference_mesh,
 )
+from .large_steps_visualization_patch import install_large_steps_visualization_patch
 from .visualization_status_patch import install_status_visualization_patch
 
-# Make recovery colors independent of Plotly lighting. In particular, clipped
-# cyan/blue solids must never appear gray like the non-authoritative emergency
-# normal prism.
+install_large_steps_visualization_patch()
 install_status_visualization_patch()
 
 __all__ = [
     "DesignParameters",
     "DesignResult",
     "BijectiveFreeBoundaryConfig",
+    "LargeStepsMeshConditioningConfig",
     "ABDBackendConfig",
     "ABDBackendError",
     "ABDBackendUnavailableError",
@@ -232,6 +289,7 @@ __all__ = [
     "build_paper_reference_initialization",
     "complexity_metrics",
     "compute_backend_info",
+    "condition_mesh_with_large_steps",
     "export_t2d_stl",
     "export_t3d_stl",
     "find_abd_executable",
@@ -256,6 +314,8 @@ __all__ = [
     "triangle_jacobian_diagnostics",
     "validate_reference_mesh",
     "install_status_visualization_patch",
+    "install_large_steps_visualization_patch",
+    "install_large_steps_conditioning",
     "install_abd_layout_compatibility",
     "install_bijective_free_boundary",
     "__version__",
