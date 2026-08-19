@@ -1,11 +1,9 @@
-"""Route bijective S -> Omega to a full-resident CUDA optimizer when available.
+"""Route bijective S -> Omega to full-resident CUDA or Apple MPS optimizers.
 
-Apple Silicon compatibility:
-- CUDA remains the only full-resident GPU path for this optimizer because the
-  current harmonic-response / sparse PCG implementation is validated on CUDA.
-- On M-series Macs, PyTorch MPS availability is detected and reported, while
-  S -> Omega intentionally falls back to the existing CPU coupled solver.
-- Mitsuba 3 Metal acceleration is independent of this PyTorch Omega backend.
+- NVIDIA: full CUDA-resident coupled Omega solver.
+- Apple Silicon: full MPS/Metal-resident coupled Omega solver with matrix-free
+  harmonic PCG (no PyTorch sparse-matrix dependency).
+- Other platforms: reference CPU coupled solver.
 """
 from __future__ import annotations
 
@@ -14,6 +12,7 @@ from typing import Any
 
 from .dynamic_free_boundary_cuda_backend import _resolve_torch_device
 from .dynamic_free_boundary_cuda_full import full_cuda_bijective_free_boundary_parameterization
+from .dynamic_free_boundary_mps_full import full_mps_bijective_free_boundary_parameterization
 from .optimization_debug_visualization import (
     capture_omega_accepted_states,
     render_omega_flip_debug_animation,
@@ -51,24 +50,20 @@ def _attach_floater_metrics(base: Any, metrics: dict[str, Any]) -> None:
         )
 
 
-def _attach_macos_fallback_metrics(metrics: dict[str, Any], *, requested: str) -> None:
+def _attach_cpu_fallback_metrics(metrics: dict[str, Any], *, requested: str) -> None:
     available, label = _mps_status()
     metrics.update(
         {
             "omega_cuda_used": False,
             "omega_full_cuda_resident": False,
+            "omega_full_gpu_resident": False,
             "omega_compute_device": "cpu",
             "omega_device_name": "CPU",
             "omega_mps_available": bool(available),
             "omega_mps_device_label": label,
             "omega_mps_acceleration_used": False,
             "omega_requested_device": requested,
-            "omega_platform_fallback_reason": (
-                "Apple Silicon/MPS detected, but the current full-resident Omega solver uses a CUDA-tested sparse PCG path; "
-                "using the reference CPU coupled solver for numerical compatibility."
-                if available
-                else "CUDA unavailable; using the reference CPU coupled solver."
-            ),
+            "omega_platform_fallback_reason": "No requested GPU backend available; using reference CPU coupled solver.",
         }
     )
 
@@ -116,7 +111,7 @@ def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
     used = int(metrics.get("optimization_iteration_count", len(records)) or len(records))
     requested_iterations = int(metrics.get("optimization_requested_max_iterations", used) or used)
     floater_mode = str(metrics.get("floater_initialization_mode", "mean_value_arc_length"))
-    resident = bool(metrics.get("omega_full_cuda_resident", False))
+    resident = bool(metrics.get("omega_full_gpu_resident", metrics.get("omega_full_cuda_resident", False)))
     residency = "FULL GPU-RESIDENT" if resident else "CPU / fallback"
     st.caption(
         f"{residency} | device: {device_name} | iterations: {used}/{requested_iterations} | "
@@ -162,7 +157,7 @@ def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
 
 
 def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
-    """Use full CUDA-resident optimization on NVIDIA; safe CPU fallback on Apple Silicon."""
+    """Select full CUDA, full MPS, or reference CPU coupled optimization."""
     if getattr(v2_module, "_CUDA_FREE_BOUNDARY_ACCELERATION_INSTALLED", False):
         return
 
@@ -173,11 +168,26 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
     def accelerated_parameterization(vertices, faces, config=None, progress_callback=None):
         requested = _env_device()
         mps_available, _mps_label = _mps_status()
+        active_config = config if config is not None else v2_module.BijectiveFreeBoundaryConfig()
 
         if requested == "mps" or (requested == "auto" and mps_available):
-            uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
+            if not mps_available:
+                raise RuntimeError("ONESTRING_BIJECTIVE_DEVICE=mps was requested, but PyTorch MPS is unavailable")
+            base._emit_progress(
+                progress_callback,
+                "S -> Omega FULL MPS",
+                0.01,
+                "Metal-resident optimization loop / Apple Silicon / float32",
+            )
+            with capture_omega_accepted_states(base, faces, active_config) as recorder:
+                uv, loop, metrics = full_mps_bijective_free_boundary_parameterization(
+                    vertices, faces, active_config, progress_callback
+                )
             _attach_floater_metrics(base, metrics)
-            _attach_macos_fallback_metrics(metrics, requested=requested)
+            recorder.capture_final(uv, metrics)
+            debug_summary = recorder.summary()
+            metrics.update(debug_summary)
+            render_omega_flip_debug_animation(recorder.frames, faces, loop, debug_summary)
             _render_streamlit_energy_history(metrics)
             return uv, loop, metrics
 
@@ -188,12 +198,11 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
                 raise
             uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
             _attach_floater_metrics(base, metrics)
-            _attach_macos_fallback_metrics(metrics, requested=requested)
+            _attach_cpu_fallback_metrics(metrics, requested=requested)
             _render_streamlit_energy_history(metrics)
             return uv, loop, metrics
 
         if device.type == "cuda":
-            active_config = config if config is not None else v2_module.BijectiveFreeBoundaryConfig()
             base._emit_progress(
                 progress_callback,
                 "S -> Omega FULL CUDA",
@@ -212,6 +221,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
                 "omega_mps_available": bool(mps_available),
                 "omega_mps_acceleration_used": False,
                 "omega_requested_device": requested,
+                "omega_full_gpu_resident": True,
             })
             render_omega_flip_debug_animation(recorder.frames, faces, loop, debug_summary)
             _render_streamlit_energy_history(metrics)
@@ -222,6 +232,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
         metrics.update({
             "omega_cuda_used": False,
             "omega_full_cuda_resident": False,
+            "omega_full_gpu_resident": False,
             "omega_compute_device": str(device),
             "omega_device_name": "CPU",
             "omega_torch_dtype": str(dtype).replace("torch.", ""),
