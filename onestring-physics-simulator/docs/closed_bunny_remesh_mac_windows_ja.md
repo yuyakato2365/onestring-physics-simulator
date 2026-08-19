@@ -67,8 +67,6 @@ import mitsuba as mi
 mi.set_variant('metal_ad_rgb', 'llvm_ad_rgb')
 ```
 
-とし、Metal が使えない環境では LLVM CPU へ fallback できます。
-
 ### 2. Remesh
 
 例:
@@ -112,16 +110,67 @@ python tools/remesh_closed_bunny.py \
 
 頂点を直接 Delete Vertices するより、Faces を削除する方が意図しない大きな穴を作りにくい。
 
-### 4. OneString on Mac
+### 4. OneString on Mac: FULL MPS Omega
 
-現在の `bijective_free_boundary` は CUDA が無い場合 CPU solver へ fallback するため、Apple Silicon でも実行可能です。Large Steps preprocessing は今回 OFF にします。
+Apple Silicon では PyTorch MPS (Metal Performance Shaders) を検出し、S -> Omega の coupled optimizer を MPS GPU 上で実行します。
 
 ```text
 Omega parameterization mode = bijective_free_boundary
 Large Steps mesh conditioning = OFF
+ONESTRING_BIJECTIVE_DEVICE = auto   # 推奨
 ```
 
-CUDA 専用の full-resident Omega loop は Mac では使わず CPU fallback になります。Mitsuba 3 の Metal backend と PyTorch/CUDA backend は別物なので混同しないこと。
+`auto` の選択順は概念的に次です。
+
+```text
+NVIDIA CUDA available -> CUDA
+else Apple MPS available -> MPS
+else -> CPU
+```
+
+MPS path では以下を Metal GPU 上に常駐させます。
+
+- UV vertices
+- energy / gradient
+- L-BFGS history / search direction
+- triangle safe-step
+- boundary edge-vertex first-singularity test
+- line-search candidates
+- boundary self-intersection test
+- harmonic boundary response
+
+harmonic response は PyTorch sparse matrix を使わず、triangle edge list による matrix-free combinatorial Laplacian を Jacobi-PCG で解きます。
+
+```math
+(Lx)_i = d_i x_i - \sum_{j\in N(i)}x_j
+```
+
+MPS では `float32` を使い、Floater/Tutte initialization と最終 global overlap audit は CPU です。反復中の accepted UV state は CPU へ戻しません。
+
+確認:
+
+```bash
+python - <<'PY'
+import torch
+print('torch:', torch.__version__)
+print('MPS built:', torch.backends.mps.is_built())
+print('MPS available:', torch.backends.mps.is_available())
+PY
+```
+
+Streamlit 実行中に次が出れば MPS path です。
+
+```text
+S -> Omega FULL MPS
+MPS Omega i/N
+Metal-resident
+```
+
+MPS を明示的に強制する場合:
+
+```bash
+export ONESTRING_BIJECTIVE_DEVICE=mps
+```
 
 ---
 
@@ -172,14 +221,29 @@ python tools\remesh_closed_bunny.py `
 
 Blender 以降は Mac と同じ。
 
-### 3. OneString on Alienware
+### 3. OneString on Alienware: FULL CUDA Omega
 
 ```text
 Omega parameterization mode = bijective_free_boundary
 Large Steps mesh conditioning = OFF
+ONESTRING_BIJECTIVE_DEVICE = auto
 ```
 
-NVIDIA CUDA PyTorch が利用可能なら S -> Omega は full GPU-resident CUDA path を使う。
+NVIDIA CUDA PyTorch が利用可能なら S -> Omega は full GPU-resident CUDA path を使います。
+
+表示:
+
+```text
+S -> Omega FULL CUDA
+CUDA Omega i/N
+GPU-resident
+```
+
+CUDA を明示的に強制する場合:
+
+```powershell
+$env:ONESTRING_BIJECTIVE_DEVICE = "cuda"
+```
 
 ---
 
@@ -201,6 +265,7 @@ Before / remeshed closed / Blender-cut open
 OneString 側:
 
 ```text
+- accelerator backend (CUDA / MPS / CPU)
 - Floater initialization mode
 - S -> Omega runtime
 - minimum signed Omega triangle area
