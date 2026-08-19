@@ -36,6 +36,7 @@ def _install_parameterization_backends(module: Any) -> None:
     module._CEPS_STRICT_ADAPTER_INSTALLED = False
     module._FAST_T3D_PREVIEW_PATCH_INSTALLED = False
     module._LARGE_STEPS_CONDITIONING_PATCH_INSTALLED = False
+    module._K2D_CORRESPONDENCE_ANIMATION_PATCH_INSTALLED = False
     install_discrete_bff(module)
     install_bijective_free_boundary(module)
     install_large_steps_conditioning(module)
