@@ -10,6 +10,8 @@ from .large_steps_mesh_conditioning import (
     LargeStepsMeshConditioningConfig,
     condition_mesh_with_large_steps,
 )
+from .large_steps_visualization_patch import render_large_steps_live_comparison
+from .optimization_debug_visualization import install_k2d_correspondence_animation
 from . import dynamic_free_boundary_v2 as _dynamic_free_boundary_v2
 from .dynamic_free_boundary_cuda_patch import install_cuda_free_boundary_acceleration
 
@@ -178,13 +180,19 @@ def _make_streamlit_progress_callback():
 
 def install_large_steps_conditioning(pipeline_module: Any) -> None:
     """Wrap S -> Omega so sampled input meshes are conditioned first."""
+    # The K2D patch is installed here as well so importlib.reload() of the
+    # pipeline reinstalls both debug visualizations consistently.
+    install_k2d_correspondence_animation(pipeline_module)
     if getattr(pipeline_module, "_LARGE_STEPS_CONDITIONING_PATCH_INSTALLED", False):
         return
     legacy = pipeline_module._build_surface_parameterization
 
     def build(surface: Any, target: Any, grid: Any, params: Any) -> Any:
         mode = str(getattr(params, "omega_parameterization_mode", "bff"))
-        sampled = str(getattr(surface, "kind", getattr(target, "kind", ""))) == "sampled"
+        sampled = (
+            str(getattr(surface, "kind", "")) == "sampled"
+            or str(getattr(target, "kind", "")) == "sampled"
+        )
         default_enabled = _env_bool("ONESTRING_LARGE_STEPS_CONDITIONING", True)
         enabled = bool(
             _setting(
@@ -260,6 +268,18 @@ def install_large_steps_conditioning(pipeline_module: Any) -> None:
             setattr(surface, "_large_steps_conditioning_applied", True)
             setattr(surface, "_large_steps_conditioned_vertices", np.asarray(conditioned_vertices, dtype=float))
             setattr(surface, "_large_steps_conditioning_metrics", dict(conditioning_metrics))
+        except Exception:
+            pass
+
+        # Show the geometric effect immediately after Large Steps, before the
+        # potentially long S -> Omega optimization starts.
+        try:
+            render_large_steps_live_comparison(
+                np.asarray(surface.vertices, dtype=float),
+                np.asarray(conditioned_vertices, dtype=float),
+                np.asarray(surface.faces, dtype=int),
+                dict(conditioning_metrics),
+            )
         except Exception:
             pass
 
