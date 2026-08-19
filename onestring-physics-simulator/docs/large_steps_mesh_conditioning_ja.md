@@ -71,8 +71,11 @@ GPU 上へ移した主な処理:
 - boundary self-intersection check
 - harmonic boundary response の Dirichlet solve（GPU PCG）
 
-一方、outer optimizer の phase 制御と最終 global triangle-overlap audit は CPU のままです。
-このためアルゴリズムの意味を大きく変えず、最も頻繁に呼ばれる数値計算を CUDA に移す構成です。
+一方、outer optimizer の phase 制御、boundary update 用の full first-singularity safe-step
+（triangle degeneracy + boundary edge/vertex collision）、および最終 global triangle-overlap audit は
+CPU のままです。このため現時点では「完全GPU化」ではなく hybrid CUDA backend です。
+アルゴリズムの意味を大きく変えず、最も頻繁に呼ばれる energy / gradient / validity / predictor 計算を
+CUDA に移す構成にしています。
 
 環境変数 `ONESTRING_BIJECTIVE_DEVICE` は `auto` / `cuda` / `cpu` を受け付けます。
 既定は `auto` です。`cuda` を明示した場合、CUDA が利用できなければエラーになります。
