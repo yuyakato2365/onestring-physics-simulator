@@ -4,11 +4,22 @@
 - Apple Silicon: full MPS/Metal-resident coupled Omega solver with matrix-free
   harmonic PCG (no PyTorch sparse-matrix dependency).
 - Other platforms: reference CPU coupled solver.
+
+This wrapper also removes an undesirable global scale drift from the free-boundary
+result.  The optimizer is still free to change the *shape* of Omega, but if its
+final accepted embedding has smaller total area than the initial Floater/Tutte
+embedding, the returned UV map is uniformly enlarged about its centroid so that
+its total area matches the initial embedding.  Positive uniform scaling preserves
+triangle orientation and bijectivity.  The same normalization is applied to the
+recorded debug snapshots so the animation visualizes shape change rather than a
+meaningless global shrink.
 """
 from __future__ import annotations
 
 import os
 from typing import Any
+
+import numpy as np
 
 from .dynamic_free_boundary_cuda_backend import _resolve_torch_device
 from .dynamic_free_boundary_cuda_full import full_cuda_bijective_free_boundary_parameterization
@@ -68,6 +79,111 @@ def _attach_cpu_fallback_metrics(metrics: dict[str, Any], *, requested: str) -> 
     )
 
 
+def _total_uv_area(uv: Any, faces: Any) -> float:
+    """Total unsigned triangle area for a valid 2D embedding."""
+    points = np.asarray(uv, dtype=float)
+    tris = np.asarray(faces, dtype=int)[:, :3]
+    if points.ndim != 2 or points.shape[1] < 2 or len(tris) == 0:
+        return 0.0
+    p = points[tris]
+    a = p[:, 1, :2] - p[:, 0, :2]
+    b = p[:, 2, :2] - p[:, 0, :2]
+    signed_double = a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
+    finite = signed_double[np.isfinite(signed_double)]
+    if not len(finite):
+        return 0.0
+    return 0.5 * float(np.sum(np.abs(finite)))
+
+
+def _normalize_shrunken_omega_area(
+    base: Any,
+    uv: Any,
+    faces: Any,
+    loop: Any,
+    metrics: dict[str, Any],
+    *,
+    progress_callback: Any = None,
+) -> np.ndarray:
+    """Undo only global shrink; never shrink an embedding that already expanded.
+
+    Target area is the area of a fresh Floater/Tutte initialization using the same
+    input mesh and configured initial boundary shape.  We reconstruct it from the
+    initial-area metric when present, otherwise from the current metrics only if a
+    caller has populated ``omega_initial_total_area``.  The accelerated wrappers
+    set the target explicitly before calling this helper.
+    """
+    result = np.asarray(uv, dtype=float).copy()
+    initial_area = float(metrics.get("omega_initial_total_area", 0.0) or 0.0)
+    raw_area = _total_uv_area(result, faces)
+    scale = 1.0
+    applied = False
+    if initial_area > 0.0 and raw_area > 0.0 and np.isfinite(initial_area) and np.isfinite(raw_area):
+        if raw_area < initial_area * (1.0 - 1.0e-10):
+            scale = float(np.sqrt(initial_area / raw_area))
+            center = np.mean(result[:, :2], axis=0)
+            result[:, :2] = center[None, :] + scale * (result[:, :2] - center[None, :])
+            applied = True
+
+    normalized_area = _total_uv_area(result, faces)
+    metrics.update(
+        {
+            "omega_global_area_normalization_enabled": True,
+            "omega_global_area_normalization_mode": "expand_only_to_initial_floater_area",
+            "omega_global_area_normalization_applied": bool(applied),
+            "omega_initial_total_area": float(initial_area),
+            "omega_raw_final_total_area": float(raw_area),
+            "omega_global_area_normalization_scale": float(scale),
+            "omega_normalized_final_total_area": float(normalized_area),
+            "omega_final_energy_is_pre_area_normalization": bool(applied),
+        }
+    )
+    if applied:
+        try:
+            base._emit_progress(
+                progress_callback,
+                "Omega global area normalization",
+                0.985,
+                f"raw area={raw_area:.6g}; initial area={initial_area:.6g}; expand scale={scale:.6g}; normalized area={normalized_area:.6g}",
+            )
+        except Exception:
+            pass
+    return result
+
+
+def _normalize_debug_frames_to_initial_area(frames: list[dict[str, Any]], faces: Any, initial_area: float) -> None:
+    """Normalize recorded accepted states for visualization only."""
+    if not frames or initial_area <= 0.0 or not np.isfinite(initial_area):
+        return
+    for frame in frames:
+        try:
+            uv = np.asarray(frame.get("uv"), dtype=float)
+            raw = _total_uv_area(uv, faces)
+            scale = 1.0
+            normalized = uv.copy()
+            if raw > 0.0 and raw < initial_area * (1.0 - 1.0e-10):
+                scale = float(np.sqrt(initial_area / raw))
+                center = np.mean(normalized[:, :2], axis=0)
+                normalized[:, :2] = center[None, :] + scale * (normalized[:, :2] - center[None, :])
+            frame["uv"] = normalized.astype(np.float32, copy=False)
+            frame["raw_total_area"] = float(raw)
+            frame["area_normalization_scale"] = float(scale)
+            frame["normalized_total_area"] = float(_total_uv_area(normalized, faces))
+        except Exception:
+            continue
+
+
+def _initial_floater_area(base: Any, vertices: Any, faces: Any, config: Any) -> float:
+    """Compute the global area gauge used by the solver before optimization."""
+    try:
+        xyz = np.asarray(vertices, dtype=float)
+        tris = np.asarray(faces, dtype=int)[:, :3]
+        loop, _topology = base._extract_single_disk_boundary(tris, len(xyz))
+        uv0 = base._tutte_embedding(xyz, tris, loop, config.initial_boundary_shape)
+        return float(_total_uv_area(uv0, tris))
+    except Exception:
+        return 0.0
+
+
 def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
     """Show accepted S -> Omega energy trajectory after optimization."""
     try:
@@ -120,6 +236,15 @@ def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
     platform_note = str(metrics.get("omega_platform_fallback_reason", ""))
     if platform_note:
         st.caption(f"Platform note: {platform_note}")
+    if bool(metrics.get("omega_global_area_normalization_enabled", False)):
+        raw = float(metrics.get("omega_raw_final_total_area", 0.0) or 0.0)
+        target = float(metrics.get("omega_initial_total_area", 0.0) or 0.0)
+        scale = float(metrics.get("omega_global_area_normalization_scale", 1.0) or 1.0)
+        final_area = float(metrics.get("omega_normalized_final_total_area", raw) or raw)
+        st.caption(
+            f"Global Ω area normalization: raw={raw:.6g}, initial={target:.6g}, "
+            f"scale={scale:.6g}, returned={final_area:.6g} (expand-only)."
+        )
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
@@ -169,6 +294,13 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
         requested = _env_device()
         mps_available, _mps_label = _mps_status()
         active_config = config if config is not None else v2_module.BijectiveFreeBoundaryConfig()
+        initial_area = _initial_floater_area(base, vertices, faces, active_config)
+
+        def normalize_result(uv, loop, metrics):
+            metrics["omega_initial_total_area"] = float(initial_area)
+            return _normalize_shrunken_omega_area(
+                base, uv, faces, loop, metrics, progress_callback=progress_callback
+            )
 
         if requested == "mps" or (requested == "auto" and mps_available):
             if not mps_available:
@@ -184,7 +316,9 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
                     vertices, faces, active_config, progress_callback
                 )
             _attach_floater_metrics(base, metrics)
+            uv = normalize_result(uv, loop, metrics)
             recorder.capture_final(uv, metrics)
+            _normalize_debug_frames_to_initial_area(recorder.frames, faces, initial_area)
             debug_summary = recorder.summary()
             metrics.update(debug_summary)
             render_omega_flip_debug_animation(recorder.frames, faces, loop, debug_summary)
@@ -199,6 +333,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
             uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
             _attach_floater_metrics(base, metrics)
             _attach_cpu_fallback_metrics(metrics, requested=requested)
+            uv = normalize_result(uv, loop, metrics)
             _render_streamlit_energy_history(metrics)
             return uv, loop, metrics
 
@@ -214,7 +349,9 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
                     vertices, faces, active_config, progress_callback
                 )
             _attach_floater_metrics(base, metrics)
+            uv = normalize_result(uv, loop, metrics)
             recorder.capture_final(uv, metrics)
+            _normalize_debug_frames_to_initial_area(recorder.frames, faces, initial_area)
             debug_summary = recorder.summary()
             metrics.update(debug_summary)
             metrics.update({
@@ -240,6 +377,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
             "omega_mps_acceleration_used": False,
             "omega_requested_device": requested,
         })
+        uv = normalize_result(uv, loop, metrics)
         _render_streamlit_energy_history(metrics)
         return uv, loop, metrics
 
