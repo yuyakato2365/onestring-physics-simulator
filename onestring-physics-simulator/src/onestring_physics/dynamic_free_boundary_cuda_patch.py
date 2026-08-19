@@ -24,6 +24,115 @@ def _env_device() -> str:
     return value if value in {"auto", "cuda", "cpu"} else "auto"
 
 
+def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
+    """Show the accepted S -> Omega energy trajectory after optimization."""
+    try:
+        import streamlit as st
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        if get_script_run_ctx() is None:
+            return
+    except Exception:
+        return
+
+    records = list(metrics.get("optimization_iteration_log", []) or [])
+    if not records:
+        return
+
+    iterations: list[int] = []
+    total_energy: list[float] = []
+    shrink_energy: list[float] = []
+    boundary_x: list[int] = []
+    boundary_y: list[float] = []
+    safe_step: list[float] = []
+    for row in records:
+        try:
+            iteration = int(row.get("iteration", 0)) + 1
+            energy = float(row.get("energy", float("nan")))
+            shrink = float(row.get("shrink_energy", float("nan")))
+        except Exception:
+            continue
+        iterations.append(iteration)
+        total_energy.append(energy)
+        shrink_energy.append(shrink)
+        try:
+            safe_step.append(float(row.get("safe_step_limit", float("nan"))))
+        except Exception:
+            safe_step.append(float("nan"))
+        if str(row.get("phase", "")) == "boundary":
+            boundary_x.append(iteration)
+            boundary_y.append(energy)
+
+    if not iterations:
+        return
+
+    st.subheader("S → Ω optimization energy")
+    device_name = str(metrics.get("omega_device_name", metrics.get("omega_compute_device", "CPU")))
+    termination = str(metrics.get("optimization_termination_reason", "unknown"))
+    used_iterations = int(metrics.get("optimization_iteration_count", len(records)) or len(records))
+    requested_iterations = int(metrics.get("optimization_requested_max_iterations", used_iterations) or used_iterations)
+    st.caption(
+        f"device: {device_name} | iterations: {used_iterations}/{requested_iterations} | "
+        f"termination: {termination}. Boundary-update acceptances are shown as markers."
+    )
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(
+            x=iterations,
+            y=total_energy,
+            mode="lines",
+            name="Total energy",
+            hovertemplate="iteration=%{x}<br>Total E=%{y:.6g}<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=iterations,
+            y=shrink_energy,
+            mode="lines",
+            name="Shrink energy",
+            hovertemplate="iteration=%{x}<br>Shrink E=%{y:.6g}<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+    if boundary_x:
+        fig.add_trace(
+            go.Scatter(
+                x=boundary_x,
+                y=boundary_y,
+                mode="markers",
+                name="Accepted boundary update",
+                hovertemplate="boundary update at %{x}<br>Total E=%{y:.6g}<extra></extra>",
+            ),
+            secondary_y=False,
+        )
+    fig.update_xaxes(title_text="Optimization iteration")
+    fig.update_yaxes(title_text="Total energy", secondary_y=False)
+    fig.update_yaxes(title_text="Shrink energy", secondary_y=True)
+    fig.update_layout(
+        height=430,
+        margin=dict(l=20, r=20, t=25, b=20),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+    )
+    try:
+        st.plotly_chart(fig, use_container_width=True)
+    except TypeError:
+        st.plotly_chart(fig)
+
+    finite_safe = [value for value in safe_step if value == value and value != float("inf")]
+    if finite_safe:
+        st.caption(
+            "Safe-step limit: "
+            f"min={min(finite_safe):.3g}, median={sorted(finite_safe)[len(finite_safe)//2]:.3g}. "
+            "Extremely small values indicate that near-degenerate UV triangles are still limiting motion."
+        )
+
+
 def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
     """Patch expensive numeric kernels while retaining the V2 outer algorithm."""
     if getattr(v2_module, "_CUDA_FREE_BOUNDARY_ACCELERATION_INSTALLED", False):
@@ -117,10 +226,29 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
         except Exception:
             if requested == "cuda":
                 raise
-            return original_parameterization(vertices, faces, config, progress_callback)
+            uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
+            metrics.update(
+                {
+                    "omega_cuda_used": False,
+                    "omega_compute_device": "cpu",
+                    "omega_device_name": "CPU",
+                }
+            )
+            _render_streamlit_energy_history(metrics)
+            return uv, loop, metrics
 
         if device.type != "cuda":
-            return original_parameterization(vertices, faces, config, progress_callback)
+            uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
+            metrics.update(
+                {
+                    "omega_cuda_used": False,
+                    "omega_compute_device": str(device),
+                    "omega_device_name": "CPU",
+                    "omega_torch_dtype": str(dtype).replace("torch.", ""),
+                }
+            )
+            _render_streamlit_energy_history(metrics)
+            return uv, loop, metrics
 
         token_accel = _ACTIVE_ACCELERATOR.set(None)
         token_device = _REQUESTED_DEVICE.set("cuda")
@@ -173,6 +301,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
                     f"E={metrics.get('final_energy', 0.0):.5g}"
                 ),
             )
+            _render_streamlit_energy_history(metrics)
             return uv, loop, metrics
         finally:
             _ACTIVE_ACCELERATOR.reset(token_accel)
