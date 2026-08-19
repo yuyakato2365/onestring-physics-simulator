@@ -89,7 +89,6 @@ class OmegaAcceptedStateRecorder:
         self.max_frames = max(8, int(max_frames))
         self.max_iterations = max(1, int(getattr(config, "max_iterations", 1)))
         self.minimum_double_area = float(getattr(config, "minimum_signed_double_area", 1.0e-12))
-        # Keep room for the exact initial and final states.
         self.interval = max(1, int(math.ceil(self.max_iterations / max(1, self.max_frames - 2))))
         self.next_iteration = 1
         self.frames: list[dict[str, Any]] = []
@@ -103,17 +102,15 @@ class OmegaAcceptedStateRecorder:
         value = np.asarray(uv, dtype=np.float32).copy()
         self._initial_uv = value
         stats = _orientation_stats_np(value, self.faces, self.minimum_double_area)
-        self.frames.append(
-            {
-                "iteration": 0,
-                "phase": "initial Floater/Tutte",
-                "energy": float("nan"),
-                "shrink_energy": float("nan"),
-                "safe_step_limit": float("nan"),
-                "uv": value,
-                **stats,
-            }
-        )
+        self.frames.append({
+            "iteration": 0,
+            "phase": "initial Floater/Tutte",
+            "energy": float("nan"),
+            "shrink_energy": float("nan"),
+            "safe_step_limit": float("nan"),
+            "uv": value,
+            **stats,
+        })
         ratio = float(stats.get("minimum_area_ratio", float("nan")))
         if np.isfinite(ratio):
             self._lowest_ratio_seen = ratio
@@ -132,9 +129,6 @@ class OmegaAcceptedStateRecorder:
             return
         if iteration <= self._last_iteration:
             return
-
-        # A cheap GPU-only risk test lets us retain unusually dangerous states
-        # without copying every boundary update to CPU.
         risky = False
         try:
             tri = uv[accel.faces]
@@ -156,7 +150,6 @@ class OmegaAcceptedStateRecorder:
             return
         if len(self.frames) >= self.max_frames - 1:
             return
-
         try:
             uv_np = uv.detach().cpu().numpy().astype(np.float32, copy=True)
         except Exception:
@@ -174,17 +167,15 @@ class OmegaAcceptedStateRecorder:
             except Exception:
                 return float("nan")
 
-        self.frames.append(
-            {
-                "iteration": int(iteration),
-                "phase": str(local.get("phase", "accepted")),
-                "energy": scalar(energy),
-                "shrink_energy": scalar(shrink),
-                "safe_step_limit": scalar(safe),
-                "uv": uv_np,
-                **stats,
-            }
-        )
+        self.frames.append({
+            "iteration": int(iteration),
+            "phase": str(local.get("phase", "accepted")),
+            "energy": scalar(energy),
+            "shrink_energy": scalar(shrink),
+            "safe_step_limit": scalar(safe),
+            "uv": uv_np,
+            **stats,
+        })
         self._last_iteration = int(iteration)
         while self.next_iteration <= iteration:
             self.next_iteration += self.interval
@@ -214,10 +205,7 @@ class OmegaAcceptedStateRecorder:
 
     def summary(self) -> dict[str, Any]:
         if not self.frames:
-            return {
-                "omega_debug_snapshot_count": 0,
-                "omega_debug_any_accepted_flip": False,
-            }
+            return {"omega_debug_snapshot_count": 0, "omega_debug_any_accepted_flip": False}
         flips = [int(f.get("flip_count", 0)) for f in self.frames]
         ratios = [float(f.get("minimum_area_ratio", float("nan"))) for f in self.frames]
         finite_ratios = [v for v in ratios if np.isfinite(v)]
@@ -232,7 +220,6 @@ class OmegaAcceptedStateRecorder:
 
 @contextmanager
 def capture_omega_accepted_states(base_module: Any, faces: np.ndarray, config: Any) -> Iterator[OmegaAcceptedStateRecorder]:
-    """Temporarily instrument the CUDA solver without changing its numerical path."""
     max_frames = int(os.getenv("ONESTRING_OMEGA_DEBUG_MAX_FRAMES", "48"))
     recorder = OmegaAcceptedStateRecorder(faces, config, max_frames=max_frames)
     original_emit = base_module._emit_progress
@@ -299,13 +286,7 @@ def _triangle_line_xy(uv: np.ndarray, faces: np.ndarray, triangle_ids: list[int]
     return x, y
 
 
-def render_omega_flip_debug_animation(
-    frames: list[dict[str, Any]],
-    faces: np.ndarray,
-    boundary_loop: list[int] | np.ndarray,
-    summary: dict[str, Any] | None = None,
-) -> None:
-    """Render accepted-state Omega animation focused on triangle orientation."""
+def render_omega_flip_debug_animation(frames: list[dict[str, Any]], faces: np.ndarray, boundary_loop: list[int] | np.ndarray, summary: dict[str, Any] | None = None) -> None:
     if not frames or not _streamlit_available() or not _env_bool("ONESTRING_OMEGA_DEBUG_ANIMATION", True):
         return
     try:
@@ -326,7 +307,8 @@ def render_omega_flip_debug_animation(
     def payload(frame: dict[str, Any]):
         uv = np.asarray(frame["uv"], dtype=float)
         mesh_x, mesh_y = _edge_line_xy(uv, edges)
-        risk_ids = [int(v) for v in frame.get("risk_triangle_ids", []) if int(v) not in set(frame.get("flip_triangle_ids", []))]
+        flip_set = set(frame.get("flip_triangle_ids", []))
+        risk_ids = [int(v) for v in frame.get("risk_triangle_ids", []) if int(v) not in flip_set]
         risk_x, risk_y = _triangle_line_xy(uv, tris, risk_ids)
         flip_x, flip_y = _triangle_line_xy(uv, tris, list(frame.get("flip_triangle_ids", [])))
         if boundary:
@@ -337,17 +319,13 @@ def render_omega_flip_debug_animation(
             bx, by = [], []
         return mesh_x, mesh_y, risk_x, risk_y, flip_x, flip_y, bx, by
 
-    first = frames[0]
-    p0 = payload(first)
-    fig = go.Figure(
-        data=[
-            go.Scattergl(x=p0[0], y=p0[1], mode="lines", line=dict(width=1), opacity=0.55, name="Omega mesh"),
-            go.Scattergl(x=p0[2], y=p0[3], mode="lines", line=dict(width=4), name="lowest signed-area triangles"),
-            go.Scattergl(x=p0[4], y=p0[5], mode="lines", line=dict(width=6), name="FLIPPED triangles"),
-            go.Scattergl(x=p0[6], y=p0[7], mode="lines", line=dict(width=3), name="Omega boundary"),
-        ]
-    )
-
+    p0 = payload(frames[0])
+    fig = go.Figure(data=[
+        go.Scattergl(x=p0[0], y=p0[1], mode="lines", line=dict(width=1), opacity=0.55, name="Omega mesh"),
+        go.Scattergl(x=p0[2], y=p0[3], mode="lines", line=dict(width=4), name="lowest signed-area triangles"),
+        go.Scattergl(x=p0[4], y=p0[5], mode="lines", line=dict(width=6), name="FLIPPED triangles"),
+        go.Scattergl(x=p0[6], y=p0[7], mode="lines", line=dict(width=3), name="Omega boundary"),
+    ])
     plotly_frames = []
     for index, record in enumerate(frames):
         p = payload(record)
@@ -358,50 +336,30 @@ def render_omega_flip_debug_animation(
             f"min/median={float(record.get('minimum_area_ratio', float('nan'))):.3g} | "
             f"E={float(record.get('energy', float('nan'))):.5g}"
         )
-        plotly_frames.append(
-            go.Frame(
-                name=str(index),
-                data=[
-                    go.Scattergl(x=p[0], y=p[1]),
-                    go.Scattergl(x=p[2], y=p[3]),
-                    go.Scattergl(x=p[4], y=p[5]),
-                    go.Scattergl(x=p[6], y=p[7]),
-                ],
-                layout=go.Layout(title=title),
-            )
-        )
+        plotly_frames.append(go.Frame(name=str(index), data=[
+            go.Scattergl(x=p[0], y=p[1]),
+            go.Scattergl(x=p[2], y=p[3]),
+            go.Scattergl(x=p[4], y=p[5]),
+            go.Scattergl(x=p[6], y=p[7]),
+        ], layout=go.Layout(title=title)))
     fig.frames = plotly_frames
-
-    steps = [
-        {
-            "method": "animate",
-            "label": str(int(record.get("iteration", 0))),
-            "args": [[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}, "transition": {"duration": 0}}],
-        }
-        for i, record in enumerate(frames)
-    ]
+    steps = [{
+        "method": "animate",
+        "label": str(int(record.get("iteration", 0))),
+        "args": [[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}, "transition": {"duration": 0}}],
+    } for i, record in enumerate(frames)]
     fig.update_layout(
-        title="Accepted Ω state | initial",
-        height=720,
+        title="Accepted Ω state | initial", height=720,
         xaxis=dict(title="u", range=[float(min_xy[0] - padding), float(max_xy[0] + padding)]),
         yaxis=dict(title="v", range=[float(min_xy[1] - padding), float(max_xy[1] + padding)], scaleanchor="x", scaleratio=1),
         legend=dict(orientation="h", x=0.0, y=1.08),
-        updatemenus=[
-            {
-                "type": "buttons",
-                "direction": "left",
-                "x": 0.0,
-                "y": -0.12,
-                "buttons": [
-                    {"label": "▶ Play", "method": "animate", "args": [None, {"fromcurrent": True, "frame": {"duration": 220, "redraw": True}, "transition": {"duration": 0}}]},
-                    {"label": "■ Pause", "method": "animate", "args": [[None], {"mode": "immediate", "frame": {"duration": 0, "redraw": False}}]},
-                ],
-            }
-        ],
+        updatemenus=[{"type": "buttons", "direction": "left", "x": 0.0, "y": -0.12, "buttons": [
+            {"label": "▶ Play", "method": "animate", "args": [None, {"fromcurrent": True, "frame": {"duration": 220, "redraw": True}, "transition": {"duration": 0}}]},
+            {"label": "■ Pause", "method": "animate", "args": [[None], {"mode": "immediate", "frame": {"duration": 0, "redraw": False}}]},
+        ]}],
         sliders=[{"active": 0, "currentvalue": {"prefix": "iteration "}, "steps": steps, "x": 0.18, "len": 0.80, "y": -0.10}],
         margin=dict(l=30, r=20, t=80, b=120),
     )
-
     st.subheader("Ω flip / degeneracy debug animation")
     info = dict(summary or {})
     any_flip = bool(info.get("omega_debug_any_accepted_flip", any(int(f.get("flip_count", 0)) > 0 for f in frames)))
@@ -442,7 +400,6 @@ def _quad_edge_lines(vertices: np.ndarray, edges: np.ndarray) -> tuple[list[floa
 
 
 def render_k2d_correspondence_morph(mesh_2d: Any, mesh_k2d: Any, mesh_k3d: Any | None = None) -> None:
-    """Animate M2D vertex identity into final K2D, keeping the original grid visible."""
     if not _streamlit_available() or not _env_bool("ONESTRING_K2D_DEBUG_ANIMATION", True):
         return
     try:
@@ -460,14 +417,12 @@ def render_k2d_correspondence_morph(mesh_2d: Any, mesh_k2d: Any, mesh_k3d: Any |
     ghost_x, ghost_y = _quad_edge_lines(start, edges)
     n_steps = max(12, min(36, int(os.getenv("ONESTRING_K2D_MORPH_FRAMES", "28"))))
     ts = np.linspace(0.0, 1.0, n_steps)
-
     grid = getattr(mesh_2d, "grid", None)
     nx = int(getattr(grid, "nx", -1)) if grid is not None else -1
     ny = int(getattr(grid, "ny", -1)) if grid is not None else -1
     row_width = nx + 1 if nx >= 0 else 0
     regular_count = (nx + 1) * (ny + 1) if nx >= 0 and ny >= 0 else 0
     displacement = np.linalg.norm(final[:, :2] - start[:, :2], axis=1)
-
     hover: list[str] = []
     for vertex_id in range(len(start)):
         if row_width > 0 and vertex_id < regular_count:
@@ -481,69 +436,45 @@ def render_k2d_correspondence_morph(mesh_2d: Any, mesh_k2d: Any, mesh_k3d: Any |
             f"K2D=({final[vertex_id,0]:.5g}, {final[vertex_id,1]:.5g})<br>"
             f"|Δ|={displacement[vertex_id]:.5g}"
         )
-
     all_xy = np.vstack([start[:, :2], final[:, :2]])
     min_xy = np.nanmin(all_xy, axis=0)
     max_xy = np.nanmax(all_xy, axis=0)
     span = np.maximum(max_xy - min_xy, 1.0e-8)
     padding = 0.06 * float(max(span))
-
-    current0 = start.copy()
-    current_x, current_y = _quad_edge_lines(current0, edges)
-    fig = go.Figure(
-        data=[
-            go.Scattergl(x=ghost_x, y=ghost_y, mode="lines", line=dict(width=1, dash="dot"), opacity=0.35, name="Original M2D grid (fixed ghost)"),
-            go.Scattergl(x=current_x, y=current_y, mode="lines", line=dict(width=2), name="Current M2D → K2D mesh"),
-            go.Scattergl(
-                x=current0[:, 0], y=current0[:, 1], mode="markers", marker=dict(size=5, color=displacement, colorscale="Viridis", showscale=True, colorbar=dict(title="final |Δ|")),
-                text=hover, hoverinfo="text", name="vertex identity",
-            ),
-        ]
-    )
-
+    current_x, current_y = _quad_edge_lines(start, edges)
+    fig = go.Figure(data=[
+        go.Scattergl(x=ghost_x, y=ghost_y, mode="lines", line=dict(width=1, dash="dot"), opacity=0.35, name="Original M2D grid (fixed ghost)"),
+        go.Scattergl(x=current_x, y=current_y, mode="lines", line=dict(width=2), name="Current M2D → K2D mesh"),
+        go.Scattergl(x=start[:, 0], y=start[:, 1], mode="markers",
+                     marker=dict(size=5, color=displacement, colorscale="Viridis", showscale=True, colorbar=dict(title="final |Δ|")),
+                     text=hover, hoverinfo="text", name="vertex identity"),
+    ])
     animation_frames = []
     for i, t in enumerate(ts):
         current = (1.0 - float(t)) * start + float(t) * final
         ex, ey = _quad_edge_lines(current, edges)
-        animation_frames.append(
-            go.Frame(
-                name=str(i),
-                data=[
-                    go.Scattergl(x=ghost_x, y=ghost_y),
-                    go.Scattergl(x=ex, y=ey),
-                    go.Scattergl(x=current[:, 0], y=current[:, 1], text=hover),
-                ],
-                layout=go.Layout(title=f"M2D → K2D correspondence morph | {100.0*float(t):.0f}%"),
-            )
-        )
+        animation_frames.append(go.Frame(name=str(i), data=[
+            go.Scattergl(x=ghost_x, y=ghost_y),
+            go.Scattergl(x=ex, y=ey),
+            go.Scattergl(x=current[:, 0], y=current[:, 1], text=hover),
+        ], layout=go.Layout(title=f"M2D → K2D correspondence morph | {100.0*float(t):.0f}%")))
     fig.frames = animation_frames
-    steps = [
-        {
-            "method": "animate",
-            "label": f"{100.0*float(t):.0f}%",
-            "args": [[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}, "transition": {"duration": 0}}],
-        }
-        for i, t in enumerate(ts)
-    ]
+    steps = [{
+        "method": "animate", "label": f"{100.0*float(t):.0f}%",
+        "args": [[str(i)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}, "transition": {"duration": 0}}],
+    } for i, t in enumerate(ts)]
     fig.update_layout(
-        title="M2D → K2D correspondence morph | 0%",
-        height=700,
+        title="M2D → K2D correspondence morph | 0%", height=700,
         xaxis=dict(title="x", range=[float(min_xy[0] - padding), float(max_xy[0] + padding)]),
         yaxis=dict(title="y", range=[float(min_xy[1] - padding), float(max_xy[1] + padding)], scaleanchor="x", scaleratio=1),
         legend=dict(orientation="h", x=0.0, y=1.08),
-        updatemenus=[
-            {
-                "type": "buttons", "direction": "left", "x": 0.0, "y": -0.12,
-                "buttons": [
-                    {"label": "▶ Play", "method": "animate", "args": [None, {"fromcurrent": True, "frame": {"duration": 180, "redraw": True}, "transition": {"duration": 0}}]},
-                    {"label": "■ Pause", "method": "animate", "args": [[None], {"mode": "immediate", "frame": {"duration": 0, "redraw": False}}]},
-                ],
-            }
-        ],
+        updatemenus=[{"type": "buttons", "direction": "left", "x": 0.0, "y": -0.12, "buttons": [
+            {"label": "▶ Play", "method": "animate", "args": [None, {"fromcurrent": True, "frame": {"duration": 180, "redraw": True}, "transition": {"duration": 0}}]},
+            {"label": "■ Pause", "method": "animate", "args": [[None], {"mode": "immediate", "frame": {"duration": 0, "redraw": False}}]},
+        ]}],
         sliders=[{"active": 0, "currentvalue": {"prefix": "morph "}, "steps": steps, "x": 0.18, "len": 0.80, "y": -0.10}],
         margin=dict(l=30, r=20, t=80, b=120),
     )
-
     st.subheader("M2D → K2D grid correspondence animation")
     st.caption(
         "The dotted ghost is the original M2D grid and never moves. Hover a current vertex to see its original vertex id and grid(row,col). "
@@ -556,7 +487,6 @@ def render_k2d_correspondence_morph(mesh_2d: Any, mesh_k2d: Any, mesh_k3d: Any |
 
 
 def install_k2d_correspondence_animation(pipeline_module: Any) -> None:
-    """Render the M2D/K2D correspondence immediately after K2D optimization."""
     if getattr(pipeline_module, "_K2D_CORRESPONDENCE_ANIMATION_PATCH_INSTALLED", False):
         return
     original = pipeline_module._optimize_k2d
