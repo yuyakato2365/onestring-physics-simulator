@@ -6,6 +6,10 @@ from typing import Any
 
 from .dynamic_free_boundary_cuda_backend import _resolve_torch_device
 from .dynamic_free_boundary_cuda_full import full_cuda_bijective_free_boundary_parameterization
+from .optimization_debug_visualization import (
+    capture_omega_accepted_states,
+    render_omega_flip_debug_animation,
+)
 from .robust_floater_patch import install_robust_floater_fallback
 
 
@@ -135,16 +139,24 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
             return uv, loop, metrics
 
         if device.type == "cuda":
+            active_config = config if config is not None else v2_module.BijectiveFreeBoundaryConfig()
             base._emit_progress(
                 progress_callback,
                 "S -> Omega FULL CUDA",
                 0.01,
                 f"GPU-resident optimization loop / {torch.cuda.get_device_name(device)} / {str(dtype).replace('torch.', '')}",
             )
-            uv, loop, metrics = full_cuda_bijective_free_boundary_parameterization(
-                vertices, faces, config, progress_callback
-            )
+            with capture_omega_accepted_states(base, faces, active_config) as recorder:
+                uv, loop, metrics = full_cuda_bijective_free_boundary_parameterization(
+                    vertices, faces, active_config, progress_callback
+                )
             _attach_floater_metrics(base, metrics)
+            recorder.capture_final(uv, metrics)
+            debug_summary = recorder.summary()
+            metrics.update(debug_summary)
+            # Render the orientation trace immediately after S -> Omega and
+            # before later M2D/K2D pipeline stages can obscure the failure source.
+            render_omega_flip_debug_animation(recorder.frames, faces, loop, debug_summary)
             _render_streamlit_energy_history(metrics)
             return uv, loop, metrics
 
