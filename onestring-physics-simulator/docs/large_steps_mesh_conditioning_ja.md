@@ -14,7 +14,7 @@ S_input
 ## 目的
 
 入力に細長い三角形が含まれると、S→Omega の validity-preserving line search で
-最初の triangle-degeneracy step が極端に小さくなり、境界更新がほとんど進まないことがあります。
+triangle-degeneracy step が極端に小さくなり、境界更新がほとんど進まないことがあります。
 この stage は connectivity を変更せず、頂点配置だけを整えてその問題を軽減します。
 
 ## Large Steps
@@ -28,17 +28,32 @@ u=(I+\lambda L)v
 
 を使います。`L` は uniform/combinatorial Laplacian です。
 Open disk mesh の boundary vertices は固定し、interior variables だけについて
-
-\[
-v_I=M_{II}^{-1}(u_I-M_{IB}v_B)
-\]
-
-で 3D 頂点を復元します。
+Large-Steps metric を適用します。
 
 最適化では triangle quality と edge-length uniformity を改善しつつ、元表面の法線方向への
 移動と全体の位置変化を抑えます。候補頂点は元の local surface patch へ投影されるため、
 外部の Mitsuba preprocessing を手作業で行わず、同じパイプライン内で入力メッシュを
 conditioning できます。
+
+## CUDA 実装
+
+`device="auto"` が既定値です。PyTorch から CUDA が利用可能なら自動的に CUDA を選びます。
+CUDA 使用時は次を GPU 上で実行します。
+
+- `M = I + lambda L` の reduced sparse system
+- `M^{-1}` の適用（Jacobi-preconditioned conjugate gradient / 前処理付き共役勾配法）
+- triangle-quality / edge-uniformity / surface-preservation energy と gradient
+- Large-Steps search direction
+- local 2-ring surface projection
+- orientation / flip 検査
+- 途中の triangle-quality diagnostics
+
+line search ごとに線形方程式を解き直すことはせず、1 iteration につき Large-Steps gradient と
+search direction のための sparse solve を行い、その 3D direction の scale だけを line search で変更します。
+これにより CPU↔GPU 転送と repeated solve を減らしています。
+
+実行後の metrics では、`large_steps_compute_device`, `large_steps_cuda_used`,
+`large_steps_device_name`, `large_steps_cuda_peak_memory_mb` から実際に CUDA が使われたか確認できます。
 
 ## 保証・制約
 
@@ -59,6 +74,20 @@ conditioning できます。
 - conditioning iterations
 - learning rate
 
+conditioning 中は専用 progress bar と直近ログを表示します。既定では 5 iteration ごとに、
+次の情報を更新します。
+
+- `iteration / max_iterations`
+- objective energy
+- minimum triangle angle
+- triangle-quality p05
+- edge-length CV
+- accepted / rejected step count
+- line-search scale
+- gradient / direction の CG iteration count
+- elapsed time
+- 実際に使っている CUDA device 名
+
 計算後は `View stage -> Conditioned S` で conditioning 後の 3D mesh を確認できます。
 タイトルには最小角度と triangle-quality p05 の before/after が表示されます。
 
@@ -66,6 +95,10 @@ conditioning できます。
 
 `surface_parameterization.metrics` に以下を保存します。
 
+- `large_steps_compute_device`
+- `large_steps_cuda_used`
+- `large_steps_device_name`
+- `large_steps_cuda_peak_memory_mb`
 - `large_steps_before_minimum_angle_degrees`
 - `large_steps_after_minimum_angle_degrees`
 - `large_steps_before_triangle_quality_p05`
@@ -76,4 +109,7 @@ conditioning できます。
 - `large_steps_min_orientation_ratio`
 - `large_steps_iteration_count`
 - `large_steps_rejected_step_count`
+- `large_steps_max_gradient_cg_iterations`
+- `large_steps_max_direction_cg_iterations`
+- `large_steps_max_cg_relative_residual`
 - `large_steps_runtime_seconds`
