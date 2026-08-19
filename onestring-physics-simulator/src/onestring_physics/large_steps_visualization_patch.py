@@ -159,10 +159,34 @@ def install_large_steps_visualization_patch() -> None:
     try:
         import streamlit as st
         from . import visualization
+        from . import large_steps_pipeline_patch
     except Exception:
         return
     if getattr(visualization, "_LARGE_STEPS_VISUALIZATION_PATCH_INSTALLED", False):
         return
+
+    # The pipeline wrapper resolves this module-global function at runtime.
+    # Wrapping it here lets us emit the comparison immediately after the
+    # conditioning call returns, before legacy(conditioned_surface, ...) starts
+    # the S -> Omega solve.
+    original_condition = large_steps_pipeline_patch.condition_mesh_with_large_steps
+
+    def condition_with_live_preview(vertices, faces, config=None, progress_callback=None):
+        conditioned, metrics = original_condition(
+            vertices,
+            faces,
+            config,
+            progress_callback=progress_callback,
+        )
+        render_large_steps_live_comparison(
+            np.asarray(vertices, dtype=float),
+            np.asarray(conditioned, dtype=float),
+            np.asarray(faces, dtype=int),
+            metrics,
+        )
+        return conditioned, metrics
+
+    large_steps_pipeline_patch.condition_mesh_with_large_steps = condition_with_live_preview
 
     original_figure_surface_mesh = visualization.figure_surface_mesh
 
