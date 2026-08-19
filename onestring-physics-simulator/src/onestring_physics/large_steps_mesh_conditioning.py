@@ -1,23 +1,23 @@
-"""Large-Steps mesh conditioning for open triangle surfaces.
+"""CUDA-capable Large-Steps mesh conditioning for open triangle surfaces.
 
-This module applies the differential parameterization from
-"Large Steps in Inverse Rendering of Geometry" before S -> Omega. It does not
-change connectivity. Instead, interior vertices are optimized in the
-Large-Steps coordinates u=(I+lambda L)v while boundary vertices stay fixed.
-Accepted vertices are projected back to a local patch of the original surface,
-so the stage redistributes samples without intentionally changing the target
-shape.
+The stage applies the differential parameterization from
+"Large Steps in Inverse Rendering of Geometry" before S -> Omega. Connectivity
+is fixed, 3D boundary vertices are fixed, and interior vertices are optimized in
+u=(I+lambda L)v coordinates. The Large-Steps linear system, objective,
+orientation checks, local surface projection, and quality snapshots all run on
+the selected PyTorch device (CUDA when available/requested).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 _EPS = 1.0e-12
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,21 @@ class LargeStepsMeshConditioningConfig:
     project_to_original_surface: bool = True
     projection_ring: int = 2
     relative_energy_tolerance: float = 1.0e-8
+    device: str = "auto"  # auto | cuda | cpu
+    dtype: str = "auto"  # auto | float32 | float64
+    cg_tolerance: float = 1.0e-6
+    cg_max_iterations: int = 160
+    progress_log_every: int = 5
+    maximum_vertex_step_fraction: float = 0.20
+
+
+def _emit_progress(callback: ProgressCallback | None, **payload: Any) -> None:
+    if callback is None:
+        return
+    try:
+        callback(dict(payload))
+    except Exception:
+        return
 
 
 def _unique_edges(faces: np.ndarray) -> np.ndarray:
@@ -97,24 +112,6 @@ def _triangle_quality_metrics(vertices: np.ndarray, faces: np.ndarray) -> dict[s
     }
 
 
-def _uniform_laplacian(faces: np.ndarray, vertex_count: int):
-    try:
-        from scipy import sparse
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError("scipy is required for Large Steps conditioning") from exc
-    edges = _unique_edges(faces)
-    if not len(edges):
-        return sparse.csr_matrix((vertex_count, vertex_count), dtype=float)
-    row = np.concatenate([edges[:, 0], edges[:, 1]])
-    col = np.concatenate([edges[:, 1], edges[:, 0]])
-    data = -np.ones(len(row), dtype=float)
-    degree = np.bincount(row, minlength=vertex_count).astype(float)
-    row = np.concatenate([row, np.arange(vertex_count)])
-    col = np.concatenate([col, np.arange(vertex_count)])
-    data = np.concatenate([data, degree])
-    return sparse.coo_matrix((data, (row, col)), shape=(vertex_count, vertex_count)).tocsr()
-
-
 def _original_face_normals(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     tri = np.asarray(vertices, dtype=float)[np.asarray(faces, dtype=int)[:, :3]]
     cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
@@ -133,54 +130,6 @@ def _vertex_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
         np.add.at(out, tris[:, corner], cross)
     out /= np.maximum(np.linalg.norm(out, axis=1)[:, None], _EPS)
     return out
-
-
-def _orientation_ratios(
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    original_normals: np.ndarray,
-    original_area2: np.ndarray,
-) -> np.ndarray:
-    tri = np.asarray(vertices, dtype=float)[np.asarray(faces, dtype=int)[:, :3]]
-    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    signed = np.sum(cross * original_normals, axis=1)
-    return signed / np.maximum(original_area2, _EPS)
-
-
-def _closest_point_on_triangle(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
-    ab = b - a
-    ac = c - a
-    ap = p - a
-    d1 = float(np.dot(ab, ap))
-    d2 = float(np.dot(ac, ap))
-    if d1 <= 0.0 and d2 <= 0.0:
-        return a
-    bp = p - b
-    d3 = float(np.dot(ab, bp))
-    d4 = float(np.dot(ac, bp))
-    if d3 >= 0.0 and d4 <= d3:
-        return b
-    vc = d1 * d4 - d3 * d2
-    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
-        v = d1 / max(d1 - d3, _EPS)
-        return a + v * ab
-    cp = p - c
-    d5 = float(np.dot(ab, cp))
-    d6 = float(np.dot(ac, cp))
-    if d6 >= 0.0 and d5 <= d6:
-        return c
-    vb = d5 * d2 - d1 * d6
-    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
-        w = d2 / max(d2 - d6, _EPS)
-        return a + w * ac
-    va = d3 * d6 - d5 * d4
-    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
-        w = (d4 - d3) / max((d4 - d3) + (d5 - d6), _EPS)
-        return b + w * (c - b)
-    denom = 1.0 / max(va + vb + vc, _EPS)
-    v = vb * denom
-    w = vc * denom
-    return a + ab * v + ac * w
 
 
 def _local_projection_candidates(faces: np.ndarray, vertex_count: int, ring: int) -> list[np.ndarray]:
@@ -212,88 +161,294 @@ def _local_projection_candidates(faces: np.ndarray, vertex_count: int, ring: int
     return out
 
 
-def _project_vertices_locally(
-    vertices: np.ndarray,
-    original_vertices: np.ndarray,
-    original_faces: np.ndarray,
-    candidates: list[np.ndarray],
-    movable_ids: np.ndarray,
-) -> np.ndarray:
-    result = np.asarray(vertices, dtype=float).copy()
-    triangles = np.asarray(original_vertices, dtype=float)[np.asarray(original_faces, dtype=int)[:, :3]]
-    for vertex_id in np.asarray(movable_ids, dtype=int):
-        p = result[vertex_id]
-        best = p
-        best_distance = math.inf
-        for face_id in candidates[vertex_id]:
-            tri = triangles[int(face_id)]
-            closest = _closest_point_on_triangle(p, tri[0], tri[1], tri[2])
-            distance = float(np.dot(p - closest, p - closest))
-            if distance < best_distance:
-                best_distance = distance
-                best = closest
-        result[vertex_id] = best
-    return result
+def _projection_candidate_matrix(
+    candidates: list[np.ndarray], movable_ids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    selected = [np.asarray(candidates[int(v)], dtype=int) for v in np.asarray(movable_ids, dtype=int)]
+    width = max((len(ids) for ids in selected), default=1)
+    face_ids = np.zeros((len(selected), width), dtype=np.int64)
+    valid = np.zeros((len(selected), width), dtype=bool)
+    for row, ids in enumerate(selected):
+        if len(ids):
+            face_ids[row, : len(ids)] = ids
+            valid[row, : len(ids)] = True
+    return face_ids, valid
 
 
-def _surface_deviation(
-    vertices: np.ndarray,
-    original_vertices: np.ndarray,
-    original_faces: np.ndarray,
-    candidates: list[np.ndarray],
-) -> np.ndarray:
-    triangles = np.asarray(original_vertices, dtype=float)[np.asarray(original_faces, dtype=int)[:, :3]]
-    out = np.zeros(len(vertices), dtype=float)
-    for vertex_id, p in enumerate(np.asarray(vertices, dtype=float)):
-        best = math.inf
-        for face_id in candidates[vertex_id]:
-            tri = triangles[int(face_id)]
-            closest = _closest_point_on_triangle(p, tri[0], tri[1], tri[2])
-            best = min(best, float(np.linalg.norm(p - closest)))
-        out[vertex_id] = 0.0 if not np.isfinite(best) else best
-    return out
-
-
-def _torch_energy_gradient(
-    vertices: np.ndarray,
-    original_vertices: np.ndarray,
-    faces: np.ndarray,
-    edges: np.ndarray,
-    original_vertex_normals: np.ndarray,
-    target_edge_length: float,
-    config: LargeStepsMeshConditioningConfig,
-) -> tuple[float, np.ndarray, dict[str, float]]:
+def _resolve_device_and_dtype(config: LargeStepsMeshConditioningConfig):
     try:
         import torch
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("PyTorch is required for Large Steps mesh conditioning") from exc
 
-    dtype = torch.float64
-    v = torch.tensor(np.asarray(vertices), dtype=dtype, requires_grad=True)
-    v0 = torch.tensor(np.asarray(original_vertices), dtype=dtype)
-    f = torch.tensor(np.asarray(faces, dtype=np.int64)[:, :3], dtype=torch.long)
-    e = torch.tensor(np.asarray(edges, dtype=np.int64), dtype=torch.long)
-    normals = torch.tensor(np.asarray(original_vertex_normals), dtype=dtype)
+    requested = str(config.device).strip().lower()
+    if requested not in {"auto", "cuda", "cpu"}:
+        raise ValueError("Large Steps device must be one of: auto, cuda, cpu")
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Large Steps device='cuda' was requested, but torch.cuda.is_available() is False"
+            )
+        device = torch.device("cuda")
+    elif requested == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device("cpu")
 
-    tri = v[f]
+    dtype_name = str(config.dtype).strip().lower()
+    if dtype_name == "auto":
+        dtype = torch.float32 if device.type == "cuda" else torch.float64
+    elif dtype_name == "float32":
+        dtype = torch.float32
+    elif dtype_name == "float64":
+        dtype = torch.float64
+    else:
+        raise ValueError("Large Steps dtype must be one of: auto, float32, float64")
+    return torch, device, dtype
+
+
+def _build_reduced_system(
+    *,
+    torch: Any,
+    faces: np.ndarray,
+    vertices: np.ndarray,
+    interior: np.ndarray,
+    boundary: np.ndarray,
+    lambda_: float,
+    device: Any,
+    dtype: Any,
+):
+    vertex_count = len(vertices)
+    edges = _unique_edges(faces)
+    local = np.full(vertex_count, -1, dtype=np.int64)
+    local[np.asarray(interior, dtype=int)] = np.arange(len(interior), dtype=np.int64)
+    boundary_mask = np.zeros(vertex_count, dtype=bool)
+    boundary_mask[np.asarray(boundary, dtype=int)] = True
+
+    degree = np.zeros(vertex_count, dtype=np.float64)
+    if len(edges):
+        np.add.at(degree, edges[:, 0], 1.0)
+        np.add.at(degree, edges[:, 1], 1.0)
+
+    rows: list[int] = []
+    cols: list[int] = []
+    values: list[float] = []
+    coupling = np.zeros((len(interior), 3), dtype=np.float64)
+
+    diag = 1.0 + float(lambda_) * degree[np.asarray(interior, dtype=int)]
+    for i, value in enumerate(diag):
+        rows.append(i)
+        cols.append(i)
+        values.append(float(value))
+
+    for a_raw, b_raw in edges:
+        a, b = int(a_raw), int(b_raw)
+        ia, ib = int(local[a]), int(local[b])
+        if ia >= 0 and ib >= 0:
+            rows.extend([ia, ib])
+            cols.extend([ib, ia])
+            values.extend([-float(lambda_), -float(lambda_)])
+        elif ia >= 0 and boundary_mask[b]:
+            coupling[ia] += -float(lambda_) * np.asarray(vertices[b], dtype=float)
+        elif ib >= 0 and boundary_mask[a]:
+            coupling[ib] += -float(lambda_) * np.asarray(vertices[a], dtype=float)
+
+    indices = torch.tensor([rows, cols], dtype=torch.long, device=device)
+    vals = torch.tensor(values, dtype=dtype, device=device)
+    matrix = torch.sparse_coo_tensor(
+        indices, vals, (len(interior), len(interior)), device=device, dtype=dtype
+    ).coalesce()
+    diagonal = torch.tensor(diag, dtype=dtype, device=device)
+    boundary_coupling = torch.tensor(coupling, dtype=dtype, device=device)
+    return matrix, diagonal, boundary_coupling
+
+
+def _pcg_solve(
+    torch: Any,
+    matrix: Any,
+    diagonal: Any,
+    rhs: Any,
+    *,
+    tolerance: float,
+    max_iterations: int,
+    initial: Any | None = None,
+) -> tuple[Any, int, float]:
+    if rhs.numel() == 0:
+        return rhs.clone(), 0, 0.0
+    x = torch.zeros_like(rhs) if initial is None else initial.clone()
+    r = rhs - torch.sparse.mm(matrix, x)
+    norm_b = torch.linalg.vector_norm(rhs, dim=0).clamp_min(1.0e-20)
+    z = r / diagonal[:, None].clamp_min(1.0e-20)
+    p = z.clone()
+    rz = torch.sum(r * z, dim=0)
+    last_relative = math.inf
+    check_every = 8
+
+    for iteration in range(1, max(1, int(max_iterations)) + 1):
+        ap = torch.sparse.mm(matrix, p)
+        denom = torch.sum(p * ap, dim=0)
+        safe_denom = torch.where(
+            torch.abs(denom) < 1.0e-30,
+            torch.full_like(denom, 1.0e-30),
+            denom,
+        )
+        alpha = rz / safe_denom
+        x = x + p * alpha[None, :]
+        r = r - ap * alpha[None, :]
+
+        if iteration == 1 or iteration % check_every == 0 or iteration == int(max_iterations):
+            relative = torch.max(torch.linalg.vector_norm(r, dim=0) / norm_b)
+            last_relative = float(relative.detach().item())
+            if last_relative <= float(tolerance):
+                return x, iteration, last_relative
+
+        z = r / diagonal[:, None].clamp_min(1.0e-20)
+        rz_new = torch.sum(r * z, dim=0)
+        safe_rz = torch.where(
+            torch.abs(rz) < 1.0e-30,
+            torch.full_like(rz, 1.0e-30),
+            rz,
+        )
+        beta = rz_new / safe_rz
+        p = z + p * beta[None, :]
+        rz = rz_new
+
+    return x, int(max_iterations), float(last_relative)
+
+
+def _closest_points_to_triangles_torch(torch: Any, points: Any, triangles: Any) -> Any:
+    a, b, c = triangles[..., 0, :], triangles[..., 1, :], triangles[..., 2, :]
+    ab = b - a
+    ac = c - a
+    ap = points - a
+    d1 = torch.sum(ab * ap, dim=-1)
+    d2 = torch.sum(ac * ap, dim=-1)
+
+    bp = points - b
+    d3 = torch.sum(ab * bp, dim=-1)
+    d4 = torch.sum(ac * bp, dim=-1)
+
+    cp = points - c
+    d5 = torch.sum(ab * cp, dim=-1)
+    d6 = torch.sum(ac * cp, dim=-1)
+
+    vc = d1 * d4 - d3 * d2
+    vb = d5 * d2 - d1 * d6
+    va = d3 * d6 - d5 * d4
+
+    eps = 1.0e-20
+    denom_face = (va + vb + vc).clamp_min(eps)
+    v_face = vb / denom_face
+    w_face = vc / denom_face
+    result = a + ab * v_face[..., None] + ac * w_face[..., None]
+
+    denom_bc = (d4 - d3) + (d5 - d6)
+    w_bc = (d4 - d3) / torch.where(
+        torch.abs(denom_bc) < eps, torch.full_like(denom_bc, eps), denom_bc
+    )
+    q_bc = b + (c - b) * w_bc[..., None]
+    cond_bc = (va <= 0.0) & ((d4 - d3) >= 0.0) & ((d5 - d6) >= 0.0)
+    result = torch.where(cond_bc[..., None], q_bc, result)
+
+    denom_ac = d2 - d6
+    w_ac = d2 / torch.where(
+        torch.abs(denom_ac) < eps, torch.full_like(denom_ac, eps), denom_ac
+    )
+    q_ac = a + ac * w_ac[..., None]
+    cond_ac = (vb <= 0.0) & (d2 >= 0.0) & (d6 <= 0.0)
+    result = torch.where(cond_ac[..., None], q_ac, result)
+
+    cond_c = (d6 >= 0.0) & (d5 <= d6)
+    result = torch.where(cond_c[..., None], c, result)
+
+    denom_ab = d1 - d3
+    v_ab = d1 / torch.where(
+        torch.abs(denom_ab) < eps, torch.full_like(denom_ab, eps), denom_ab
+    )
+    q_ab = a + ab * v_ab[..., None]
+    cond_ab = (vc <= 0.0) & (d1 >= 0.0) & (d3 <= 0.0)
+    result = torch.where(cond_ab[..., None], q_ab, result)
+
+    cond_b = (d3 >= 0.0) & (d4 <= d3)
+    result = torch.where(cond_b[..., None], b, result)
+
+    cond_a = (d1 <= 0.0) & (d2 <= 0.0)
+    result = torch.where(cond_a[..., None], a, result)
+    return result
+
+
+def _project_movable_vertices_torch(
+    torch: Any,
+    vertices: Any,
+    original_triangles: Any,
+    movable_ids: Any,
+    candidate_face_ids: Any,
+    candidate_valid: Any,
+) -> tuple[Any, Any]:
+    if movable_ids.numel() == 0:
+        return vertices, torch.zeros((0,), dtype=vertices.dtype, device=vertices.device)
+    points = vertices[movable_ids]
+    candidate_triangles = original_triangles[candidate_face_ids]
+    expanded_points = points[:, None, :].expand(-1, candidate_triangles.shape[1], -1)
+    closest = _closest_points_to_triangles_torch(torch, expanded_points, candidate_triangles)
+    distance2 = torch.sum((expanded_points - closest) ** 2, dim=-1)
+    infinity = torch.full_like(distance2, float("inf"))
+    distance2 = torch.where(candidate_valid, distance2, infinity)
+    best = torch.argmin(distance2, dim=1)
+    row = torch.arange(len(points), device=vertices.device)
+    projected = closest[row, best]
+    best_distance2 = distance2[row, best]
+    out = vertices.clone()
+    out[movable_ids] = projected
+    return out, best_distance2
+
+
+def _orientation_ratios_torch(
+    torch: Any,
+    vertices: Any,
+    faces: Any,
+    original_face_normals: Any,
+    original_area2: Any,
+) -> Any:
+    tri = vertices[faces]
+    cross = torch.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0], dim=1)
+    signed = torch.sum(cross * original_face_normals, dim=1)
+    return signed / original_area2.clamp_min(1.0e-20)
+
+
+def _energy_torch(
+    torch: Any,
+    vertices: Any,
+    original_vertices: Any,
+    faces: Any,
+    edges: Any,
+    original_vertex_normals: Any,
+    target_edge_length: float,
+    config: LargeStepsMeshConditioningConfig,
+) -> tuple[Any, dict[str, Any]]:
+    tri = vertices[faces]
     e01 = tri[:, 1] - tri[:, 0]
     e12 = tri[:, 2] - tri[:, 1]
     e20 = tri[:, 0] - tri[:, 2]
-    area2 = torch.linalg.vector_norm(torch.cross(e01, tri[:, 2] - tri[:, 0], dim=1), dim=1)
+    area2 = torch.linalg.vector_norm(
+        torch.cross(e01, tri[:, 2] - tri[:, 0], dim=1), dim=1
+    )
     denom = (
         torch.sum(e01 * e01, dim=1)
         + torch.sum(e12 * e12, dim=1)
         + torch.sum(e20 * e20, dim=1)
-    ).clamp_min(_EPS)
+    ).clamp_min(1.0e-20)
     quality = 2.0 * math.sqrt(3.0) * area2 / denom
     quality_loss = torch.mean((1.0 - quality) ** 2)
 
-    edge_vec = v[e[:, 1]] - v[e[:, 0]]
-    edge_len = torch.linalg.vector_norm(edge_vec, dim=1).clamp_min(_EPS)
-    edge_loss = torch.mean(torch.log(edge_len / max(float(target_edge_length), _EPS)) ** 2)
+    edge_vec = vertices[edges[:, 1]] - vertices[edges[:, 0]]
+    edge_len = torch.linalg.vector_norm(edge_vec, dim=1).clamp_min(1.0e-20)
+    edge_loss = torch.mean(
+        torch.log(edge_len / max(float(target_edge_length), _EPS)) ** 2
+    )
 
-    displacement = v - v0
-    normal_displacement = torch.sum(displacement * normals, dim=1)
+    displacement = vertices - original_vertices
+    normal_displacement = torch.sum(displacement * original_vertex_normals, dim=1)
     normal_loss = torch.mean(normal_displacement * normal_displacement)
     position_loss = torch.mean(torch.sum(displacement * displacement, dim=1))
 
@@ -303,31 +458,69 @@ def _torch_energy_gradient(
         + float(config.surface_normal_weight) * normal_loss
         + float(config.position_weight) * position_loss
     )
-    total.backward()
-    gradient = v.grad.detach().cpu().numpy()
-    terms = {
-        "quality_loss": float(quality_loss.detach().cpu()),
-        "edge_uniformity_loss": float(edge_loss.detach().cpu()),
-        "surface_normal_loss": float(normal_loss.detach().cpu()),
-        "position_loss": float(position_loss.detach().cpu()),
+    return total, {
+        "quality_loss": quality_loss,
+        "edge_uniformity_loss": edge_loss,
+        "surface_normal_loss": normal_loss,
+        "position_loss": position_loss,
     }
-    return float(total.detach().cpu()), gradient, terms
+
+
+def _quality_snapshot_torch(torch: Any, vertices: Any, faces: Any, edges: Any) -> dict[str, float]:
+    with torch.no_grad():
+        tri = vertices[faces]
+        e01 = tri[:, 1] - tri[:, 0]
+        e12 = tri[:, 2] - tri[:, 1]
+        e20 = tri[:, 0] - tri[:, 2]
+        lengths = torch.stack(
+            [
+                torch.linalg.vector_norm(e01, dim=1),
+                torch.linalg.vector_norm(e12, dim=1),
+                torch.linalg.vector_norm(e20, dim=1),
+            ],
+            dim=1,
+        ).clamp_min(1.0e-20)
+        area2 = torch.linalg.vector_norm(
+            torch.cross(e01, tri[:, 2] - tri[:, 0], dim=1), dim=1
+        )
+        quality = 2.0 * math.sqrt(3.0) * area2 / torch.sum(lengths * lengths, dim=1).clamp_min(1.0e-20)
+
+        a, b, c = lengths[:, 0], lengths[:, 1], lengths[:, 2]
+
+        def angle(opposite: Any, side1: Any, side2: Any) -> Any:
+            cosine = (side1 * side1 + side2 * side2 - opposite * opposite) / (
+                2.0 * side1 * side2
+            ).clamp_min(1.0e-20)
+            return torch.rad2deg(torch.acos(torch.clamp(cosine, -1.0, 1.0)))
+
+        minimum_angles = torch.min(
+            torch.stack([angle(b, a, c), angle(c, a, b), angle(a, b, c)], dim=1),
+            dim=1,
+        ).values
+        edge_lengths = torch.linalg.vector_norm(
+            vertices[edges[:, 1]] - vertices[edges[:, 0]], dim=1
+        )
+        edge_mean = torch.mean(edge_lengths)
+        edge_cv = torch.std(edge_lengths, unbiased=False) / edge_mean.clamp_min(1.0e-20)
+        return {
+            "minimum_angle_degrees": float(torch.min(minimum_angles).item()),
+            "triangle_quality_p05": float(torch.quantile(quality, 0.05).item()),
+            "edge_length_cv": float(edge_cv.item()),
+        }
 
 
 def condition_mesh_with_large_steps(
     vertices: np.ndarray,
     faces: np.ndarray,
     config: LargeStepsMeshConditioningConfig | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Redistribute an open triangle mesh using the Large Steps parameterization.
+    """Redistribute an open triangle mesh using CUDA-capable Large Steps.
 
-    Connectivity and boundary vertex positions are preserved exactly. The
-    optimization variable is the reduced differential coordinate u_I for
-    interior vertices. This is the same I + lambda L metric used by Large
-    Steps, adapted to a fixed-boundary conditioning objective rather than an
-    inverse-rendering loss.
+    The selected device owns the Large-Steps sparse system, PCG solves, objective,
+    local projection, and validity checks. With device="auto", CUDA is preferred
+    whenever PyTorch reports an available CUDA device.
     """
-
     cfg = config or LargeStepsMeshConditioningConfig()
     xyz0 = np.asarray(vertices, dtype=float)
     tris = np.asarray(faces, dtype=int)[:, :3]
@@ -344,11 +537,17 @@ def condition_mesh_with_large_steps(
     boundary_mask = np.zeros(len(xyz0), dtype=bool)
     boundary_mask[boundary] = True
     interior = np.flatnonzero(~boundary_mask)
-    edges = _unique_edges(tris)
+    edges_np = _unique_edges(tris)
     target_edge = max(float(before["edge_length_median"]), _EPS)
-    original_vertex_normals = _vertex_normals(xyz0, tris)
-    original_face_normals, original_area2 = _original_face_normals(xyz0, tris)
+    original_vertex_normals_np = _vertex_normals(xyz0, tris)
+    original_face_normals_np, original_area2_np = _original_face_normals(xyz0, tris)
     projection_candidates = _local_projection_candidates(tris, len(xyz0), cfg.projection_ring)
+
+    torch, device, dtype = _resolve_device_and_dtype(cfg)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    gpu_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
+    dtype_name = str(dtype).split(".")[-1]
 
     metrics: dict[str, Any] = {
         "large_steps_conditioning_enabled": True,
@@ -361,8 +560,34 @@ def condition_mesh_with_large_steps(
         "large_steps_requested_iterations": int(cfg.max_iterations),
         "large_steps_boundary_vertex_count": int(len(boundary)),
         "large_steps_interior_vertex_count": int(len(interior)),
+        "large_steps_compute_device_requested": str(cfg.device),
+        "large_steps_compute_device": str(device),
+        "large_steps_cuda_used": bool(device.type == "cuda"),
+        "large_steps_device_name": gpu_name,
+        "large_steps_dtype": dtype_name,
+        "large_steps_cg_tolerance": float(cfg.cg_tolerance),
+        "large_steps_cg_max_iterations": int(cfg.cg_max_iterations),
         **{f"large_steps_before_{key}": value for key, value in before.items()},
     }
+
+    _emit_progress(
+        progress_callback,
+        event="setup",
+        iteration=0,
+        max_iterations=int(cfg.max_iterations),
+        fraction=0.0,
+        device=str(device),
+        device_name=gpu_name,
+        dtype=dtype_name,
+        vertex_count=int(len(xyz0)),
+        face_count=int(len(tris)),
+        interior_vertex_count=int(len(interior)),
+        boundary_vertex_count=int(len(boundary)),
+        minimum_angle_degrees=float(before["minimum_angle_degrees"]),
+        triangle_quality_p05=float(before["triangle_quality_p05"]),
+        elapsed_seconds=float(time.perf_counter() - started),
+    )
+
     if not len(interior):
         metrics.update(
             {
@@ -372,149 +597,296 @@ def condition_mesh_with_large_steps(
                 **{f"large_steps_after_{key}": value for key, value in before.items()},
             }
         )
+        _emit_progress(progress_callback, event="done", fraction=1.0, **metrics)
         return xyz0.copy(), metrics
 
-    try:
-        from scipy import sparse
-        from scipy.sparse import linalg as spla
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError("scipy is required for Large Steps conditioning") from exc
+    xyz0_t = torch.tensor(xyz0, dtype=dtype, device=device)
+    faces_t = torch.tensor(tris, dtype=torch.long, device=device)
+    edges_t = torch.tensor(edges_np, dtype=torch.long, device=device)
+    interior_t = torch.tensor(interior, dtype=torch.long, device=device)
+    boundary_t = torch.tensor(boundary, dtype=torch.long, device=device)
+    vertex_normals_t = torch.tensor(original_vertex_normals_np, dtype=dtype, device=device)
+    face_normals_t = torch.tensor(original_face_normals_np, dtype=dtype, device=device)
+    original_area2_t = torch.tensor(original_area2_np, dtype=dtype, device=device)
+    original_triangles_t = xyz0_t[faces_t]
 
-    laplacian = _uniform_laplacian(tris, len(xyz0))
-    matrix = sparse.eye(len(xyz0), format="csr") + float(cfg.lambda_) * laplacian
-    m_ii = matrix[interior[:, None], interior].tocsc()
-    m_ib = matrix[interior[:, None], boundary].tocsr()
-    solve = spla.factorized(m_ii)
-    boundary_positions = xyz0[boundary]
-    boundary_coupling = np.asarray(m_ib @ boundary_positions, dtype=float)
+    candidate_ids_np, candidate_valid_np = _projection_candidate_matrix(
+        projection_candidates, interior
+    )
+    candidate_ids_t = torch.tensor(candidate_ids_np, dtype=torch.long, device=device)
+    candidate_valid_t = torch.tensor(candidate_valid_np, dtype=torch.bool, device=device)
 
-    def encode(v: np.ndarray) -> np.ndarray:
-        return np.asarray(m_ii @ v[interior] + boundary_coupling, dtype=float)
+    matrix, diagonal, boundary_coupling = _build_reduced_system(
+        torch=torch,
+        faces=tris,
+        vertices=xyz0,
+        interior=interior,
+        boundary=boundary,
+        lambda_=float(cfg.lambda_),
+        device=device,
+        dtype=dtype,
+    )
 
-    def decode(u: np.ndarray) -> np.ndarray:
-        v = xyz0.copy()
-        rhs = np.asarray(u - boundary_coupling, dtype=float)
-        for axis in range(3):
-            v[interior, axis] = np.asarray(solve(rhs[:, axis]), dtype=float)
-        v[boundary] = boundary_positions
-        return v
+    def encode(v: Any) -> Any:
+        return torch.sparse.mm(matrix, v[interior_t]) + boundary_coupling
 
-    u = encode(xyz0)
-    adam_m = np.zeros_like(u)
-    adam_v = np.zeros_like(u)
+    current = xyz0_t.clone()
+    u = encode(current)
+    adam_m = torch.zeros_like(u)
+    adam_v = torch.zeros_like(u)
     beta1, beta2 = 0.9, 0.999
     accepted = 0
     rejected = 0
     reason = "maximum_iterations"
-    last_energy = math.inf
-    initial_energy = None
+    initial_energy_value: float | None = None
+    final_energy_value = math.inf
     last_terms: dict[str, float] = {}
+    max_gradient_cg_iterations = 0
+    max_direction_cg_iterations = 0
+    max_cg_relative_residual = 0.0
+    last_step_scale = 0.0
 
     for iteration in range(max(1, int(cfg.max_iterations))):
-        current = decode(u)
-        energy, grad_v, terms = _torch_energy_gradient(
-            current,
-            xyz0,
-            tris,
-            edges,
-            original_vertex_normals,
+        current_var = current.detach().requires_grad_(True)
+        energy_t, terms_t = _energy_torch(
+            torch,
+            current_var,
+            xyz0_t,
+            faces_t,
+            edges_t,
+            vertex_normals_t,
             target_edge,
             cfg,
         )
-        if initial_energy is None:
-            initial_energy = float(energy)
-        last_terms = terms
-        grad_i = grad_v[interior]
-        grad_u = np.zeros_like(grad_i)
-        for axis in range(3):
-            grad_u[:, axis] = np.asarray(solve(grad_i[:, axis]), dtype=float)
+        grad_v = torch.autograd.grad(energy_t, current_var, create_graph=False)[0]
+        energy = float(energy_t.detach().item())
+        if initial_energy_value is None:
+            initial_energy_value = energy
+        grad_i = grad_v[interior_t].detach()
+        grad_u, cg_grad_iters, cg_grad_residual = _pcg_solve(
+            torch,
+            matrix,
+            diagonal,
+            grad_i,
+            tolerance=float(cfg.cg_tolerance),
+            max_iterations=int(cfg.cg_max_iterations),
+        )
+        max_gradient_cg_iterations = max(max_gradient_cg_iterations, int(cg_grad_iters))
+        max_cg_relative_residual = max(max_cg_relative_residual, float(cg_grad_residual))
 
         t = iteration + 1
         adam_m = beta1 * adam_m + (1.0 - beta1) * grad_u
         adam_v = beta2 * adam_v + (1.0 - beta2) * (grad_u * grad_u)
         m_hat = adam_m / (1.0 - beta1**t)
         v_hat = adam_v / (1.0 - beta2**t)
-        delta = -float(cfg.learning_rate) * target_edge * m_hat / (np.sqrt(v_hat) + 1.0e-8)
-        rms = float(np.linalg.norm(delta) / math.sqrt(max(1, delta.size)))
-        max_rms = 0.20 * target_edge
-        if rms > max_rms:
-            delta *= max_rms / rms
+        delta_u = -float(cfg.learning_rate) * target_edge * m_hat / (
+            torch.sqrt(v_hat) + 1.0e-8
+        )
+
+        delta_v, cg_dir_iters, cg_dir_residual = _pcg_solve(
+            torch,
+            matrix,
+            diagonal,
+            delta_u,
+            tolerance=float(cfg.cg_tolerance),
+            max_iterations=int(cfg.cg_max_iterations),
+        )
+        max_direction_cg_iterations = max(max_direction_cg_iterations, int(cg_dir_iters))
+        max_cg_relative_residual = max(max_cg_relative_residual, float(cg_dir_residual))
+
+        rms = torch.linalg.vector_norm(delta_v) / math.sqrt(max(1, delta_v.numel()))
+        max_rms = float(cfg.maximum_vertex_step_fraction) * target_edge
+        rms_value = float(rms.detach().item())
+        if rms_value > max_rms > 0.0:
+            delta_v = delta_v * (max_rms / rms_value)
 
         accepted_candidate = None
         scale = 1.0
-        for _ in range(max(1, int(cfg.line_search_max_steps))):
-            candidate_u = u + scale * delta
-            candidate = decode(candidate_u)
-            if cfg.project_to_original_surface:
-                candidate = _project_vertices_locally(
-                    candidate,
-                    xyz0,
-                    tris,
-                    projection_candidates,
-                    interior,
+        for _line_search_step in range(max(1, int(cfg.line_search_max_steps))):
+            with torch.no_grad():
+                candidate = current.clone()
+                candidate[interior_t] = current[interior_t] + scale * delta_v
+                if cfg.project_to_original_surface:
+                    candidate, _projection_distance2 = _project_movable_vertices_torch(
+                        torch,
+                        candidate,
+                        original_triangles_t,
+                        interior_t,
+                        candidate_ids_t,
+                        candidate_valid_t,
+                    )
+                    candidate[boundary_t] = xyz0_t[boundary_t]
+                ratios = _orientation_ratios_torch(
+                    torch, candidate, faces_t, face_normals_t, original_area2_t
                 )
-                candidate[boundary] = boundary_positions
+                min_ratio = float(torch.min(ratios).item())
+                if not math.isfinite(min_ratio) or min_ratio <= float(cfg.minimum_orientation_ratio):
+                    rejected += 1
+                    scale *= 0.5
+                    continue
+                candidate_energy_t, candidate_terms_t = _energy_torch(
+                    torch,
+                    candidate,
+                    xyz0_t,
+                    faces_t,
+                    edges_t,
+                    vertex_normals_t,
+                    target_edge,
+                    cfg,
+                )
+                candidate_energy = float(candidate_energy_t.item())
+                if not math.isfinite(candidate_energy) or candidate_energy > energy * (1.0 + 1.0e-9):
+                    rejected += 1
+                    scale *= 0.5
+                    continue
                 candidate_u = encode(candidate)
-            ratios = _orientation_ratios(candidate, tris, original_face_normals, original_area2)
-            if np.any(~np.isfinite(ratios)) or float(np.min(ratios)) <= float(cfg.minimum_orientation_ratio):
-                rejected += 1
-                scale *= 0.5
-                continue
-            candidate_energy, _candidate_grad, candidate_terms = _torch_energy_gradient(
-                candidate,
-                xyz0,
-                tris,
-                edges,
-                original_vertex_normals,
-                target_edge,
-                cfg,
-            )
-            if not np.isfinite(candidate_energy) or candidate_energy > energy * (1.0 + 1.0e-9):
-                rejected += 1
-                scale *= 0.5
-                continue
-            accepted_candidate = (candidate_u, float(candidate_energy), candidate_terms)
-            break
+                accepted_candidate = (
+                    candidate,
+                    candidate_u,
+                    candidate_energy,
+                    {key: float(value.item()) for key, value in candidate_terms_t.items()},
+                    min_ratio,
+                )
+                break
 
         if accepted_candidate is None:
             reason = "valid_decreasing_step_exhausted"
+            _emit_progress(
+                progress_callback,
+                event="stalled",
+                iteration=int(iteration + 1),
+                max_iterations=int(cfg.max_iterations),
+                fraction=float((iteration + 1) / max(1, int(cfg.max_iterations))),
+                energy=float(energy),
+                accepted_steps=int(accepted),
+                rejected_steps=int(rejected),
+                elapsed_seconds=float(time.perf_counter() - started),
+                device=str(device),
+                device_name=gpu_name,
+            )
             break
 
-        u, new_energy, last_terms = accepted_candidate
+        current, u, new_energy, last_terms, min_ratio = accepted_candidate
         accepted += 1
+        last_step_scale = float(scale)
         relative = abs(energy - new_energy) / max(abs(energy), 1.0)
-        last_energy = new_energy
+        final_energy_value = float(new_energy)
+
+        should_log = (
+            iteration == 0
+            or (iteration + 1) % max(1, int(cfg.progress_log_every)) == 0
+            or iteration + 1 == int(cfg.max_iterations)
+        )
+        if should_log:
+            snapshot = _quality_snapshot_torch(torch, current, faces_t, edges_t)
+            memory_mb = 0.0
+            if device.type == "cuda":
+                memory_mb = float(torch.cuda.memory_allocated(device) / (1024.0 * 1024.0))
+            _emit_progress(
+                progress_callback,
+                event="iteration",
+                iteration=int(iteration + 1),
+                max_iterations=int(cfg.max_iterations),
+                fraction=float((iteration + 1) / max(1, int(cfg.max_iterations))),
+                energy=float(new_energy),
+                relative_energy_change=float(relative),
+                minimum_angle_degrees=float(snapshot["minimum_angle_degrees"]),
+                triangle_quality_p05=float(snapshot["triangle_quality_p05"]),
+                edge_length_cv=float(snapshot["edge_length_cv"]),
+                minimum_orientation_ratio=float(min_ratio),
+                accepted_steps=int(accepted),
+                rejected_steps=int(rejected),
+                line_search_step_scale=float(scale),
+                cg_gradient_iterations=int(cg_grad_iters),
+                cg_direction_iterations=int(cg_dir_iters),
+                cg_relative_residual=max(float(cg_grad_residual), float(cg_dir_residual)),
+                elapsed_seconds=float(time.perf_counter() - started),
+                device=str(device),
+                device_name=gpu_name,
+                cuda_memory_allocated_mb=float(memory_mb),
+            )
+
         if relative <= float(cfg.relative_energy_tolerance):
             reason = "relative_energy_tolerance"
             break
 
-    conditioned = decode(u)
-    if cfg.project_to_original_surface:
-        conditioned = _project_vertices_locally(
-            conditioned, xyz0, tris, projection_candidates, interior
+    conditioned_t = current.detach()
+    with torch.no_grad():
+        if cfg.project_to_original_surface:
+            conditioned_t, final_projection_distance2 = _project_movable_vertices_torch(
+                torch,
+                conditioned_t,
+                original_triangles_t,
+                interior_t,
+                candidate_ids_t,
+                candidate_valid_t,
+            )
+            conditioned_t[boundary_t] = xyz0_t[boundary_t]
+        else:
+            final_projection_distance2 = torch.zeros(
+                (len(interior),), dtype=dtype, device=device
+            )
+        ratios = _orientation_ratios_torch(
+            torch, conditioned_t, faces_t, face_normals_t, original_area2_t
         )
-        conditioned[boundary] = boundary_positions
-    ratios = _orientation_ratios(conditioned, tris, original_face_normals, original_area2)
-    if np.any(ratios <= 0.0):
-        raise RuntimeError("Large Steps conditioning produced an inverted input triangle")
+        min_ratio = float(torch.min(ratios).item())
+        if min_ratio <= 0.0:
+            raise RuntimeError("Large Steps conditioning produced an inverted input triangle")
 
+        deviation = torch.zeros((len(xyz0),), dtype=dtype, device=device)
+        if len(interior):
+            deviation[interior_t] = torch.sqrt(final_projection_distance2.clamp_min(0.0))
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    conditioned = conditioned_t.cpu().numpy().astype(float, copy=False)
     after = _triangle_quality_metrics(conditioned, tris)
-    deviation = _surface_deviation(conditioned, xyz0, tris, projection_candidates)
+    runtime = float(time.perf_counter() - started)
     metrics.update(
         {
             "large_steps_iteration_count": int(accepted),
             "large_steps_rejected_step_count": int(rejected),
             "large_steps_termination_reason": reason,
-            "large_steps_initial_energy": float(initial_energy if initial_energy is not None else 0.0),
-            "large_steps_final_energy": float(last_energy if np.isfinite(last_energy) else (initial_energy or 0.0)),
-            "large_steps_min_orientation_ratio": float(np.min(ratios)),
-            "large_steps_surface_deviation_mean": float(np.mean(deviation)),
-            "large_steps_surface_deviation_p95": float(np.percentile(deviation, 95.0)),
-            "large_steps_surface_deviation_max": float(np.max(deviation)),
-            "large_steps_runtime_seconds": float(time.perf_counter() - started),
+            "large_steps_initial_energy": float(initial_energy_value or 0.0),
+            "large_steps_final_energy": float(
+                final_energy_value if math.isfinite(final_energy_value) else (initial_energy_value or 0.0)
+            ),
+            "large_steps_min_orientation_ratio": float(min_ratio),
+            "large_steps_surface_deviation_mean": float(torch.mean(deviation).item()),
+            "large_steps_surface_deviation_p95": float(torch.quantile(deviation, 0.95).item()),
+            "large_steps_surface_deviation_max": float(torch.max(deviation).item()),
+            "large_steps_runtime_seconds": runtime,
+            "large_steps_last_step_scale": float(last_step_scale),
+            "large_steps_max_gradient_cg_iterations": int(max_gradient_cg_iterations),
+            "large_steps_max_direction_cg_iterations": int(max_direction_cg_iterations),
+            "large_steps_max_cg_relative_residual": float(max_cg_relative_residual),
             **{f"large_steps_after_{key}": value for key, value in after.items()},
             **{f"large_steps_final_{key}": value for key, value in last_terms.items()},
         }
+    )
+    if device.type == "cuda":
+        metrics["large_steps_cuda_peak_memory_mb"] = float(
+            torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)
+        )
+
+    _emit_progress(
+        progress_callback,
+        event="done",
+        iteration=int(accepted),
+        max_iterations=int(cfg.max_iterations),
+        fraction=1.0,
+        energy=float(metrics["large_steps_final_energy"]),
+        minimum_angle_degrees=float(after["minimum_angle_degrees"]),
+        triangle_quality_p05=float(after["triangle_quality_p05"]),
+        edge_length_cv=float(after["edge_length_cv"]),
+        minimum_orientation_ratio=float(min_ratio),
+        accepted_steps=int(accepted),
+        rejected_steps=int(rejected),
+        elapsed_seconds=runtime,
+        termination_reason=reason,
+        device=str(device),
+        device_name=gpu_name,
+        cuda_used=bool(device.type == "cuda"),
     )
     return conditioned, metrics
 
