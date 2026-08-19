@@ -1,4 +1,12 @@
-"""Route bijective S -> Omega to a full-resident CUDA optimizer when available."""
+"""Route bijective S -> Omega to a full-resident CUDA optimizer when available.
+
+Apple Silicon compatibility:
+- CUDA remains the only full-resident GPU path for this optimizer because the
+  current harmonic-response / sparse PCG implementation is validated on CUDA.
+- On M-series Macs, PyTorch MPS availability is detected and reported, while
+  S -> Omega intentionally falls back to the existing CPU coupled solver.
+- Mitsuba 3 Metal acceleration is independent of this PyTorch Omega backend.
+"""
 from __future__ import annotations
 
 import os
@@ -15,7 +23,20 @@ from .robust_floater_patch import install_robust_floater_fallback
 
 def _env_device() -> str:
     value = os.getenv("ONESTRING_BIJECTIVE_DEVICE", "auto").strip().lower()
-    return value if value in {"auto", "cuda", "cpu"} else "auto"
+    return value if value in {"auto", "cuda", "mps", "cpu"} else "auto"
+
+
+def _mps_status() -> tuple[bool, str]:
+    try:
+        import torch
+        available = bool(
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_built()
+            and torch.backends.mps.is_available()
+        )
+        return available, "Apple Metal / MPS" if available else "MPS unavailable"
+    except Exception:
+        return False, "PyTorch unavailable"
 
 
 def _attach_floater_metrics(base: Any, metrics: dict[str, Any]) -> None:
@@ -28,6 +49,28 @@ def _attach_floater_metrics(base: Any, metrics: dict[str, Any]) -> None:
                 "floater_primary_error": str(info.get("primary_error", "")),
             }
         )
+
+
+def _attach_macos_fallback_metrics(metrics: dict[str, Any], *, requested: str) -> None:
+    available, label = _mps_status()
+    metrics.update(
+        {
+            "omega_cuda_used": False,
+            "omega_full_cuda_resident": False,
+            "omega_compute_device": "cpu",
+            "omega_device_name": "CPU",
+            "omega_mps_available": bool(available),
+            "omega_mps_device_label": label,
+            "omega_mps_acceleration_used": False,
+            "omega_requested_device": requested,
+            "omega_platform_fallback_reason": (
+                "Apple Silicon/MPS detected, but the current full-resident Omega solver uses a CUDA-tested sparse PCG path; "
+                "using the reference CPU coupled solver for numerical compatibility."
+                if available
+                else "CUDA unavailable; using the reference CPU coupled solver."
+            ),
+        }
+    )
 
 
 def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
@@ -71,14 +114,17 @@ def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
     device_name = str(metrics.get("omega_device_name", metrics.get("omega_compute_device", "CPU")))
     termination = str(metrics.get("optimization_termination_reason", "unknown"))
     used = int(metrics.get("optimization_iteration_count", len(records)) or len(records))
-    requested = int(metrics.get("optimization_requested_max_iterations", used) or used)
+    requested_iterations = int(metrics.get("optimization_requested_max_iterations", used) or used)
     floater_mode = str(metrics.get("floater_initialization_mode", "mean_value_arc_length"))
     resident = bool(metrics.get("omega_full_cuda_resident", False))
     residency = "FULL GPU-RESIDENT" if resident else "CPU / fallback"
     st.caption(
-        f"{residency} | device: {device_name} | iterations: {used}/{requested} | "
+        f"{residency} | device: {device_name} | iterations: {used}/{requested_iterations} | "
         f"termination: {termination} | Floater init: {floater_mode}"
     )
+    platform_note = str(metrics.get("omega_platform_fallback_reason", ""))
+    if platform_note:
+        st.caption(f"Platform note: {platform_note}")
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
@@ -116,7 +162,7 @@ def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
 
 
 def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
-    """Use full CUDA-resident optimization on CUDA; retain original CPU solver otherwise."""
+    """Use full CUDA-resident optimization on NVIDIA; safe CPU fallback on Apple Silicon."""
     if getattr(v2_module, "_CUDA_FREE_BOUNDARY_ACCELERATION_INSTALLED", False):
         return
 
@@ -126,6 +172,15 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
 
     def accelerated_parameterization(vertices, faces, config=None, progress_callback=None):
         requested = _env_device()
+        mps_available, _mps_label = _mps_status()
+
+        if requested == "mps" or (requested == "auto" and mps_available):
+            uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
+            _attach_floater_metrics(base, metrics)
+            _attach_macos_fallback_metrics(metrics, requested=requested)
+            _render_streamlit_energy_history(metrics)
+            return uv, loop, metrics
+
         try:
             torch, device, dtype = _resolve_torch_device(requested)
         except Exception:
@@ -133,8 +188,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
                 raise
             uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
             _attach_floater_metrics(base, metrics)
-            metrics.update({"omega_cuda_used": False, "omega_full_cuda_resident": False,
-                            "omega_compute_device": "cpu", "omega_device_name": "CPU"})
+            _attach_macos_fallback_metrics(metrics, requested=requested)
             _render_streamlit_energy_history(metrics)
             return uv, loop, metrics
 
@@ -154,8 +208,11 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
             recorder.capture_final(uv, metrics)
             debug_summary = recorder.summary()
             metrics.update(debug_summary)
-            # Render the orientation trace immediately after S -> Omega and
-            # before later M2D/K2D pipeline stages can obscure the failure source.
+            metrics.update({
+                "omega_mps_available": bool(mps_available),
+                "omega_mps_acceleration_used": False,
+                "omega_requested_device": requested,
+            })
             render_omega_flip_debug_animation(recorder.frames, faces, loop, debug_summary)
             _render_streamlit_energy_history(metrics)
             return uv, loop, metrics
@@ -168,6 +225,9 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
             "omega_compute_device": str(device),
             "omega_device_name": "CPU",
             "omega_torch_dtype": str(dtype).replace("torch.", ""),
+            "omega_mps_available": bool(mps_available),
+            "omega_mps_acceleration_used": False,
+            "omega_requested_device": requested,
         })
         _render_streamlit_energy_history(metrics)
         return uv, loop, metrics
