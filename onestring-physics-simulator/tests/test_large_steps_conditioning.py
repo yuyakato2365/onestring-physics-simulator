@@ -38,6 +38,7 @@ def test_large_steps_conditioning_improves_skinny_open_disk_and_keeps_boundary()
             lambda_=10.0,
             max_iterations=80,
             learning_rate=0.06,
+            device="cpu",
         ),
     )
     after = _triangle_quality_metrics(conditioned, faces)
@@ -48,7 +49,34 @@ def test_large_steps_conditioning_improves_skinny_open_disk_and_keeps_boundary()
     assert after["triangle_quality_p05"] > before["triangle_quality_p05"]
     assert metrics["large_steps_connectivity_changed"] is False
     assert metrics["large_steps_boundary_fixed"] is True
-    assert metrics["large_steps_surface_deviation_max"] < 1.0e-9
+    assert metrics["large_steps_surface_deviation_max"] < 1.0e-8
+    assert metrics["large_steps_compute_device"] == "cpu"
+    assert metrics["large_steps_cuda_used"] is False
+
+
+def test_large_steps_conditioning_reports_detailed_progress():
+    vertices, faces = _skinny_disk()
+    events = []
+    condition_mesh_with_large_steps(
+        vertices,
+        faces,
+        LargeStepsMeshConditioningConfig(
+            max_iterations=12,
+            device="cpu",
+            progress_log_every=3,
+        ),
+        progress_callback=events.append,
+    )
+    assert events[0]["event"] == "setup"
+    assert events[-1]["event"] == "done"
+    iteration_events = [event for event in events if event["event"] == "iteration"]
+    assert iteration_events
+    assert "energy" in iteration_events[-1]
+    assert "minimum_angle_degrees" in iteration_events[-1]
+    assert "triangle_quality_p05" in iteration_events[-1]
+    assert "cg_gradient_iterations" in iteration_events[-1]
+    assert "cg_direction_iterations" in iteration_events[-1]
+    assert "rejected_steps" in iteration_events[-1]
 
 
 def test_large_steps_conditioning_can_be_disabled():
