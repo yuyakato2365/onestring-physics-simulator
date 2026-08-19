@@ -55,6 +55,54 @@ search direction のための sparse solve を行い、その 3D direction の s
 実行後の metrics では、`large_steps_compute_device`, `large_steps_cuda_used`,
 `large_steps_device_name`, `large_steps_cuda_peak_memory_mb` から実際に CUDA が使われたか確認できます。
 
+## S -> Omega の CUDA 化
+
+`bijective_free_boundary` の V2 outer optimizer（境界/内部の交互更新、L-BFGS history、
+line-search acceptance）は既存のロジックを維持しつつ、反復内の重い数値kernelを PyTorch/CUDA に移しました。
+CUDA が利用可能な場合は自動的に有効になります。
+
+GPU 上へ移した主な処理:
+
+- symmetric Dirichlet energy / gradient
+- conformal energy term
+- shrink penalty
+- boundary barrier
+- interior triangle safe-step
+- boundary self-intersection check
+- harmonic boundary response の Dirichlet solve（GPU PCG）
+
+一方、outer optimizer の phase 制御と最終 global triangle-overlap audit は CPU のままです。
+このためアルゴリズムの意味を大きく変えず、最も頻繁に呼ばれる数値計算を CUDA に移す構成です。
+
+環境変数 `ONESTRING_BIJECTIVE_DEVICE` は `auto` / `cuda` / `cpu` を受け付けます。
+既定は `auto` です。`cuda` を明示した場合、CUDA が利用できなければエラーになります。
+
+Streamlit の `bijective max iterations` は既定 3000、上限 10000 に拡張しています。
+ただし、gradient tolerance、relative-energy tolerance、または boundary line-search failure などの
+停止条件を満たした場合は上限より前に終了します。
+
+S -> Omega 完了後は `S → Ω optimization energy` グラフを表示します。
+
+- Total energy: 全目的関数
+- Shrink energy: 局所縮小を抑える項
+- marker: accepted boundary update
+
+さらに safe-step limit の最小値・中央値も表示するため、skinny UV triangle が依然として
+最適化stepを制限しているか確認できます。
+
+主要 metrics:
+
+- `omega_cuda_used`
+- `omega_compute_device`
+- `omega_device_name`
+- `omega_torch_dtype`
+- `omega_cuda_energy_call_count`
+- `omega_cuda_energy_seconds`
+- `omega_cuda_safe_step_call_count`
+- `omega_cuda_safe_step_seconds`
+- `omega_cuda_boundary_check_call_count`
+- `omega_cuda_boundary_check_seconds`
+
 ## 保証・制約
 
 - face connectivity は変更しない。
