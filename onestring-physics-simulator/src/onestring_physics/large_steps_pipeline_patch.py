@@ -1,4 +1,4 @@
-"""Install CUDA-capable Large Steps mesh conditioning before bijective S -> Omega."""
+"""Install CUDA-capable Large Steps conditioning and S -> Omega acceleration."""
 from __future__ import annotations
 
 import os
@@ -10,6 +10,62 @@ from .large_steps_mesh_conditioning import (
     LargeStepsMeshConditioningConfig,
     condition_mesh_with_large_steps,
 )
+from . import dynamic_free_boundary_v2 as _dynamic_free_boundary_v2
+from .dynamic_free_boundary_cuda_patch import install_cuda_free_boundary_acceleration
+
+
+# Patch the already-imported V2 optimizer before the pipeline backend wrapper is
+# installed. The outer optimization semantics remain V2; only heavy kernels are
+# routed to CUDA when torch.cuda.is_available().
+install_cuda_free_boundary_acceleration(_dynamic_free_boundary_v2)
+
+
+def _install_bijective_iteration_ui_patch() -> None:
+    """Raise the legacy Streamlit max-iteration widget without editing app.py."""
+    try:
+        import streamlit as st
+    except Exception:
+        return
+    if getattr(st, "_onestring_bijective_iteration_patch", False):
+        return
+
+    original_number_input = st.number_input
+
+    def number_input_with_bijective_defaults(*args: Any, **kwargs: Any):
+        label = args[0] if args else kwargs.get("label")
+        if label == "bijective max iterations":
+            positional = list(args)
+            # Streamlit signature starts label, min_value, max_value, value, step.
+            if len(positional) >= 3:
+                positional[2] = 10000
+            else:
+                kwargs["max_value"] = 10000
+            if len(positional) >= 4:
+                try:
+                    if int(positional[3]) == 1000:
+                        positional[3] = 3000
+                except Exception:
+                    pass
+            else:
+                try:
+                    if "value" not in kwargs or int(kwargs.get("value", 1000)) == 1000:
+                        kwargs["value"] = 3000
+                except Exception:
+                    kwargs["value"] = 3000
+            help_text = str(kwargs.get("help", ""))
+            suffix = (
+                " CUDA acceleration is used automatically when available. "
+                "The default is raised to 3000; optimization may still stop earlier on convergence/failure criteria."
+            )
+            kwargs["help"] = (help_text + suffix).strip()
+            args = tuple(positional)
+        return original_number_input(*args, **kwargs)
+
+    st.number_input = number_input_with_bijective_defaults
+    st._onestring_bijective_iteration_patch = True
+
+
+_install_bijective_iteration_ui_patch()
 
 
 def _env_bool(name: str, default: bool) -> bool:
