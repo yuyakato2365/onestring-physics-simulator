@@ -1,166 +1,307 @@
 # Large Steps 入力メッシュ conditioning
 
-`omega_parameterization_mode="bijective_free_boundary"` で sampled input mesh を使う場合、
-現在のパイプラインは S→Omega の前に自動で次を実行します。
+## 1. 何をしているのか
 
-```text
-S_input
-  -> Large Steps mesh conditioning
-  -> S_conditioned
-  -> bijective free-boundary parameterization
-  -> Omega
-```
-
-## 目的
-
-入力に細長い三角形が含まれると、S→Omega の validity-preserving line search で
-triangle-degeneracy step が極端に小さくなり、境界更新がほとんど進まないことがあります。
-この stage は connectivity を変更せず、頂点配置だけを整えてその問題を軽減します。
-
-## Large Steps
-
-Nicolet et al., *Large Steps in Inverse Rendering of Geometry* と同じ differential
-parameterization
+`Large Steps in Inverse Rendering of Geometry` の中心アイデアは、頂点位置 `v` を直接最適化する代わりに
 
 \[
 u=(I+\lambda L)v
 \]
 
-を使います。`L` は uniform/combinatorial Laplacian です。
-Open disk mesh の boundary vertices は固定し、interior variables だけについて
-Large-Steps metric を適用します。
+という differential coordinates（微分座標）`u` を最適化変数として使うことです。
 
-最適化では triangle quality と edge-length uniformity を改善しつつ、元表面の法線方向への
-移動と全体の位置変化を抑えます。候補頂点は元の local surface patch へ投影されるため、
-外部の Mitsuba preprocessing を手作業で行わず、同じパイプライン内で入力メッシュを
-conditioning できます。
+ここで
 
-## CUDA 実装
+- `v \in R^{n\times 3}`: 3D vertex positions（3D頂点位置）
+- `L`: mesh Laplacian（メッシュラプラシアン）
+- `\lambda>0`: smoothing scale（平滑化スケール）
+- `M=I+\lambda L`
 
-`device="auto"` が既定値です。PyTorch から CUDA が利用可能なら自動的に CUDA を選びます。
-CUDA 使用時は次を GPU 上で実行します。
+です。
 
-- `M = I + lambda L` の reduced sparse system
-- `M^{-1}` の適用（Jacobi-preconditioned conjugate gradient / 前処理付き共役勾配法）
-- triangle-quality / edge-uniformity / surface-preservation energy と gradient
-- Large-Steps search direction
-- local 2-ring surface projection
-- orientation / flip 検査
-- 途中の triangle-quality diagnostics
+元の頂点位置は
 
-line search ごとに線形方程式を解き直すことはせず、1 iteration につき Large-Steps gradient と
-search direction のための sparse solve を行い、その 3D direction の scale だけを line search で変更します。
-これにより CPU↔GPU 転送と repeated solve を減らしています。
+\[
+v=M^{-1}u=(I+\lambda L)^{-1}u
+\]
 
-実行後の metrics では、`large_steps_compute_device`, `large_steps_cuda_used`,
-`large_steps_device_name`, `large_steps_cuda_peak_memory_mb` から実際に CUDA が使われたか確認できます。
+として復元します。
 
-## S -> Omega の CUDA 化
+重要: Large Steps は remeshing（リメッシュ）ではありません。edge split / collapse / flip は行わず、connectivity は固定です。また Large Steps 自体は「三角形品質」を定義しません。何を良い形とするかは別の目的関数 `E(v)` が決めます。
 
-`bijective_free_boundary` の V2 outer optimizer（境界/内部の交互更新、L-BFGS history、
-line-search acceptance）は既存のロジックを維持しつつ、反復内の重い数値kernelを PyTorch/CUDA に移しました。
-CUDA が利用可能な場合は自動的に有効になります。
+---
 
-GPU 上へ移した主な処理:
+## 2. なぜ "Large Steps" なのか
 
-- symmetric Dirichlet energy / gradient
-- conformal energy term
-- shrink penalty
-- boundary barrier
-- interior triangle safe-step
-- boundary self-intersection check
-- harmonic boundary response の Dirichlet solve（GPU PCG）
+頂点位置を直接最急降下すると
 
-一方、outer optimizer の phase 制御、boundary update 用の full first-singularity safe-step
-（triangle degeneracy + boundary edge/vertex collision）、および最終 global triangle-overlap audit は
-CPU のままです。このため現時点では「完全GPU化」ではなく hybrid CUDA backend です。
-アルゴリズムの意味を大きく変えず、最も頻繁に呼ばれる energy / gradient / validity / predictor 計算を
-CUDA に移す構成にしています。
+\[
+v_{k+1}=v_k-\eta\nabla_v E
+\]
 
-環境変数 `ONESTRING_BIJECTIVE_DEVICE` は `auto` / `cuda` / `cpu` を受け付けます。
-既定は `auto` です。`cuda` を明示した場合、CUDA が利用できなければエラーになります。
+です。
 
-Streamlit の `bijective max iterations` は既定 3000、上限 10000 に拡張しています。
-ただし、gradient tolerance、relative-energy tolerance、または boundary line-search failure などの
-停止条件を満たした場合は上限より前に終了します。
+一方 `u=Mv` を変数にすると、連鎖律より概念的には
 
-S -> Omega 完了後は `S → Ω optimization energy` グラフを表示します。
+\[
+\nabla_u E=M^{-T}\nabla_v E
+\]
 
-- Total energy: 全目的関数
-- Shrink energy: 局所縮小を抑える項
-- marker: accepted boundary update
+となります。`L` が対称なら `M^{-T}=M^{-1}` なので、gradient に
 
-さらに safe-step limit の最小値・中央値も表示するため、skinny UV triangle が依然として
-最適化stepを制限しているか確認できます。
+\[
+(I+\lambda L)^{-1}
+\]
 
-主要 metrics:
+という spatial low-pass filter（空間的ローパスフィルタ）をかけるのと似た作用になります。
 
-- `omega_cuda_used`
-- `omega_compute_device`
-- `omega_device_name`
-- `omega_torch_dtype`
-- `omega_cuda_energy_call_count`
-- `omega_cuda_energy_seconds`
-- `omega_cuda_safe_step_call_count`
-- `omega_cuda_safe_step_seconds`
-- `omega_cuda_boundary_check_call_count`
-- `omega_cuda_boundary_check_seconds`
+Laplacian の固有分解
 
-## 保証・制約
+\[
+L=\Phi\,\mathrm{diag}(\mu_1,\ldots,\mu_n)\Phi^T
+\]
 
-- face connectivity は変更しない。
-- 3D boundary vertices は固定する。
-- 各 step で元 face normal に対する orientation ratio を検査し、反転候補を reject する。
-- conditioning 後の頂点は元表面の local 2-ring triangle patch へ投影する。
-- remeshing / edge flip / edge split / edge collapse は行わない。
-- したがって connectivity 自体が悪いケースは、この stage だけでは直せない。
+を考えると
 
-## Streamlit
+\[
+(I+\lambda L)^{-1}
+=\Phi\,\mathrm{diag}\left(\frac{1}{1+\lambda\mu_i}\right)\Phi^T.
+\]
 
-`Omega parameterization mode = bijective_free_boundary` を選ぶと
-`Large Steps mesh conditioning` 設定が表示されます。
+高周波 mode（局所的でギザギザした変形）は `\mu_i` が大きいため
 
-- enable / disable
-- lambda
-- conditioning iterations
-- learning rate
+\[
+\frac{1}{1+\lambda\mu_i}
+\]
 
-conditioning 中は専用 progress bar と直近ログを表示します。既定では 5 iteration ごとに、
-次の情報を更新します。
+で強く減衰し、低周波 mode（広い範囲が一緒に動く滑らかな変形）は比較的残ります。
 
-- `iteration / max_iterations`
-- objective energy
-- minimum triangle angle
-- triangle-quality p05
-- edge-length CV
-- accepted / rejected step count
-- line-search scale
-- gradient / direction の CG iteration count
-- elapsed time
-- 実際に使っている CUDA device 名
+したがって、1頂点だけを局所的に動かすより、近傍を含む広い領域を協調して動かす search direction（探索方向）が得られやすくなります。これが "Large Steps" の本質です。
 
-計算後は `View stage -> Conditioned S` で conditioning 後の 3D mesh を確認できます。
-タイトルには最小角度と triangle-quality p05 の before/after が表示されます。
+`\lambda` を大きくすると、より広域に滑らかな変形になります。ただし大きすぎると局所修正能力が落ちます。
 
-## 主な metrics
+---
 
-`surface_parameterization.metrics` に以下を保存します。
+## 3. このプロジェクトでの目的
 
-- `large_steps_compute_device`
-- `large_steps_cuda_used`
-- `large_steps_device_name`
-- `large_steps_cuda_peak_memory_mb`
-- `large_steps_before_minimum_angle_degrees`
-- `large_steps_after_minimum_angle_degrees`
-- `large_steps_before_triangle_quality_p05`
-- `large_steps_after_triangle_quality_p05`
-- `large_steps_before_edge_length_cv`
-- `large_steps_after_edge_length_cv`
-- `large_steps_surface_deviation_max`
-- `large_steps_min_orientation_ratio`
-- `large_steps_iteration_count`
-- `large_steps_rejected_step_count`
-- `large_steps_max_gradient_cg_iterations`
-- `large_steps_max_direction_cg_iterations`
-- `large_steps_max_cg_relative_residual`
-- `large_steps_runtime_seconds`
+S -> Omega の bijective optimizer（全単射最適化）では、triangle signed area（符号付き三角形面積）が0に近づくと safe-step が非常に小さくなります。
+
+\[
+A_t(\alpha)=A_t(v+\alpha d)
+\]
+
+に対し、最初に
+
+\[
+A_t(\alpha)=\varepsilon
+\]
+
+となる `\alpha` より手前でstepを止めるためです。
+
+skinny triangle（細長い三角形）が多いと、非常に小さい `\alpha` しか許されず、S -> Omega の境界更新がほとんど進まなくなることがあります。
+
+そこで元の意図は
+
+```text
+S_input
+  -> connectivityを変えずに三角形配置を改善
+  -> S_conditioned
+  -> bijective free-boundary
+  -> Omega
+```
+
+でした。
+
+---
+
+## 4. 現在の内製 conditioning の目的関数
+
+現在の実装では、各triangleの品質
+
+\[
+q_t=\frac{4\sqrt{3}A_t}{l_1^2+l_2^2+l_3^2}
+\]
+
+を使います。正三角形で `q_t=1`、細長くなるほど0に近づきます。
+
+quality term（品質項）は
+
+\[
+E_{quality}=\frac{1}{|F|}\sum_t(1-q_t)^2
+\]
+
+です。
+
+さらに edge uniformity（辺長一様化）
+
+\[
+E_{edge}=\frac{1}{|E|}\sum_e
+\left(\log\frac{l_e}{h}\right)^2
+\]
+
+を加えます。`h` は初期edge lengthのmedianです。
+
+形状を元surfaceから大きく変えないため
+
+\[
+E_{normal}=\frac{1}{n}\sum_i
+\big((v_i-v_i^0)\cdot n_i^0\big)^2
+\]
+
+と
+
+\[
+E_{pos}=\frac{1}{n}\sum_i\|v_i-v_i^0\|^2
+\]
+
+も加えます。
+
+全体は
+
+\[
+E=
+ w_qE_{quality}
+ +w_eE_{edge}
+ +w_nE_{normal}
+ +w_pE_{pos}.
+\]
+
+候補頂点は元meshのlocal triangle patchへprojectionし、boundary verticesは固定しています。
+
+---
+
+## 5. 現在わかっている問題
+
+この目的関数は「平均品質」を良くするため、worst triangle（最悪三角形）を直接守っていません。
+
+例えば
+
+```text
+q05: 0.459 -> 0.463
+minimum angle: 1.24 deg -> 0.63 deg
+```
+
+のように、下位5%の平均傾向は少し改善しても、最悪三角形だけさらに悪化することがあります。
+
+つまり問題は Large Steps の座標変換そのものではなく、Large Steps 上に載せている conditioning objective が「S -> Omega のsafe-stepを守る」という目的に十分一致していない点です。
+
+改善案は、例えば lower-tail barrier（低品質側障壁）
+
+\[
+E_{bad}=\sum_t\max(q_{target}-q_t,0)^2
+\]
+
+や minimum-angle barrier（最小角障壁）を使い、さらに
+
+\[
+q_{min}^{new}\ge q_{min}^{old}
+\]
+
+をhard acceptance rule（採用条件）にすることです。
+
+---
+
+## 6. Large Steps と remeshing の違い
+
+### Large Steps
+
+- connectivity固定
+- vertex positionsだけ変える
+- `u=(I+\lambda L)v` というoptimization parameterization
+- topology / edge graphは変わらない
+
+### isotropic remeshing（等方リメッシュ）
+
+- edge split
+- edge collapse
+- edge flip
+- vertex relocation
+
+などでconnectivity自体を変えられます。
+
+そのため、元connectivityに非常に悪いskinny triangleが組み込まれている場合は、Botsch-Kobbelt remeshingの方が直接的です。
+
+現在の比較実験では
+
+```text
+closed Bunny
+ -> Botsch-Kobbelt remesh
+ -> Blenderで底面を削除
+ -> open disk Bunny
+ -> OneString (Large Steps OFF)
+```
+
+を推奨しています。
+
+---
+
+## 7. GPU backend
+
+### Alienware / NVIDIA
+
+S -> Omega は full CUDA-resident backend を使います。
+
+```text
+S -> Omega FULL CUDA
+CUDA Omega i/N
+GPU-resident
+```
+
+UV、gradient、L-BFGS、safe-step、line search、boundary validity、harmonic responseをCUDA上に保持し、CPUへ戻すのは初期化と最終監査が中心です。
+
+### MacBook Pro M3 Pro / Apple Silicon
+
+S -> Omega は full MPS-resident backend を使います。
+
+```text
+S -> Omega FULL MPS
+MPS Omega i/N
+Metal-resident
+```
+
+PyTorch sparse matrix依存を避けるため、harmonic boundary responseはmatrix-free PCGです。
+
+combinatorial Laplacianについて
+
+\[
+(Lx)_i=d_ix_i-\sum_{j\in N(i)}x_j
+\]
+
+をtriangle edge listから直接評価します。
+
+このため `L_{II}` を疎行列として明示的に保存せず、MPS上の `index_add` でmatvecを構成できます。
+
+### auto selection
+
+```text
+CUDA available -> CUDA
+else MPS available -> MPS
+else -> CPU
+```
+
+環境変数:
+
+```text
+ONESTRING_BIJECTIVE_DEVICE=auto|cuda|mps|cpu
+```
+
+---
+
+## 8. 保証・制約
+
+内製Large Steps conditioningについて:
+
+- face connectivityは変更しない
+- 3D boundary verticesは固定
+- orientation ratioが閾値以下のcandidateはreject
+- candidateを元surface local patchへ投影
+- remeshing / edge flip / edge split / edge collapseはしない
+
+S -> Omegaについて:
+
+- accepted stateはpositive signed areaを維持
+- boundary self-intersectionをreject
+- boundary first-singularity safe-stepを使用
+- 最終UVはCPUでglobal overlap audit
+
+Large Steps preprocessingをOFFにしても、CUDA/MPSのS -> Omega backendや後段のM2D/K3D/K2D処理はそのまま利用できます。
