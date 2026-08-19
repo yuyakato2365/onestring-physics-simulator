@@ -10,6 +10,7 @@ from .dynamic_free_boundary_cuda_backend import (
     TorchOmegaAccelerator,
     _resolve_torch_device,
 )
+from .robust_floater_patch import install_robust_floater_fallback
 
 _ACTIVE_ACCELERATOR: contextvars.ContextVar[TorchOmegaAccelerator | None] = contextvars.ContextVar(
     "onestring_omega_accelerator", default=None
@@ -73,9 +74,11 @@ def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
     termination = str(metrics.get("optimization_termination_reason", "unknown"))
     used_iterations = int(metrics.get("optimization_iteration_count", len(records)) or len(records))
     requested_iterations = int(metrics.get("optimization_requested_max_iterations", used_iterations) or used_iterations)
+    floater_mode = str(metrics.get("floater_initialization_mode", "mean_value_arc_length"))
     st.caption(
         f"device: {device_name} | iterations: {used_iterations}/{requested_iterations} | "
-        f"termination: {termination}. Boundary-update acceptances are shown as markers."
+        f"termination: {termination} | Floater init: {floater_mode}. "
+        "Boundary-update acceptances are shown as markers."
     )
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -133,12 +136,27 @@ def _render_streamlit_energy_history(metrics: dict[str, Any]) -> None:
         )
 
 
+def _attach_floater_metrics(base: Any, metrics: dict[str, Any]) -> None:
+    info = getattr(base, "_LAST_FLOATER_INITIALIZATION", None)
+    if not isinstance(info, dict):
+        return
+    metrics.update(
+        {
+            "floater_initialization_mode": str(info.get("mode", "unknown")),
+            "floater_fallback_used": bool(info.get("fallback_used", False)),
+            "floater_primary_error": str(info.get("primary_error", "")),
+        }
+    )
+
+
 def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
     """Patch expensive numeric kernels while retaining the V2 outer algorithm."""
     if getattr(v2_module, "_CUDA_FREE_BOUNDARY_ACCELERATION_INSTALLED", False):
         return
 
     base = v2_module.base
+    install_robust_floater_fallback(base)
+
     original_parameterization = v2_module.bijective_free_boundary_parameterization
     original_energy_gradient = v2_module._energy_gradient
     original_harmonic = v2_module.HarmonicBoundaryResponse
@@ -227,6 +245,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
             if requested == "cuda":
                 raise
             uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
+            _attach_floater_metrics(base, metrics)
             metrics.update(
                 {
                     "omega_cuda_used": False,
@@ -239,6 +258,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
 
         if device.type != "cuda":
             uv, loop, metrics = original_parameterization(vertices, faces, config, progress_callback)
+            _attach_floater_metrics(base, metrics)
             metrics.update(
                 {
                     "omega_cuda_used": False,
@@ -262,6 +282,7 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
             uv, loop, metrics = original_parameterization(
                 vertices, faces, config, progress_callback
             )
+            _attach_floater_metrics(base, metrics)
             accelerator = _ACTIVE_ACCELERATOR.get()
             metrics.update(
                 {
@@ -298,7 +319,8 @@ def install_cuda_free_boundary_acceleration(v2_module: Any) -> None:
                 (
                     f"device={metrics['omega_device_name']}; "
                     f"energy calls={metrics.get('omega_cuda_energy_call_count', 0)}; "
-                    f"E={metrics.get('final_energy', 0.0):.5g}"
+                    f"E={metrics.get('final_energy', 0.0):.5g}; "
+                    f"Floater={metrics.get('floater_initialization_mode', 'unknown')}"
                 ),
             )
             _render_streamlit_energy_history(metrics)
