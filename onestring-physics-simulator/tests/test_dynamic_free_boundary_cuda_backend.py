@@ -1,7 +1,7 @@
 import numpy as np
 
-from onestring_physics import bijective_free_boundary as base
-from onestring_physics import dynamic_free_boundary as previous
+import onestring_physics.bijective_free_boundary as base
+import onestring_physics.dynamic_free_boundary as previous
 from onestring_physics.dynamic_free_boundary_cuda_backend import (
     TorchHarmonicBoundaryResponse,
     TorchOmegaAccelerator,
