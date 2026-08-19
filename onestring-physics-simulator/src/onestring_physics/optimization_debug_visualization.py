@@ -1,13 +1,13 @@
 """Interactive debug visualizations for S -> Omega and M2D -> K2D.
 
 The Omega recorder intentionally captures *accepted* optimization states rather
-than interpolating between the initial/final maps.  It hooks the existing
-progress emission points of the full CUDA solver and copies only a bounded set
-of UV snapshots back to CPU.  This keeps the optimizer GPU-resident while
-making triangle-orientation failures inspectable.
+than interpolating between the initial/final maps. It hooks the progress
+emission points of the full CUDA/MPS solvers and copies only a bounded set of
+UV snapshots back to CPU. This keeps the optimizer GPU-resident while making
+triangle-orientation failures inspectable.
 
 The K2D visualization has a different purpose: preserve vertex identity so the
-user can see where every final K2D grid vertex came from in M2D.  It therefore
+user can see where every final K2D grid vertex came from in M2D. It therefore
 uses a correspondence morph between M2D and the final K2D state; it is clearly
 labelled as a correspondence view rather than an optimizer-iteration trace.
 """
@@ -81,7 +81,7 @@ def _orientation_stats_np(uv: np.ndarray, faces: np.ndarray, absolute_floor: flo
 
 
 class OmegaAcceptedStateRecorder:
-    """Bounded recorder for accepted UV states of the full CUDA optimizer."""
+    """Bounded recorder for accepted UV states of the full CUDA/MPS optimizer."""
 
     def __init__(self, faces: np.ndarray, config: Any, max_frames: int = 48) -> None:
         self.faces = np.asarray(faces, dtype=int)[:, :3]
@@ -116,7 +116,8 @@ class OmegaAcceptedStateRecorder:
             self._lowest_ratio_seen = ratio
 
     def maybe_capture_from_solver_frame(self, frame: Any, stage: str) -> None:
-        if not str(stage).startswith("CUDA Omega"):
+        stage_name = str(stage)
+        if not (stage_name.startswith("CUDA Omega") or stage_name.startswith("MPS Omega")):
             return
         local = getattr(frame, "f_locals", {}) or {}
         uv = local.get("uv")
@@ -368,7 +369,7 @@ def render_omega_flip_debug_animation(frames: list[dict[str, Any]], faces: np.nd
     else:
         st.success("No flipped triangle was found in the captured ACCEPTED Ω states. Watch the highlighted low-area triangles for near-degeneracy.")
     st.caption(
-        "This is an actual accepted-state trace, not interpolation. The animation stores a bounded sample of accepted CUDA states; "
+        "This is an actual accepted-state trace, not interpolation. The animation stores a bounded sample of accepted GPU states (CUDA/MPS); "
         "the thick risk overlay tracks triangles with the smallest signed UV areas. Rejected line-search candidates are not shown."
     )
     try:
