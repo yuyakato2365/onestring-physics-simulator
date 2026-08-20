@@ -1,14 +1,15 @@
-"""Validation launcher for simple Split panels plus animation View stages.
+"""Validation launcher for simple Split panels plus unified process animations.
 
-For this launcher, Split semantics are intentionally simple:
+Numerical Split semantics stay intentionally simple and unchanged:
 - cut once along each requested existing row/column grid line;
 - duplicate interface vertex ids so panels become edge-disconnected;
 - preserve the original M2D arrangement and open only a symmetric seam gap;
 - never bin-pack or reorder panels.
 
-The legacy Streamlit app reloads ``onestring_pipeline`` at import time.  That is
-useful for the normal app but destroys runtime patches here, so this validation
-launcher freezes that one reload and keeps exactly one Split wrapper stack.
+UI/debug behavior is deliberately separated from those numerics.  A fresh run
+shows exactly one diagnostic sequence (Omega -> Split -> K2D), and the same
+Omega/K2D animations can later be selected from View stage without substituting
+T3D or another legacy static stage.
 """
 from __future__ import annotations
 
@@ -20,6 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import streamlit as st
+
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -29,21 +33,20 @@ import onestring_physics as package  # noqa: E402
 from onestring_physics import onestring_pipeline as pipeline  # noqa: E402
 from onestring_physics import optimization_debug_visualization as opt_debug  # noqa: E402
 from onestring_physics import final_split_panel_pass as final_split_module  # noqa: E402
+from onestring_physics import simple_split_panel_patch as simple_split_module  # noqa: E402
 from onestring_physics.simple_split_panel_patch import install_simple_split_panel_patch  # noqa: E402
 from onestring_physics.split_diagnostics import install_split_diagnostics  # noqa: E402
-from onestring_physics.view_stage_animation_patch import (  # noqa: E402
-    install_view_stage_animation_selector,
-    render_selected_animation_view,
-    wrap_build_to_cache_state,
-)
 from onestring_physics.process_animation_view_patch import (  # noqa: E402
     install_k2d_process_recorder,
-    install_omega_process_cache,
-    install_process_animation_selector,
-    render_selected_process_animation,
 )
 from onestring_physics.process_animation_view_fix import (  # noqa: E402
     install_process_view_reliability_fixes,
+)
+from onestring_physics.unified_animation_ui import (  # noqa: E402
+    cache_omega_payload,
+    install_unified_animation_ui,
+    render_postrun_process_sequence,
+    render_selected_synthetic_view,
 )
 
 LOG_PATH = ROOT / "logs" / "split_debug.jsonl"
@@ -95,40 +98,58 @@ def _wire_active_globals(module: Any) -> None:
             glb["_optimize_k2d"] = active_k2d
 
 
+def _install_deferred_omega_renderer() -> None:
+    """Cache Omega frames during computation; draw them only in the unified UI."""
+    if not hasattr(opt_debug, "_onestring_original_omega_renderer_for_unified_view"):
+        opt_debug._onestring_original_omega_renderer_for_unified_view = (
+            opt_debug.render_omega_flip_debug_animation
+        )
+
+    def cache_only(frames: Any, faces: Any, boundary_loop: Any, summary: Any = None) -> None:
+        cache_omega_payload(frames, faces, boundary_loop, summary)
+
+    opt_debug.render_omega_flip_debug_animation = cache_only
+
+
 def _install_once() -> None:
-    # Omega process state is cached both at the legacy renderer and directly at
-    # OmegaAcceptedStateRecorder.capture_final(), so View stage never depends on
-    # one particular rendering call path.
-    install_omega_process_cache(opt_debug)
+    # Cache accepted Omega states directly at recorder completion as a fallback
+    # for backends/callers that bypass the renderer module attribute.
     install_process_view_reliability_fixes(opt_debug)
+    _install_deferred_omega_renderer()
 
-    # Preserve the genuine K2D debug renderer.  The Split validation patch owns
-    # Split geometry only; it must not replace the K2D animation renderer.
-    original_k2d_debug_renderer = opt_debug.render_k2d_correspondence_morph
+    # Preserve the genuine Split diagnostic renderer before installing its
+    # numerical wrapper.  The optimizer must not draw UI as a side effect.
+    if not hasattr(simple_split_module, "_onestring_original_split_renderer_for_unified_view"):
+        simple_split_module._onestring_original_split_renderer_for_unified_view = (
+            simple_split_module.render_split_panel_correspondence
+        )
 
-    # Install Split first so its numerical behavior remains exactly the working
-    # simple Split path (cut + symmetric seam gap).
     install_simple_split_panel_patch(pipeline, opt_debug)
 
-    # The Split patch historically reused the K2D renderer slot for its panel
-    # diagnostic, which produced two Split plots.  Restore the K2D renderer after
-    # Split installation; Split still renders its own single diagnostic directly.
-    opt_debug.render_k2d_correspondence_morph = original_k2d_debug_renderer
+    # Stop BOTH historical UI side effects:
+    # 1) optimize_k2d_keep_panel_layout() used this module-global renderer;
+    # 2) the Split installer overwrote the K2D-correspondence renderer slot.
+    # The Split/K2D visuals are rendered exactly once after the full build.
+    def deferred_noop(*args: Any, **kwargs: Any) -> None:
+        return None
 
-    # Record the OUTERMOST active K2D function after Split has wrapped it.  This
-    # guarantees the actual legacy build route is instrumented.
+    simple_split_module.render_split_panel_correspondence = deferred_noop
+    opt_debug.render_k2d_correspondence_morph = deferred_noop
+
+    # Record the outermost active K2D path after Split has wrapped it.  This
+    # captures real solver checkpoints and the final accepted K2D result.
     install_k2d_process_recorder(pipeline)
 
     install_split_diagnostics(pipeline, final_split_module, ROOT)
     _wire_active_globals(pipeline)
 
-    base_build = pipeline.build_onestring_design
-    cached_build = wrap_build_to_cache_state(base_build)
-    pipeline.build_onestring_design = cached_build
-    package.build_onestring_design = cached_build
+    # Keep public imports synchronized with the already-patched pipeline.  The
+    # legacy app imports build_onestring_design from the pipeline module itself.
+    package.build_onestring_design = pipeline.build_onestring_design
     package.onestring_pipeline = pipeline
 
-    build_globals = getattr(base_build, "__globals__", {})
+    build_fn = pipeline.build_onestring_design
+    build_globals = getattr(build_fn, "__globals__", {})
     global_m2d = build_globals.get("_build_m2d") if isinstance(build_globals, dict) else None
     global_k2d = build_globals.get("_optimize_k2d") if isinstance(build_globals, dict) else None
     snapshot = {
@@ -141,7 +162,7 @@ def _install_once() -> None:
     }
     _append_route_log("simple_split_execution_route_wired", **snapshot)
     print(
-        "[SPLIT-ROUTE] simple_split=True "
+        "[SPLIT-ROUTE] simple_split=True unified_animation_ui=True "
         f"global_m2d_same={snapshot['global_and_pipeline_m2d_same_object']} "
         f"global_k2d_same={snapshot['global_and_pipeline_k2d_same_object']} "
         f"m2d={snapshot['pipeline_build_m2d']['name']} "
@@ -156,18 +177,23 @@ def _install_once() -> None:
 if not getattr(package, "_onestring_simple_split_launcher_installed", False):
     _install_once()
     package._onestring_simple_split_launcher_installed = True
+else:
+    # Streamlit reruns the launcher in the same Python process.  Reassert UI-only
+    # deferrals without stacking any numerical wrappers.
+    _install_deferred_omega_renderer()
+    simple_split_module.render_split_panel_correspondence = lambda *a, **k: None
+    opt_debug.render_k2d_correspondence_morph = lambda *a, **k: None
 
 
 # The backed-up legacy app immediately executes importlib.reload(pipeline).
-# In this dedicated validation launcher that would erase Split/K2D/Omega runtime
-# instrumentation.  Return the already-patched module instead.
+# In this dedicated launcher that would erase Split/K2D/Omega instrumentation.
 if not getattr(importlib, "_onestring_simple_split_freeze_installed", False):
     _real_reload = importlib.reload
 
     def _reload_except_active_pipeline(module: Any) -> Any:
         if module is pipeline or getattr(module, "__name__", "") == "onestring_physics.onestring_pipeline":
             _append_route_log("pipeline_reload_skipped_for_simple_split")
-            print("[SPLIT-ROUTE] skipped legacy pipeline reload; Split/process animation stack preserved")
+            print("[SPLIT-ROUTE] skipped legacy pipeline reload; unified animation stack preserved")
             return pipeline
         return _real_reload(module)
 
@@ -175,14 +201,29 @@ if not getattr(importlib, "_onestring_simple_split_freeze_installed", False):
     importlib._onestring_simple_split_freeze_installed = True
 
 
-# Extend View stage with both assembly animations and real optimization traces.
-install_view_stage_animation_selector()
-install_process_animation_selector()
+# One selector wrapper owns every synthetic animation choice.  It returns a
+# private sentinel, never T3D, so the legacy View-stage branch draws no impostor.
+install_unified_animation_ui()
 
-# Run the normal UI after the calculation routes are pinned.
-runpy.run_path(str(ROOT / "app.py"), run_name="__main__")
+# Capture the legacy script globals so we know whether this rerun performed an
+# actual fresh pipeline build or was only a display/View-stage rerun.
+legacy_globals = runpy.run_path(str(ROOT / "app.py"), run_name="__main__")
 
-# Render exactly the synthetic view selected in View stage.  The process renderer
-# is evaluated first; assembly renderer ignores process-only selections.
-render_selected_process_animation(opt_debug)
-render_selected_animation_view()
+state = legacy_globals.get("state")
+if state is None:
+    state = st.session_state.get("onestring_state")
+
+fresh_run = bool(legacy_globals.get("run_pipeline", False))
+split_renderer = getattr(
+    simple_split_module,
+    "_onestring_original_split_renderer_for_unified_view",
+    None,
+)
+
+if fresh_run and state is not None and split_renderer is not None:
+    # Exactly one fresh-run sequence: Omega -> Split -> K2D.
+    render_postrun_process_sequence(state, opt_debug, split_renderer)
+else:
+    # Display-only reruns (including changing View stage) draw only the selected
+    # synthetic animation.  Normal legacy stages were already rendered above.
+    render_selected_synthetic_view(opt_debug, state=state)
