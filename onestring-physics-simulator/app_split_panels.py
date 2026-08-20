@@ -36,6 +36,12 @@ from onestring_physics.view_stage_animation_patch import (  # noqa: E402
     render_selected_animation_view,
     wrap_build_to_cache_state,
 )
+from onestring_physics.process_animation_view_patch import (  # noqa: E402
+    install_k2d_process_recorder,
+    install_omega_process_cache,
+    install_process_animation_selector,
+    render_selected_process_animation,
+)
 
 LOG_PATH = ROOT / "logs" / "split_debug.jsonl"
 
@@ -87,6 +93,11 @@ def _wire_active_globals(module: Any) -> None:
 
 
 def _install_once() -> None:
+    # Process animation instrumentation is UI/debug-only. Install K2D tracing
+    # before the Split wrapper so the latter remains the outer geometry owner.
+    install_omega_process_cache(opt_debug)
+    install_k2d_process_recorder(pipeline)
+
     install_simple_split_panel_patch(pipeline, opt_debug)
     install_split_diagnostics(pipeline, final_split_module, ROOT)
     _wire_active_globals(pipeline)
@@ -137,10 +148,14 @@ if not getattr(importlib, "_onestring_simple_split_freeze_installed", False):
     importlib._onestring_simple_split_freeze_installed = True
 
 
+# Keep the existing assembly animation choices, then append the actual
+# optimization-process views requested for Omega and K2D.
 install_view_stage_animation_selector()
+install_process_animation_selector()
 
 # Run the normal UI after the simple Split route is pinned.
 runpy.run_path(str(ROOT / "app.py"), run_name="__main__")
 
-# Synthetic View-stage animation choices are rendered from the cached design.
+# Synthetic View-stage choices are rendered from cached design/debug state.
+render_selected_process_animation(opt_debug)
 render_selected_animation_view()
