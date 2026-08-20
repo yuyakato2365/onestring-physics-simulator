@@ -55,6 +55,9 @@ third_party/affine-body-dynamics/**/*.exp
 # Local Boundary First Flattening checkout
 third_party/boundary-first-flattening/
 
+# Local OptCuts checkout
+third_party/OptCuts/
+
 # Autodesk ABD upstream sample and comparison data
 # The OneString backend generates its own scenes and tile meshes.
 third_party/affine-body-dynamics/meshes/
