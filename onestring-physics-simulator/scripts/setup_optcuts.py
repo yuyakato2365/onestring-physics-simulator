@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Clone and build the official OptCuts research code for the OneString bridge.
 
-The upstream OptCuts repository predates current CMake policy defaults.  Recent
-CMake releases reject the old ``cmake_minimum_required`` version used by the
-nested DownloadProject/TBB configure step.  This setup helper applies a tiny,
-local-only compatibility patch to the ignored third_party checkout so the
+The upstream OptCuts repository predates current CMake policy defaults. Recent
+CMake releases reject several legacy policy settings used by the vendored
+DownloadProject/TBB/libigl/GLFW stack. This setup helper applies tiny,
+local-only compatibility patches to the ignored third_party checkout so the
 original research code can still be configured without modifying its numerical
 implementation.
 """
@@ -38,15 +38,7 @@ def executable_candidates(root: Path) -> list[Path]:
 
 
 def patch_nested_cmake_policy(root: Path) -> bool:
-    """Pass a modern compatibility floor into OptCuts' nested CMake configure.
-
-    OptCuts vendors an old ``DownloadProject.cmake`` that launches a second
-    CMake process for TBB and other dependencies.  Passing
-    ``-DCMAKE_POLICY_VERSION_MINIMUM=3.5`` only to the top-level configure does
-    not automatically reach that nested process, so inject the same cache value
-    there.  The third_party checkout is gitignored; this never edits the upstream
-    repository or OneString numerical code.
-    """
+    """Pass a modern compatibility floor into OptCuts' nested CMake configure."""
 
     path = root / "cmake" / "DownloadProject.cmake"
     if not path.is_file():
@@ -84,6 +76,38 @@ def patch_nested_cmake_policy(root: Path) -> bool:
     return True
 
 
+def patch_legacy_glfw_policy(root: Path) -> bool:
+    """Replace GLFW's removed CMP0042 OLD policy with the required NEW behavior.
+
+    The GLFW bundled inside OptCuts' old libigl snapshot explicitly requests
+    ``cmake_policy(SET CMP0042 OLD)``. Modern CMake no longer permits OLD for
+    this policy. CMP0042 controls MACOSX_RPATH behavior; using NEW is the modern
+    required behavior and does not change OptCuts' numerical algorithm.
+    """
+
+    path = root / "ext" / "libigl" / "external" / "glfw" / "CMakeLists.txt"
+    if not path.is_file():
+        print(f"GLFW compatibility patch skipped: {path} was not found")
+        return False
+
+    text = path.read_text(encoding="utf-8")
+    old = "cmake_policy(SET CMP0042 OLD)"
+    new = "cmake_policy(SET CMP0042 NEW) # OneString modern-CMake compatibility"
+    if new in text:
+        print("OptCuts GLFW CMP0042 compatibility patch already present.")
+        return False
+    if old not in text:
+        print("OptCuts GLFW CMP0042 OLD policy was not found; no patch needed.")
+        return False
+
+    backup = path.with_suffix(path.suffix + ".onestring-backup")
+    if not backup.exists():
+        backup.write_text(text, encoding="utf-8")
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print(f"Applied local OptCuts GLFW CMP0042 compatibility patch: {path}")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -113,6 +137,7 @@ def main() -> int:
         print("No automatic git pull is performed; this script never overwrites local upstream edits.")
 
     patch_nested_cmake_policy(root)
+    patch_legacy_glfw_policy(root)
 
     if args.no_build:
         return 0
