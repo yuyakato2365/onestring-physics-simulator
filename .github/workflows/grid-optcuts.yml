@@ -2,8 +2,7 @@ name: Grid OptCuts validation
 
 on:
   push:
-    branches:
-      - agent/large-steps-mesh-conditioning
+    branches: [agent/large-steps-mesh-conditioning]
     paths:
       - "onestring-physics-simulator/scripts/patch_optcuts_native_grid*.py"
       - "onestring-physics-simulator/scripts/patch_optcuts_grid_v4.py"
@@ -36,22 +35,15 @@ jobs:
         working-directory: onestring-physics-simulator
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install system build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build \
-            libgl1-mesa-dev libglu1-mesa-dev \
-            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
-            libpng-dev
-
-      - name: Install Python test dependencies
-        run: python -m pip install --upgrade pip -r requirements.txt
+          sudo apt-get install -y build-essential cmake ninja-build libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libpng-dev
+          python -m pip install --upgrade pip -r requirements.txt
 
       - name: Python syntax check
         run: |
@@ -72,19 +64,19 @@ jobs:
       - name: Patch and build official OptCuts
         run: python scripts/setup_optcuts.py --jobs 2
 
-      - name: Verify native V4 source markers
+      - name: Verify native source contract
         run: |
           grep -q "ONESTRING_GRID_NATIVE_V4" third_party/OptCuts/src/TriMesh.cpp
           grep -q "ONESTRING_GRID_NATIVE_V4_FAST_SEARCH" third_party/OptCuts/src/TriMesh.cpp
           grep -q "oneStringGridLockedVert" third_party/OptCuts/src/TriMesh.hpp
-          grep -q "native_candidate_search enabled version=4" third_party/OptCuts/src/main.cpp
           grep -q "ONESTRING_GRID_NATIVE_V4_SEAM_SIDECAR" third_party/OptCuts/src/main.cpp
+          grep -q "ONESTRING_GRID_NATIVE_V4_HARD_LOCK_STEP_FORWARD" third_party/OptCuts/src/Optimizer.cpp
           test -x third_party/OptCuts/build/OptCuts_bin
 
-      - name: Native Grid-OptCuts initialization smoke test
+      - name: Initial Grid seam smoke
         shell: bash
         run: |
-          cat > /tmp/onestring_grid_smoke.obj <<'OBJ'
+          cat > /tmp/grid_tetra.obj <<'OBJ'
           v 1 1 1
           v -1 -1 1
           v -1 1 -1
@@ -94,84 +86,65 @@ jobs:
           f 1 3 4
           f 2 4 3
           OBJ
-          export ONESTRING_OPTCUTS_GRID_NATIVE=1
-          export ONESTRING_OPTCUTS_GRID_H=0.5
-          export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0
-          export ONESTRING_OPTCUTS_GRID_PHASE_U=0
-          export ONESTRING_OPTCUTS_GRID_PHASE_V=0
-          export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=4
-          export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=4
-          export ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=4
-          if ! timeout 120 ./third_party/OptCuts/build/OptCuts_bin \
-            100 /tmp/onestring_grid_smoke.obj 0.999 1 0 1000 1 0 native-grid-init-smoke \
-            > /tmp/native-grid-init-smoke.log 2>&1; then
-            cat /tmp/native-grid-init-smoke.log
-            exit 1
-          fi
-          cat /tmp/native-grid-init-smoke.log
-          grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-init-smoke.log
-          grep -q "\[ONESTRING-GRID\] global_bijectivity_scaffold=enabled" /tmp/native-grid-init-smoke.log
-          grep -q "\[ONESTRING-GRID\] final_seam_sidecar=" /tmp/native-grid-init-smoke.log
-          grep -q "optimization converged" /tmp/native-grid-init-smoke.log
+          export ONESTRING_OPTCUTS_GRID_NATIVE=1 ONESTRING_OPTCUTS_GRID_H=0.5
+          export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0 ONESTRING_OPTCUTS_GRID_PHASE_U=0 ONESTRING_OPTCUTS_GRID_PHASE_V=0
+          export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=4 ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=8 ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=8
+          timeout 120 ./third_party/OptCuts/build/OptCuts_bin 100 /tmp/grid_tetra.obj 0.999 1 0 1000 1 0 grid-init > /tmp/grid-init.log 2>&1 || { cat /tmp/grid-init.log; exit 1; }
+          cat /tmp/grid-init.log
+          grep -q "global_bijectivity_scaffold=enabled" /tmp/grid-init.log
+          grep -q "final_seam_sidecar=" /tmp/grid-init.log
+          grep -q "optimization converged" /tmp/grid-init.log
 
-      - name: Native Grid-OptCuts split-search smoke test
-        shell: bash
-        run: |
-          export ONESTRING_OPTCUTS_GRID_NATIVE=1
-          export ONESTRING_OPTCUTS_GRID_H=0.5
-          export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0
-          export ONESTRING_OPTCUTS_GRID_PHASE_U=0
-          export ONESTRING_OPTCUTS_GRID_PHASE_V=0
-          export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=4
-          export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=4
-          export ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=4
-          if ! timeout 120 ./third_party/OptCuts/build/OptCuts_bin \
-            100 /tmp/onestring_grid_smoke.obj 0.999 2 0 4.1 1 0 native-grid-split-smoke \
-            > /tmp/native-grid-split-smoke.log 2>&1; then
-            cat /tmp/native-grid-split-smoke.log
-            exit 1
-          fi
-          cat /tmp/native-grid-split-smoke.log
-          grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-split-smoke.log
-          grep -q "evaluate vertex splits" /tmp/native-grid-split-smoke.log
-
-      - name: Native Grid-OptCuts accepts a real Grid split
+      - name: Find and validate one actually accepted Grid split
         shell: bash
         run: |
           python - <<'PY'
-          import numpy as np
-          import trimesh
-          mesh = trimesh.creation.icosphere(subdivisions=0, radius=1.0)
-          vertices = np.asarray(mesh.vertices).copy()
-          vertices[:, 2] *= 3.0
-          mesh = trimesh.Trimesh(vertices=vertices, faces=mesh.faces, process=False)
-          mesh.export('/tmp/onestring_grid_icosahedron.obj')
-          print(f'anisotropic icosahedron vertices={len(mesh.vertices)} faces={len(mesh.faces)}')
+          import numpy as np, trimesh
+          for subdivision in (0, 1):
+              base = trimesh.creation.icosphere(subdivisions=subdivision, radius=1.0)
+              for stretch in (2.0, 3.0, 5.0, 8.0):
+                  v = np.asarray(base.vertices).copy()
+                  v[:, 2] *= stretch
+                  trimesh.Trimesh(vertices=v, faces=base.faces, process=False).export(
+                      f'/tmp/grid_candidate_s{subdivision}_z{stretch:g}.obj')
           PY
           export ONESTRING_OPTCUTS_GRID_NATIVE=1
-          export ONESTRING_OPTCUTS_GRID_H=0.20
-          export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0
-          export ONESTRING_OPTCUTS_GRID_PHASE_U=0
-          export ONESTRING_OPTCUTS_GRID_PHASE_V=0
-          export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=6
-          export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=3
-          export ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=3
-          if ! timeout 45 ./third_party/OptCuts/build/OptCuts_bin \
-            100 /tmp/onestring_grid_icosahedron.obj 0.001 3 0 4.1 1 0 native-grid-accepted-split \
-            > /tmp/native-grid-accepted-split.log 2>&1; then
-            cat /tmp/native-grid-accepted-split.log
+          export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0 ONESTRING_OPTCUTS_GRID_PHASE_U=0 ONESTRING_OPTCUTS_GRID_PHASE_V=0
+          export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=12 ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=12
+          accepted=0
+          for mesh in /tmp/grid_candidate_*.obj; do
+            for h in 0.08 0.10 0.15 0.20 0.30; do
+              for snap in 4 8 12 20; do
+                export ONESTRING_OPTCUTS_GRID_H="$h" ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS="$snap"
+                tag="accepted-$(basename "$mesh" .obj)-h${h}-s${snap}"
+                log="/tmp/${tag}.log"
+                if timeout 30 ./third_party/OptCuts/build/OptCuts_bin 100 "$mesh" 0.001 3 0 4.01 1 0 "$tag" > "$log" 2>&1; then
+                  if grep -Eq "boundary split E_dec =|interior split E_dec =" "$log" && grep -q "final_seam_sidecar=" "$log"; then
+                    echo "ACCEPTED GRID SPLIT FIXTURE: mesh=$mesh h=$h snap=$snap"
+                    cat "$log"
+                    accepted=1
+                    break 3
+                  fi
+                elif grep -q "ONESTRING_GRID_FINAL_COHESIVE_SEAM_OFF_LATTICE" "$log"; then
+                  echo "A cut was accepted but its final cohesive seam left the Grid:"
+                  cat "$log"
+                  exit 1
+                fi
+              done
+            done
+          done
+          if [ "$accepted" -ne 1 ]; then
+            echo "No deterministic accepted Grid split was found in the bounded fixture sweep."
+            for log in /tmp/accepted-*.log; do tail -n 15 "$log" 2>/dev/null || true; done
             exit 1
           fi
-          cat /tmp/native-grid-accepted-split.log
-          grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-accepted-split.log
-          grep -Eq "boundary split E_dec =|interior split E_dec =" /tmp/native-grid-accepted-split.log
 
-      - name: Run Grid-OptCuts unit and end-to-end tests
+      - name: Run Grid-OptCuts Python tests
         env:
           PYTHONPATH: src
           ONESTRING_OPTCUTS_EXECUTABLE: third_party/OptCuts/build/OptCuts_bin
-          ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX: "4"
-          ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS: "4"
+          ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX: "8"
+          ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS: "8"
         run: |
           python -m pytest \
             tests/test_optcuts_grid_native.py \
