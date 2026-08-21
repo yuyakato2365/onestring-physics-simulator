@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Clone, patch, and build OptCuts for the OneString bridge.
 
-The official research code receives only two kinds of local changes:
-1. compatibility fixes required by modern CMake/GLFW; and
+The local checkout receives:
+1. compatibility fixes required by modern CMake/GLFW/Eigen; and
 2. the explicit OneString native Grid-OptCuts candidate-search patch.
 
-The native grid patch is dormant unless ONESTRING_OPTCUTS_GRID_NATIVE=1, so the
-same executable still provides untouched official OptCuts behavior for the
-normal ``optcuts`` mode.
+The Grid patch is dormant unless ONESTRING_OPTCUTS_GRID_NATIVE=1, so the same
+binary still executes the authors' ordinary OptCuts path for ``optcuts``.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -17,10 +15,8 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 
 from patch_optcuts_native_grid import apply_native_grid_patch
-
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
 CMAKE_POLICY_MINIMUM = "3.5"
@@ -63,8 +59,7 @@ def patch_nested_cmake_policy(root: Path) -> bool:
     )
     if needle not in text:
         raise SystemExit(
-            "OptCuts DownloadProject.cmake has an unexpected layout; refusing to patch it automatically. "
-            "Inspect cmake/DownloadProject.cmake around its nested execute_process(CMAKE_COMMAND ...) call."
+            "OptCuts DownloadProject.cmake has an unexpected layout; refusing to patch it automatically."
         )
     backup = path.with_suffix(path.suffix + ".onestring-backup")
     if not backup.exists():
@@ -96,20 +91,45 @@ def patch_legacy_glfw_policy(root: Path) -> bool:
     return True
 
 
+def patch_legacy_eigen_transpositions(root: Path) -> bool:
+    """Fix the old Eigen Transpositions assignment for current Apple/Clang builds.
+
+    OptCuts' vendored Eigen snapshot uses ``trt.derived()`` in an assignment path
+    that fails with modern compilers.  Replacing it with ``trt`` is the known
+    compatibility fix used by this project previously; it does not affect
+    OptCuts' numerical algorithm.
+    """
+    path = root / "ext" / "libigl" / "external" / "eigen" / "Eigen" / "src" / "Core" / "Transpositions.h"
+    if not path.is_file():
+        print(f"Eigen compatibility patch skipped: {path} was not found")
+        return False
+    text = path.read_text(encoding="utf-8")
+    marker = "= trt; // OneString modern-Eigen compatibility"
+    if marker in text:
+        print("OptCuts Eigen Transpositions compatibility patch already present.")
+        return False
+    old = "= trt.derived();"
+    if old not in text:
+        print("OptCuts Eigen trt.derived() assignment was not found; no patch needed.")
+        return False
+    backup = path.with_suffix(path.suffix + ".onestring-backup")
+    if not backup.exists():
+        backup.write_text(text, encoding="utf-8")
+    text = text.replace(old, "= trt; // OneString modern-Eigen compatibility")
+    path.write_text(text, encoding="utf-8")
+    print(f"Applied local OptCuts Eigen compatibility patch: {path}")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--root",
-        type=Path,
+        "--root", type=Path,
         default=Path(__file__).resolve().parents[1] / "third_party" / "OptCuts",
         help="Destination for the official OptCuts checkout.",
     )
     parser.add_argument("--jobs", type=int, default=max(1, min(12, os.cpu_count() or 4)))
-    parser.add_argument(
-        "--no-build",
-        action="store_true",
-        help="Clone/check and patch only; do not invoke CMake.",
-    )
+    parser.add_argument("--no-build", action="store_true", help="Patch only; do not invoke CMake.")
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
 
@@ -122,10 +142,11 @@ def main() -> int:
         raise SystemExit(f"{root} exists but is not a Git checkout")
     else:
         print(f"Using existing OptCuts checkout: {root}")
-        print("No automatic git pull is performed; this script never overwrites local upstream edits.")
+        print("No automatic git pull is performed; local upstream edits are not overwritten.")
 
     patch_nested_cmake_policy(root)
     patch_legacy_glfw_policy(root)
+    patch_legacy_eigen_transpositions(root)
     apply_native_grid_patch(root)
 
     if args.no_build:
@@ -134,42 +155,26 @@ def main() -> int:
         raise SystemExit("cmake is required to build OptCuts")
 
     build = root / "build"
-    run(
-        [
-            "cmake",
-            "-S",
-            str(root),
-            "-B",
-            str(build),
-            "-DCMAKE_BUILD_TYPE=Release",
-            f"-DCMAKE_POLICY_VERSION_MINIMUM={CMAKE_POLICY_MINIMUM}",
-        ]
-    )
-    run(
-        [
-            "cmake",
-            "--build",
-            str(build),
-            "--config",
-            "Release",
-            "--parallel",
-            str(max(1, args.jobs)),
-        ]
-    )
+    run([
+        "cmake", "-S", str(root), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+        f"-DCMAKE_POLICY_VERSION_MINIMUM={CMAKE_POLICY_MINIMUM}",
+    ])
+    run([
+        "cmake", "--build", str(build), "--config", "Release", "--parallel", str(max(1, args.jobs)),
+    ])
 
     for candidate in executable_candidates(root):
         if candidate.is_file():
             print("\nOptCuts executable:")
             print(candidate)
-            print("\nNative Grid-OptCuts support is compiled in and remains dormant for official optcuts mode.")
-            print("Set explicitly if desired:")
+            print("\nNative Grid-OptCuts support is compiled in and dormant for official optcuts mode.")
             if os.name == "nt":
                 print(f'$env:ONESTRING_OPTCUTS_EXECUTABLE = "{candidate}"')
             else:
                 print(f'export ONESTRING_OPTCUTS_EXECUTABLE="{candidate}"')
             return 0
 
-    print("Build finished, but OptCuts_bin was not found in the expected locations.", file=sys.stderr)
+    print("Build finished, but OptCuts_bin was not found in the expected locations.")
     return 2
 
 
