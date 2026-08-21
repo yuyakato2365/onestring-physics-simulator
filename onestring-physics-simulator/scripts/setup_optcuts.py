@@ -16,6 +16,7 @@ import subprocess
 
 from patch_optcuts_native_grid_v4_final import apply_native_grid_patch
 from patch_optcuts_native_grid_v4_perf import apply_native_grid_perf_patch
+from patch_optcuts_native_grid_v4_diagnostics import apply_native_grid_diagnostics
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
 CMAKE_POLICY_MINIMUM = "3.5"
@@ -140,6 +141,7 @@ def main() -> int:
     patch_legacy_eigen_transpositions(root)
     apply_native_grid_patch(root)
     apply_native_grid_perf_patch(root)
+    apply_native_grid_diagnostics(root)
 
     if args.no_build:
         return 0
