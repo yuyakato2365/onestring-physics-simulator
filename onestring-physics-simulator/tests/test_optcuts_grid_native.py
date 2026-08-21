@@ -21,9 +21,9 @@ from onestring_physics.optcuts_grid_native_pipeline_patch import (
 from onestring_physics.optcuts_uv_overlap_guard import positive_area_uv_overlaps
 
 
-def test_native_grid_version_requires_junction_lock_v2():
-    assert NATIVE_GRID_VERSION >= 2
-    assert f"version={NATIVE_GRID_VERSION}" in NATIVE_GRID_MARKER
+def test_native_grid_version_is_paired_seam_v4():
+    assert NATIVE_GRID_VERSION == 4
+    assert "version=4" in NATIVE_GRID_MARKER
 
 
 def test_fabrication_frame_rotation_preserves_fixed_lattice():
@@ -59,11 +59,10 @@ def test_internal_optcuts_seam_detected_from_surface_uv_index_mismatch():
     assert {tuple(p) for p in segments[0]} == {(0.0, 0.0), (1.0, 1.0)}
 
 
-def test_native_seam_is_transferred_as_zero_width_m2d_topology_cut():
-    # 2x1 base lattice:
-    #   3 ---- 4 ---- 5
-    #   |      |      |
-    #   0 ---- 1 ---- 2
+def test_m2d_can_disconnect_a_native_seam_that_coincides_with_shared_grid_edge():
+    # V4 normally produces two distinct UV boundary sides. This helper remains
+    # necessary for the special case where an exported native seam lies on a
+    # shared M2D grid edge: geometry stays coincident while topology disconnects.
     h = 1.0
     segment = np.asarray([[[1.0, 0.0], [1.0, 1.0]]], dtype=float)
     cut_edges = _grid_cut_edges_from_segments(
@@ -124,12 +123,25 @@ def test_native_pipeline_does_not_intercept_official_optcuts():
     assert pipeline._build_surface_parameterization(None, None, None, params) is sentinel
 
 
-def test_cpp_patcher_contains_persistent_lock_and_actual_cut_preflight():
+def test_v4_patcher_encodes_grid_search_not_posthoc_seam_snap():
     root = Path(__file__).resolve().parents[1]
-    patcher = (root / "scripts" / "patch_optcuts_native_grid.py").read_text(encoding="utf-8")
-    assert "ONESTRING_GRID_NATIVE_V2" in patcher
-    assert "oneStringGridLockedVert" in patcher
-    assert "oneStringGridPreservesLocked" in patcher
-    assert "oneStringGridActualCutFeasible" in patcher
-    assert "ONESTRING_GRID_APPLIED_INTERIOR_CUT_INVERTED" in patcher
-    assert "ONESTRING_GRID_APPLIED_BOUNDARY_CUT_INVERTED" in patcher
+    algorithm = (root / "scripts" / "patch_optcuts_native_grid.py").read_text(encoding="utf-8")
+    installer = (root / "scripts" / "patch_optcuts_native_grid_v4.py").read_text(encoding="utf-8")
+
+    assert "ONESTRING_GRID_NATIVE_V4" in algorithm
+    assert "oneStringGridComputeLocalLDec" in algorithm
+    assert "oneStringTryInteriorGridCut" in algorithm
+    assert "oneStringTryBoundaryGridCut" in algorithm
+    assert "oneStringTotalSD" in algorithm
+    assert "A-B-C" in algorithm and "A-D-C" in algorithm
+    assert "oneStringGridLockedVert" in algorithm
+    assert "oneStringMainInitialGridBoundary" in algorithm
+    assert "version=4" in installer
+    assert "_replace_in_function" in installer
+    assert "No completed free seam" not in installer  # implementation, not a post-hoc adapter
+
+
+def test_setup_uses_function_scoped_v4_installer():
+    root = Path(__file__).resolve().parents[1]
+    setup = (root / "scripts" / "setup_optcuts.py").read_text(encoding="utf-8")
+    assert "from patch_optcuts_native_grid_v4 import apply_native_grid_patch" in setup
