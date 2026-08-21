@@ -44,6 +44,9 @@ from onestring_physics.optcuts_rectilinear_seam_patch import (  # noqa: E402
 from onestring_physics.optcuts_chart_aware_patch import (  # noqa: E402
     install_optcuts_chart_aware_patch,
 )
+from onestring_physics.optcuts_chart_vertex_compaction_patch import (  # noqa: E402
+    install_optcuts_chart_vertex_compaction_patch,
+)
 from onestring_physics.optcuts_manifold_guard_patch import (  # noqa: E402
     install_optcuts_manifold_guard_patch,
 )
@@ -165,6 +168,9 @@ def _install_post_simple_split_optcuts_hook() -> None:
         # then reject any quad that crosses an immutable OptCuts UV chart and
         # attach chart ids used by M2D -> M3D.
         install_optcuts_chart_aware_patch(pipeline_module)
+        # Chart-aware face rejection leaves unused overlay vertices behind.  They
+        # have no chart by design, so compact/reindex them before M2D -> M3D.
+        install_optcuts_chart_vertex_compaction_patch(pipeline_module)
 
     simple_split_module.install_simple_split_panel_patch = install_then_optcuts_grid_seam
     simple_split_module._onestring_optcuts_post_split_hook_installed = True
@@ -174,7 +180,7 @@ def _install_post_simple_split_optcuts_hook() -> None:
 # 1) official OptCuts S->Omega dispatch;
 # 2) persistent active-run flag;
 # 3) seam metadata and fabrication adapters (installed after Simple Split);
-# 4) chart-aware M2D/M3D mapping;
+# 4) chart-aware M2D/M3D mapping and unused-vertex compaction;
 # 5) K3D validity guard and exact T3D preflight.
 install_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
