@@ -24,6 +24,9 @@ if str(SRC) not in sys.path:
 
 import onestring_physics as package  # noqa: E402
 from onestring_physics import onestring_pipeline as pipeline  # noqa: E402
+from onestring_physics.fast_assembly_animation_patch import (  # noqa: E402
+    install_fast_assembly_animation_patch,
+)
 from onestring_physics.optcuts_pipeline_patch import install_optcuts_pipeline_patch  # noqa: E402
 
 
@@ -123,6 +126,7 @@ def _install_optcuts_selector() -> None:
 
 
 install_optcuts_pipeline_patch(pipeline)
+install_fast_assembly_animation_patch()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
