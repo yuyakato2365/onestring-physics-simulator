@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
 """Patch official OptCuts into OneString native Grid-OptCuts.
 
-The modification is deliberately inside OptCuts' topology search, not a
-post-process.  In grid mode, split candidates must be realizable on one fixed
-orthogonal h-lattice before they can compete in OptCuts' energy-decrease query.
-Accepted seam vertices are permanently grid-locked, so later topology queries
-cannot move an existing fabrication junction.
+The modification is inside OptCuts' topology search, never a completed-seam
+post-process. In native grid mode every split candidate must first be realizable
+on one fixed orthogonal h-lattice. The candidate is then *actually cut at those
+lattice coordinates* on a trial mesh and scored by the resulting Symmetric
+Dirichlet decrease plus the ordinary OptCuts seam-length term. Accepted seam
+vertices become permanent lattice locks.
 
-Native V2 still uses OptCuts' existing source-mesh edge topology for candidate
-cuts; it does not yet insert new 3D surface vertices at arbitrary grid-line /
-source-triangle intersections.  This limits candidate resolution but does not
-relax the fabrication-grid constraint on any accepted seam.
+Native V3 still uses OptCuts' existing source-mesh edges as topological cut
+candidates. It does not yet insert arbitrary new 3D surface vertices at grid-line
+/ source-triangle intersections. This limits candidate resolution, not the grid
+constraint of accepted cuts.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-MARKER = "ONESTRING_GRID_NATIVE_V2"
-OLD_MARKER = "ONESTRING_GRID_NATIVE_V1"
+MARKER = "ONESTRING_GRID_NATIVE_V3"
+OLD_MARKERS = ("ONESTRING_GRID_NATIVE_V1", "ONESTRING_GRID_NATIVE_V2")
 
 HELPERS = r'''
-// ONESTRING_GRID_NATIVE_V2
+// ONESTRING_GRID_NATIVE_V3
 #include <cstdlib>
 #include <cmath>
+#include <cfloat>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -176,7 +178,6 @@ std::vector<Eigen::MatrixXd> oneStringGridCornerEmbeddings(
         if(oneStringEmbeddingMaxSnapSteps(p, q) <= oneStringGridMaxSnapSteps()) oneStringPushUnique(out, q);
     };
 
-    // Straight horizontal run. Do not permit an immediate U-turn/overlap.
     for(long long dj = -1; dj <= 1; ++dj) {
         const long long j = oneStringRoundIndex((g0[1] + g1[1] + g2[1]) / 3.0) + dj;
         long long a0 = i0, a1 = i1, a2 = i2;
@@ -185,7 +186,6 @@ std::vector<Eigen::MatrixXd> oneStringGridCornerEmbeddings(
         if((a1 - a0) * (a2 - a1) > 0) accept(a0, j, a1, j, a2, j);
     }
 
-    // Straight vertical run. Do not permit an immediate U-turn/overlap.
     for(long long di = -1; di <= 1; ++di) {
         const long long i = oneStringRoundIndex((g0[0] + g1[0] + g2[0]) / 3.0) + di;
         long long b0 = j0, b1 = j1, b2 = j2;
@@ -194,13 +194,12 @@ std::vector<Eigen::MatrixXd> oneStringGridCornerEmbeddings(
         if((b1 - b0) * (b2 - b1) > 0) accept(i, b0, i, b1, i, b2);
     }
 
-    // H -> V and V -> H one-bend candidates.
     {
         long long ai0 = i0, aj0 = j0, ai2 = i2, aj2 = j2;
         if(ai2 == ai0) ai2 += (g2[0] >= g0[0]) ? 1 : -1;
         if(aj2 == aj0) aj2 += (g2[1] >= g0[1]) ? 1 : -1;
-        accept(ai0, aj0, ai2, aj0, ai2, aj2);
-        accept(ai0, aj0, ai0, aj2, ai2, aj2);
+        accept(ai0, aj0, ai2, aj0, ai2, aj2); // H -> V
+        accept(ai0, aj0, ai0, aj2, ai2, aj2); // V -> H
     }
     return out;
 }
@@ -217,22 +216,6 @@ bool oneStringGridPreservesLocked(
         if((mesh.V.row(path[i]) - target.row(i)).norm() > tol) return false;
     }
     return true;
-}
-
-Eigen::MatrixXd oneStringEncodeInteriorCut(const Eigen::MatrixXd& optcutsPos, const Eigen::MatrixXd& gridPath)
-{
-    Eigen::MatrixXd encoded(optcutsPos.rows() + 3, 2);
-    encoded.topRows(optcutsPos.rows()) = optcutsPos;
-    encoded.bottomRows(3) = gridPath;
-    return encoded;
-}
-
-Eigen::MatrixXd oneStringEncodeBoundaryCut(const Eigen::MatrixXd& optcutsPos, const Eigen::MatrixXd& gridPath)
-{
-    Eigen::MatrixXd encoded(optcutsPos.rows() + 2, 2);
-    encoded.topRows(optcutsPos.rows()) = optcutsPos;
-    encoded.bottomRows(2) = gridPath;
-    return encoded;
 }
 
 Eigen::MatrixXd oneStringTrialInteriorEncoding(const Eigen::MatrixXd& gridPath)
@@ -262,14 +245,33 @@ Eigen::MatrixXd oneStringTrialBoundaryEncoding(
     return encoded;
 }
 
-bool oneStringGridActualCutFeasible(
+double oneStringGridTotalSD(const OptCuts::TriMesh& mesh)
+{
+    OptCuts::SymDirichletEnergy sd;
+    double total = 0.0;
+    for(int triI = 0; triI < mesh.F.rows(); ++triI) {
+        double e = 0.0;
+        sd.getEnergyValByElemID(mesh, triI, e);
+        if(!std::isfinite(e)) return std::numeric_limits<double>::infinity();
+        total += e;
+    }
+    return total;
+}
+
+// Exact hard-Grid candidate score used by native V3.  This performs the same
+// topological split that would actually be accepted, at the exact candidate
+// lattice coordinates, then measures the real SD change. No free-OptCuts UV
+// result is used as a proxy for the constrained candidate.
+double oneStringGridActualCutSDDec(
     const OptCuts::TriMesh& mesh,
     const std::vector<int>& path,
     const Eigen::MatrixXd& gridPath,
     bool boundarySplit)
 {
-    if(!oneStringGridPreservesLocked(mesh, path, gridPath)) return false;
+    if(!oneStringGridPreservesLocked(mesh, path, gridPath)) return -__DBL_MAX__;
     try {
+        const double before = oneStringGridTotalSD(mesh);
+        if(!std::isfinite(before)) return -__DBL_MAX__;
         OptCuts::TriMesh trial = mesh;
         if(boundarySplit) {
             trial.splitEdgeOnBoundary(
@@ -280,34 +282,23 @@ bool oneStringGridActualCutFeasible(
         else {
             trial.cutPath(path, true, 1, oneStringTrialInteriorEncoding(gridPath), false);
         }
-        return trial.checkInversion(true);
+        if(!trial.checkInversion(true)) return -__DBL_MAX__;
+        const double after = oneStringGridTotalSD(trial);
+        if(!std::isfinite(after)) return -__DBL_MAX__;
+        return before - after;
     }
     catch(...) {
-        return false;
+        return -__DBL_MAX__;
     }
 }
 
-double oneStringGridSnapSDIncrease(
+bool oneStringGridActualCutFeasible(
     const OptCuts::TriMesh& mesh,
     const std::vector<int>& path,
-    const Eigen::MatrixXd& target)
+    const Eigen::MatrixXd& gridPath,
+    bool boundarySplit)
 {
-    if(!oneStringGridPreservesLocked(mesh, path, target)) return std::numeric_limits<double>::infinity();
-    OptCuts::TriMesh trial = mesh;
-    for(int i = 0; i < target.rows(); ++i) trial.V.row(path[i]) = target.row(i);
-    if(!trial.checkInversion(true)) return std::numeric_limits<double>::infinity();
-
-    OptCuts::SymDirichletEnergy sd;
-    double before = 0.0, after = 0.0;
-    for(int triI = 0; triI < mesh.F.rows(); ++triI) {
-        double eb = 0.0, ea = 0.0;
-        sd.getEnergyValByElemID(mesh, triI, eb);
-        sd.getEnergyValByElemID(trial, triI, ea);
-        before += eb;
-        after += ea;
-    }
-    const double inc = (after - before) / std::max(1.0, mesh.surfaceArea);
-    return std::max(0.0, inc);
+    return oneStringGridActualCutSDDec(mesh, path, gridPath, boundarySplit) > -__DBL_MAX__ / 2.0;
 }
 
 } // anonymous namespace
@@ -321,21 +312,21 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-def _restore_old_v1_if_needed(root: Path) -> None:
+def _restore_old_native_if_needed(root: Path) -> None:
     cpp = root / "src" / "TriMesh.cpp"
     if not cpp.is_file():
         return
     text = cpp.read_text(encoding="utf-8")
-    if OLD_MARKER not in text or MARKER in text:
+    if MARKER in text or not any(old in text for old in OLD_MARKERS):
         return
     backup = cpp.with_suffix(cpp.suffix + ".onestring-grid-native-backup")
     if not backup.is_file():
         raise RuntimeError(
-            "Local OptCuts contains native Grid V1 but its backup is missing; "
-            "cannot safely upgrade automatically. Restore upstream TriMesh.cpp and rerun setup_optcuts.py."
+            "Local OptCuts contains an older OneString native Grid patch but its backup is missing. "
+            "Restore upstream TriMesh.cpp and rerun setup_optcuts.py."
         )
     cpp.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
-    print("Restored upstream TriMesh.cpp from V1 backup before applying native Grid V2.")
+    print("Restored upstream TriMesh.cpp from old native Grid backup before applying V3.")
 
 
 def patch_tri_mesh_header(root: Path) -> bool:
@@ -343,8 +334,7 @@ def patch_tri_mesh_header(root: Path) -> bool:
     if not path.is_file():
         raise FileNotFoundError(path)
     text = path.read_text(encoding="utf-8")
-    marker = "oneStringGridLockedVert"
-    if marker in text:
+    if "oneStringGridLockedVert" in text:
         return False
     text = replace_once(
         text,
@@ -367,7 +357,7 @@ def patch_tri_mesh(root: Path) -> bool:
         raise FileNotFoundError(path)
     text = path.read_text(encoding="utf-8")
     if MARKER in text:
-        print("OneString native Grid-OptCuts V2 patch already present.")
+        print("OneString native Grid-OptCuts V3 patch already present.")
         return False
 
     text = replace_once(
@@ -386,8 +376,6 @@ def patch_tri_mesh(root: Path) -> bool:
         "preserve native Grid locks when rebuilding fixed set",
     )
 
-    # Grid mode is split-only until a merge operation with the same lattice
-    # invariants is implemented.
     text = replace_once(
         text,
         "        else {\n            double EwDec_max_split, EwDec_max_merge;\n",
@@ -401,15 +389,15 @@ def patch_tri_mesh(root: Path) -> bool:
     )
 
     old_one_point = '''    void TriMesh::onePointCut(int vI)\n    {\n        assert((vI >= 0) && (vI < V_rest.rows()));\n        std::vector<int> path(vNeighbor[vI].begin(), vNeighbor[vI].end());\n        assert(path.size() >= 3);\n        path[1] = vI;\n        path.resize(3);\n        \n        bool makeCoh = true;\n        if(!makeCoh) {\n            for(int pI = 0; pI + 1 < path.size(); pI++) {\n                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm();\n            }\n        }\n        \n        cutPath(path, makeCoh);\n        \n        if(makeCoh) {\n            initSeams = cohE;\n        }\n    }\n'''
-    new_one_point = '''    void TriMesh::onePointCut(int vI)\n    {\n        assert((vI >= 0) && (vI < V_rest.rows()));\n        bool makeCoh = true;\n        if(oneStringGridEnabled()) {\n            double bestCost = std::numeric_limits<double>::infinity();\n            std::vector<int> bestPath;\n            Eigen::MatrixXd bestGrid;\n            std::vector<int> neighbors(vNeighbor[vI].begin(), vNeighbor[vI].end());\n            for(int a = 0; a < static_cast<int>(neighbors.size()); ++a) {\n                for(int b = a + 1; b < static_cast<int>(neighbors.size()); ++b) {\n                    std::vector<int> path = {neighbors[a], vI, neighbors[b]};\n                    const auto embeddings = oneStringGridCornerEmbeddings(V.row(path[0]), V.row(path[1]), V.row(path[2]));\n                    for(const auto& gridPath : embeddings) {\n                        if(!oneStringGridActualCutFeasible(*this, path, gridPath, false)) continue;\n                        const double cost = oneStringGridSnapSDIncrease(*this, path, gridPath);\n                        if(std::isfinite(cost) && cost < bestCost) {\n                            bestCost = cost;\n                            bestPath = path;\n                            bestGrid = gridPath;\n                        }\n                    }\n                }\n            }\n            if(bestPath.empty()) {\n                throw std::runtime_error("ONESTRING_GRID_INITIAL_CUT_INFEASIBLE");\n            }\n            cutPath(bestPath, makeCoh, 1, oneStringTrialInteriorEncoding(bestGrid));\n            std::cout << "[ONESTRING-GRID] initial_cut snap_SD_cost=" << bestCost << std::endl;\n            if(makeCoh) initSeams = cohE;\n            return;\n        }\n\n        std::vector<int> path(vNeighbor[vI].begin(), vNeighbor[vI].end());\n        assert(path.size() >= 3);\n        path[1] = vI;\n        path.resize(3);\n        if(!makeCoh) {\n            for(int pI = 0; pI + 1 < path.size(); pI++) {\n                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm();\n            }\n        }\n        cutPath(path, makeCoh);\n        if(makeCoh) initSeams = cohE;\n    }\n'''
+    new_one_point = '''    void TriMesh::onePointCut(int vI)\n    {\n        assert((vI >= 0) && (vI < V_rest.rows()));\n        bool makeCoh = true;\n        if(oneStringGridEnabled()) {\n            double bestSDDec = -__DBL_MAX__;\n            std::vector<int> bestPath;\n            Eigen::MatrixXd bestGrid;\n            std::vector<int> neighbors(vNeighbor[vI].begin(), vNeighbor[vI].end());\n            for(int a = 0; a < static_cast<int>(neighbors.size()); ++a) {\n                for(int b = a + 1; b < static_cast<int>(neighbors.size()); ++b) {\n                    std::vector<int> path = {neighbors[a], vI, neighbors[b]};\n                    const auto embeddings = oneStringGridCornerEmbeddings(V.row(path[0]), V.row(path[1]), V.row(path[2]));\n                    for(const auto& gridPath : embeddings) {\n                        const double sdDec = oneStringGridActualCutSDDec(*this, path, gridPath, false);\n                        if(sdDec > bestSDDec) {\n                            bestSDDec = sdDec;\n                            bestPath = path;\n                            bestGrid = gridPath;\n                        }\n                    }\n                }\n            }\n            if(bestPath.empty() || bestSDDec <= -__DBL_MAX__ / 2.0) {\n                throw std::runtime_error("ONESTRING_GRID_INITIAL_CUT_INFEASIBLE");\n            }\n            cutPath(bestPath, makeCoh, 1, oneStringTrialInteriorEncoding(bestGrid));\n            std::cout << "[ONESTRING-GRID] initial_cut constrained_SD_dec=" << bestSDDec << std::endl;\n            if(makeCoh) initSeams = cohE;\n            return;\n        }\n\n        std::vector<int> path(vNeighbor[vI].begin(), vNeighbor[vI].end());\n        assert(path.size() >= 3);\n        path[1] = vI;\n        path.resize(3);\n        if(!makeCoh) {\n            for(int pI = 0; pI + 1 < path.size(); pI++) {\n                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm();\n            }\n        }\n        cutPath(path, makeCoh);\n        if(makeCoh) initSeams = cohE;\n    }\n'''
     text = replace_once(text, old_one_point, new_one_point, "grid initial one-point cut")
 
     old_boundary = '''                    Eigen::MatrixXd newVertPosI;\n                    const double SDDec = queryLocalEdDec_bSplit(edge, newVertPosI);\n                    \n                    const double seInc = (V_rest.row(vI) - V_rest.row(nbVI)).norm() /\n                        virtualRadius * (vertWeight[vI] + vertWeight[nbVI]) / 2.0;\n                    const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n                    if(curEwDec > maxEwDec) {\n                        maxEwDec = curEwDec;\n                        path_max[0] = vI;\n                        path_max[1] = nbVI;\n                        newVertPos_max = newVertPosI;\n                        energyChanges_max.first = -SDDec;\n                        energyChanges_max.second = seInc;\n                    }\n'''
-    new_boundary = '''                    Eigen::MatrixXd newVertPosI;\n                    const double SDDec = queryLocalEdDec_bSplit(edge, newVertPosI);\n                    const double seInc = (V_rest.row(vI) - V_rest.row(nbVI)).norm() /\n                        virtualRadius * (vertWeight[vI] + vertWeight[nbVI]) / 2.0;\n\n                    if(oneStringGridEnabled()) {\n                        std::vector<int> gridPathIDs = {vI, nbVI};\n                        const auto embeddings = oneStringGridEdgeEmbeddings(V.row(vI), V.row(nbVI));\n                        for(const auto& gridPath : embeddings) {\n                            if(!oneStringGridActualCutFeasible(*this, gridPathIDs, gridPath, true)) continue;\n                            const double snapSDInc = oneStringGridSnapSDIncrease(*this, gridPathIDs, gridPath);\n                            if(!std::isfinite(snapSDInc)) continue;\n                            const double constrainedSDDec = SDDec - snapSDInc;\n                            const double curEwDec = (1.0 - lambda_t) * constrainedSDDec - lambda_t * seInc;\n                            if(curEwDec > maxEwDec) {\n                                maxEwDec = curEwDec;\n                                path_max[0] = vI;\n                                path_max[1] = nbVI;\n                                newVertPos_max = oneStringEncodeBoundaryCut(newVertPosI, gridPath);\n                                energyChanges_max.first = -constrainedSDDec;\n                                energyChanges_max.second = seInc;\n                            }\n                        }\n                    }\n                    else {\n                        const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n                        if(curEwDec > maxEwDec) {\n                            maxEwDec = curEwDec;\n                            path_max[0] = vI;\n                            path_max[1] = nbVI;\n                            newVertPos_max = newVertPosI;\n                            energyChanges_max.first = -SDDec;\n                            energyChanges_max.second = seInc;\n                        }\n                    }\n'''
+    new_boundary = '''                    Eigen::MatrixXd newVertPosI;\n                    const double seInc = (V_rest.row(vI) - V_rest.row(nbVI)).norm() /\n                        virtualRadius * (vertWeight[vI] + vertWeight[nbVI]) / 2.0;\n\n                    if(oneStringGridEnabled()) {\n                        std::vector<int> gridPathIDs = {vI, nbVI};\n                        const auto embeddings = oneStringGridEdgeEmbeddings(V.row(vI), V.row(nbVI));\n                        for(const auto& gridPath : embeddings) {\n                            const double constrainedSDDec = oneStringGridActualCutSDDec(*this, gridPathIDs, gridPath, true);\n                            if(constrainedSDDec <= -__DBL_MAX__ / 2.0) continue;\n                            const double curEwDec = (1.0 - lambda_t) * constrainedSDDec - lambda_t * seInc;\n                            if(curEwDec > maxEwDec) {\n                                maxEwDec = curEwDec;\n                                path_max[0] = vI;\n                                path_max[1] = nbVI;\n                                newVertPos_max = oneStringTrialBoundaryEncoding(*this, gridPathIDs, gridPath);\n                                energyChanges_max.first = -constrainedSDDec;\n                                energyChanges_max.second = seInc;\n                            }\n                        }\n                    }\n                    else {\n                        const double SDDec = queryLocalEdDec_bSplit(edge, newVertPosI);\n                        const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n                        if(curEwDec > maxEwDec) {\n                            maxEwDec = curEwDec;\n                            path_max[0] = vI;\n                            path_max[1] = nbVI;\n                            newVertPos_max = newVertPosI;\n                            energyChanges_max.first = -SDDec;\n                            energyChanges_max.second = seInc;\n                        }\n                    }\n'''
     text = replace_once(text, old_boundary, new_boundary, "grid boundary split scoring")
 
     old_interior = '''                    SDDec += computeLocalEdDec_inSplit(umbrella, freeVert, path, newVertPos);\n                    //TODO: share local mesh before split, also for boundary splits\n                    \n                    const double seInc = ((V_rest.row(path[0]) - V_rest.row(path[1])).norm() * (vertWeight[path[0]] + vertWeight[path[1]]) +\n                                          (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]])) / virtualRadius / 2.0;\n                    const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n                    if(EwDec > EwDec_max) {\n                        EwDec_max = EwDec;\n                        newVertPos_max = newVertPos;\n                        path_max = path;\n                        energyChanges_max.first = -SDDec;\n                        energyChanges_max.second = seInc;\n                    }\n'''
-    new_interior = '''                    SDDec += computeLocalEdDec_inSplit(umbrella, freeVert, path, newVertPos);\n                    //TODO: share local mesh before split, also for boundary splits\n                    const double seInc = ((V_rest.row(path[0]) - V_rest.row(path[1])).norm() * (vertWeight[path[0]] + vertWeight[path[1]]) +\n                                          (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]])) / virtualRadius / 2.0;\n\n                    if(oneStringGridEnabled()) {\n                        const auto embeddings = oneStringGridCornerEmbeddings(V.row(path[0]), V.row(path[1]), V.row(path[2]));\n                        for(const auto& gridPath : embeddings) {\n                            if(!oneStringGridActualCutFeasible(*this, path, gridPath, false)) continue;\n                            const double snapSDInc = oneStringGridSnapSDIncrease(*this, path, gridPath);\n                            if(!std::isfinite(snapSDInc)) continue;\n                            const double constrainedSDDec = SDDec - snapSDInc;\n                            const double EwDec = (1.0 - lambda_t) * constrainedSDDec - lambda_t * seInc;\n                            if(EwDec > EwDec_max) {\n                                EwDec_max = EwDec;\n                                newVertPos_max = oneStringEncodeInteriorCut(newVertPos, gridPath);\n                                path_max = path;\n                                energyChanges_max.first = -constrainedSDDec;\n                                energyChanges_max.second = seInc;\n                            }\n                        }\n                    }\n                    else {\n                        const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n                        if(EwDec > EwDec_max) {\n                            EwDec_max = EwDec;\n                            newVertPos_max = newVertPos;\n                            path_max = path;\n                            energyChanges_max.first = -SDDec;\n                            energyChanges_max.second = seInc;\n                        }\n                    }\n'''
+    new_interior = '''                    const double seInc = ((V_rest.row(path[0]) - V_rest.row(path[1])).norm() * (vertWeight[path[0]] + vertWeight[path[1]]) +\n                                          (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]])) / virtualRadius / 2.0;\n\n                    if(oneStringGridEnabled()) {\n                        const auto embeddings = oneStringGridCornerEmbeddings(V.row(path[0]), V.row(path[1]), V.row(path[2]));\n                        for(const auto& gridPath : embeddings) {\n                            const double constrainedSDDec = oneStringGridActualCutSDDec(*this, path, gridPath, false);\n                            if(constrainedSDDec <= -__DBL_MAX__ / 2.0) continue;\n                            const double EwDec = (1.0 - lambda_t) * constrainedSDDec - lambda_t * seInc;\n                            if(EwDec > EwDec_max) {\n                                EwDec_max = EwDec;\n                                newVertPos_max = oneStringTrialInteriorEncoding(gridPath);\n                                path_max = path;\n                                energyChanges_max.first = -constrainedSDDec;\n                                energyChanges_max.second = seInc;\n                            }\n                        }\n                    }\n                    else {\n                        SDDec += computeLocalEdDec_inSplit(umbrella, freeVert, path, newVertPos);\n                        const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n                        if(EwDec > EwDec_max) {\n                            EwDec_max = EwDec;\n                            newVertPos_max = newVertPos;\n                            path_max = path;\n                            energyChanges_max.first = -SDDec;\n                            energyChanges_max.second = seInc;\n                        }\n                    }\n'''
     text = replace_once(text, old_interior, new_interior, "grid interior split scoring")
 
     text = replace_once(
@@ -426,7 +414,6 @@ def patch_tri_mesh(root: Path) -> bool:
         "apply and lock interior grid target",
     )
 
-    # Verify the real post-cut topology before returning it to OptCuts.
     text = replace_once(
         text,
         '''        return cuts_made;\n    }\n    \n    void TriMesh::computeSeamScore''',
@@ -455,7 +442,7 @@ def patch_tri_mesh(root: Path) -> bool:
     text = replace_once(
         text,
         '''    void TriMesh::computeFeatures(bool multiComp, bool resetFixedV)\n    {\n''',
-        '''    void TriMesh::computeFeatures(bool multiComp, bool resetFixedV)\n    {\n        static bool oneStringGridPrinted = false;\n        if(oneStringGridEnabled() && !oneStringGridPrinted) {\n            std::cout << "[ONESTRING-GRID] native_candidate_search enabled version=2 h=" << oneStringGridH()\n                      << " angle_rad=" << oneStringGridAngle() << std::endl;\n            oneStringGridPrinted = true;\n        }\n''',
+        '''    void TriMesh::computeFeatures(bool multiComp, bool resetFixedV)\n    {\n        static bool oneStringGridPrinted = false;\n        if(oneStringGridEnabled() && !oneStringGridPrinted) {\n            std::cout << "[ONESTRING-GRID] native_candidate_search enabled version=3 h=" << oneStringGridH()\n                      << " angle_rad=" << oneStringGridAngle() << std::endl;\n            oneStringGridPrinted = true;\n        }\n''',
         "native grid marker",
     )
 
@@ -463,12 +450,12 @@ def patch_tri_mesh(root: Path) -> bool:
     if not backup.exists():
         backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     path.write_text(text, encoding="utf-8")
-    print(f"Applied OneString native Grid-OptCuts V2 patch: {path}")
+    print(f"Applied OneString native Grid-OptCuts V3 patch: {path}")
     return True
 
 
 def apply_native_grid_patch(root: Path) -> bool:
-    _restore_old_v1_if_needed(root)
+    _restore_old_native_if_needed(root)
     changed_h = patch_tri_mesh_header(root)
     changed_c = patch_tri_mesh(root)
     return changed_h or changed_c
