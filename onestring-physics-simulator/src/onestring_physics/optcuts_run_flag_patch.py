@@ -1,10 +1,4 @@
-"""Persist the active OptCuts mode across stages that replace mesh metrics.
-
-Several pipeline stages construct a fresh QuadMesh with a new metrics dict.  A
-later guard therefore must not infer OptCuts mode only from mesh.metrics.  This
-small wrapper records the selected parameterization mode on the active pipeline
-module at S->Omega dispatch time.
-"""
+"""Persist the active OptCuts mode across stages that replace mesh metrics."""
 from __future__ import annotations
 
 from typing import Any
@@ -16,12 +10,16 @@ def install_optcuts_run_flag_patch(pipeline: Any) -> None:
     base_builder = pipeline._build_surface_parameterization
 
     def build_surface_parameterization_with_run_flag(surface: Any, target: Any, grid: Any, params: Any):
-        active = str(getattr(params, "omega_parameterization_mode", "")) == "optcuts"
+        mode = str(getattr(params, "omega_parameterization_mode", ""))
+        active = mode in {"optcuts", "optcuts_grid"}
+        grid_active = mode == "optcuts_grid"
         pipeline._onestring_optcuts_active_run = bool(active)
+        pipeline._onestring_optcuts_grid_active_run = bool(grid_active)
         original_module = getattr(pipeline, "_original", None)
         if original_module is not None:
             try:
                 original_module._onestring_optcuts_active_run = bool(active)
+                original_module._onestring_optcuts_grid_active_run = bool(grid_active)
             except Exception:
                 pass
         return base_builder(surface, target, grid, params)
