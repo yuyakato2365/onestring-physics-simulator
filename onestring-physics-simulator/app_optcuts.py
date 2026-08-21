@@ -49,6 +49,9 @@ from onestring_physics.optcuts_grid_fusion_v2 import (  # noqa: E402
     install_strict_grid_seam_topology_patch,
     install_strict_optcuts_grid_fusion,
 )
+from onestring_physics.optcuts_grid_optimizer_v2 import (  # noqa: E402
+    install_strict_optcuts_grid_optimizer,
+)
 from onestring_physics.optcuts_k3d_validity_patch import (  # noqa: E402
     install_optcuts_k3d_validity_patch,
 )
@@ -136,9 +139,9 @@ def _install_optcuts_selector() -> None:
             )
             grid_opt_iters = st.number_input(
                 "Grid-constrained UV optimization iterations",
-                min_value=20,
+                min_value=40,
                 max_value=2000,
-                value=max(20, int(os.environ.get("ONESTRING_OPTCUTS_GRID_OPT_ITERS", "180"))),
+                value=max(40, int(os.environ.get("ONESTRING_OPTCUTS_GRID_OPT_ITERS", "240"))),
                 step=20,
                 key="onestring_optcuts_grid_opt_iters",
             )
@@ -179,9 +182,11 @@ def _install_post_simple_split_grid_m2d_hook() -> None:
 
 # Order matters.
 # First replace the earlier post-hoc axis behavior and hard-target builder with
-# the strict one-physical-seam/one-line model.  Then install the official OptCuts
+# the strict one-physical-seam/one-line model, and replace the one-jump UV solve
+# with an orientation-safe continuation solve.  Then install the official OptCuts
 # proposal backend and the constrained reparameterization wrapper.
 install_strict_optcuts_grid_fusion()
+install_strict_optcuts_grid_optimizer()
 install_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
 install_optcuts_grid_constrained_parameterization_patch(pipeline)
