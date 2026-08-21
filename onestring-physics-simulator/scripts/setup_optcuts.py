@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Clone, patch, build, and verify OptCuts for the OneString bridge."""
+"""Clone, apply the canonical Grid-OptCuts V4 patch, build, and smoke-test it."""
 from __future__ import annotations
 
 import argparse
@@ -7,14 +7,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
-from patch_optcuts_native_grid_v4_final import apply_native_grid_patch
-from patch_optcuts_native_grid_v4_perf import apply_native_grid_perf_patch
-from patch_optcuts_native_grid_v4_diagnostics import apply_native_grid_diagnostics
-from patch_optcuts_native_grid_v4_trial_relax import apply_trial_relax_patch
-from patch_optcuts_native_grid_v4_bijectivity import (
-    RUNTIME_MARKER as GRID_BIJECTIVITY_RUNTIME_MARKER,
-    apply_grid_bijectivity_patch,
+from patch_optcuts_grid_v4 import (
+    GRID_BIJECTIVITY_RUNTIME_MARKER,
+    NATIVE_RUNTIME_MARKER,
+    apply_grid_optcuts_v4,
 )
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
@@ -35,14 +33,92 @@ def executable_candidates(root: Path) -> list[Path]:
     ]
 
 
-def _verify_binary_marker(executable: Path, marker: str) -> None:
+def _verify_binary_contains(executable: Path, markers: tuple[str, ...]) -> None:
     data = executable.read_bytes()
-    if marker.encode("utf-8") not in data:
+    missing = [m for m in markers if m.encode("utf-8") not in data]
+    if missing:
         raise SystemExit(
-            "OptCuts build completed, but the required native Grid-OptCuts marker was not compiled into "
-            f"{executable}: {marker!r}. Refusing to report setup success."
+            "OptCuts build completed but required Grid-OptCuts strings were not compiled into "
+            f"{executable}: missing={missing}. Refusing setup success."
         )
-    print(f"Verified compiled Grid-OptCuts marker: {marker}")
+    print("Verified compiled Grid-OptCuts marker strings.")
+
+
+def _write_tetra_obj(path: Path) -> None:
+    path.write_text(
+        """v 1 1 1\nv -1 -1 1\nv -1 1 -1\nv 1 -1 -1\n"
+        "f 1 3 2\nf 1 2 4\nf 1 4 3\nf 2 3 4\n",
+        encoding="utf-8",
+    )
+
+
+def _runtime_smoke_test(executable: Path, root: Path) -> None:
+    """Run the same native Grid mode and require *runtime* contract markers."""
+    with tempfile.TemporaryDirectory(prefix="onestring_grid_optcuts_setup_smoke_") as tmp:
+        obj = Path(tmp) / "tetra.obj"
+        _write_tetra_obj(obj)
+        env = os.environ.copy()
+        env.update({
+            "ONESTRING_OPTCUTS_GRID_NATIVE": "1",
+            "ONESTRING_OPTCUTS_GRID_H": "0.25",
+            "ONESTRING_OPTCUTS_GRID_ANGLE_RAD": "0",
+            "ONESTRING_OPTCUTS_GRID_PHASE_U": "0",
+            "ONESTRING_OPTCUTS_GRID_PHASE_V": "0",
+            "ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS": "2",
+        })
+        command = [
+            str(executable),
+            "100",             # headless
+            str(obj),
+            "0.999",           # lambda
+            "1",               # test id
+            "1",               # OptCuts method
+            "100",             # loose distortion bound -> quick smoke
+            "1",               # bijectivity scaffold requested
+            "0",               # one-point/two-edge initial cut
+            "onestring_setup_smoke",
+        ]
+        print("+ runtime smoke:", " ".join(command))
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(root),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=45.0,
+                check=False,
+            )
+            combined = completed.stdout + "\n" + completed.stderr
+            if completed.returncode != 0:
+                tail = "\n".join(combined.splitlines()[-80:])
+                raise SystemExit(
+                    f"Grid-OptCuts runtime smoke exited with code {completed.returncode}.\n{tail}"
+                )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            combined = stdout + "\n" + stderr
+            # Marker verification is the purpose of this smoke.  A timeout after
+            # both markers is acceptable because old OptCuts can spend time in
+            # final reporting even on tiny meshes.
+            if NATIVE_RUNTIME_MARKER not in combined or GRID_BIJECTIVITY_RUNTIME_MARKER not in combined:
+                tail = "\n".join(combined.splitlines()[-80:])
+                raise SystemExit(
+                    "Grid-OptCuts runtime smoke timed out before proving the runtime contract.\n" + tail
+                )
+
+        missing = [
+            marker for marker in (NATIVE_RUNTIME_MARKER, GRID_BIJECTIVITY_RUNTIME_MARKER)
+            if marker not in combined
+        ]
+        if missing:
+            marker_lines = [line for line in combined.splitlines() if "[ONESTRING-GRID]" in line]
+            raise SystemExit(
+                "Grid-OptCuts runtime smoke failed: required code paths did not execute. "
+                f"missing={missing}; markers_seen={marker_lines[-12:]}"
+            )
+        print("Verified Grid-OptCuts runtime contract: candidate search + global bijectivity scaffold.")
 
 
 def patch_nested_cmake_policy(root: Path) -> bool:
@@ -53,7 +129,6 @@ def patch_nested_cmake_policy(root: Path) -> bool:
     text = path.read_text(encoding="utf-8")
     marker = 'CMAKE_POLICY_VERSION_MINIMUM:STRING=3.5'
     if marker in text:
-        print("OptCuts nested CMake policy compatibility patch already present.")
         return False
     needle = (
         'execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}"\n'
@@ -67,58 +142,43 @@ def patch_nested_cmake_policy(root: Path) -> bool:
         '                        .'
     )
     if needle not in text:
-        raise SystemExit(
-            "OptCuts DownloadProject.cmake has an unexpected layout; refusing to patch it automatically."
-        )
+        raise SystemExit("Unexpected OptCuts DownloadProject.cmake layout")
     backup = path.with_suffix(path.suffix + ".onestring-backup")
     if not backup.exists():
         backup.write_text(text, encoding="utf-8")
     path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
-    print(f"Applied local OptCuts nested CMake compatibility patch: {path}")
     return True
 
 
 def patch_legacy_glfw_policy(root: Path) -> bool:
     path = root / "ext" / "libigl" / "external" / "glfw" / "CMakeLists.txt"
     if not path.is_file():
-        print(f"GLFW compatibility patch skipped: {path} was not found")
         return False
     text = path.read_text(encoding="utf-8")
     old = "cmake_policy(SET CMP0042 OLD)"
     new = "cmake_policy(SET CMP0042 NEW) # OneString modern-CMake compatibility"
-    if new in text:
-        print("OptCuts GLFW CMP0042 compatibility patch already present.")
-        return False
-    if old not in text:
-        print("OptCuts GLFW CMP0042 OLD policy was not found; no patch needed.")
+    if new in text or old not in text:
         return False
     backup = path.with_suffix(path.suffix + ".onestring-backup")
     if not backup.exists():
         backup.write_text(text, encoding="utf-8")
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
-    print(f"Applied local OptCuts GLFW CMP0042 compatibility patch: {path}")
     return True
 
 
 def patch_legacy_eigen_transpositions(root: Path) -> bool:
     path = root / "ext" / "libigl" / "external" / "eigen" / "Eigen" / "src" / "Core" / "Transpositions.h"
     if not path.is_file():
-        print(f"Eigen compatibility patch skipped: {path} was not found")
         return False
     text = path.read_text(encoding="utf-8")
     marker = "= trt; // OneString modern-Eigen compatibility"
-    if marker in text:
-        print("OptCuts Eigen Transpositions compatibility patch already present.")
-        return False
     old = "= trt.derived();"
-    if old not in text:
-        print("OptCuts Eigen trt.derived() assignment was not found; no patch needed.")
+    if marker in text or old not in text:
         return False
     backup = path.with_suffix(path.suffix + ".onestring-backup")
     if not backup.exists():
         backup.write_text(text, encoding="utf-8")
-    path.write_text(text.replace(old, "= trt; // OneString modern-Eigen compatibility"), encoding="utf-8")
-    print(f"Applied local OptCuts Eigen compatibility patch: {path}")
+    path.write_text(text.replace(old, marker), encoding="utf-8")
     return True
 
 
@@ -127,10 +187,9 @@ def main() -> int:
     parser.add_argument(
         "--root", type=Path,
         default=Path(__file__).resolve().parents[1] / "third_party" / "OptCuts",
-        help="Destination for the official OptCuts checkout.",
     )
     parser.add_argument("--jobs", type=int, default=max(1, min(12, os.cpu_count() or 4)))
-    parser.add_argument("--no-build", action="store_true", help="Patch only; do not invoke CMake.")
+    parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
 
@@ -141,18 +200,14 @@ def main() -> int:
         run(["git", "clone", OFFICIAL_REPOSITORY, str(root)])
     elif not (root / ".git").is_dir():
         raise SystemExit(f"{root} exists but is not a Git checkout")
-    else:
-        print(f"Using existing OptCuts checkout: {root}")
-        print("No automatic git pull is performed; local upstream edits are not overwritten.")
 
     patch_nested_cmake_policy(root)
     patch_legacy_glfw_policy(root)
     patch_legacy_eigen_transpositions(root)
-    apply_native_grid_patch(root)
-    apply_native_grid_perf_patch(root)
-    apply_native_grid_diagnostics(root)
-    apply_trial_relax_patch(root)
-    apply_grid_bijectivity_patch(root)
+
+    # Single canonical Grid-OptCuts patch entrypoint.  Do not add individual V4
+    # fragment calls here; patch_optcuts_grid_v4.py owns that complete contract.
+    apply_grid_optcuts_v4(root)
 
     if args.no_build:
         return 0
@@ -171,20 +226,21 @@ def main() -> int:
         "cmake", "--build", str(build), "--config", "Release", "--parallel", str(max(1, args.jobs)),
     ])
 
-    for candidate in executable_candidates(root):
-        if candidate.is_file():
-            _verify_binary_marker(candidate, GRID_BIJECTIVITY_RUNTIME_MARKER)
-            print("\nOptCuts executable:")
-            print(candidate)
-            print("\nNative Grid-OptCuts V4 support is compiled in and verified.")
-            if os.name == "nt":
-                print(f'$env:ONESTRING_OPTCUTS_EXECUTABLE = "{candidate}"')
-            else:
-                print(f'export ONESTRING_OPTCUTS_EXECUTABLE="{candidate}"')
-            return 0
+    executable = next((p for p in executable_candidates(root) if p.is_file()), None)
+    if executable is None:
+        raise SystemExit("Build finished, but OptCuts_bin was not found")
 
-    print("Build finished, but OptCuts_bin was not found in the expected locations.")
-    return 2
+    _verify_binary_contains(executable, (NATIVE_RUNTIME_MARKER, GRID_BIJECTIVITY_RUNTIME_MARKER))
+    _runtime_smoke_test(executable, root)
+
+    print("\nOptCuts executable:")
+    print(executable)
+    print("\nNative Grid-OptCuts V4 consolidated setup is compiled and runtime-verified.")
+    if os.name == "nt":
+        print(f'$env:ONESTRING_OPTCUTS_EXECUTABLE = "{executable}"')
+    else:
+        print(f'export ONESTRING_OPTCUTS_EXECUTABLE="{executable}"')
+    return 0
 
 
 if __name__ == "__main__":
