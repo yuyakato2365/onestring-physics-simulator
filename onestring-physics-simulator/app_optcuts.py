@@ -4,10 +4,8 @@
     Authors' OptCuts backend, unchanged.
 
 ``optcuts_grid``
-    OneString native Grid-OptCuts V3. The C++ OptCuts split candidate search
-    itself is restricted to the fixed fabrication lattice. No Python seam
-    snapping, global integer embedding, or continuation reparameterization is
-    installed.
+    OneString native Grid-OptCuts V4. OptCuts' own split search is restricted to
+    the fixed fabrication lattice. No completed free seam is snapped afterward.
 """
 from __future__ import annotations
 
@@ -70,10 +68,10 @@ def _install_optcuts_selector() -> None:
             )
         else:
             st.caption(
-                "Native Grid-OptCuts V3: OptCuts evaluates only split candidates realizable on the "
-                "fixed Tile-size lattice. Each candidate is actually trial-cut at its Grid coordinates "
-                "and scored by the resulting Symmetric Dirichlet decrease; accepted seam/junction "
-                "vertices remain Grid-locked."
+                "Native Grid-OptCuts V4: physical split candidates are generated and scored inside "
+                "OptCuts only through the fixed Tile-size H/V lattice. Interior cuts use two distinct "
+                "Grid boundary sides (A-B-C / A-D-C), not coincident seam copies. Each candidate is "
+                "actually trial-cut and scored by its resulting Symmetric Dirichlet decrease."
             )
 
         executable = st.text_input(
@@ -148,7 +146,7 @@ def _install_optcuts_selector() -> None:
                 key="onestring_optcuts_grid_phase_v",
             )
             max_snap = st.number_input(
-                "Max accepted candidate snap [Grid units]",
+                "Max candidate displacement [Grid units]",
                 min_value=0.5,
                 max_value=8.0,
                 value=max(0.5, _safe_float_env("ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS", 2.0)),
@@ -156,15 +154,16 @@ def _install_optcuts_selector() -> None:
                 key="onestring_optcuts_grid_max_snap",
             )
             st.caption(
-                "Native V3 is split-only: unconstrained OptCuts merge is disabled. Candidate cut "
-                "topology still follows existing input surface-mesh edges; arbitrary Grid-line / "
-                "surface-triangle intersection insertion is a later resolution extension."
+                "V4 is split-only: unconstrained OptCuts merge is disabled. The physical cut topology "
+                "still follows existing input surface-mesh edges; arbitrary Grid-line / surface-triangle "
+                "intersection insertion is a later topology-resolution extension."
             )
             os.environ["ONESTRING_OPTCUTS_GRID_ANGLE_DEGREES"] = str(float(angle))
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_U"] = str(float(phase_u))
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = str(float(phase_v))
             os.environ["ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS"] = str(float(max_snap))
-            # Coincident fabrication-seam copies are incompatible with the old OptCuts air-mesh scaffold.
+            # Native Grid mode uses exact trial-cut/global-overlap validation instead
+            # of the original unconstrained free-boundary air scaffold.
             os.environ["ONESTRING_OPTCUTS_USE_BIJECTIVITY"] = "0"
             os.environ["ONESTRING_OPTCUTS_INITIAL_CUT_OPTION"] = "0"
 
