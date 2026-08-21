@@ -1,7 +1,7 @@
 """Native Grid-OptCuts subprocess bridge.
 
 This path does not use the official OneString bridge's UV area normalization:
-that would change the fixed fabrication spacing h after OptCuts exits.  Native
+that would change the fixed fabrication spacing h after OptCuts exits. Native
 Grid-OptCuts imports raw C++ UVs, applies at most a rigid coordinate-frame
 rotation/reflection that preserves the lattice exactly, and never rescales it.
 """
@@ -37,6 +37,9 @@ from .optcuts_backend import (
     resolve_optcuts_executable,
 )
 
+NATIVE_GRID_VERSION = 2
+NATIVE_GRID_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=2"
+
 
 @contextmanager
 def _temporary_env(values: dict[str, str]) -> Iterator[None]:
@@ -53,7 +56,6 @@ def _temporary_env(values: dict[str, str]) -> Iterator[None]:
 
 
 def _to_fabrication_frame(uv: np.ndarray, angle_rad: float) -> np.ndarray:
-    """Rigidly express world-UV coordinates in the configured grid (u,v) frame."""
     pts = np.asarray(uv, dtype=float)
     c, s = math.cos(angle_rad), math.sin(angle_rad)
     u = np.asarray([c, s], dtype=float)
@@ -127,17 +129,20 @@ def run_native_grid_optcuts(
             raise OptCutsError(
                 f"Native Grid-OptCuts exited with code {completed.returncode}.\nLast output:\n{tail}"
             )
-        if "[ONESTRING-GRID] native_candidate_search enabled" not in combined:
+        if NATIVE_GRID_MARKER not in combined:
+            marker_lines = [line for line in combined.splitlines() if "[ONESTRING-GRID]" in line]
+            found = marker_lines[-5:] if marker_lines else ["(no Grid-OptCuts marker found)"]
             raise OptCutsError(
-                "OPTCUTS_GRID_NATIVE_BINARY_NOT_PATCHED: selected OptCuts executable has no "
-                "native Grid-OptCuts marker. Run `python scripts/setup_optcuts.py` to patch and rebuild it."
+                "OPTCUTS_GRID_NATIVE_BINARY_VERSION_MISMATCH: optcuts_grid requires native Grid-OptCuts "
+                f"V{NATIVE_GRID_VERSION} with persistent junction locks and trial-cut feasibility checks. "
+                "Run `python scripts/setup_optcuts.py` to repatch and rebuild third_party/OptCuts. "
+                f"Markers seen: {found}"
             )
 
         result_obj = _find_output_obj(root, tag, started)
         xyz, faces, raw_uv, uv_faces = _read_obj_with_uv(result_obj)
 
-        # Convert to the grid's own orthogonal frame. This is rigid: SD and all
-        # seam/grid incidences are unchanged, while M2D can use an ordinary x/y lattice.
+        # Rigidly express the result in the fabrication grid frame. No scaling.
         uv = _to_fabrication_frame(raw_uv, angle)
         effective_phase_u = float(phase_u)
         effective_phase_v = float(phase_v)
@@ -150,7 +155,7 @@ def run_native_grid_optcuts(
 
         reflected = False
         if _signed_area(uv[loops[0]]) < 0.0:
-            # Reflecting fabrication-v preserves the exact axis-aligned h-lattice.
+            # Reflection across fabrication-u preserves the same axis-aligned h-lattice.
             uv[:, 1] *= -1.0
             effective_phase_v *= -1.0
             reflected = True
@@ -161,10 +166,15 @@ def run_native_grid_optcuts(
                 "OPTCUTS_GRID_NATIVE_FLIPPED_UV: patched OptCuts returned flipped triangles; "
                 f"count={differential['uv_triangle_flip_count']}"
             )
+        if int(differential.get("uv_degenerate_triangle_count", 0)) != 0:
+            raise OptCutsOutputError(
+                "OPTCUTS_GRID_NATIVE_DEGENERATE_UV: patched OptCuts returned degenerate triangles; "
+                f"count={differential['uv_degenerate_triangle_count']}"
+            )
 
         metrics: dict[str, object] = {
             "parameterization_backend_name": "optcuts_native_grid_constrained",
-            "parameterization_backend_version": "official_OptCuts_plus_OneString_native_grid_v1",
+            "parameterization_backend_version": f"official_OptCuts_plus_OneString_native_grid_v{NATIVE_GRID_VERSION}",
             "parameterization_method": "optcuts_grid",
             "omega_parameterization_mode": "optcuts_grid",
             "flattening_backend": "optcuts_native_grid_cpp",
@@ -181,6 +191,9 @@ def run_native_grid_optcuts(
             "optcuts_runtime_seconds": float(time.time() - started),
             "optcuts_stdout_tail": "\n".join(completed.stdout.splitlines()[-80:]),
             "optcuts_stderr_tail": "\n".join(completed.stderr.splitlines()[-80:]),
+            "optcuts_grid_native_version": NATIVE_GRID_VERSION,
+            "optcuts_grid_junction_locking": True,
+            "optcuts_grid_trial_actual_cut_feasibility": True,
             "optcuts_uv_area_normalization_scale": 1.0,
             "optcuts_uv_post_scale_applied": False,
             "optcuts_uv_fabrication_frame_rotation_degrees": -float(angle_degrees),
@@ -206,11 +219,11 @@ def run_native_grid_optcuts(
             "optcuts_grid_bijectivity_scaffold_enabled": False,
             "optcuts_grid_constraint_model": (
                 "OptCuts split candidate search restricted to fixed-h orthogonal lattice embeddings "
-                "(H, V, H-V, V-H); selected seam vertices remain hard-fixed on the lattice"
+                "(H, V, H-V, V-H); accepted seam/junction vertices are persistent lattice locks"
             ),
             "optcuts_grid_topology_resolution_limit": (
                 "candidate cuts follow existing source triangle-mesh edges; arbitrary "
-                "grid-line/triangle intersection insertion is not implemented in native V1"
+                "grid-line/triangle intersection insertion is not implemented in native V2"
             ),
             **differential,
         }
