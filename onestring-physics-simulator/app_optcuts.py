@@ -4,9 +4,10 @@
     Authors' OptCuts backend, unchanged.
 
 ``optcuts_grid``
-    OneString native Grid-OptCuts. The C++ OptCuts split candidate search itself
-    is restricted to the fixed fabrication lattice. No Python seam snapping,
-    global integer embedding, or continuation reparameterization is installed.
+    OneString native Grid-OptCuts V3. The C++ OptCuts split candidate search
+    itself is restricted to the fixed fabrication lattice. No Python seam
+    snapping, global integer embedding, or continuation reparameterization is
+    installed.
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ from onestring_physics.fast_assembly_animation_patch import install_fast_assembl
 from onestring_physics.optcuts_pipeline_patch import install_optcuts_pipeline_patch  # noqa: E402
 from onestring_physics.optcuts_run_flag_patch import install_optcuts_run_flag_patch  # noqa: E402
 from onestring_physics.optcuts_grid_native_pipeline_patch import install_native_grid_optcuts_pipeline_patch  # noqa: E402
+from onestring_physics.optcuts_grid_native_lift_patch import install_native_grid_optcuts_lift_patch  # noqa: E402
 from onestring_physics.optcuts_grid_constrained_m2d_patch import install_optcuts_grid_constrained_m2d_patch  # noqa: E402
 from onestring_physics.optcuts_grid_consistency_patch import install_optcuts_grid_consistency_patch  # noqa: E402
 from onestring_physics.optcuts_k3d_validity_patch import install_optcuts_k3d_validity_patch  # noqa: E402
@@ -68,9 +70,10 @@ def _install_optcuts_selector() -> None:
             )
         else:
             st.caption(
-                "Native Grid-OptCuts: OptCuts evaluates only split candidates that can be embedded "
-                "as H/V or one-bend H-V/V-H segments on the fixed Tile-size lattice. Selected seam "
-                "vertices are fixed on that lattice during subsequent OptCuts optimization."
+                "Native Grid-OptCuts V3: OptCuts evaluates only split candidates realizable on the "
+                "fixed Tile-size lattice. Each candidate is actually trial-cut at its Grid coordinates "
+                "and scored by the resulting Symmetric Dirichlet decrease; accepted seam/junction "
+                "vertices remain Grid-locked."
             )
 
         executable = st.text_input(
@@ -145,7 +148,7 @@ def _install_optcuts_selector() -> None:
                 key="onestring_optcuts_grid_phase_v",
             )
             max_snap = st.number_input(
-                "Max candidate snap [Grid units]",
+                "Max accepted candidate snap [Grid units]",
                 min_value=0.5,
                 max_value=8.0,
                 value=max(0.5, _safe_float_env("ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS", 2.0)),
@@ -153,15 +156,15 @@ def _install_optcuts_selector() -> None:
                 key="onestring_optcuts_grid_max_snap",
             )
             st.caption(
-                "Native V1 is split-only: unconstrained seam merge is disabled. "
-                "Candidate cut topology still follows existing input triangle-mesh edges; "
-                "arbitrary Grid-line/triangle intersection insertion is the next extension."
+                "Native V3 is split-only: unconstrained OptCuts merge is disabled. Candidate cut "
+                "topology still follows existing input surface-mesh edges; arbitrary Grid-line / "
+                "surface-triangle intersection insertion is a later resolution extension."
             )
             os.environ["ONESTRING_OPTCUTS_GRID_ANGLE_DEGREES"] = str(float(angle))
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_U"] = str(float(phase_u))
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = str(float(phase_v))
             os.environ["ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS"] = str(float(max_snap))
-            # Native V1 uses exact coincident grid seam copies; scaffold mode is intentionally disabled.
+            # Coincident fabrication-seam copies are incompatible with the old OptCuts air-mesh scaffold.
             os.environ["ONESTRING_OPTCUTS_USE_BIJECTIVITY"] = "0"
             os.environ["ONESTRING_OPTCUTS_INITIAL_CUT_OPTION"] = "0"
 
@@ -194,10 +197,11 @@ def _install_grid_m2d_after_simple_split() -> None:
     simple_split_module._onestring_grid_constrained_optcuts_hook_installed = True
 
 
-# Official OptCuts first, then native Grid-OptCuts intercepts only optcuts_grid.
+# Official OptCuts first; native Grid-OptCuts intercepts only optcuts_grid.
 install_optcuts_pipeline_patch(pipeline)
 install_native_grid_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
+install_native_grid_optcuts_lift_patch(pipeline)
 install_fast_assembly_animation_patch()
 install_optcuts_k3d_validity_patch(pipeline)
 install_optcuts_k3d_preflight_patch(pipeline)
