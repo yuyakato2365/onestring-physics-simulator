@@ -1,9 +1,13 @@
 """Robust M2D topology cut for snapped OptCuts grid seams.
 
 Unlike a component-only cutter, this duplicates a grid vertex separately for
-connected sectors of incident faces around that vertex.  Therefore open slits
+connected sectors of incident faces around that vertex. Therefore open slits
 and branched seam graphs are represented correctly even when cutting the seam
 does not split the whole mesh into multiple connected components.
+
+Important: cells removed by the original Omega clipping are NOT restored here.
+Restoring a quad that crosses an OptCuts UV seam can make two of its corners map
+to the same 3D point, yielding T3D_FAILED_INVALID_TOP/duplicate_top_vertex.
 """
 from __future__ import annotations
 
@@ -14,7 +18,6 @@ import numpy as np
 
 from .optcuts_grid_seam_patch import (
     _grid_graph,
-    _heal_narrow_seam_strip,
     _make_quadmesh,
     _nearest_used_vertex,
     _snap_segment_path,
@@ -85,8 +88,6 @@ def _duplicate_vertices_along_cut_edges(
             continue
         local = {fi: set() for fi in face_ids}
         face_set = set(face_ids)
-        # Around this vertex, incident faces stay in the same sector only when
-        # they share a non-cut edge containing the vertex.
         for edge, touching in edge_faces.items():
             if int(vertex) not in edge or edge in cut_edges:
                 continue
@@ -123,6 +124,45 @@ def _duplicate_vertices_along_cut_edges(
     return verts, out, int(duplicate_count)
 
 
+def _mapped_quad_is_valid(
+    pipeline: Any,
+    points_2d: np.ndarray,
+    parameterization: Any,
+    tile_scale: float,
+) -> bool:
+    """Reject a quad that would become a duplicate/degenerate top in M3D/K3D."""
+    mapped: list[np.ndarray] = []
+    inverse = getattr(pipeline, "inverse_map_uv_to_surface", None)
+    if inverse is None:
+        return True
+    try:
+        for point in np.asarray(points_2d, dtype=float):
+            value = inverse(np.asarray(point[:2], dtype=float), parameterization)
+            xyz = np.asarray(value[0] if isinstance(value, tuple) else value, dtype=float).reshape(-1)[:3]
+            if len(xyz) != 3 or not np.all(np.isfinite(xyz)):
+                return False
+            mapped.append(xyz)
+    except Exception:
+        return False
+    pts = np.asarray(mapped, dtype=float)
+    if pts.shape != (4, 3):
+        return False
+    scale = max(float(np.max(np.ptp(pts, axis=0))), float(tile_scale), 1e-9)
+    tol = max(1e-9, 1e-7 * scale)
+    pair_min = min(
+        float(np.linalg.norm(pts[i] - pts[j]))
+        for i in range(4)
+        for j in range(i + 1, 4)
+    )
+    if pair_min <= tol:
+        return False
+    area = 0.5 * (
+        float(np.linalg.norm(np.cross(pts[1] - pts[0], pts[2] - pts[0])))
+        + float(np.linalg.norm(np.cross(pts[2] - pts[0], pts[3] - pts[0])))
+    )
+    return bool(np.isfinite(area) and area > max(1e-14, tol * tol))
+
+
 def install_optcuts_grid_seam_topology_patch(pipeline: Any) -> None:
     """Install after Simple Split; affect only domains carrying OptCuts seam data."""
     if getattr(pipeline, "_onestring_optcuts_grid_seam_topology_patch_installed", False):
@@ -156,9 +196,12 @@ def install_optcuts_grid_seam_topology_patch(pipeline: Any) -> None:
             print("[OPTCUTS-SEAM] no internal seam detected; M2D unchanged")
             return mesh
 
-        healed_faces, restored = _heal_narrow_seam_strip(mesh, segments, grid)
+        # Do not heal/restore cells removed by Omega clipping. A restored quad may
+        # straddle two UV charts and map two corners to the same 3D point.
         vertices = np.asarray(mesh.vertices, dtype=float).copy()
-        adjacency, _grid_edges = _grid_graph(vertices, healed_faces)
+        working_faces = np.asarray(mesh.faces, dtype=int).copy()
+        restored = 0
+        adjacency, _grid_edges = _grid_graph(vertices, working_faces)
         used = np.asarray(sorted(adjacency), dtype=int)
         if len(used) == 0:
             metrics.update({
@@ -191,7 +234,6 @@ def install_optcuts_grid_seam_topology_patch(pipeline: Any) -> None:
                 tile_scale,
             )
             if len(path) < 2:
-                # Fine surface edges commonly collapse onto one grid vertex.
                 collapsed_or_failed += 1
                 continue
             snapped_paths.append(path)
@@ -202,15 +244,34 @@ def install_optcuts_grid_seam_topology_patch(pipeline: Any) -> None:
             metrics.update({
                 "optcuts_grid_seam_applied": False,
                 "optcuts_grid_seam_reason": "all_source_edges_collapsed_during_grid_snap",
-                "optcuts_grid_seam_restored_face_count": int(restored),
+                "optcuts_grid_seam_restored_face_count": 0,
             })
             mesh.metrics.update(metrics)
             print("[OPTCUTS-SEAM] all seam segments collapsed during grid snap")
             return mesh
 
         cut_vertices, cut_faces, duplicated = _duplicate_vertices_along_cut_edges(
-            vertices, healed_faces, cut_edges
+            vertices, working_faces, cut_edges
         )
+
+        # Guard against exactly the invalid topology seen at T3D: evaluate each
+        # candidate M2D quad through the same inverse map before K2D/T3D.
+        parameterization = getattr(domain, "_optcuts_parameterization", None)
+        invalid_face_ids: list[int] = []
+        if parameterization is not None and len(cut_faces):
+            for fi, face in enumerate(cut_faces):
+                if not _mapped_quad_is_valid(
+                    pipeline,
+                    cut_vertices[np.asarray(face, dtype=int)],
+                    parameterization,
+                    tile_scale,
+                ):
+                    invalid_face_ids.append(int(fi))
+            if invalid_face_ids:
+                keep = np.ones(len(cut_faces), dtype=bool)
+                keep[np.asarray(invalid_face_ids, dtype=int)] = False
+                cut_faces = cut_faces[keep]
+
         components = _face_components(cut_faces)
         panel_vertices = [np.unique(cut_faces[c].reshape(-1)) for c in components]
         metrics.update({
@@ -218,7 +279,9 @@ def install_optcuts_grid_seam_topology_patch(pipeline: Any) -> None:
             "optcuts_grid_seam_model": (
                 "connected grid-edge snap + zero-width local face-sector vertex duplication"
             ),
-            "optcuts_grid_seam_restored_face_count": int(restored),
+            "optcuts_grid_seam_restored_face_count": 0,
+            "optcuts_grid_seam_restoration_disabled_reason": "avoid_uv_chart_crossing_quads",
+            "optcuts_grid_seam_invalid_mapped_quad_count": int(len(invalid_face_ids)),
             "optcuts_grid_seam_snapped_path_count": int(len(snapped_paths)),
             "optcuts_grid_seam_cut_edge_count": int(len(cut_edges)),
             "optcuts_grid_seam_collapsed_or_failed_source_edges": int(collapsed_or_failed),
@@ -229,11 +292,9 @@ def install_optcuts_grid_seam_topology_patch(pipeline: Any) -> None:
             "split_panel_geometry_separated": bool(duplicated > 0),
             "split_panel_count": int(len(components)),
             "split_panel_gap": 0.0,
-            "split_panel_layout_model": "OptCuts zero-width seam; no seam-strip cell deletion",
+            "split_panel_layout_model": "OptCuts zero-width seam; no seam-strip cell restoration",
         })
         out = _make_quadmesh(pipeline, mesh, cut_vertices, cut_faces, metrics)
-        # These attributes let the existing lift/K2D compatibility wrappers use
-        # the true zero-gap UV topology without reintroducing a visible gap.
         setattr(out, "_split_panel_source_vertices", cut_vertices.copy())
         setattr(out, "_split_panel_face_components", components)
         setattr(out, "_split_panel_vertex_components", panel_vertices)
@@ -244,7 +305,8 @@ def install_optcuts_grid_seam_topology_patch(pipeline: Any) -> None:
             "[OPTCUTS-SEAM] applied "
             f"source_edges={len(source_edges)} grid_paths={len(snapped_paths)} "
             f"cut_edges={len(cut_edges)} duplicated_vertices={duplicated} "
-            f"restored_faces={restored} components={len(components)}"
+            f"invalid_mapped_quads_removed={len(invalid_face_ids)} "
+            f"components={len(components)}"
         )
         return out
 
@@ -260,4 +322,8 @@ def install_optcuts_grid_seam_topology_patch(pipeline: Any) -> None:
     pipeline._onestring_optcuts_grid_seam_topology_patch_installed = True
 
 
-__all__ = ["install_optcuts_grid_seam_topology_patch", "_duplicate_vertices_along_cut_edges"]
+__all__ = [
+    "install_optcuts_grid_seam_topology_patch",
+    "_duplicate_vertices_along_cut_edges",
+    "_mapped_quad_is_valid",
+]
