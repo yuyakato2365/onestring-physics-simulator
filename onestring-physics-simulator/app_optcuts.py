@@ -2,9 +2,13 @@
 
 This launcher adds one UI option, ``optcuts``, to the legacy Omega
 parameterization selector and installs the external OptCuts backend before the
-existing Split/K2D/Omega instrumentation.  In OptCuts mode, the legacy CSF
-row/column Split heuristic is suppressed and the actual OptCuts seam graph is
-snapped to continuous M2D grid-edge paths as a zero-width topological cut.
+existing Split/K2D/Omega instrumentation.
+
+In OptCuts mode, OptCuts remains the distortion-aware seam proposer, but the
+final OneString seam is constrained to the preselected fabrication grid: the
+existing ``tile_size`` is the minimum unit, degree-2 OptCuts seam vertices are
+compressed into chains, and every final seam segment is horizontal or vertical
+on that grid.  The legacy CSF row/column Split heuristic is suppressed.
 Existing non-OptCuts Split numerics are not modified.
 """
 
@@ -34,8 +38,8 @@ from onestring_physics.optcuts_pipeline_patch import install_optcuts_pipeline_pa
 from onestring_physics.optcuts_grid_seam_patch import (  # noqa: E402
     install_optcuts_seam_metadata_patch,
 )
-from onestring_physics.optcuts_grid_seam_topology_patch import (  # noqa: E402
-    install_optcuts_grid_seam_topology_patch,
+from onestring_physics.optcuts_rectilinear_seam_patch import (  # noqa: E402
+    install_optcuts_rectilinear_seam_patch,
 )
 from onestring_physics.optcuts_manifold_guard_patch import (  # noqa: E402
     install_optcuts_manifold_guard_patch,
@@ -75,9 +79,10 @@ def _install_optcuts_selector() -> None:
 
         if value == "optcuts":
             st.caption(
-                "Official OptCuts external backend (SIGGRAPH Asia 2018). "
-                "Its connected seam graph is snapped to M2D grid edges as a zero-width cut; "
-                "the legacy CSF row/column Split heuristic is disabled in this mode."
+                "Official OptCuts (SIGGRAPH Asia 2018) proposes distortion-relieving cuts; "
+                "OneString then compresses them into connected orthogonal seam chains on the "
+                "fabrication grid. The main Tile size is the fixed minimum seam/grid unit. "
+                "Legacy CSF row/column Split is disabled in this mode."
             )
             executable = st.text_input(
                 "OptCuts executable",
@@ -148,14 +153,14 @@ def _install_optcuts_selector() -> None:
 
 
 def _install_post_simple_split_optcuts_hook() -> None:
-    """Make the OptCuts grid-seam adapter the outermost M2D wrapper."""
+    """Make the rectilinear OptCuts adapter the outermost M2D wrapper."""
     if getattr(simple_split_module, "_onestring_optcuts_post_split_hook_installed", False):
         return
     original_installer = simple_split_module.install_simple_split_panel_patch
 
     def install_then_optcuts_grid_seam(pipeline_module: Any, optimization_debug_module: Any) -> None:
         original_installer(pipeline_module, optimization_debug_module)
-        install_optcuts_grid_seam_topology_patch(pipeline_module)
+        install_optcuts_rectilinear_seam_patch(pipeline_module)
         install_optcuts_manifold_guard_patch(pipeline_module)
 
     simple_split_module.install_simple_split_panel_patch = install_then_optcuts_grid_seam
