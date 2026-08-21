@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Final installer entrypoint for OneString native Grid-OptCuts V4.
+"""Core source patch for OneString native Grid-OptCuts V4.
 
-TriMesh.hpp/TriMesh.cpp are patched by the function-scoped V4 installer. This
-module owns the official main.cpp edits with anchors verified against the pinned
-OptCuts source used by OneString.
+This module owns the actual OptCuts source modifications.  In particular,
+Grid-mode global bijectivity is decided at Optimizer construction (the only
+place that matters) rather than by a topology-specific initialization marker.
 """
 from __future__ import annotations
 
@@ -32,9 +32,6 @@ def _patch_main(root: Path) -> None:
         "main.cpp Grid helper insertion",
     )
 
-    # Official no-input-UV initialization maps the cut boundary to a circle.
-    # Grid V4 replaces only that boundary target; the harmonic solve itself is
-    # still the authors' implementation.
     text = _replace_once(
         text,
         """            Eigen::MatrixXd bnd_uv;\n            igl::map_vertices_to_circle(temp.V_rest,\n                                        bnd_stacked.tail(bnd_all[longest_bnd_id].size()),\n                                        bnd_uv);\n            double xOffset = componentI % UVGridDim * 2.1, yOffset = componentI / UVGridDim * 2.1;\n            for(int bnd_uvI = 0; bnd_uvI < bnd_uv.rows(); bnd_uvI++) {\n                bnd_uv(bnd_uvI, 0) += xOffset;\n                bnd_uv(bnd_uvI, 1) += yOffset;\n            }\n""",
@@ -49,16 +46,18 @@ def _patch_main(root: Path) -> None:
         "main.cpp lock initial Grid boundary",
     )
 
+    # This is the authoritative bijectivity decision.  The old implementation
+    # emitted a marker inside onePointCut(), so open/already-cut inputs could use
+    # Grid mode correctly yet fail the Python marker check.  Grid mode now forces
+    # the authors' air/scaffold barrier whenever bijectiveParam is requested and
+    # reports the *actual bool passed to Optimizer* here, independent of topology.
     text = _replace_once(
         text,
         """    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, bijectiveParam && !rand1PInitCut); // for random one point initial cut, don't need air meshes in the beginning since it's impossible for a quad to intersect itself\n    \n    optimizer->precompute();\n""",
-        """    if(oneStringMainGridEnabled()) {\n        std::cout << \"[ONESTRING-GRID] native_candidate_search enabled version=4 h=\"\n                  << oneStringMainGridH() << std::endl;\n    }\n    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, bijectiveParam && !rand1PInitCut); // for random one point initial cut, don't need air meshes in the beginning since it's impossible for a quad to intersect itself\n    \n    optimizer->precompute();\n""",
-        "main.cpp V4 runtime marker",
+        """    // ONESTRING_GRID_NATIVE_V4_BIJECTIVITY_SCAFFOLD\n    const bool oneStringUseBijectivityScaffold = oneStringMainGridEnabled()\n        ? bijectiveParam\n        : (bijectiveParam && !rand1PInitCut);\n    if(oneStringMainGridEnabled()) {\n        std::cout << \"[ONESTRING-GRID] native_candidate_search enabled version=4 h=\"\n                  << oneStringMainGridH() << std::endl;\n        std::cout << \"[ONESTRING-GRID] global_bijectivity_scaffold=\"\n                  << (oneStringUseBijectivityScaffold ? \"enabled\" : \"disabled\") << std::endl;\n        if(!oneStringUseBijectivityScaffold) {\n            throw std::runtime_error(\"ONESTRING_GRID_BIJECTIVITY_SCAFFOLD_DISABLED\");\n        }\n    }\n    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, oneStringUseBijectivityScaffold);\n    \n    optimizer->precompute();\n""",
+        "main.cpp Grid runtime and bijectivity contract",
     )
 
-    # The authors' dual update switches between split and merge. V4 deliberately
-    # has no unconstrained merge, so when the bound is met it stops; otherwise it
-    # updates lambda and, on the re-query pass, chooses only recorded Grid splits.
     text = _replace_once(
         text,
         """    double measure_bound = E_SD;\n    const double eps_lambda = std::min(1.0e-3, std::abs(updateLambda(measure_bound) - energyParams[0]));\n    \n    //TODO?: stop when first violates bounds from feasible, don't go to best feasible. check after each merge whether distortion is violated\n""",
@@ -67,7 +66,7 @@ def _patch_main(root: Path) -> None:
     )
 
     path.write_text(text, encoding="utf-8")
-    print(f"Applied verified Grid-OptCuts V4 main patch: {path}")
+    print(f"Applied integrated Grid-OptCuts V4 main patch: {path}")
 
 
 def apply_native_grid_patch(root: Path) -> bool:
