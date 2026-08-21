@@ -4,12 +4,11 @@ This launcher adds one UI option, ``optcuts``, to the legacy Omega
 parameterization selector and installs the external OptCuts backend before the
 existing Split/K2D/Omega instrumentation.
 
-In OptCuts mode, OptCuts remains the distortion-aware seam proposer, but the
-final OneString seam is constrained to the preselected fabrication grid: the
-existing ``tile_size`` is the minimum unit, degree-2 OptCuts seam vertices are
-compressed into chains, and every final seam segment is horizontal or vertical
-on that grid. The legacy CSF row/column Split heuristic is suppressed.
-Existing non-OptCuts Split numerics are not modified.
+In OptCuts mode, OptCuts remains the distortion-aware seam proposer.  Its
+original UV chart boundaries remain authoritative for inverse mapping, while
+OneString adds a fixed-unit rectilinear fabrication seam network on top.  The
+existing ``tile_size`` is the minimum unit and the legacy CSF row/column Split
+heuristic is suppressed.  Existing non-OptCuts Split numerics are not modified.
 """
 
 from __future__ import annotations
@@ -41,6 +40,9 @@ from onestring_physics.optcuts_grid_seam_patch import (  # noqa: E402
 )
 from onestring_physics.optcuts_rectilinear_seam_patch import (  # noqa: E402
     install_optcuts_rectilinear_seam_patch,
+)
+from onestring_physics.optcuts_chart_aware_patch import (  # noqa: E402
+    install_optcuts_chart_aware_patch,
 )
 from onestring_physics.optcuts_manifold_guard_patch import (  # noqa: E402
     install_optcuts_manifold_guard_patch,
@@ -83,10 +85,10 @@ def _install_optcuts_selector() -> None:
 
         if value == "optcuts":
             st.caption(
-                "Official OptCuts (SIGGRAPH Asia 2018) proposes distortion-relieving cuts; "
-                "OneString then compresses them into connected orthogonal seam chains on the "
-                "fabrication grid. The main Tile size is the fixed minimum seam/grid unit. "
-                "Legacy CSF row/column Split is disabled in this mode."
+                "Official OptCuts (SIGGRAPH Asia 2018) proposes distortion-relieving cuts. "
+                "Its original UV chart boundaries are preserved for a valid inverse map; "
+                "OneString additionally builds connected orthogonal fabrication seams on the "
+                "fixed Tile-size grid. Legacy CSF row/column Split is disabled in this mode."
             )
             executable = st.text_input(
                 "OptCuts executable",
@@ -107,10 +109,7 @@ def _install_optcuts_selector() -> None:
                 "OptCuts initial lambda",
                 min_value=0.0001,
                 max_value=0.9999,
-                value=min(
-                    0.9999,
-                    max(0.0001, _safe_float_env("ONESTRING_OPTCUTS_LAMBDA_INIT", 0.999)),
-                ),
+                value=min(0.9999, max(0.0001, _safe_float_env("ONESTRING_OPTCUTS_LAMBDA_INIT", 0.999))),
                 step=0.001,
                 format="%.4f",
                 key="onestring_optcuts_lambda_init",
@@ -124,9 +123,7 @@ def _install_optcuts_selector() -> None:
             initial_cut_label = original_selectbox(
                 "OptCuts initial cut",
                 ["random one-point (0)", "farthest two-point (1)"],
-                index=0
-                if os.environ.get("ONESTRING_OPTCUTS_INITIAL_CUT_OPTION", "0") != "1"
-                else 1,
+                index=0 if os.environ.get("ONESTRING_OPTCUTS_INITIAL_CUT_OPTION", "0") != "1" else 1,
                 key="onestring_optcuts_initial_cut",
             )
             timeout = st.number_input(
@@ -145,9 +142,7 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_DISTORTION_BOUND"] = str(float(distortion))
             os.environ["ONESTRING_OPTCUTS_LAMBDA_INIT"] = str(float(lambda_init))
             os.environ["ONESTRING_OPTCUTS_USE_BIJECTIVITY"] = "1" if use_bijectivity else "0"
-            os.environ["ONESTRING_OPTCUTS_INITIAL_CUT_OPTION"] = (
-                "1" if initial_cut_label.startswith("farthest") else "0"
-            )
+            os.environ["ONESTRING_OPTCUTS_INITIAL_CUT_OPTION"] = "1" if initial_cut_label.startswith("farthest") else "0"
             os.environ["ONESTRING_OPTCUTS_TIMEOUT_SECONDS"] = str(float(timeout))
             os.environ["ONESTRING_OPTCUTS_METHOD_TYPE"] = "0"
         return value
@@ -157,7 +152,7 @@ def _install_optcuts_selector() -> None:
 
 
 def _install_post_simple_split_optcuts_hook() -> None:
-    """Make the rectilinear OptCuts adapter the outermost M2D wrapper."""
+    """Install OptCuts M2D adapters outside the stable Simple Split wrapper."""
     if getattr(simple_split_module, "_onestring_optcuts_post_split_hook_installed", False):
         return
     original_installer = simple_split_module.install_simple_split_panel_patch
@@ -166,17 +161,21 @@ def _install_post_simple_split_optcuts_hook() -> None:
         original_installer(pipeline_module, optimization_debug_module)
         install_optcuts_rectilinear_seam_patch(pipeline_module)
         install_optcuts_manifold_guard_patch(pipeline_module)
+        # Must be outermost: first build the rectilinear fabrication topology,
+        # then reject any quad that crosses an immutable OptCuts UV chart and
+        # attach chart ids used by M2D -> M3D.
+        install_optcuts_chart_aware_patch(pipeline_module)
 
     simple_split_module.install_simple_split_panel_patch = install_then_optcuts_grid_seam
     simple_split_module._onestring_optcuts_post_split_hook_installed = True
 
 
 # Order matters:
-# 1) install official OptCuts dispatch;
-# 2) persist the selected OptCuts mode across fresh-metrics QuadMesh stages;
-# 3) install seam/grid adapters;
-# 4) keep K3D inside the exact T3D-valid quad domain;
-# 5) assert the exact T3D tops again immediately before extrusion.
+# 1) official OptCuts S->Omega dispatch;
+# 2) persistent active-run flag;
+# 3) seam metadata and fabrication adapters (installed after Simple Split);
+# 4) chart-aware M2D/M3D mapping;
+# 5) K3D validity guard and exact T3D preflight.
 install_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
 install_robust_optcuts_seam_extraction()
