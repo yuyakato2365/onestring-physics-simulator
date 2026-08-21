@@ -123,21 +123,25 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
+          import numpy as np
           import trimesh
-          mesh = trimesh.creation.icosphere(subdivisions=1, radius=1.0)
-          mesh.export('/tmp/onestring_grid_icosphere.obj')
-          print(f'icosphere vertices={len(mesh.vertices)} faces={len(mesh.faces)}')
+          mesh = trimesh.creation.icosphere(subdivisions=0, radius=1.0)
+          vertices = np.asarray(mesh.vertices).copy()
+          vertices[:, 2] *= 3.0
+          mesh = trimesh.Trimesh(vertices=vertices, faces=mesh.faces, process=False)
+          mesh.export('/tmp/onestring_grid_icosahedron.obj')
+          print(f'anisotropic icosahedron vertices={len(mesh.vertices)} faces={len(mesh.faces)}')
           PY
           export ONESTRING_OPTCUTS_GRID_NATIVE=1
-          export ONESTRING_OPTCUTS_GRID_H=0.10
+          export ONESTRING_OPTCUTS_GRID_H=0.20
           export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0
           export ONESTRING_OPTCUTS_GRID_PHASE_U=0
           export ONESTRING_OPTCUTS_GRID_PHASE_V=0
-          export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=8
-          export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=4
-          export ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=6
-          timeout 90 ./third_party/OptCuts/build/OptCuts_bin \
-            100 /tmp/onestring_grid_icosphere.obj 0.01 3 0 4.1 0 0 native-grid-accepted-split \
+          export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=6
+          export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=3
+          export ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=3
+          timeout 45 ./third_party/OptCuts/build/OptCuts_bin \
+            100 /tmp/onestring_grid_icosahedron.obj 0.001 3 0 4.1 0 0 native-grid-accepted-split \
             > /tmp/native-grid-accepted-split.log 2>&1
           cat /tmp/native-grid-accepted-split.log
           grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-accepted-split.log
