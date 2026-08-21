@@ -36,6 +36,7 @@ from .optcuts_backend import (
     _write_triangle_obj,
     resolve_optcuts_executable,
 )
+from .optcuts_uv_overlap_guard import positive_area_uv_overlaps
 
 NATIVE_GRID_VERSION = 2
 NATIVE_GRID_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=2"
@@ -172,6 +173,14 @@ def run_native_grid_optcuts(
                 f"count={differential['uv_degenerate_triangle_count']}"
             )
 
+        overlap_count, overlap_examples = positive_area_uv_overlaps(uv, uv_faces)
+        if overlap_count:
+            raise OptCutsOutputError(
+                "OPTCUTS_GRID_NATIVE_GLOBAL_UV_OVERLAP: local triangle orientation is valid but "
+                f"{overlap_count} non-adjacent triangle pairs overlap with positive area; "
+                f"examples={overlap_examples[:10]}. The native Grid cut set is not globally injective."
+            )
+
         metrics: dict[str, object] = {
             "parameterization_backend_name": "optcuts_native_grid_constrained",
             "parameterization_backend_version": f"official_OptCuts_plus_OneString_native_grid_v{NATIVE_GRID_VERSION}",
@@ -194,6 +203,8 @@ def run_native_grid_optcuts(
             "optcuts_grid_native_version": NATIVE_GRID_VERSION,
             "optcuts_grid_junction_locking": True,
             "optcuts_grid_trial_actual_cut_feasibility": True,
+            "optcuts_grid_global_overlap_guard": True,
+            "optcuts_grid_global_overlap_count": 0,
             "optcuts_uv_area_normalization_scale": 1.0,
             "optcuts_uv_post_scale_applied": False,
             "optcuts_uv_fabrication_frame_rotation_degrees": -float(angle_degrees),
