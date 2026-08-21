@@ -17,6 +17,7 @@ import subprocess
 from patch_optcuts_native_grid_v4_final import apply_native_grid_patch
 from patch_optcuts_native_grid_v4_perf import apply_native_grid_perf_patch
 from patch_optcuts_native_grid_v4_diagnostics import apply_native_grid_diagnostics
+from patch_optcuts_native_grid_v4_trial_relax import apply_trial_relax_patch
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
 CMAKE_POLICY_MINIMUM = "3.5"
@@ -142,6 +143,7 @@ def main() -> int:
     apply_native_grid_patch(root)
     apply_native_grid_perf_patch(root)
     apply_native_grid_diagnostics(root)
+    apply_trial_relax_patch(root)
 
     if args.no_build:
         return 0
