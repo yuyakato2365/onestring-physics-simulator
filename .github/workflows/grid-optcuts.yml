@@ -6,19 +6,23 @@ on:
       - agent/large-steps-mesh-conditioning
     paths:
       - "onestring-physics-simulator/scripts/patch_optcuts_native_grid*.py"
+      - "onestring-physics-simulator/scripts/patch_optcuts_grid_v4.py"
       - "onestring-physics-simulator/scripts/setup_optcuts.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_*.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_uv_overlap_guard.py"
-      - "onestring-physics-simulator/tests/test_optcuts_grid_native.py"
+      - "onestring-physics-simulator/tests/test_optcuts_grid_*.py"
+      - "onestring-physics-simulator/tests/test_optcuts_backend.py"
       - "onestring-physics-simulator/app_optcuts.py"
       - ".github/workflows/grid-optcuts.yml"
   pull_request:
     paths:
       - "onestring-physics-simulator/scripts/patch_optcuts_native_grid*.py"
+      - "onestring-physics-simulator/scripts/patch_optcuts_grid_v4.py"
       - "onestring-physics-simulator/scripts/setup_optcuts.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_*.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_uv_overlap_guard.py"
-      - "onestring-physics-simulator/tests/test_optcuts_grid_native.py"
+      - "onestring-physics-simulator/tests/test_optcuts_grid_*.py"
+      - "onestring-physics-simulator/tests/test_optcuts_backend.py"
       - "onestring-physics-simulator/app_optcuts.py"
       - ".github/workflows/grid-optcuts.yml"
   workflow_dispatch:
@@ -56,11 +60,14 @@ jobs:
             scripts/patch_optcuts_native_grid_v4.py \
             scripts/patch_optcuts_native_grid_v4_final.py \
             scripts/patch_optcuts_native_grid_v4_perf.py \
+            scripts/patch_optcuts_grid_v4.py \
             scripts/setup_optcuts.py \
             src/onestring_physics/optcuts_grid_native_backend.py \
             src/onestring_physics/optcuts_grid_native_pipeline_patch.py \
             src/onestring_physics/optcuts_grid_native_lift_patch.py \
-            src/onestring_physics/optcuts_grid_constrained_m2d_patch.py
+            src/onestring_physics/optcuts_grid_constrained_m2d_patch.py \
+            src/onestring_physics/optcuts_grid_orientation_patch.py \
+            src/onestring_physics/optcuts_grid_seam_sidecar_patch.py
 
       - name: Patch and build official OptCuts
         run: python scripts/setup_optcuts.py --jobs 2
@@ -71,6 +78,7 @@ jobs:
           grep -q "ONESTRING_GRID_NATIVE_V4_FAST_SEARCH" third_party/OptCuts/src/TriMesh.cpp
           grep -q "oneStringGridLockedVert" third_party/OptCuts/src/TriMesh.hpp
           grep -q "native_candidate_search enabled version=4" third_party/OptCuts/src/main.cpp
+          grep -q "ONESTRING_GRID_NATIVE_V4_SEAM_SIDECAR" third_party/OptCuts/src/main.cpp
           test -x third_party/OptCuts/build/OptCuts_bin
 
       - name: Native Grid-OptCuts initialization smoke test
@@ -94,11 +102,16 @@ jobs:
           export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=4
           export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=4
           export ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=4
-          timeout 120 ./third_party/OptCuts/build/OptCuts_bin \
-            100 /tmp/onestring_grid_smoke.obj 0.999 1 0 1000 0 0 native-grid-init-smoke \
-            > /tmp/native-grid-init-smoke.log 2>&1
+          if ! timeout 120 ./third_party/OptCuts/build/OptCuts_bin \
+            100 /tmp/onestring_grid_smoke.obj 0.999 1 0 1000 1 0 native-grid-init-smoke \
+            > /tmp/native-grid-init-smoke.log 2>&1; then
+            cat /tmp/native-grid-init-smoke.log
+            exit 1
+          fi
           cat /tmp/native-grid-init-smoke.log
           grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-init-smoke.log
+          grep -q "\[ONESTRING-GRID\] global_bijectivity_scaffold=enabled" /tmp/native-grid-init-smoke.log
+          grep -q "\[ONESTRING-GRID\] final_seam_sidecar=" /tmp/native-grid-init-smoke.log
           grep -q "optimization converged" /tmp/native-grid-init-smoke.log
 
       - name: Native Grid-OptCuts split-search smoke test
@@ -112,9 +125,12 @@ jobs:
           export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=4
           export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=4
           export ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=4
-          timeout 120 ./third_party/OptCuts/build/OptCuts_bin \
-            100 /tmp/onestring_grid_smoke.obj 0.999 2 0 4.1 0 0 native-grid-split-smoke \
-            > /tmp/native-grid-split-smoke.log 2>&1
+          if ! timeout 120 ./third_party/OptCuts/build/OptCuts_bin \
+            100 /tmp/onestring_grid_smoke.obj 0.999 2 0 4.1 1 0 native-grid-split-smoke \
+            > /tmp/native-grid-split-smoke.log 2>&1; then
+            cat /tmp/native-grid-split-smoke.log
+            exit 1
+          fi
           cat /tmp/native-grid-split-smoke.log
           grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-split-smoke.log
           grep -q "evaluate vertex splits" /tmp/native-grid-split-smoke.log
@@ -140,9 +156,12 @@ jobs:
           export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=6
           export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=3
           export ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=3
-          timeout 45 ./third_party/OptCuts/build/OptCuts_bin \
-            100 /tmp/onestring_grid_icosahedron.obj 0.001 3 0 4.1 0 0 native-grid-accepted-split \
-            > /tmp/native-grid-accepted-split.log 2>&1
+          if ! timeout 45 ./third_party/OptCuts/build/OptCuts_bin \
+            100 /tmp/onestring_grid_icosahedron.obj 0.001 3 0 4.1 1 0 native-grid-accepted-split \
+            > /tmp/native-grid-accepted-split.log 2>&1; then
+            cat /tmp/native-grid-accepted-split.log
+            exit 1
+          fi
           cat /tmp/native-grid-accepted-split.log
           grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-accepted-split.log
           grep -Eq "boundary split E_dec =|interior split E_dec =" /tmp/native-grid-accepted-split.log
@@ -153,4 +172,9 @@ jobs:
           ONESTRING_OPTCUTS_EXECUTABLE: third_party/OptCuts/build/OptCuts_bin
           ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX: "4"
           ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS: "4"
-        run: python -m pytest tests/test_optcuts_grid_native.py tests/test_optcuts_backend.py -q
+        run: |
+          python -m pytest \
+            tests/test_optcuts_grid_native.py \
+            tests/test_optcuts_grid_orientation_patch.py \
+            tests/test_optcuts_grid_seam_sidecar_patch.py \
+            tests/test_optcuts_backend.py -q
