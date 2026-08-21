@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Make native Grid-OptCuts V4 validate cuts after constrained relaxation.
+"""Defer Grid candidate validation to the scorer, validate accepted cuts once.
 
-`allowCutThrough=False` is used by the Grid candidate trial helpers, while the
-real accepted OptCuts operation uses the default `True`.  V4 originally checked
-triangle inversion inside cutPath/splitEdgeOnBoundary immediately after moving
-new seam vertices onto the lattice.  That rejected candidates before the trial
-scorer could reparameterize the newly cut topology.
+Candidate trials use ``allowCutThrough=False``.  Their exact trial topology is
+validated by ``oneStringScoreTrial`` after the cut is constructed.  The actual
+accepted OptCuts operation uses the default ``allowCutThrough=True`` and is
+validated once before returning to the ordinary OptCuts optimizer.
 
-Trials now defer validity to oneStringScoreTrial(), which performs a harmonic
-solve with all Grid/boundary vertices fixed.  Real accepted cuts perform the
-same constrained relaxation immediately, then enforce inversion and seam-grid
-validity before returning to the main OptCuts optimizer.
+Critically, this patch performs NO harmonic/global solve.  Candidate enumeration
+must remain cheap, and accepted cuts are globally relaxed by the normal OptCuts
+optimization phase after topology selection.
 """
 from __future__ import annotations
 from pathlib import Path
 
-MARKER = "ONESTRING_GRID_NATIVE_V4_RELAX_BEFORE_VALIDATE"
+MARKER = "ONESTRING_GRID_NATIVE_V4_DEFER_TRIAL_VALIDATE"
 
 
 def apply_trial_relax_patch(root: Path) -> bool:
@@ -33,16 +31,12 @@ def apply_trial_relax_patch(root: Path) -> bool:
 '''
     new_interior = '''            if(oneStringGridEncodedInterior) {
                 oneStringLockGridVertices(*this, {path[0], path[1], path[2], nV});
-                // ONESTRING_GRID_NATIVE_V4_RELAX_BEFORE_VALIDATE
-                // Candidate trials pass allowCutThrough=false and are relaxed/
-                // checked by oneStringScoreTrial. A real accepted cut uses the
-                // default true and is relaxed here before becoming authoritative.
-                if(allowCutThrough) {
-                    if(!oneStringRelaxGridTrialUV(*this) ||
-                       !checkInversion(true) ||
-                       !oneStringAllCohesiveSeamSidesGridAligned(*this)) {
-                        throw std::runtime_error("ONESTRING_GRID_APPLIED_INTERIOR_CUT_INVALID");
-                    }
+                // ONESTRING_GRID_NATIVE_V4_DEFER_TRIAL_VALIDATE
+                // Candidate trials are checked by oneStringScoreTrial.  The real
+                // accepted cut is checked once here, with no global solve.
+                if(allowCutThrough &&
+                   (!checkInversion(true) || !oneStringAllCohesiveSeamSidesGridAligned(*this))) {
+                    throw std::runtime_error("ONESTRING_GRID_APPLIED_INTERIOR_CUT_INVALID");
                 }
             }
 '''
@@ -69,12 +63,9 @@ def apply_trial_relax_patch(root: Path) -> bool:
             fixedVert.insert(vI_boundary);
             fixedVert.insert(oneStringGridBoundaryDuplicate);
             fixedVert.insert(vI_interior);
-            if(allowCutThrough) {
-                if(!oneStringRelaxGridTrialUV(*this) ||
-                   !checkInversion(true) ||
-                   !oneStringAllCohesiveSeamSidesGridAligned(*this)) {
-                    throw std::runtime_error("ONESTRING_GRID_APPLIED_BOUNDARY_CUT_INVALID");
-                }
+            if(allowCutThrough &&
+               (!checkInversion(true) || !oneStringAllCohesiveSeamSidesGridAligned(*this))) {
+                throw std::runtime_error("ONESTRING_GRID_APPLIED_BOUNDARY_CUT_INVALID");
             }
         }
 '''
@@ -83,7 +74,7 @@ def apply_trial_relax_patch(root: Path) -> bool:
     text = text.replace(old_boundary, new_boundary, 1)
 
     path.write_text(text, encoding="utf-8")
-    print(f"Applied Grid-OptCuts relaxed trial/accepted-cut validation: {path}")
+    print(f"Applied Grid-OptCuts deferred trial/accepted-cut validation: {path}")
     return True
 
 
