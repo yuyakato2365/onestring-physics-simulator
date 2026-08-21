@@ -25,8 +25,8 @@ def test_zero_width_cut_duplicates_only_topology() -> None:
     assert len(out_v) == len(vertices) + 2
     # Geometry is unchanged: duplicated ids occupy exactly the same positions.
     assert np.allclose(np.sort(out_v[:, 0]), np.sort(np.r_[vertices[:, 0], 1.0, 1.0]))
-    # The two faces no longer share the cut-edge vertex ids.
-    assert set(map(int, out_f[0])).isdisjoint(set(map(int, out_f[1]))) is False
+    # The two quads have no shared vertex ids after the shared seam edge is cut.
+    assert set(map(int, out_f[0])).isdisjoint(set(map(int, out_f[1])))
     assert int(out_f[0, 1]) != int(out_f[1, 0])
     assert int(out_f[0, 2]) != int(out_f[1, 3])
 
@@ -49,10 +49,9 @@ def test_open_slit_does_not_require_global_component_split() -> None:
         vertices, faces, {(1, 4)}
     )
 
-    assert duplicated >= 2
-    # The lower seam edge is disconnected even though the upper row still joins
-    # the left and right sides around the interior slit endpoint.
+    # The boundary endpoint is duplicated even though the mesh as a whole stays
+    # connected around the interior slit tip.
+    assert duplicated >= 1
     left_lower = out_f[0]
     right_lower = out_f[1]
     assert int(left_lower[1]) != int(right_lower[0])
-    assert int(left_lower[2]) != int(right_lower[3])
