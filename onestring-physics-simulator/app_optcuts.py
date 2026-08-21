@@ -32,8 +32,10 @@ from onestring_physics.fast_assembly_animation_patch import (  # noqa: E402
 )
 from onestring_physics.optcuts_pipeline_patch import install_optcuts_pipeline_patch  # noqa: E402
 from onestring_physics.optcuts_grid_seam_patch import (  # noqa: E402
-    install_optcuts_grid_seam_m2d_patch,
     install_optcuts_seam_metadata_patch,
+)
+from onestring_physics.optcuts_grid_seam_topology_patch import (  # noqa: E402
+    install_optcuts_grid_seam_topology_patch,
 )
 
 
@@ -134,20 +136,14 @@ def _install_optcuts_selector() -> None:
 
 
 def _install_post_simple_split_optcuts_hook() -> None:
-    """Make the OptCuts grid-seam adapter the outermost M2D wrapper.
-
-    ``app_split_panels.py`` imports the installer from this module. Replacing the
-    installer here lets the stable Simple Split install normally first, then adds
-    the OptCuts-only seam adapter around it. Non-OptCuts runs still return the
-    Simple Split result unchanged.
-    """
+    """Make the OptCuts grid-seam adapter the outermost M2D wrapper."""
     if getattr(simple_split_module, "_onestring_optcuts_post_split_hook_installed", False):
         return
     original_installer = simple_split_module.install_simple_split_panel_patch
 
     def install_then_optcuts_grid_seam(pipeline_module: Any, optimization_debug_module: Any) -> None:
         original_installer(pipeline_module, optimization_debug_module)
-        install_optcuts_grid_seam_m2d_patch(pipeline_module)
+        install_optcuts_grid_seam_topology_patch(pipeline_module)
 
     simple_split_module.install_simple_split_panel_patch = install_then_optcuts_grid_seam
     simple_split_module._onestring_optcuts_post_split_hook_installed = True
