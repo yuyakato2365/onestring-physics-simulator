@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Clone and build the official OptCuts research code for the OneString bridge.
+"""Clone, patch, and build OptCuts for the OneString bridge.
 
-The upstream OptCuts repository predates current CMake policy defaults. Recent
-CMake releases reject several legacy policy settings used by the vendored
-DownloadProject/TBB/libigl/GLFW stack. This setup helper applies tiny,
-local-only compatibility patches to the ignored third_party checkout so the
-original research code can still be configured without modifying its numerical
-implementation.
+The official research code receives only two kinds of local changes:
+1. compatibility fixes required by modern CMake/GLFW; and
+2. the explicit OneString native Grid-OptCuts candidate-search patch.
+
+The native grid patch is dormant unless ONESTRING_OPTCUTS_GRID_NATIVE=1, so the
+same executable still provides untouched official OptCuts behavior for the
+normal ``optcuts`` mode.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+
+from patch_optcuts_native_grid import apply_native_grid_patch
 
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
@@ -38,19 +41,15 @@ def executable_candidates(root: Path) -> list[Path]:
 
 
 def patch_nested_cmake_policy(root: Path) -> bool:
-    """Pass a modern compatibility floor into OptCuts' nested CMake configure."""
-
     path = root / "cmake" / "DownloadProject.cmake"
     if not path.is_file():
         print(f"OptCuts compatibility patch skipped: {path} was not found")
         return False
-
     text = path.read_text(encoding="utf-8")
     marker = 'CMAKE_POLICY_VERSION_MINIMUM:STRING=3.5'
     if marker in text:
         print("OptCuts nested CMake policy compatibility patch already present.")
         return False
-
     needle = (
         'execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}"\n'
         '                        -D "CMAKE_MAKE_PROGRAM:FILE=${CMAKE_MAKE_PROGRAM}"\n'
@@ -67,7 +66,6 @@ def patch_nested_cmake_policy(root: Path) -> bool:
             "OptCuts DownloadProject.cmake has an unexpected layout; refusing to patch it automatically. "
             "Inspect cmake/DownloadProject.cmake around its nested execute_process(CMAKE_COMMAND ...) call."
         )
-
     backup = path.with_suffix(path.suffix + ".onestring-backup")
     if not backup.exists():
         backup.write_text(text, encoding="utf-8")
@@ -77,19 +75,10 @@ def patch_nested_cmake_policy(root: Path) -> bool:
 
 
 def patch_legacy_glfw_policy(root: Path) -> bool:
-    """Replace GLFW's removed CMP0042 OLD policy with the required NEW behavior.
-
-    The GLFW bundled inside OptCuts' old libigl snapshot explicitly requests
-    ``cmake_policy(SET CMP0042 OLD)``. Modern CMake no longer permits OLD for
-    this policy. CMP0042 controls MACOSX_RPATH behavior; using NEW is the modern
-    required behavior and does not change OptCuts' numerical algorithm.
-    """
-
     path = root / "ext" / "libigl" / "external" / "glfw" / "CMakeLists.txt"
     if not path.is_file():
         print(f"GLFW compatibility patch skipped: {path} was not found")
         return False
-
     text = path.read_text(encoding="utf-8")
     old = "cmake_policy(SET CMP0042 OLD)"
     new = "cmake_policy(SET CMP0042 NEW) # OneString modern-CMake compatibility"
@@ -99,7 +88,6 @@ def patch_legacy_glfw_policy(root: Path) -> bool:
     if old not in text:
         print("OptCuts GLFW CMP0042 OLD policy was not found; no patch needed.")
         return False
-
     backup = path.with_suffix(path.suffix + ".onestring-backup")
     if not backup.exists():
         backup.write_text(text, encoding="utf-8")
@@ -120,7 +108,7 @@ def main() -> int:
     parser.add_argument(
         "--no-build",
         action="store_true",
-        help="Clone/check only; do not invoke CMake.",
+        help="Clone/check and patch only; do not invoke CMake.",
     )
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
@@ -138,6 +126,7 @@ def main() -> int:
 
     patch_nested_cmake_policy(root)
     patch_legacy_glfw_policy(root)
+    apply_native_grid_patch(root)
 
     if args.no_build:
         return 0
@@ -172,7 +161,8 @@ def main() -> int:
         if candidate.is_file():
             print("\nOptCuts executable:")
             print(candidate)
-            print("\nSet explicitly if desired:")
+            print("\nNative Grid-OptCuts support is compiled in and remains dormant for official optcuts mode.")
+            print("Set explicitly if desired:")
             if os.name == "nt":
                 print(f'$env:ONESTRING_OPTCUTS_EXECUTABLE = "{candidate}"')
             else:
