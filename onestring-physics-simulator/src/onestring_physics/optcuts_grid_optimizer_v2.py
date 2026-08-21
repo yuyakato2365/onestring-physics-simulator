@@ -1,4 +1,10 @@
-"""Continuation solver for the grid-constrained OptCuts UV embedding."""
+"""Continuation solver for the experimental post-constrained OptCuts UV embedding.
+
+This solver is intentionally fail-fast.  If an intermediate continuation stage
+already flips triangles, the completed official OptCuts topology is not being
+embedded injectively under the imposed straight-grid targets.  Continuing more
+stages cannot be treated as a numerical fix for that structural mismatch.
+"""
 from __future__ import annotations
 
 import math
@@ -21,7 +27,6 @@ def _strict_optimize_constrained_uv(
     hard_targets: np.ndarray,
     iterations: int,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Move OptCuts UV continuously into the hard straight-grid constraint set."""
     if torch is None:
         raise RuntimeError("PyTorch is required for grid-constrained OptCuts reparameterization")
 
@@ -122,7 +127,6 @@ def _strict_optimize_constrained_uv(
         if best_stage_uv is None:
             raise RuntimeError(f"OPTCUTS_GRID_CONSTRAINED_OPTIMIZER_FAILED_AT_STAGE:{stage}")
         with torch.no_grad():
-            # Continue from the best state of this stage, not merely the last Adam step.
             variable.copy_(best_stage_uv)
             tri = best_stage_uv[faces]
             B = torch.stack([tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]], dim=2)
@@ -139,6 +143,17 @@ def _strict_optimize_constrained_uv(
             f"stage={stage}/{stages} alpha={alpha:.4f} invalid={invalid_count} "
             f"min_oriented_det={min_det:.6g} best_loss={best_stage_loss:.6g}"
         )
+
+        if invalid_count > 0:
+            raise RuntimeError(
+                "OPTCUTS_GRID_POSTCONSTRAINT_STRUCTURAL_MISMATCH: "
+                f"the completed official OptCuts cut topology already produces {invalid_count} "
+                f"flipped/degenerate triangles at continuation stage {stage}/{stages} "
+                f"(alpha={alpha:.4f}, min_oriented_det={min_det:.6g}). "
+                "Do not tune Adam/continuation to hide this. The straight-grid constraint must "
+                "be enforced while cut candidates are selected, before the final OptCuts topology "
+                "is committed. Use mode='optcuts' for the official stable result."
+            )
 
     if best_final is None:
         raise RuntimeError("OPTCUTS_GRID_CONSTRAINED_OPTIMIZER_FAILED")
