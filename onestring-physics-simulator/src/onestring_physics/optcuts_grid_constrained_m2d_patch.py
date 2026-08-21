@@ -1,13 +1,12 @@
 """M2D construction for the true grid-constrained OptCuts flow.
 
 The final OptCuts/OneString reparameterization already has straight seam copies
-on an h-spaced orthogonal lattice.  M2D must therefore use exactly the same
-lattice instead of building an unrelated nx-by-ny bbox grid and snapping later.
+on an h-spaced orthogonal lattice. M2D therefore uses exactly the same lattice.
+No second seam is added and no free OptCuts seam is snapped after the fact.
 
-No extra fabrication seam is inserted here.  No seam-strip cells are healed or
-removed as a postprocess.  A cell is kept when its center belongs to the final UV
-triangle domain and no UV-domain boundary pierces its strict interior.  Because
-constrained seams lie on grid lines, seam-adjacent valid cells survive cleanly.
+Grid vertex ids are intentionally NOT compacted: downstream OneString code uses
+``QuadGrid`` connectivity, so M2D keeps the original fixed-grid numbering and
+only filters faces.
 """
 from __future__ import annotations
 
@@ -81,7 +80,6 @@ def _segment_hits_open_rect(
     hi: np.ndarray,
     eps: float,
 ) -> bool:
-    """Whether segment intersects the strict interior of an axis-aligned cell."""
     lower = np.asarray(lo, dtype=float) + float(eps)
     upper = np.asarray(hi, dtype=float) - float(eps)
     if np.any(lower >= upper):
@@ -123,26 +121,6 @@ def _cell_crossed_by_uv_boundary(points: np.ndarray, data: dict[str, Any], h: fl
     return False
 
 
-def _compact_mesh_vertices(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
-    f = np.asarray(faces, dtype=int)
-    used = np.unique(f.reshape(-1))
-    remap = np.full(len(vertices), -1, dtype=int)
-    remap[used] = np.arange(len(used), dtype=int)
-    return np.asarray(vertices, dtype=float)[used], remap[f], int(len(vertices) - len(used))
-
-
-def _make_quadmesh(pipeline: Any, mesh_template: Any, vertices: np.ndarray, faces: np.ndarray, metrics: dict[str, Any]):
-    cls = getattr(getattr(pipeline, "_original", None), "QuadMesh", None) or type(mesh_template)
-    return cls(
-        np.asarray(vertices, dtype=float),
-        np.asarray(faces, dtype=int),
-        mesh_template.grid,
-        mesh_template.stage,
-        metrics,
-        list(getattr(mesh_template, "split_lines", [])),
-    )
-
-
 def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_grid_constrained_m2d_installed", False):
         return
@@ -178,8 +156,7 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
         setattr(domain, "_optcuts_grid_unit", float(h))
         print(
             "[OPTCUTS-GRID-DOMAIN] "
-            f"h={h:g} origin=({lo[0]:.6g},{lo[1]:.6g}) grid={nx}x{ny} "
-            "legacy_split=disabled"
+            f"h={h:g} origin=({lo[0]:.6g},{lo[1]:.6g}) grid={nx}x{ny} legacy_split=disabled"
         )
         return domain
 
@@ -215,7 +192,7 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
             kept_triangle_ids.append(int(tri_id))
         if not kept:
             raise RuntimeError("OPTCUTS_GRID_M2D_EMPTY: fixed lattice contains no valid UV cells")
-        compact_vertices, compact_faces, unused = _compact_mesh_vertices(vertices, np.asarray(kept, dtype=int))
+        faces = np.asarray(kept, dtype=int)
         metrics = {
             "optcuts_grid_constrained_m2d": True,
             "optcuts_grid_unit": float(h),
@@ -223,10 +200,10 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
             "optcuts_grid_nx": int(nx),
             "optcuts_grid_ny": int(ny),
             "optcuts_grid_total_cell_count": int(nx * ny),
-            "optcuts_grid_kept_cell_count": int(len(compact_faces)),
+            "optcuts_grid_kept_cell_count": int(len(faces)),
             "optcuts_grid_outside_cell_count": int(outside),
             "optcuts_grid_boundary_crossing_cell_count": int(crossing),
-            "optcuts_grid_unused_vertex_removed_count": int(unused),
+            "optcuts_grid_vertex_ids_preserved": True,
             "optcuts_grid_posthoc_seam_snap": False,
             "optcuts_grid_posthoc_seam_cell_deletion": False,
             "optcuts_grid_seam_aligned_before_m2d": True,
@@ -235,19 +212,11 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
             "m2d_grid_overlay": "same fixed h-lattice used by constrained OptCuts seam geometry",
         }
         cls = getattr(getattr(pipeline, "_original", None), "QuadMesh", None) or getattr(pipeline, "QuadMesh")
-        out = cls(
-            compact_vertices,
-            compact_faces,
-            overlay_grid,
-            "M2D",
-            metrics,
-            [],
-        )
+        out = cls(vertices, faces, overlay_grid, "M2D", metrics, [])
         setattr(out, "_optcuts_grid_cell_triangle_ids", np.asarray(kept_triangle_ids, dtype=int))
         print(
             "[OPTCUTS-GRID-M2D] "
-            f"kept={len(compact_faces)} outside={outside} boundary_crossing={crossing} "
-            f"unused_vertices_removed={unused} h={h:g}"
+            f"kept={len(faces)} outside={outside} boundary_crossing={crossing} h={h:g}"
         )
         return out
 
