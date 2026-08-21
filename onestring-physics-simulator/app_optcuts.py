@@ -46,6 +46,9 @@ from onestring_physics.optcuts_parameterization_reference_patch import (  # noqa
 from onestring_physics.optcuts_seam_extraction_patch import (  # noqa: E402
     install_robust_optcuts_seam_extraction,
 )
+from onestring_physics.optcuts_k3d_preflight_patch import (  # noqa: E402
+    install_optcuts_k3d_preflight_patch,
+)
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -164,6 +167,7 @@ install_robust_optcuts_seam_extraction()
 install_optcuts_seam_metadata_patch(pipeline)
 install_optcuts_parameterization_reference_patch(pipeline)
 install_fast_assembly_animation_patch()
+install_optcuts_k3d_preflight_patch(pipeline)
 _install_post_simple_split_optcuts_hook()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
