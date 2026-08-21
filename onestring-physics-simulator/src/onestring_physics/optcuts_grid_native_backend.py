@@ -38,8 +38,8 @@ from .optcuts_backend import (
 )
 from .optcuts_uv_overlap_guard import positive_area_uv_overlaps
 
-NATIVE_GRID_VERSION = 2
-NATIVE_GRID_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=2"
+NATIVE_GRID_VERSION = 3
+NATIVE_GRID_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=3"
 
 
 @contextmanager
@@ -135,7 +135,8 @@ def run_native_grid_optcuts(
             found = marker_lines[-5:] if marker_lines else ["(no Grid-OptCuts marker found)"]
             raise OptCutsError(
                 "OPTCUTS_GRID_NATIVE_BINARY_VERSION_MISMATCH: optcuts_grid requires native Grid-OptCuts "
-                f"V{NATIVE_GRID_VERSION} with persistent junction locks and trial-cut feasibility checks. "
+                f"V{NATIVE_GRID_VERSION} with persistent junction locks, actual trial-cut feasibility, "
+                "and actual hard-Grid SD candidate scoring. "
                 "Run `python scripts/setup_optcuts.py` to repatch and rebuild third_party/OptCuts. "
                 f"Markers seen: {found}"
             )
@@ -156,7 +157,6 @@ def run_native_grid_optcuts(
 
         reflected = False
         if _signed_area(uv[loops[0]]) < 0.0:
-            # Reflection across fabrication-u preserves the same axis-aligned h-lattice.
             uv[:, 1] *= -1.0
             effective_phase_v *= -1.0
             reflected = True
@@ -203,6 +203,7 @@ def run_native_grid_optcuts(
             "optcuts_grid_native_version": NATIVE_GRID_VERSION,
             "optcuts_grid_junction_locking": True,
             "optcuts_grid_trial_actual_cut_feasibility": True,
+            "optcuts_grid_actual_constrained_sd_scoring": True,
             "optcuts_grid_global_overlap_guard": True,
             "optcuts_grid_global_overlap_count": 0,
             "optcuts_uv_area_normalization_scale": 1.0,
@@ -230,11 +231,13 @@ def run_native_grid_optcuts(
             "optcuts_grid_bijectivity_scaffold_enabled": False,
             "optcuts_grid_constraint_model": (
                 "OptCuts split candidate search restricted to fixed-h orthogonal lattice embeddings "
-                "(H, V, H-V, V-H); accepted seam/junction vertices are persistent lattice locks"
+                "(H, V, H-V, V-H); each candidate is actually trial-cut at exact Grid coordinates "
+                "and scored by its resulting Symmetric Dirichlet decrease; accepted seam/junction "
+                "vertices are persistent lattice locks"
             ),
             "optcuts_grid_topology_resolution_limit": (
                 "candidate cuts follow existing source triangle-mesh edges; arbitrary "
-                "grid-line/triangle intersection insertion is not implemented in native V2"
+                "grid-line/triangle intersection insertion is not implemented in native V3"
             ),
             **differential,
         }
