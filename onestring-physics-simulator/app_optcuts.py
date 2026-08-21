@@ -48,6 +48,9 @@ from onestring_physics.optcuts_k3d_validity_patch import (  # noqa: E402
 from onestring_physics.optcuts_k3d_preflight_patch import (  # noqa: E402
     install_optcuts_k3d_preflight_patch,
 )
+from onestring_physics.optcuts_visualization_compat_patch import (  # noqa: E402
+    install_optcuts_visualization_compat_patch,
+)
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -175,6 +178,7 @@ install_optcuts_grid_constrained_parameterization_patch(pipeline)
 install_fast_assembly_animation_patch()
 install_optcuts_k3d_validity_patch(pipeline)
 install_optcuts_k3d_preflight_patch(pipeline)
+install_optcuts_visualization_compat_patch()
 _install_post_simple_split_grid_m2d_hook()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
