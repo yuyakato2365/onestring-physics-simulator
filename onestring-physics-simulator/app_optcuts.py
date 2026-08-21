@@ -40,6 +40,9 @@ from onestring_physics.optcuts_grid_seam_topology_patch import (  # noqa: E402
 from onestring_physics.optcuts_manifold_guard_patch import (  # noqa: E402
     install_optcuts_manifold_guard_patch,
 )
+from onestring_physics.optcuts_parameterization_reference_patch import (  # noqa: E402
+    install_optcuts_parameterization_reference_patch,
+)
 from onestring_physics.optcuts_seam_extraction_patch import (  # noqa: E402
     install_robust_optcuts_seam_extraction,
 )
@@ -159,6 +162,7 @@ def _install_post_simple_split_optcuts_hook() -> None:
 install_optcuts_pipeline_patch(pipeline)
 install_robust_optcuts_seam_extraction()
 install_optcuts_seam_metadata_patch(pipeline)
+install_optcuts_parameterization_reference_patch(pipeline)
 install_fast_assembly_animation_patch()
 _install_post_simple_split_optcuts_hook()
 package.onestring_pipeline = pipeline
