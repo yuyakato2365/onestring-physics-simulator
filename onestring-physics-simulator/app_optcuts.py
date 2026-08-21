@@ -2,8 +2,10 @@
 
 This launcher adds one UI option, ``optcuts``, to the legacy Omega
 parameterization selector and installs the external OptCuts backend before the
-existing Split/K2D/Omega instrumentation.  Existing Split numerics are not
-modified.
+existing Split/K2D/Omega instrumentation.  In OptCuts mode, the legacy CSF
+row/column Split heuristic is suppressed and the actual OptCuts seam graph is
+snapped to continuous M2D grid-edge paths as a zero-width topological cut.
+Existing non-OptCuts Split numerics are not modified.
 """
 
 from __future__ import annotations
@@ -24,10 +26,15 @@ if str(SRC) not in sys.path:
 
 import onestring_physics as package  # noqa: E402
 from onestring_physics import onestring_pipeline as pipeline  # noqa: E402
+from onestring_physics import simple_split_panel_patch as simple_split_module  # noqa: E402
 from onestring_physics.fast_assembly_animation_patch import (  # noqa: E402
     install_fast_assembly_animation_patch,
 )
 from onestring_physics.optcuts_pipeline_patch import install_optcuts_pipeline_patch  # noqa: E402
+from onestring_physics.optcuts_grid_seam_patch import (  # noqa: E402
+    install_optcuts_grid_seam_m2d_patch,
+    install_optcuts_seam_metadata_patch,
+)
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -55,7 +62,8 @@ def _install_optcuts_selector() -> None:
         if value == "optcuts":
             st.caption(
                 "Official OptCuts external backend (SIGGRAPH Asia 2018). "
-                "No fallback to BFF/CEPS is used if the executable is missing or fails."
+                "Its connected seam graph is snapped to M2D grid edges as a zero-width cut; "
+                "the legacy CSF row/column Split heuristic is disabled in this mode."
             )
             executable = st.text_input(
                 "OptCuts executable",
@@ -125,8 +133,30 @@ def _install_optcuts_selector() -> None:
     st._onestring_optcuts_selector_installed = True
 
 
+def _install_post_simple_split_optcuts_hook() -> None:
+    """Make the OptCuts grid-seam adapter the outermost M2D wrapper.
+
+    ``app_split_panels.py`` imports the installer from this module. Replacing the
+    installer here lets the stable Simple Split install normally first, then adds
+    the OptCuts-only seam adapter around it. Non-OptCuts runs still return the
+    Simple Split result unchanged.
+    """
+    if getattr(simple_split_module, "_onestring_optcuts_post_split_hook_installed", False):
+        return
+    original_installer = simple_split_module.install_simple_split_panel_patch
+
+    def install_then_optcuts_grid_seam(pipeline_module: Any, optimization_debug_module: Any) -> None:
+        original_installer(pipeline_module, optimization_debug_module)
+        install_optcuts_grid_seam_m2d_patch(pipeline_module)
+
+    simple_split_module.install_simple_split_panel_patch = install_then_optcuts_grid_seam
+    simple_split_module._onestring_optcuts_post_split_hook_installed = True
+
+
 install_optcuts_pipeline_patch(pipeline)
+install_optcuts_seam_metadata_patch(pipeline)
 install_fast_assembly_animation_patch()
+_install_post_simple_split_optcuts_hook()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
