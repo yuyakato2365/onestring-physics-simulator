@@ -1,0 +1,67 @@
+name: Grid OptCuts validation
+
+on:
+  push:
+    branches:
+      - agent/large-steps-mesh-conditioning
+    paths:
+      - "onestring-physics-simulator/scripts/patch_optcuts_native_grid*.py"
+      - "onestring-physics-simulator/scripts/setup_optcuts.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_*.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_uv_overlap_guard.py"
+      - "onestring-physics-simulator/tests/test_optcuts_grid_native.py"
+      - "onestring-physics-simulator/app_optcuts.py"
+      - ".github/workflows/grid-optcuts.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libpng-dev
+
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade pip numpy pytest scipy
+
+      - name: Python syntax check
+        run: |
+          python -m py_compile \
+            scripts/patch_optcuts_native_grid.py \
+            scripts/patch_optcuts_native_grid_v4.py \
+            scripts/setup_optcuts.py \
+            src/onestring_physics/optcuts_grid_native_backend.py \
+            src/onestring_physics/optcuts_grid_native_pipeline_patch.py \
+            src/onestring_physics/optcuts_grid_native_lift_patch.py \
+            src/onestring_physics/optcuts_grid_constrained_m2d_patch.py
+
+      - name: Patch and build official OptCuts
+        run: python scripts/setup_optcuts.py --jobs 2
+
+      - name: Verify native V4 source markers
+        run: |
+          grep -q "ONESTRING_GRID_NATIVE_V4" third_party/OptCuts/src/TriMesh.cpp
+          grep -q "oneStringGridLockedVert" third_party/OptCuts/src/TriMesh.hpp
+          grep -q "native_candidate_search enabled version=4" third_party/OptCuts/src/main.cpp
+          test -x third_party/OptCuts/build/OptCuts_bin
+
+      - name: Run Grid-OptCuts unit tests
+        env:
+          PYTHONPATH: src
+        run: python -m pytest tests/test_optcuts_grid_native.py tests/test_optcuts_backend.py -q
