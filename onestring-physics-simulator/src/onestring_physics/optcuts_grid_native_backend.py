@@ -1,9 +1,9 @@
-"""Native Grid-OptCuts subprocess bridge.
+"""Native Grid-OptCuts V4 subprocess bridge.
 
-This path does not use the official OneString bridge's UV area normalization:
-that would change the fixed fabrication spacing h after OptCuts exits. Native
-Grid-OptCuts imports raw C++ UVs, applies at most a rigid coordinate-frame
-rotation/reflection that preserves the lattice exactly, and never rescales it.
+The native path imports raw OptCuts UV coordinates without area normalization:
+rescaling would destroy the fixed fabrication spacing h. Only rigid frame changes
+(rotation/reflection) are allowed, so Grid incidence and Symmetric Dirichlet are
+preserved exactly.
 """
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ from .optcuts_backend import (
 )
 from .optcuts_uv_overlap_guard import positive_area_uv_overlaps
 
-NATIVE_GRID_VERSION = 3
-NATIVE_GRID_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=3"
+NATIVE_GRID_VERSION = 4
+NATIVE_GRID_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=4"
 
 
 @contextmanager
@@ -89,6 +89,9 @@ def run_native_grid_optcuts(
     if int(config.method_type) not in {0, 1, 2, 3}:
         raise ValueError("OptCuts method_type must be 0, 1, 2, or 3")
 
+    # V4 handles injectivity through exact trial-cut inversion tests plus an
+    # exported global UV-overlap audit. The original air scaffold assumes an
+    # unconstrained free boundary and is therefore disabled for this Grid solver.
     cfg = replace(config, use_bijectivity=False, initial_cut_option=0)
     executable = resolve_optcuts_executable(cfg.executable)
     root = _infer_optcuts_root(executable)
@@ -109,15 +112,26 @@ def run_native_grid_optcuts(
         input_obj = temp_dir / "surface.obj"
         _write_triangle_obj(input_obj, surface_vertices, surface_faces)
         command = [
-            str(executable), "100", str(input_obj.resolve()),
-            f"{float(cfg.lambda_init):.17g}", "1", str(int(cfg.method_type)),
-            f"{float(cfg.distortion_bound):.17g}", "0", "0", tag,
+            str(executable),
+            "100",
+            str(input_obj.resolve()),
+            f"{float(cfg.lambda_init):.17g}",
+            "1",
+            str(int(cfg.method_type)),
+            f"{float(cfg.distortion_bound):.17g}",
+            "0",  # no unconstrained air scaffold in native Grid mode
+            "0",  # two-edge genus-0 initial cut; V4 parameterizes its boundary on the Grid
+            tag,
         ]
         try:
             with _temporary_env(env_values):
                 completed = subprocess.run(
-                    command, cwd=str(root), capture_output=True, text=True,
-                    timeout=float(cfg.timeout_seconds), check=False,
+                    command,
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=float(cfg.timeout_seconds),
+                    check=False,
                 )
         except subprocess.TimeoutExpired as exc:
             raise OptCutsError(f"Native Grid-OptCuts timed out after {cfg.timeout_seconds:g} s") from exc
@@ -126,17 +140,17 @@ def run_native_grid_optcuts(
 
         combined = completed.stdout + "\n" + completed.stderr
         if completed.returncode != 0:
-            tail = "\n".join(combined.splitlines()[-60:])
+            tail = "\n".join(combined.splitlines()[-80:])
             raise OptCutsError(
                 f"Native Grid-OptCuts exited with code {completed.returncode}.\nLast output:\n{tail}"
             )
         if NATIVE_GRID_MARKER not in combined:
             marker_lines = [line for line in combined.splitlines() if "[ONESTRING-GRID]" in line]
-            found = marker_lines[-5:] if marker_lines else ["(no Grid-OptCuts marker found)"]
+            found = marker_lines[-8:] if marker_lines else ["(no Grid-OptCuts marker found)"]
             raise OptCutsError(
                 "OPTCUTS_GRID_NATIVE_BINARY_VERSION_MISMATCH: optcuts_grid requires native Grid-OptCuts "
-                f"V{NATIVE_GRID_VERSION} with persistent junction locks, actual trial-cut feasibility, "
-                "and actual hard-Grid SD candidate scoring. "
+                f"V{NATIVE_GRID_VERSION} with paired non-coincident Grid seam sides, persistent junction "
+                "locks, actual trial-cut feasibility, and actual constrained-SD candidate scoring. "
                 "Run `python scripts/setup_optcuts.py` to repatch and rebuild third_party/OptCuts. "
                 f"Markers seen: {found}"
             )
@@ -144,17 +158,18 @@ def run_native_grid_optcuts(
         result_obj = _find_output_obj(root, tag, started)
         xyz, faces, raw_uv, uv_faces = _read_obj_with_uv(result_obj)
 
-        # Rigidly express the result in the fabrication grid frame. No scaling.
+        # Express the result in the fabrication frame. This is a rigid transform;
+        # critically, there is NO UV normalization or scale adjustment here.
         uv = _to_fabrication_frame(raw_uv, angle)
         effective_phase_u = float(phase_u)
         effective_phase_v = float(phase_v)
         loops = _boundary_loops(uv_faces)
-        if len(loops) != 1:
-            raise OptCutsOutputError(
-                "Native Grid-OptCuts currently requires exactly one UV boundary loop; "
-                f"got {len(loops)}"
-            )
+        if not loops:
+            raise OptCutsOutputError("Native Grid-OptCuts returned no UV boundary loop")
 
+        # _boundary_loops sorts by length, so loops[0] is the outer/main loop used
+        # by OneString for display/domain bounds. Additional loops created by cuts
+        # are legitimate and are preserved in uv_faces.
         reflected = False
         if _signed_area(uv[loops[0]]) < 0.0:
             uv[:, 1] *= -1.0
@@ -178,7 +193,7 @@ def run_native_grid_optcuts(
             raise OptCutsOutputError(
                 "OPTCUTS_GRID_NATIVE_GLOBAL_UV_OVERLAP: local triangle orientation is valid but "
                 f"{overlap_count} non-adjacent triangle pairs overlap with positive area; "
-                f"examples={overlap_examples[:10]}. The native Grid cut set is not globally injective."
+                f"examples={overlap_examples[:10]}. The selected Grid cut set is not globally injective."
             )
 
         metrics: dict[str, object] = {
@@ -198,9 +213,12 @@ def run_native_grid_optcuts(
             "optcuts_use_bijectivity": False,
             "optcuts_initial_cut_option": 0,
             "optcuts_runtime_seconds": float(time.time() - started),
-            "optcuts_stdout_tail": "\n".join(completed.stdout.splitlines()[-80:]),
-            "optcuts_stderr_tail": "\n".join(completed.stderr.splitlines()[-80:]),
+            "optcuts_stdout_tail": "\n".join(completed.stdout.splitlines()[-100:]),
+            "optcuts_stderr_tail": "\n".join(completed.stderr.splitlines()[-100:]),
             "optcuts_grid_native_version": NATIVE_GRID_VERSION,
+            "optcuts_grid_paired_uv_seam_sides": True,
+            "optcuts_grid_zero_width_uv_seam": False,
+            "optcuts_grid_initial_boundary_on_lattice": True,
             "optcuts_grid_junction_locking": True,
             "optcuts_grid_trial_actual_cut_feasibility": True,
             "optcuts_grid_actual_constrained_sd_scoring": True,
@@ -211,7 +229,7 @@ def run_native_grid_optcuts(
             "optcuts_uv_fabrication_frame_rotation_degrees": -float(angle_degrees),
             "optcuts_uv_fabrication_v_reflected": bool(reflected),
             "optcuts_uv_boundary_loop_count": int(len(loops)),
-            "optcuts_uv_boundary_vertex_count": int(len(loops[0])),
+            "optcuts_uv_main_boundary_vertex_count": int(len(loops[0])),
             "surface_vertex_count_after_cut_export": int(len(xyz)),
             "surface_triangle_count_after_cut_export": int(len(faces)),
             "uv_vertex_count_after_cut": int(len(uv)),
@@ -230,14 +248,14 @@ def run_native_grid_optcuts(
             "optcuts_grid_initial_cut_option_forced": 0,
             "optcuts_grid_bijectivity_scaffold_enabled": False,
             "optcuts_grid_constraint_model": (
-                "OptCuts split candidate search restricted to fixed-h orthogonal lattice embeddings "
-                "(H, V, H-V, V-H); each candidate is actually trial-cut at exact Grid coordinates "
-                "and scored by its resulting Symmetric Dirichlet decrease; accepted seam/junction "
-                "vertices are persistent lattice locks"
+                "OptCuts physical split candidates are evaluated only through exact fixed-h orthogonal "
+                "Grid UV embeddings. Interior two-edge cuts use paired A-B-C / A-D-C boundary sides; "
+                "each candidate is actually trial-cut and scored by resulting Symmetric Dirichlet decrease "
+                "plus the ordinary seam-length term. Accepted seam/junction vertices remain Grid-locked."
             ),
             "optcuts_grid_topology_resolution_limit": (
-                "candidate cuts follow existing source triangle-mesh edges; arbitrary "
-                "grid-line/triangle intersection insertion is not implemented in native V3"
+                "candidate physical cuts still follow existing source triangle-mesh edges; arbitrary "
+                "grid-line/triangle intersection insertion is not implemented in native V4"
             ),
             **differential,
         }
@@ -254,4 +272,4 @@ def run_native_grid_optcuts(
         temp_ctx.cleanup()
 
 
-__all__ = ["run_native_grid_optcuts"]
+__all__ = ["NATIVE_GRID_MARKER", "NATIVE_GRID_VERSION", "run_native_grid_optcuts"]
