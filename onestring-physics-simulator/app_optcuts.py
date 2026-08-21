@@ -1,12 +1,15 @@
-"""Grid-constrained OptCuts launcher for OneString.
+"""Strict grid-constrained OptCuts launcher for OneString.
 
-The ``optcuts`` mode now implements one coherent flow:
+The ``optcuts`` mode implements one coherent flow:
 
-1. official OptCuts chooses a distortion-relieving cut topology on S;
+1. official OptCuts chooses a distortion-relieving PHYSICAL cut topology on S;
 2. OneString re-solves that SAME cut topology with hard fabrication constraints:
-   every seam chain is a straight line, all seam lines share one orthogonal frame,
-   and seam endpoints/junctions lie on the fixed ``Tile size`` lattice;
-3. M2D is generated on that exact same lattice.
+   every maximal physical seam chain is one straight line, all seam lines share
+   one orthogonal frame, both UV copies of one physical seam coincide geometrically
+   (zero-width cut), and seam endpoints/junctions lie on the fixed ``Tile size`` lattice;
+3. M2D is generated on that exact same lattice;
+4. M2D topology is disconnected exactly on those seam grid edges by vertex
+   duplication, with zero geometric gap.
 
 No second post-hoc seam is added, no free OptCuts seam is snapped afterwards,
 and no seam-strip cell healing/deletion is used to fake alignment.
@@ -41,6 +44,10 @@ from onestring_physics.optcuts_grid_constrained_parameterization_patch import ( 
 )
 from onestring_physics.optcuts_grid_constrained_m2d_patch import (  # noqa: E402
     install_optcuts_grid_constrained_m2d_patch,
+)
+from onestring_physics.optcuts_grid_fusion_v2 import (  # noqa: E402
+    install_strict_grid_seam_topology_patch,
+    install_strict_optcuts_grid_fusion,
 )
 from onestring_physics.optcuts_k3d_validity_patch import (  # noqa: E402
     install_optcuts_k3d_validity_patch,
@@ -77,11 +84,11 @@ def _install_optcuts_selector() -> None:
 
         if value == "optcuts":
             st.caption(
-                "Grid-constrained OptCuts: official OptCuts first chooses the surface cut topology. "
-                "That same topology is then reparameterized with hard OneString constraints: "
-                "every seam chain is a straight line, all lines are parallel/perpendicular in one "
-                "global frame, and the main Tile size is the fixed lattice unit. M2D uses exactly "
-                "that lattice. No post-hoc extra seam is added."
+                "Strict Grid-constrained OptCuts: official OptCuts chooses the physical cut topology. "
+                "That SAME topology is reparameterized so each physical seam chain is one straight "
+                "horizontal/vertical line in a common orthogonal frame. Both UV copies of a physical "
+                "seam coincide geometrically (zero-width) while remaining topologically separate. "
+                "Tile size is the fixed lattice unit, and M2D is cut exactly on the same grid edges."
             )
             executable = st.text_input(
                 "OptCuts executable",
@@ -162,16 +169,19 @@ def _install_post_simple_split_grid_m2d_hook() -> None:
     def install_then_grid_constrained_m2d(pipeline_module: Any, optimization_debug_module: Any) -> None:
         original_installer(pipeline_module, optimization_debug_module)
         install_optcuts_grid_constrained_m2d_patch(pipeline_module)
+        # Outermost OptCuts-only M2D step: the seam is ALREADY exactly on this
+        # lattice, so only disconnect topology on those edges.  Never snap it.
+        install_strict_grid_seam_topology_patch(pipeline_module)
 
     simple_split_module.install_simple_split_panel_patch = install_then_grid_constrained_m2d
     simple_split_module._onestring_grid_constrained_optcuts_hook_installed = True
 
 
 # Order matters.
-# Official OptCuts is installed first; the next wrapper reparameterizes the SAME
-# cut topology under hard grid constraints.  The fixed-lattice M2D wrapper is
-# installed after the stable Simple Split installer so it is outermost only for
-# the constrained OptCuts domain.
+# First replace the earlier post-hoc axis behavior and hard-target builder with
+# the strict one-physical-seam/one-line model.  Then install the official OptCuts
+# proposal backend and the constrained reparameterization wrapper.
+install_strict_optcuts_grid_fusion()
 install_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
 install_optcuts_grid_constrained_parameterization_patch(pipeline)
