@@ -3,7 +3,7 @@
 
 The local checkout receives:
 1. compatibility fixes required by modern CMake/GLFW/Eigen; and
-2. the explicit OneString native Grid-OptCuts candidate-search patch.
+2. the explicit OneString native Grid-OptCuts V4 candidate-search patch.
 
 The Grid patch is dormant unless ONESTRING_OPTCUTS_GRID_NATIVE=1, so the same
 binary still executes the authors' ordinary OptCuts path for ``optcuts``.
@@ -16,7 +16,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from patch_optcuts_native_grid import apply_native_grid_patch
+from patch_optcuts_native_grid_v4 import apply_native_grid_patch
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
 CMAKE_POLICY_MINIMUM = "3.5"
@@ -92,13 +92,7 @@ def patch_legacy_glfw_policy(root: Path) -> bool:
 
 
 def patch_legacy_eigen_transpositions(root: Path) -> bool:
-    """Fix the old Eigen Transpositions assignment for current Apple/Clang builds.
-
-    OptCuts' vendored Eigen snapshot uses ``trt.derived()`` in an assignment path
-    that fails with modern compilers.  Replacing it with ``trt`` is the known
-    compatibility fix used by this project previously; it does not affect
-    OptCuts' numerical algorithm.
-    """
+    """Fix the old Eigen Transpositions assignment for current Apple/Clang builds."""
     path = root / "ext" / "libigl" / "external" / "eigen" / "Eigen" / "src" / "Core" / "Transpositions.h"
     if not path.is_file():
         print(f"Eigen compatibility patch skipped: {path} was not found")
@@ -115,8 +109,7 @@ def patch_legacy_eigen_transpositions(root: Path) -> bool:
     backup = path.with_suffix(path.suffix + ".onestring-backup")
     if not backup.exists():
         backup.write_text(text, encoding="utf-8")
-    text = text.replace(old, "= trt; // OneString modern-Eigen compatibility")
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text.replace(old, "= trt; // OneString modern-Eigen compatibility"), encoding="utf-8")
     print(f"Applied local OptCuts Eigen compatibility patch: {path}")
     return True
 
@@ -167,7 +160,7 @@ def main() -> int:
         if candidate.is_file():
             print("\nOptCuts executable:")
             print(candidate)
-            print("\nNative Grid-OptCuts support is compiled in and dormant for official optcuts mode.")
+            print("\nNative Grid-OptCuts V4 support is compiled in and dormant for official optcuts mode.")
             if os.name == "nt":
                 print(f'$env:ONESTRING_OPTCUTS_EXECUTABLE = "{candidate}"')
             else:
