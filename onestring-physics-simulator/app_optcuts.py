@@ -1,19 +1,17 @@
-"""Injective paired-line grid-constrained OptCuts launcher for OneString.
+"""Globally constrained grid-aware OptCuts launcher for OneString.
 
 The ``optcuts`` mode implements one coherent flow:
 
-1. official OptCuts chooses a distortion-relieving physical cut topology on S;
-2. OneString re-solves that SAME topology with fabrication constraints:
-   every physical seam copy is a straight line, paired copies are parallel,
-   all seam lines use one global orthogonal frame, and Tile size is the fixed
-   lattice spacing h;
-3. the lattice phase/origin is optimized from the seam layout (spacing h is fixed);
-4. M2D is generated on exactly that same phased lattice.  No second central seam
-   is inserted and no free seam is snapped after the fact.
-
-The two UV boundary copies of one physical cut are NOT collapsed onto the same
-geometric line: doing so can destroy injectivity for valid OptCuts topologies.
-Their separation is an integer multiple of h chosen close to the OptCuts proposal.
+1. official OptCuts proposes a distortion-relieving physical cut topology on S;
+2. OneString compiles the whole UV seam network as one constraint graph before
+   assigning coordinates: same-axis chains sharing a UV junction share a lattice
+   line, every junction is one shared lattice point, and every seam copy is a
+   straight horizontal/vertical segment;
+3. Tile size is the fixed lattice spacing h, while a single global lattice phase
+   is fitted to reduce unnecessary motion;
+4. the constrained UV map is solved by continuation with orientation checks;
+5. M2D is generated on exactly the same phased lattice. No post-hoc seam snapping,
+   extra central seam, or chain-local endpoint mutation is used.
 """
 
 from __future__ import annotations
@@ -46,8 +44,8 @@ from onestring_physics.optcuts_grid_constrained_parameterization_patch import ( 
 from onestring_physics.optcuts_grid_constrained_m2d_patch import (  # noqa: E402
     install_optcuts_grid_constrained_m2d_patch,
 )
-from onestring_physics.optcuts_grid_fusion_v3 import (  # noqa: E402
-    install_injective_paired_grid_fusion,
+from onestring_physics.optcuts_grid_fusion_v4 import (  # noqa: E402
+    install_global_grid_constraint_fusion,
 )
 from onestring_physics.optcuts_grid_optimizer_v2 import (  # noqa: E402
     install_strict_optcuts_grid_optimizer,
@@ -87,11 +85,11 @@ def _install_optcuts_selector() -> None:
 
         if value == "optcuts":
             st.caption(
-                "Grid-constrained OptCuts: official OptCuts chooses the physical cut topology. "
-                "The same topology is reparameterized so each seam side is a straight grid line; "
-                "paired sides are parallel, every line is parallel/perpendicular in one global frame, "
-                "and Tile size is the fixed lattice spacing. The lattice origin is fitted to the seams. "
-                "Paired UV boundaries remain separated only as much as needed for an injective map."
+                "Grid-constrained OptCuts: official OptCuts proposes the physical cut topology. "
+                "The complete seam network is then solved globally: every seam side is one straight "
+                "grid line, all lines use one orthogonal frame, shared junctions are single shared "
+                "lattice points, and Tile size is the fixed lattice spacing. The lattice phase is "
+                "fitted globally; no seam is snapped independently afterwards."
             )
             executable = st.text_input(
                 "OptCuts executable",
@@ -171,17 +169,15 @@ def _install_post_simple_split_grid_m2d_hook() -> None:
 
     def install_then_grid_constrained_m2d(pipeline_module: Any, optimization_debug_module: Any) -> None:
         original_installer(pipeline_module, optimization_debug_module)
-        # The two straight UV seam boundaries are already the actual cut boundary.
-        # Do NOT insert the rejected v2 zero-width central topology cut here.
         install_optcuts_grid_constrained_m2d_patch(pipeline_module)
 
     simple_split_module.install_simple_split_panel_patch = install_then_grid_constrained_m2d
     simple_split_module._onestring_grid_constrained_optcuts_hook_installed = True
 
 
-# Order matters.  Replace legacy post-hoc rotation/targets first, then install the
-# official OptCuts proposal backend and constrained reparameterization wrapper.
-install_injective_paired_grid_fusion()
+# Order matters: compile the seam graph globally before the official OptCuts
+# wrapper is used, then solve the constrained UV and generate the same h-lattice.
+install_global_grid_constraint_fusion()
 install_strict_optcuts_grid_optimizer()
 install_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
