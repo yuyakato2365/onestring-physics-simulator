@@ -3,6 +3,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from .optcuts_grid_orientation_patch import install_optcuts_grid_orientation_patch
+
+
+# Install before any Grid-OptCuts run.  The native pipeline module imports the
+# backend function object early, but that function resolves its helper globals
+# from the backend module at call time, so stabilizing those globals here affects
+# the actual Compute path without wrapping or duplicating the backend.
+install_optcuts_grid_orientation_patch()
+
 
 def install_optcuts_run_flag_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_run_flag_patch_installed", False):
