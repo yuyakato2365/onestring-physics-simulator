@@ -1,25 +1,98 @@
 #!/usr/bin/env python3
-"""Performance patch for OneString native Grid-OptCuts V4.
+"""Bound and correctly score OneString native Grid-OptCuts V4 candidates.
 
-V4's exact trial-cut scoring is intentionally kept, but exhaustive Cartesian
-products of nearby lattice targets are not.  This patch replaces the Grid split
-candidate evaluator with a two-stage search:
+The native Grid search has two requirements:
 
-1. enumerate grid-feasible candidates using only cheap geometry;
-2. rank them by lattice displacement and perform exact topology-copy +
-   Symmetric-Dirichlet trial scoring only for the best K candidates per source
-   vertex.
+* it must not exhaustively deep-copy/score every nearby lattice combination;
+* a Grid cut must be judged after the remaining free UV vertices have had a
+  chance to adapt to the new cut topology.
 
-This preserves the user's core algorithmic requirement: a cut is accepted only
-if the ACTUAL grid-constrained trial topology is valid and improves the OptCuts
-objective.  The prefilter changes search order/budget, not the fabrication
-constraint or the final acceptance test.
+The second point is essential.  Scoring the raw topology cut immediately after
+placing new Grid seam vertices systematically makes useful cuts look bad: the
+free interior still has the pre-cut parameterization.  This patch therefore
+performs a fast harmonic reparameterization with every UV-boundary/Grid-locked
+vertex held fixed, then evaluates the actual Symmetric Dirichlet energy.  A cut
+is accepted only if that relaxed *actual trial topology* is non-inverted and
+improves the OptCuts objective.
+
+Candidate search itself is two stage:
+1. enumerate/rank Grid-feasible candidates using cheap geometric proxies;
+2. run exact topology cut + harmonic relaxation + SD scoring only for the best
+   K candidates per source vertex.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 MARKER = "ONESTRING_GRID_NATIVE_V4_FAST_SEARCH"
+RELAX_MARKER = "ONESTRING_GRID_NATIVE_V4_RELAXED_TRIAL_SCORE"
+
+RELAXED_SCORE = r'''bool oneStringRelaxGridTrialUV(OptCuts::TriMesh& trial)
+{
+    // ONESTRING_GRID_NATIVE_V4_RELAXED_TRIAL_SCORE
+    // cutPath/splitEdgeOnBoundary update the topology.  Recompute boundary
+    // information before collecting hard constraints.
+    trial.updateFeatures();
+
+    std::vector<int> hard;
+    hard.reserve(trial.V.rows());
+    for(int vI = 0; vI < trial.V.rows(); ++vI) {
+        if(trial.isBoundaryVert(vI) ||
+           trial.oneStringGridLockedVert.find(vI) != trial.oneStringGridLockedVert.end()) {
+            hard.push_back(vI);
+        }
+    }
+    if(hard.empty()) return false;
+
+    Eigen::VectorXi b(static_cast<int>(hard.size()));
+    Eigen::MatrixXd bc(static_cast<int>(hard.size()), 2);
+    for(int i = 0; i < static_cast<int>(hard.size()); ++i) {
+        b[i] = hard[i];
+        bc.row(i) = trial.V.row(hard[i]);
+    }
+
+    Eigen::MatrixXd relaxed;
+    // Harmonic is used here only as a fast candidate reparameterization.  The
+    // accepted topology is still passed back to the ordinary OptCuts optimizer,
+    // while the seam/boundary Grid coordinates stay hard-fixed.
+    if(!igl::harmonic(trial.V_rest, trial.F, b, bc, 1, relaxed)) return false;
+    if(relaxed.rows() != trial.V.rows() || relaxed.cols() != 2) return false;
+    if(!relaxed.allFinite()) return false;
+    trial.V = relaxed;
+
+    // Re-impose hard coordinates exactly to avoid solver roundoff moving a
+    // fabrication vertex off the lattice.
+    for(int i = 0; i < static_cast<int>(hard.size()); ++i) {
+        trial.V.row(hard[i]) = bc.row(i);
+    }
+    trial.updateFeatures();
+    return true;
+}
+
+double oneStringScoreTrial(
+    const OptCuts::TriMesh& mesh,
+    OptCuts::TriMesh trial,
+    double lambda_t,
+    double seamIncrease,
+    std::pair<double, double>& energyChanges)
+{
+    if(!oneStringLockedPreserved(mesh, trial)) return -DBL_MAX;
+    if(!oneStringAllLockedOnGrid(trial)) return -DBL_MAX;
+    if(!oneStringAllCohesiveSeamSidesGridAligned(trial)) return -DBL_MAX;
+    if(!oneStringRelaxGridTrialUV(trial)) return -DBL_MAX;
+    if(!trial.checkInversion(true)) return -DBL_MAX;
+    if(!oneStringLockedPreserved(mesh, trial)) return -DBL_MAX;
+    if(!oneStringAllLockedOnGrid(trial)) return -DBL_MAX;
+    if(!oneStringAllCohesiveSeamSidesGridAligned(trial)) return -DBL_MAX;
+
+    const double before = oneStringTotalSD(mesh);
+    const double after = oneStringTotalSD(trial);
+    if(!std::isfinite(before) || !std::isfinite(after)) return -DBL_MAX;
+    const double sdDec = before - after;
+    energyChanges.first = -sdDec;
+    energyChanges.second = seamIncrease;
+    return (1.0 - lambda_t) * sdDec - lambda_t * seamIncrease;
+}'''
 
 FAST_FUNCTION = r'''double oneStringGridComputeLocalLDec(
     const OptCuts::TriMesh& mesh,
@@ -106,8 +179,6 @@ FAST_FUNCTION = r'''double oneStringGridComputeLocalLDec(
         return best;
     }
 
-    // Match original OptCuts: an interior split may not touch an existing UV
-    // boundary. Boundary growth is handled by the boundary branch above.
     for(const int nbVI : mesh.vNeighbor[vI]) {
         if(mesh.isBoundaryVert(nbVI)) return -DBL_MAX;
     }
@@ -187,28 +258,52 @@ FAST_FUNCTION = r'''double oneStringGridComputeLocalLDec(
 }'''
 
 
+def _replace_function_before(text: str, signature: str, next_signature: str, replacement: str) -> str:
+    start = text.find(signature)
+    if start < 0:
+        raise RuntimeError(f"Grid-OptCuts helper was not found: {signature}")
+    end = text.find(next_signature, start)
+    if end < 0:
+        raise RuntimeError(f"Grid-OptCuts following helper was not found: {next_signature}")
+    return text[:start] + replacement + "\n\n" + text[end:]
+
+
 def apply_native_grid_perf_patch(root: Path) -> bool:
     path = root / "src" / "TriMesh.cpp"
     if not path.is_file():
         raise FileNotFoundError(path)
     text = path.read_text(encoding="utf-8")
-    if MARKER in text:
-        print("Grid-OptCuts V4 bounded exact-trial search already present.")
-        return False
-    start = text.find("double oneStringGridComputeLocalLDec(")
-    if start < 0:
-        raise RuntimeError("Grid-OptCuts V4 computeLocalLDec helper was not found")
-    anon_end = text.find("\n\n} // anonymous namespace", start)
-    if anon_end < 0:
-        raise RuntimeError("Grid-OptCuts V4 helper namespace end was not found")
-    function_end = text.rfind("\n}", start, anon_end)
-    if function_end < 0:
-        raise RuntimeError("Grid-OptCuts V4 computeLocalLDec function end was not found")
-    function_end += 2
-    text = text[:start] + FAST_FUNCTION + text[function_end:]
-    path.write_text(text, encoding="utf-8")
-    print(f"Applied bounded exact-trial Grid-OptCuts search: {path}")
-    return True
+    changed = False
+
+    if RELAX_MARKER not in text:
+        text = _replace_function_before(
+            text,
+            "double oneStringScoreTrial(",
+            "bool oneStringTryInteriorGridCut(",
+            RELAXED_SCORE,
+        )
+        changed = True
+
+    if MARKER not in text:
+        start = text.find("double oneStringGridComputeLocalLDec(")
+        if start < 0:
+            raise RuntimeError("Grid-OptCuts V4 computeLocalLDec helper was not found")
+        anon_end = text.find("\n\n} // anonymous namespace", start)
+        if anon_end < 0:
+            raise RuntimeError("Grid-OptCuts V4 helper namespace end was not found")
+        function_end = text.rfind("\n}", start, anon_end)
+        if function_end < 0:
+            raise RuntimeError("Grid-OptCuts V4 computeLocalLDec function end was not found")
+        function_end += 2
+        text = text[:start] + FAST_FUNCTION + text[function_end:]
+        changed = True
+
+    if changed:
+        path.write_text(text, encoding="utf-8")
+        print(f"Applied relaxed bounded-trial Grid-OptCuts search: {path}")
+    else:
+        print("Grid-OptCuts V4 relaxed bounded-trial search already present.")
+    return changed
 
 
 if __name__ == "__main__":
