@@ -1,12 +1,16 @@
-"""M2D construction for the true grid-constrained OptCuts flow.
+"""M2D construction for the grid-constrained OptCuts flow.
 
 The final OptCuts/OneString reparameterization already has straight seam copies
 on an h-spaced orthogonal lattice. M2D therefore uses exactly the same lattice.
 No second seam is added and no free OptCuts seam is snapped after the fact.
 
+The lattice spacing h is fixed by tile_size, while the lattice phase/origin is
+allowed to follow the optimized seam layout. This avoids an unnecessary snap to
+world-zero without changing the fabrication unit.
+
 Grid vertex ids are intentionally NOT compacted: downstream OneString code uses
-``QuadGrid`` connectivity, so M2D keeps the original fixed-grid numbering and
-only filters faces.
+QuadGrid connectivity, so M2D keeps the original fixed-grid numbering and only
+filters faces.
 """
 from __future__ import annotations
 
@@ -134,8 +138,13 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
         h = max(float(getattr(params, "tile_size", getattr(grid, "tile_size", 0.0))), 1e-8)
         uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
         margin = int(max(0, getattr(params, "omega_overlay_margin", 1))) if params is not None else 1
-        lo = np.floor(np.min(uv, axis=0) / h) * h - margin * h
-        hi = np.ceil(np.max(uv, axis=0) / h) * h + margin * h
+        metrics = dict(getattr(parameterization, "metrics", {}) or {})
+        phase = np.asarray([
+            float(metrics.get("grid_phase_u", 0.0)),
+            float(metrics.get("grid_phase_v", 0.0)),
+        ], dtype=float)
+        lo = phase + np.floor((np.min(uv, axis=0) - phase) / h) * h - margin * h
+        hi = phase + np.ceil((np.max(uv, axis=0) - phase) / h) * h + margin * h
         nx = max(1, int(round(float((hi[0] - lo[0]) / h))))
         ny = max(1, int(round(float((hi[1] - lo[1]) / h))))
         xs = lo[0] + np.arange(nx + 1, dtype=float) * h
@@ -153,10 +162,12 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
         domain.original_requested_ny = int(getattr(grid, "ny", ny))
         setattr(domain, "_optcuts_grid_constrained_parameterization", parameterization)
         setattr(domain, "_optcuts_grid_origin", np.asarray(lo, dtype=float))
+        setattr(domain, "_optcuts_grid_phase", phase.copy())
         setattr(domain, "_optcuts_grid_unit", float(h))
         print(
             "[OPTCUTS-GRID-DOMAIN] "
-            f"h={h:g} origin=({lo[0]:.6g},{lo[1]:.6g}) grid={nx}x{ny} legacy_split=disabled"
+            f"h={h:g} phase=({phase[0]:.6g},{phase[1]:.6g}) "
+            f"origin=({lo[0]:.6g},{lo[1]:.6g}) grid={nx}x{ny} legacy_split=disabled"
         )
         return domain
 
@@ -197,6 +208,7 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
             "optcuts_grid_constrained_m2d": True,
             "optcuts_grid_unit": float(h),
             "optcuts_grid_origin": np.asarray(getattr(domain, "_optcuts_grid_origin"), dtype=float).tolist(),
+            "optcuts_grid_phase": np.asarray(getattr(domain, "_optcuts_grid_phase"), dtype=float).tolist(),
             "optcuts_grid_nx": int(nx),
             "optcuts_grid_ny": int(ny),
             "optcuts_grid_total_cell_count": int(nx * ny),
@@ -209,7 +221,7 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
             "optcuts_grid_seam_aligned_before_m2d": True,
             "number_of_splits": 0,
             "split_locations": [],
-            "m2d_grid_overlay": "same fixed h-lattice used by constrained OptCuts seam geometry",
+            "m2d_grid_overlay": "same fixed h-lattice and optimized phase used by constrained OptCuts seam geometry",
         }
         cls = getattr(getattr(pipeline, "_original", None), "QuadMesh", None) or getattr(pipeline, "QuadMesh")
         out = cls(vertices, faces, overlay_grid, "M2D", metrics, [])
