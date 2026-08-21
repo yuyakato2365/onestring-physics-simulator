@@ -8,7 +8,7 @@ In OptCuts mode, OptCuts remains the distortion-aware seam proposer, but the
 final OneString seam is constrained to the preselected fabrication grid: the
 existing ``tile_size`` is the minimum unit, degree-2 OptCuts seam vertices are
 compressed into chains, and every final seam segment is horizontal or vertical
-on that grid.  The legacy CSF row/column Split heuristic is suppressed.
+on that grid. The legacy CSF row/column Split heuristic is suppressed.
 Existing non-OptCuts Split numerics are not modified.
 """
 
@@ -35,6 +35,7 @@ from onestring_physics.fast_assembly_animation_patch import (  # noqa: E402
     install_fast_assembly_animation_patch,
 )
 from onestring_physics.optcuts_pipeline_patch import install_optcuts_pipeline_patch  # noqa: E402
+from onestring_physics.optcuts_run_flag_patch import install_optcuts_run_flag_patch  # noqa: E402
 from onestring_physics.optcuts_grid_seam_patch import (  # noqa: E402
     install_optcuts_seam_metadata_patch,
 )
@@ -49,6 +50,9 @@ from onestring_physics.optcuts_parameterization_reference_patch import (  # noqa
 )
 from onestring_physics.optcuts_seam_extraction_patch import (  # noqa: E402
     install_robust_optcuts_seam_extraction,
+)
+from onestring_physics.optcuts_k3d_validity_patch import (  # noqa: E402
+    install_optcuts_k3d_validity_patch,
 )
 from onestring_physics.optcuts_k3d_preflight_patch import (  # noqa: E402
     install_optcuts_k3d_preflight_patch,
@@ -167,11 +171,19 @@ def _install_post_simple_split_optcuts_hook() -> None:
     simple_split_module._onestring_optcuts_post_split_hook_installed = True
 
 
+# Order matters:
+# 1) install official OptCuts dispatch;
+# 2) persist the selected OptCuts mode across fresh-metrics QuadMesh stages;
+# 3) install seam/grid adapters;
+# 4) keep K3D inside the exact T3D-valid quad domain;
+# 5) assert the exact T3D tops again immediately before extrusion.
 install_optcuts_pipeline_patch(pipeline)
+install_optcuts_run_flag_patch(pipeline)
 install_robust_optcuts_seam_extraction()
 install_optcuts_seam_metadata_patch(pipeline)
 install_optcuts_parameterization_reference_patch(pipeline)
 install_fast_assembly_animation_patch()
+install_optcuts_k3d_validity_patch(pipeline)
 install_optcuts_k3d_preflight_patch(pipeline)
 _install_post_simple_split_optcuts_hook()
 package.onestring_pipeline = pipeline
