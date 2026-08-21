@@ -9,16 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# IMPORTANT: keep the imported core patch under a private, unambiguous name.
-# Do not alias apply_grid_optcuts_v4 back to apply_native_grid_patch: Python
-# resolves globals at call time, which previously made this function call
-# itself recursively until RecursionError.
 from patch_optcuts_native_grid_v4_final import apply_native_grid_patch as _apply_core_native_grid_patch
 from patch_optcuts_native_grid_v4_perf import apply_native_grid_perf_patch
 from patch_optcuts_native_grid_v4_diagnostics import apply_native_grid_diagnostics
 from patch_optcuts_native_grid_v4_trial_relax import apply_trial_relax_patch
 
-CANONICAL_PATCH_VERSION = "4.4-hard-grid-locks"
+CANONICAL_PATCH_VERSION = "4.5-authoritative-seam-sidecar"
 NATIVE_RUNTIME_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=4"
 GRID_BIJECTIVITY_RUNTIME_MARKER = "[ONESTRING-GRID] global_bijectivity_scaffold=enabled"
 
@@ -33,6 +29,8 @@ _REQUIRED_MAIN_MARKERS = (
     "ONESTRING_GRID_NATIVE_V4_BIJECTIVITY_SCAFFOLD",
     "global_bijectivity_scaffold=",
     "ONESTRING_GRID_BIJECTIVITY_SCAFFOLD_DISABLED",
+    "ONESTRING_GRID_NATIVE_V4_SEAM_SIDECAR",
+    "final_seam_sidecar=",
 )
 _REQUIRED_OPTIMIZER_MARKERS = (
     "ONESTRING_GRID_NATIVE_V4_ZERO_LOCKED_SEARCH_DIR",
@@ -58,18 +56,7 @@ def _replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 def _patch_optimizer_hard_grid_locks(root: Path) -> bool:
-    """Make Grid locks a hard optimizer invariant, not only a solver hint.
-
-    OptCuts' sparse pattern treats ``fixedVert`` specially, but ``stepForward``
-    still applies the full search direction to every mesh vertex.  Native
-    Grid-OptCuts requires a stronger invariant: once a seam/junction vertex has
-    been accepted on the fabrication lattice, no subsequent numerical step may
-    move it.  We therefore zero those search-direction entries immediately after
-    every solve and also skip their coordinate update in ``stepForward``.
-
-    The second guard is intentional redundancy: it protects the lattice even if
-    a future solver/scaffold path accidentally produces a non-zero fixed entry.
-    """
+    """Make Grid locks a hard optimizer invariant, not only a solver hint."""
     path = root / "src" / "Optimizer.cpp"
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -81,14 +68,14 @@ def _patch_optimizer_hard_grid_locks(root: Path) -> bool:
     text = _replace_once(
         text,
         """        else {\n            linSysSolver->solve(minusG, searchDir);\n        }\n        if(!mute) { timer_step.stop(); }\n        \n        fractureInitiated = false;\n""",
-        """        else {\n            linSysSolver->solve(minusG, searchDir);\n        }\n        if(!mute) { timer_step.stop(); }\n\n        // ONESTRING_GRID_NATIVE_V4_ZERO_LOCKED_SEARCH_DIR\n        // A fabrication-grid seam/junction is a hard positional constraint.\n        // Zeroing here also keeps the scaffold boundary motion consistent,\n        // because Scaffold::stepForward consumes this same searchDir.\n        for(const int vI : result.oneStringGridLockedVert) {\n            if(vI >= 0 && vI < result.V.rows() && vI * 2 + 1 < searchDir.size()) {\n                searchDir[vI * 2] = 0.0;\n                searchDir[vI * 2 + 1] = 0.0;\n            }\n        }\n        \n        fractureInitiated = false;\n""",
+        """        else {\n            linSysSolver->solve(minusG, searchDir);\n        }\n        if(!mute) { timer_step.stop(); }\n\n        // ONESTRING_GRID_NATIVE_V4_ZERO_LOCKED_SEARCH_DIR\n        for(const int vI : result.oneStringGridLockedVert) {\n            if(vI >= 0 && vI < result.V.rows() && vI * 2 + 1 < searchDir.size()) {\n                searchDir[vI * 2] = 0.0;\n                searchDir[vI * 2 + 1] = 0.0;\n            }\n        }\n        \n        fractureInitiated = false;\n""",
         "Optimizer hard-zero Grid lock search direction",
     )
 
     text = _replace_once(
         text,
         """        for(int vI = 0; vI < data.V.rows(); vI++) {\n            data.V(vI, 0) = dataV0(vI, 0) + stepSize * searchDir[vI * 2];\n            data.V(vI, 1) = dataV0(vI, 1) + stepSize * searchDir[vI * 2 + 1];\n        }\n""",
-        """        for(int vI = 0; vI < data.V.rows(); vI++) {\n            // ONESTRING_GRID_NATIVE_V4_HARD_LOCK_STEP_FORWARD\n            // Never allow an accepted fabrication-grid seam/junction to drift.\n            if(data.oneStringGridLockedVert.find(vI) != data.oneStringGridLockedVert.end()) {\n                data.V.row(vI) = dataV0.row(vI);\n                continue;\n            }\n            data.V(vI, 0) = dataV0(vI, 0) + stepSize * searchDir[vI * 2];\n            data.V(vI, 1) = dataV0(vI, 1) + stepSize * searchDir[vI * 2 + 1];\n        }\n""",
+        """        for(int vI = 0; vI < data.V.rows(); vI++) {\n            // ONESTRING_GRID_NATIVE_V4_HARD_LOCK_STEP_FORWARD\n            if(data.oneStringGridLockedVert.find(vI) != data.oneStringGridLockedVert.end()) {\n                data.V.row(vI) = dataV0.row(vI);\n                continue;\n            }\n            data.V(vI, 0) = dataV0(vI, 0) + stepSize * searchDir[vI * 2];\n            data.V(vI, 1) = dataV0(vI, 1) + stepSize * searchDir[vI * 2 + 1];\n        }\n""",
         "Optimizer hard-skip Grid lock stepForward",
     )
 
@@ -97,16 +84,34 @@ def _patch_optimizer_hard_grid_locks(root: Path) -> bool:
     return True
 
 
+def _patch_authoritative_grid_seam_sidecar(root: Path) -> bool:
+    """Export actual final cohesive seam sides from C++ instead of re-inferring them from OBJ."""
+    path = root / "src" / "main.cpp"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    text = path.read_text(encoding="utf-8")
+    if "ONESTRING_GRID_NATIVE_V4_SEAM_SIDECAR" in text:
+        print("Grid-OptCuts authoritative seam sidecar already present.")
+        return False
+
+    old = """    if(writeMesh) {\n        triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + \"_mesh.obj\", F);\n        triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + \"_mesh_normalizedUV.obj\", F, true);\n    }\n"""
+    new = """    if(writeMesh) {\n        // ONESTRING_GRID_NATIVE_V4_SEAM_SIDECAR\n        // Export the actual cohesive seam topology before OBJ gluing.  Python must\n        // consume this file instead of trying to infer cuts from v/vt indices.\n        if(oneStringMainGridEnabled()) {\n            const OptCuts::TriMesh* gridMesh = triSoup[channel_result];\n            if(gridMesh->boundaryEdge.size() != gridMesh->cohE.rows()) {\n                throw std::runtime_error(\"ONESTRING_GRID_FINAL_COHESIVE_METADATA_MISMATCH\");\n            }\n            const double h = oneStringMainGridH();\n            const double angle = oneStringMainGridEnvDouble(\"ONESTRING_OPTCUTS_GRID_ANGLE_RAD\", 0.0);\n            const double phaseU = oneStringMainGridEnvDouble(\"ONESTRING_OPTCUTS_GRID_PHASE_U\", 0.0);\n            const double phaseV = oneStringMainGridEnvDouble(\"ONESTRING_OPTCUTS_GRID_PHASE_V\", 0.0);\n            const double c = std::cos(angle), s = std::sin(angle);\n            const double tol = 1.0e-7;\n            auto gridUnits = [&](const Eigen::RowVector2d& p) {\n                return Eigen::Vector2d(\n                    (p[0] * c + p[1] * s - phaseU) / h,\n                    (-p[0] * s + p[1] * c - phaseV) / h\n                );\n            };\n            auto isGridPoint = [&](const Eigen::RowVector2d& p) {\n                const Eigen::Vector2d g = gridUnits(p);\n                return std::abs(g[0] - std::round(g[0])) <= tol &&\n                       std::abs(g[1] - std::round(g[1])) <= tol;\n            };\n            auto isGridEdge = [&](const Eigen::RowVector2d& a, const Eigen::RowVector2d& b) {\n                if(!isGridPoint(a) || !isGridPoint(b) || (a - b).norm() <= h * tol) return false;\n                const Eigen::Vector2d ga = gridUnits(a), gb = gridUnits(b);\n                return std::abs(std::round(ga[0]) - std::round(gb[0])) <= tol ||\n                       std::abs(std::round(ga[1]) - std::round(gb[1])) <= tol;\n            };\n\n            const std::string seamPath = outputFolderPath + infoName + \"_grid_seams.txt\";\n            std::ofstream seamFile(seamPath);\n            if(!seamFile.is_open()) {\n                throw std::runtime_error(\"ONESTRING_GRID_FINAL_SEAM_SIDECAR_OPEN_FAILED\");\n            }\n            seamFile.precision(17);\n            int seamSideCount = 0;\n            for(int cohI = 0; cohI < gridMesh->cohE.rows(); ++cohI) {\n                if(gridMesh->boundaryEdge[cohI]) continue;\n                const Eigen::RowVector4i e = gridMesh->cohE.row(cohI);\n                if(e.minCoeff() < 0 || e.maxCoeff() >= gridMesh->V.rows()) {\n                    throw std::runtime_error(\"ONESTRING_GRID_FINAL_COHESIVE_INDEX_INVALID\");\n                }\n                for(int side = 0; side < 2; ++side) {\n                    const int k = side * 2;\n                    const Eigen::RowVector2d a = gridMesh->V.row(e[k]);\n                    const Eigen::RowVector2d b = gridMesh->V.row(e[k + 1]);\n                    if(!isGridEdge(a, b)) {\n                        std::cerr << \"[ONESTRING-GRID] final_off_lattice_cohesive_side coh=\" << cohI\n                                  << \" side=\" << side << \" a=\" << a << \" b=\" << b << std::endl;\n                        throw std::runtime_error(\"ONESTRING_GRID_FINAL_COHESIVE_SEAM_OFF_LATTICE\");\n                    }\n                    seamFile << a[0] << ' ' << a[1] << ' ' << b[0] << ' ' << b[1] << '\\n';\n                    ++seamSideCount;\n                }\n            }\n            seamFile.close();\n            std::cout << \"[ONESTRING-GRID] final_seam_sidecar=\" << seamPath\n                      << \" sides=\" << seamSideCount << std::endl;\n        }\n        triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + \"_mesh.obj\", F);\n        triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + \"_mesh_normalizedUV.obj\", F, true);\n    }\n"""
+    text = _replace_once(text, old, new, "main.cpp authoritative Grid seam sidecar")
+    path.write_text(text, encoding="utf-8")
+    print(f"Applied authoritative Grid seam sidecar export: {path}")
+    return True
+
+
 def apply_grid_optcuts_v4(root: Path) -> bool:
     root = root.expanduser().resolve()
     changed = False
 
-    # Core V4 owns main.cpp, including the authoritative Optimizer scaffold bool.
     changed = bool(_apply_core_native_grid_patch(root)) or changed
     changed = bool(apply_native_grid_perf_patch(root)) or changed
     changed = bool(apply_native_grid_diagnostics(root)) or changed
     changed = bool(apply_trial_relax_patch(root)) or changed
     changed = bool(_patch_optimizer_hard_grid_locks(root)) or changed
+    changed = bool(_patch_authoritative_grid_seam_sidecar(root)) or changed
 
     _require_markers(root / "src" / "TriMesh.cpp", _REQUIRED_TRIMESH_MARKERS)
     _require_markers(root / "src" / "main.cpp", _REQUIRED_MAIN_MARKERS)
