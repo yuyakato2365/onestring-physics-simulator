@@ -1,93 +1,50 @@
 #!/usr/bin/env python3
-"""Bound and correctly score OneString native Grid-OptCuts V4 candidates.
+"""Bound and accelerate OneString native Grid-OptCuts V4 candidate scoring.
 
-The native Grid search has two requirements:
+Grid-OptCuts must search only fabrication-feasible cuts, but candidate scoring
+cannot solve a full-mesh harmonic parameterization for every lattice proposal.
+That made even a 42-vertex test mesh take minutes.
 
-* it must not exhaustively deep-copy/score every nearby lattice combination;
-* a Grid cut must be judged after the remaining free UV vertices have had a
-  chance to adapt to the new cut topology.
+This patch therefore uses a strict two-stage policy:
+1. enumerate/rank nearby Grid-feasible H/V candidates with cheap geometric
+   proxies and keep only a bounded number per source vertex;
+2. for those candidates, perform the ACTUAL topology cut, validate inversion,
+   persistent Grid locks and cohesive-seam H/V alignment, then evaluate the
+   immediate Symmetric Dirichlet objective.
 
-The second point is essential.  Scoring the raw topology cut immediately after
-placing new Grid seam vertices systematically makes useful cuts look bad: the
-free interior still has the pre-cut parameterization.  This patch therefore
-performs a fast harmonic reparameterization with every UV-boundary/Grid-locked
-vertex held fixed, then evaluates the actual Symmetric Dirichlet energy.  A cut
-is accepted only if that relaxed *actual trial topology* is non-inverted and
-improves the OptCuts objective.
-
-Candidate search itself is two stage:
-1. enumerate/rank Grid-feasible candidates using cheap geometric proxies;
-2. run exact topology cut + harmonic relaxation + SD scoring only for the best
-   K candidates per source vertex.
+No full-mesh solve is performed inside candidate enumeration.  Once a candidate
+is accepted, the ordinary OptCuts optimizer performs the expensive global UV
+relaxation exactly once for the accepted topology.  This keeps the search space
+faithful to Grid-OptCuts while avoiding O(candidate_count) global factorizations.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 MARKER = "ONESTRING_GRID_NATIVE_V4_FAST_SEARCH"
-RELAX_MARKER = "ONESTRING_GRID_NATIVE_V4_RELAXED_TRIAL_SCORE"
+OLD_RELAX_MARKER = "ONESTRING_GRID_NATIVE_V4_RELAXED_TRIAL_SCORE"
+LOCAL_SCORE_MARKER = "ONESTRING_GRID_NATIVE_V4_LOCAL_TRIAL_SCORE"
 
-RELAXED_SCORE = r'''bool oneStringRelaxGridTrialUV(OptCuts::TriMesh& trial)
-{
-    // ONESTRING_GRID_NATIVE_V4_RELAXED_TRIAL_SCORE
-    // cutPath/splitEdgeOnBoundary update the topology.  Recompute boundary
-    // information before collecting hard constraints.
-    trial.updateFeatures();
-
-    std::vector<int> hard;
-    hard.reserve(trial.V.rows());
-    for(int vI = 0; vI < trial.V.rows(); ++vI) {
-        if(trial.isBoundaryVert(vI) ||
-           trial.oneStringGridLockedVert.find(vI) != trial.oneStringGridLockedVert.end()) {
-            hard.push_back(vI);
-        }
-    }
-    if(hard.empty()) return false;
-
-    Eigen::VectorXi b(static_cast<int>(hard.size()));
-    Eigen::MatrixXd bc(static_cast<int>(hard.size()), 2);
-    for(int i = 0; i < static_cast<int>(hard.size()); ++i) {
-        b[i] = hard[i];
-        bc.row(i) = trial.V.row(hard[i]);
-    }
-
-    Eigen::MatrixXd relaxed;
-    // Harmonic is used here only as a fast candidate reparameterization.  The
-    // accepted topology is still passed back to the ordinary OptCuts optimizer,
-    // while the seam/boundary Grid coordinates stay hard-fixed.
-    if(!igl::harmonic(trial.V_rest, trial.F, b, bc, 1, relaxed)) return false;
-    if(relaxed.rows() != trial.V.rows() || relaxed.cols() != 2) return false;
-    if(!relaxed.allFinite()) return false;
-    trial.V = relaxed;
-
-    // Re-impose hard coordinates exactly to avoid solver roundoff moving a
-    // fabrication vertex off the lattice.
-    for(int i = 0; i < static_cast<int>(hard.size()); ++i) {
-        trial.V.row(hard[i]) = bc.row(i);
-    }
-    trial.updateFeatures();
-    return true;
-}
-
-double oneStringScoreTrial(
+LOCAL_SCORE = r'''double oneStringScoreTrial(
     const OptCuts::TriMesh& mesh,
-    OptCuts::TriMesh trial,
+    const OptCuts::TriMesh& trial,
     double lambda_t,
     double seamIncrease,
     std::pair<double, double>& energyChanges)
 {
+    // ONESTRING_GRID_NATIVE_V4_LOCAL_TRIAL_SCORE
+    // This function is intentionally cheap.  Candidate enumeration must never
+    // run a global harmonic/OptCuts solve.  The accepted topology is globally
+    // relaxed by the ordinary OptCuts optimizer after split selection.
     if(!oneStringLockedPreserved(mesh, trial)) return -DBL_MAX;
     if(!oneStringAllLockedOnGrid(trial)) return -DBL_MAX;
     if(!oneStringAllCohesiveSeamSidesGridAligned(trial)) return -DBL_MAX;
-    if(!oneStringRelaxGridTrialUV(trial)) return -DBL_MAX;
     if(!trial.checkInversion(true)) return -DBL_MAX;
-    if(!oneStringLockedPreserved(mesh, trial)) return -DBL_MAX;
-    if(!oneStringAllLockedOnGrid(trial)) return -DBL_MAX;
-    if(!oneStringAllCohesiveSeamSidesGridAligned(trial)) return -DBL_MAX;
 
     const double before = oneStringTotalSD(mesh);
     const double after = oneStringTotalSD(trial);
     if(!std::isfinite(before) || !std::isfinite(after)) return -DBL_MAX;
+
     const double sdDec = before - after;
     energyChanges.first = -sdDec;
     energyChanges.second = seamIncrease;
@@ -275,13 +232,22 @@ def apply_native_grid_perf_patch(root: Path) -> bool:
     text = path.read_text(encoding="utf-8")
     changed = False
 
-    if RELAX_MARKER not in text:
-        text = _replace_function_before(
-            text,
-            "double oneStringScoreTrial(",
-            "bool oneStringTryInteriorGridCut(",
-            RELAXED_SCORE,
-        )
+    if LOCAL_SCORE_MARKER not in text:
+        # Upgrade an already-patched V4 checkout as well as a fresh V4 source.
+        if OLD_RELAX_MARKER in text:
+            text = _replace_function_before(
+                text,
+                "bool oneStringRelaxGridTrialUV(",
+                "bool oneStringTryInteriorGridCut(",
+                LOCAL_SCORE,
+            )
+        else:
+            text = _replace_function_before(
+                text,
+                "double oneStringScoreTrial(",
+                "bool oneStringTryInteriorGridCut(",
+                LOCAL_SCORE,
+            )
         changed = True
 
     if MARKER not in text:
@@ -300,9 +266,9 @@ def apply_native_grid_perf_patch(root: Path) -> bool:
 
     if changed:
         path.write_text(text, encoding="utf-8")
-        print(f"Applied relaxed bounded-trial Grid-OptCuts search: {path}")
+        print(f"Applied bounded local-score Grid-OptCuts search: {path}")
     else:
-        print("Grid-OptCuts V4 relaxed bounded-trial search already present.")
+        print("Grid-OptCuts V4 bounded local-score search already present.")
     return changed
 
 
