@@ -2,11 +2,10 @@
 
 Two modes are intentionally separated:
 
-* ``optcuts``: official OptCuts output is used directly.  No OneString grid
+* ``optcuts``: official OptCuts output is used directly. No OneString grid
   seam constraint, axis snap, or constrained UV solve is applied.
-* ``optcuts_grid``: official OptCuts is used only as the proposal backend for
-  the experimental grid-constrained pipeline.  This mode may apply the common
-  fabrication-axis rotation and later constrained processing.
+* ``optcuts_grid``: official OptCuts is used as the proposal backend for the
+  experimental grid-constrained pipeline.
 
 All non-OptCuts modes delegate unchanged to the pre-existing pipeline.
 """
@@ -61,46 +60,22 @@ def _config_from_params(params: Any) -> OptCutsConfig:
     return OptCutsConfig(
         executable=executable,
         distortion_bound=float(
-            getattr(
-                params,
-                "optcuts_distortion_bound",
-                _env_float("ONESTRING_OPTCUTS_DISTORTION_BOUND", 4.1),
-            )
+            getattr(params, "optcuts_distortion_bound", _env_float("ONESTRING_OPTCUTS_DISTORTION_BOUND", 4.1))
         ),
         lambda_init=float(
-            getattr(
-                params,
-                "optcuts_lambda_init",
-                _env_float("ONESTRING_OPTCUTS_LAMBDA_INIT", 0.999),
-            )
+            getattr(params, "optcuts_lambda_init", _env_float("ONESTRING_OPTCUTS_LAMBDA_INIT", 0.999))
         ),
         method_type=int(
-            getattr(
-                params,
-                "optcuts_method_type",
-                _env_int("ONESTRING_OPTCUTS_METHOD_TYPE", 0),
-            )
+            getattr(params, "optcuts_method_type", _env_int("ONESTRING_OPTCUTS_METHOD_TYPE", 0))
         ),
         use_bijectivity=bool(
-            getattr(
-                params,
-                "optcuts_use_bijectivity",
-                _env_bool("ONESTRING_OPTCUTS_USE_BIJECTIVITY", True),
-            )
+            getattr(params, "optcuts_use_bijectivity", _env_bool("ONESTRING_OPTCUTS_USE_BIJECTIVITY", True))
         ),
         initial_cut_option=int(
-            getattr(
-                params,
-                "optcuts_initial_cut_option",
-                _env_int("ONESTRING_OPTCUTS_INITIAL_CUT_OPTION", 0),
-            )
+            getattr(params, "optcuts_initial_cut_option", _env_int("ONESTRING_OPTCUTS_INITIAL_CUT_OPTION", 0))
         ),
         timeout_seconds=float(
-            getattr(
-                params,
-                "optcuts_timeout_seconds",
-                _env_float("ONESTRING_OPTCUTS_TIMEOUT_SECONDS", 600.0),
-            )
+            getattr(params, "optcuts_timeout_seconds", _env_float("ONESTRING_OPTCUTS_TIMEOUT_SECONDS", 600.0))
         ),
     )
 
@@ -108,8 +83,7 @@ def _config_from_params(params: Any) -> OptCutsConfig:
 def _align_uv_to_optcuts_seam_axis(parameterization: Any) -> float:
     """Rigidly rotate UV so the dominant OptCuts seam direction becomes +u.
 
-    This helper is used only by ``optcuts_grid``.  ``optcuts`` itself keeps the
-    official output unchanged.
+    Used only by ``optcuts_grid``. ``optcuts`` keeps the official UV unchanged.
     """
     payload = extract_connected_seam_payload_robust(parameterization)
     segments = np.asarray(payload.get("segments", np.zeros((0, 2, 2))), dtype=float)
@@ -185,6 +159,9 @@ def _build_optcuts_parameterization(
     boundary = result.uv_vertices_2d[loop + [loop[0]]]
 
     is_grid = requested_mode == "optcuts_grid"
+    # Important: existing grid wrappers key off method == "optcuts". Keep the
+    # official mode on a distinct internal method so those wrappers cannot touch it.
+    internal_method = "optcuts" if is_grid else "optcuts_official"
     metrics: dict[str, object] = {
         **result.metrics,
         "parameterization_exactness_label": "official_optcuts_external_backend",
@@ -213,6 +190,7 @@ def _build_optcuts_parameterization(
         "bff_implemented": False,
         "optcuts_implemented": True,
         "optcuts_grid_mode": bool(is_grid),
+        "optcuts_internal_method": internal_method,
         "omega_boundary_fixed": False,
         "omega_boundary_forced_rectangle": False,
         "omega_boundary_shape": "free",
@@ -225,7 +203,7 @@ def _build_optcuts_parameterization(
     }
 
     parameterization = pipeline.SurfaceParameterization(
-        method=requested_mode,
+        method=internal_method,
         surface_vertices_3d=np.asarray(result.surface_vertices_3d, dtype=float),
         surface_faces=np.asarray(result.surface_faces, dtype=int),
         uv_vertices_2d=np.asarray(result.uv_vertices_2d, dtype=float),
