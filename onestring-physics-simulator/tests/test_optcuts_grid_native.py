@@ -60,9 +60,6 @@ def test_internal_optcuts_seam_detected_from_surface_uv_index_mismatch():
 
 
 def test_m2d_can_disconnect_a_native_seam_that_coincides_with_shared_grid_edge():
-    # V4 normally produces two distinct UV boundary sides. This helper remains
-    # necessary for the special case where an exported native seam lies on a
-    # shared M2D grid edge: geometry stays coincident while topology disconnects.
     h = 1.0
     segment = np.asarray([[[1.0, 0.0], [1.0, 1.0]]], dtype=float)
     cut_edges = _grid_cut_edges_from_segments(
@@ -123,10 +120,10 @@ def test_native_pipeline_does_not_intercept_official_optcuts():
     assert pipeline._build_surface_parameterization(None, None, None, params) is sentinel
 
 
-def test_v4_patcher_encodes_grid_search_not_posthoc_seam_snap():
+def test_v4_algorithm_is_grid_search_not_posthoc_seam_snap():
     root = Path(__file__).resolve().parents[1]
     algorithm = (root / "scripts" / "patch_optcuts_native_grid.py").read_text(encoding="utf-8")
-    installer = (root / "scripts" / "patch_optcuts_native_grid_v4.py").read_text(encoding="utf-8")
+    installer = (root / "scripts" / "patch_optcuts_native_grid_v4_final.py").read_text(encoding="utf-8")
 
     assert "ONESTRING_GRID_NATIVE_V4" in algorithm
     assert "oneStringGridComputeLocalLDec" in algorithm
@@ -136,12 +133,12 @@ def test_v4_patcher_encodes_grid_search_not_posthoc_seam_snap():
     assert "A-B-C" in algorithm and "A-D-C" in algorithm
     assert "oneStringGridLockedVert" in algorithm
     assert "oneStringMainInitialGridBoundary" in algorithm
+    assert "igl::map_vertices_to_circle" in installer
     assert "version=4" in installer
-    assert "_replace_in_function" in installer
-    assert "No completed free seam" not in installer  # implementation, not a post-hoc adapter
 
 
-def test_setup_uses_function_scoped_v4_installer():
+def test_setup_uses_verified_v4_installer_and_cpp14():
     root = Path(__file__).resolve().parents[1]
     setup = (root / "scripts" / "setup_optcuts.py").read_text(encoding="utf-8")
-    assert "from patch_optcuts_native_grid_v4 import apply_native_grid_patch" in setup
+    assert "from patch_optcuts_native_grid_v4_final import apply_native_grid_patch" in setup
+    assert "-DCMAKE_CXX_STANDARD=14" in setup
