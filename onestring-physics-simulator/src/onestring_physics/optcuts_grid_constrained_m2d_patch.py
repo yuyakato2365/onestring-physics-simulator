@@ -28,7 +28,7 @@ def _barycentric_2d(point: np.ndarray, tri: np.ndarray) -> np.ndarray | None:
     if abs(denom) <= 1e-14:
         return None
     u = float((v2[0] * v1[1] - v1[0] * v2[1]) / denom)
-    v = float((v0[0] * v2[1] - v2[0] * v1[1]) / denom)
+    v = float((v0[0] * v2[1] - v2[0] * v0[1]) / denom)
     return np.asarray([1.0 - u - v, u, v], dtype=float)
 
 
