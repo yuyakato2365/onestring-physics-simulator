@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Canonical OneString Grid-OptCuts V4 patch entrypoint.
 
-This is the only patch entrypoint setup_optcuts.py calls.  Grid bijectivity is
+This is the only patch entrypoint setup_optcuts.py calls. Grid bijectivity is
 part of the core main.cpp patch itself; there is no separately-wired bijectivity
 fragment anymore.
 """
@@ -9,12 +9,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from patch_optcuts_native_grid_v4_final import apply_native_grid_patch
+# IMPORTANT: keep the imported core patch under a private, unambiguous name.
+# Do not alias apply_grid_optcuts_v4 back to apply_native_grid_patch: Python
+# resolves globals at call time, which previously made this function call
+# itself recursively until RecursionError.
+from patch_optcuts_native_grid_v4_final import apply_native_grid_patch as _apply_core_native_grid_patch
 from patch_optcuts_native_grid_v4_perf import apply_native_grid_perf_patch
 from patch_optcuts_native_grid_v4_diagnostics import apply_native_grid_diagnostics
 from patch_optcuts_native_grid_v4_trial_relax import apply_trial_relax_patch
 
-CANONICAL_PATCH_VERSION = "4.2-consolidated-runtime-bijectivity"
+CANONICAL_PATCH_VERSION = "4.3-consolidated-no-recursion"
 NATIVE_RUNTIME_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=4"
 GRID_BIJECTIVITY_RUNTIME_MARKER = "[ONESTRING-GRID] global_bijectivity_scaffold=enabled"
 
@@ -47,7 +51,7 @@ def apply_grid_optcuts_v4(root: Path) -> bool:
     changed = False
 
     # Core V4 owns main.cpp, including the authoritative Optimizer scaffold bool.
-    changed = bool(apply_native_grid_patch(root)) or changed
+    changed = bool(_apply_core_native_grid_patch(root)) or changed
     changed = bool(apply_native_grid_perf_patch(root)) or changed
     changed = bool(apply_native_grid_diagnostics(root)) or changed
     changed = bool(apply_trial_relax_patch(root)) or changed
@@ -62,11 +66,9 @@ def apply_grid_optcuts_v4(root: Path) -> bool:
     return changed
 
 
-apply_native_grid_patch = apply_grid_optcuts_v4
-
-
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("root", type=Path)
     args = parser.parse_args()
