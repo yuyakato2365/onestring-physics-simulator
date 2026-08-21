@@ -1,18 +1,27 @@
 """Runtime integration of the official OptCuts executable into S -> Omega.
 
-The patch is deliberately opt-in.  Existing BFF, CEPS, free-boundary, and M2D
+The patch is deliberately opt-in. Existing BFF, CEPS, free-boundary, and M2D
 Split paths are delegated unchanged unless ``omega_parameterization_mode`` is
 exactly ``"optcuts"``.
+
+For OneString's rectilinear fabrication-seam mode, OptCuts is still allowed to
+find an arbitrary distortion-aware cut and UV embedding first.  We then apply a
+rigid UV rotation only: the dominant axis of the OptCuts seam network is aligned
+to the fabrication grid u-axis.  Because this is a rigid 2D transform, it does
+not change the OptCuts distortion; it only chooses the common orthogonal frame
+used by the later fixed-unit rectilinear seam adapter.
 """
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any
 
 import numpy as np
 
 from .optcuts_backend import OptCutsConfig, run_official_optcuts
+from .optcuts_seam_extraction_patch import extract_connected_seam_payload_robust
 
 
 def _env_float(name: str, default: float) -> float:
@@ -97,6 +106,70 @@ def _config_from_params(params: Any) -> OptCutsConfig:
     )
 
 
+def _align_uv_to_optcuts_seam_axis(parameterization: Any) -> float:
+    """Rigidly rotate UV so the dominant OptCuts seam direction becomes +u.
+
+    The direction is estimated by a length-weighted second moment of all robustly
+    extracted seam segments.  Since a seam axis is unoriented (+d and -d are the
+    same axis), this is more stable than selecting an arbitrary first source edge.
+    Returns the applied clockwise rotation angle in degrees.
+    """
+    payload = extract_connected_seam_payload_robust(parameterization)
+    segments = np.asarray(payload.get("segments", np.zeros((0, 2, 2))), dtype=float)
+    if len(segments) == 0:
+        parameterization.metrics["optcuts_fabrication_axis_status"] = "no_internal_seam"
+        parameterization.metrics["optcuts_fabrication_axis_rotation_degrees"] = 0.0
+        return 0.0
+
+    moment = np.zeros((2, 2), dtype=float)
+    total = 0.0
+    for segment in segments:
+        direction = np.asarray(segment[1] - segment[0], dtype=float)
+        length = float(np.linalg.norm(direction))
+        if length <= 1e-12 or not np.isfinite(length):
+            continue
+        unit = direction / length
+        moment += length * np.outer(unit, unit)
+        total += length
+    if total <= 1e-12:
+        parameterization.metrics["optcuts_fabrication_axis_status"] = "degenerate_internal_seam"
+        parameterization.metrics["optcuts_fabrication_axis_rotation_degrees"] = 0.0
+        return 0.0
+
+    values, vectors = np.linalg.eigh(moment)
+    axis = np.asarray(vectors[:, int(np.argmax(values))], dtype=float)
+    angle = float(math.atan2(axis[1], axis[0]))
+    # Axis orientation is modulo pi; choose the smaller-magnitude rigid rotation.
+    while angle > math.pi / 2.0:
+        angle -= math.pi
+    while angle <= -math.pi / 2.0:
+        angle += math.pi
+
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    center = np.mean(uv, axis=0) if len(uv) else np.zeros(2, dtype=float)
+    c, s = math.cos(-angle), math.sin(-angle)
+    rotation = np.asarray([[c, -s], [s, c]], dtype=float)
+    rotated = (uv - center[None, :]) @ rotation.T + center[None, :]
+    parameterization.uv_vertices_2d = rotated
+
+    loop = [int(v) for v in parameterization.metrics.get("boundary_loop", [])]
+    if loop:
+        parameterization.omega_boundary = rotated[loop + [loop[0]]]
+
+    degrees = float(math.degrees(-angle))
+    parameterization.metrics.update({
+        "optcuts_fabrication_axis_status": "aligned",
+        "optcuts_fabrication_axis_model": "length-weighted principal axis of robust OptCuts seam graph",
+        "optcuts_fabrication_axis_rotation_degrees": degrees,
+        "optcuts_fabrication_axis_u": [float(math.cos(angle)), float(math.sin(angle))],
+        "optcuts_fabrication_axis_v": [float(-math.sin(angle)), float(math.cos(angle))],
+        "optcuts_uv_rotation_is_rigid": True,
+        "optcuts_distortion_changed_by_axis_alignment": False,
+    })
+    print(f"[OPTCUTS-AXIS] rigid_uv_rotation_degrees={degrees:.4f} seam_segments={len(segments)}")
+    return degrees
+
+
 def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, grid: Any, params: Any):
     del target, grid  # OptCuts works directly on the triangulated target surface.
 
@@ -123,8 +196,8 @@ def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, gr
         "harmonic_solve_performed": False,
         "omega_corresponds_to_S": True,
         "omega_correspondence_model": (
-            "official OptCuts cut topology + UV embedding; M2D inverse mapping uses paired "
-            "surface_faces/uv_faces barycentric coordinates"
+            "official OptCuts cut topology + UV embedding; rigid axis alignment; "
+            "M2D inverse mapping uses paired surface_faces/uv_faces barycentric coordinates"
         ),
         "paper_flow_stage": "S -> Omega by official OptCuts external backend",
         "paper_exactness_warning": (
@@ -135,7 +208,7 @@ def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, gr
         "omega_boundary_fixed": False,
         "omega_boundary_forced_rectangle": False,
         "omega_boundary_shape": "free",
-        "omega_boundary_constraint_model": "OptCuts optimized seams and arbitrary embedding",
+        "omega_boundary_constraint_model": "OptCuts optimized seams + rigid fabrication-axis alignment",
         "fallbacks_used": [],
     }
 
@@ -150,8 +223,12 @@ def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, gr
         metrics=metrics,
     )
 
+    # OneString-specific fusion: pick the common orthogonal fabrication frame
+    # from OptCuts' own seam network before the regular M2D grid is constructed.
+    _align_uv_to_optcuts_seam_axis(parameterization)
+
     # Reuse the current branch's generic quality audit only if it can handle the
-    # separate 3D/UV index spaces produced by seams.  Failure here must not turn
+    # separate 3D/UV index spaces produced by seams. Failure here must not turn
     # into a fallback; the backend's own Jacobian/SVD metrics remain available.
     quality_fn = getattr(pipeline, "_omega_quality_metrics", None)
     if callable(quality_fn):
@@ -190,9 +267,6 @@ def install_optcuts_pipeline_patch(pipeline: Any) -> None:
     if original_module is not None:
         original_module._build_surface_parameterization = optcuts_dispatch
 
-    # build_onestring_design in this repository may execute in the globals of a
-    # backed-up compatibility module. Rewire only this one symbol; do not reload
-    # or reinstall any Split/K2D wrappers.
     for fn in (
         getattr(pipeline, "build_onestring_design", None),
         getattr(pipeline, "_ORIGINAL_BUILD_ONESTRING_DESIGN", None),
