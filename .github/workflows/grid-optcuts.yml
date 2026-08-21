@@ -113,6 +113,28 @@ jobs:
           grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-split-smoke.log
           grep -q "evaluate vertex splits" /tmp/native-grid-split-smoke.log
 
+      - name: Native Grid-OptCuts accepts a real Grid split
+        shell: bash
+        run: |
+          python - <<'PY'
+          import trimesh
+          mesh = trimesh.creation.icosphere(subdivisions=1, radius=1.0)
+          mesh.export('/tmp/onestring_grid_icosphere.obj')
+          print(f'icosphere vertices={len(mesh.vertices)} faces={len(mesh.faces)}')
+          PY
+          export ONESTRING_OPTCUTS_GRID_NATIVE=1
+          export ONESTRING_OPTCUTS_GRID_H=0.10
+          export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0
+          export ONESTRING_OPTCUTS_GRID_PHASE_U=0
+          export ONESTRING_OPTCUTS_GRID_PHASE_V=0
+          export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=8
+          timeout 180 ./third_party/OptCuts/build/OptCuts_bin \
+            100 /tmp/onestring_grid_icosphere.obj 0.999 3 0 4.1 0 0 native-grid-accepted-split \
+            > /tmp/native-grid-accepted-split.log 2>&1
+          cat /tmp/native-grid-accepted-split.log
+          grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-accepted-split.log
+          grep -Eq "boundary split E_dec =|interior split E_dec =" /tmp/native-grid-accepted-split.log
+
       - name: Run Grid-OptCuts unit and end-to-end tests
         env:
           PYTHONPATH: src
