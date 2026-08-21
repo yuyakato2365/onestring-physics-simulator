@@ -3,15 +3,17 @@
 The ``optcuts`` mode implements one coherent flow:
 
 1. official OptCuts proposes a distortion-relieving physical cut topology on S;
-2. OneString compiles the whole UV seam network as one constraint graph before
-   assigning coordinates: same-axis chains sharing a UV junction share a lattice
-   line, every junction is one shared lattice point, and every seam copy is a
-   straight horizontal/vertical segment;
-3. Tile size is the fixed lattice spacing h, while a single global lattice phase
-   is fitted to reduce unnecessary motion;
+2. OneString decomposes that seam network into straight H/V segment runs in one
+   global orthogonal frame; bends and loops are represented by multiple straight
+   segments meeting at globally solved lattice junctions;
+3. Tile size is the fixed lattice spacing h, while one global lattice phase is
+   fitted to reduce unnecessary motion;
 4. the constrained UV map is solved by continuation with orientation checks;
-5. M2D is generated on exactly the same phased lattice. No post-hoc seam snapping,
-   extra central seam, or chain-local endpoint mutation is used.
+5. M2D is generated on exactly the same phased lattice and QuadGrid geometry is
+   explicitly synchronized to the M2D vertex coordinates.
+
+No post-hoc staircase seam snapping, extra central seam, chain-local endpoint
+mutation, or independent junction assignment is used.
 """
 
 from __future__ import annotations
@@ -44,8 +46,11 @@ from onestring_physics.optcuts_grid_constrained_parameterization_patch import ( 
 from onestring_physics.optcuts_grid_constrained_m2d_patch import (  # noqa: E402
     install_optcuts_grid_constrained_m2d_patch,
 )
-from onestring_physics.optcuts_grid_fusion_v4 import (  # noqa: E402
-    install_global_grid_constraint_fusion,
+from onestring_physics.optcuts_grid_consistency_patch import (  # noqa: E402
+    install_optcuts_grid_consistency_patch,
+)
+from onestring_physics.optcuts_grid_fusion_v5 import (  # noqa: E402
+    install_orthogonal_segment_grid_fusion,
 )
 from onestring_physics.optcuts_grid_optimizer_v2 import (  # noqa: E402
     install_strict_optcuts_grid_optimizer,
@@ -86,10 +91,9 @@ def _install_optcuts_selector() -> None:
         if value == "optcuts":
             st.caption(
                 "Grid-constrained OptCuts: official OptCuts proposes the physical cut topology. "
-                "The complete seam network is then solved globally: every seam side is one straight "
-                "grid line, all lines use one orthogonal frame, shared junctions are single shared "
-                "lattice points, and Tile size is the fixed lattice spacing. The lattice phase is "
-                "fitted globally; no seam is snapped independently afterwards."
+                "The seam network is decomposed into straight horizontal/vertical segments in one "
+                "global orthogonal frame. Shared bends/junctions are solved once as common lattice "
+                "points. Tile size is the fixed lattice spacing; the lattice phase is fitted globally."
             )
             executable = st.text_input(
                 "OptCuts executable",
@@ -170,14 +174,15 @@ def _install_post_simple_split_grid_m2d_hook() -> None:
     def install_then_grid_constrained_m2d(pipeline_module: Any, optimization_debug_module: Any) -> None:
         original_installer(pipeline_module, optimization_debug_module)
         install_optcuts_grid_constrained_m2d_patch(pipeline_module)
+        install_optcuts_grid_consistency_patch(pipeline_module)
 
     simple_split_module.install_simple_split_panel_patch = install_then_grid_constrained_m2d
     simple_split_module._onestring_grid_constrained_optcuts_hook_installed = True
 
 
-# Order matters: compile the seam graph globally before the official OptCuts
-# wrapper is used, then solve the constrained UV and generate the same h-lattice.
-install_global_grid_constraint_fusion()
+# Order matters: compile the complete orthogonal seam graph first, then use the
+# official OptCuts proposal backend and constrained UV continuation solver.
+install_orthogonal_segment_grid_fusion()
 install_strict_optcuts_grid_optimizer()
 install_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
