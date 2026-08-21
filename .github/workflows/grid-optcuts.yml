@@ -71,7 +71,7 @@ jobs:
           grep -q "native_candidate_search enabled version=4" third_party/OptCuts/src/main.cpp
           test -x third_party/OptCuts/build/OptCuts_bin
 
-      - name: Native Grid-OptCuts headless smoke test
+      - name: Native Grid-OptCuts initialization smoke test
         shell: bash
         run: |
           cat > /tmp/onestring_grid_smoke.obj <<'OBJ'
@@ -91,11 +91,27 @@ jobs:
           export ONESTRING_OPTCUTS_GRID_PHASE_V=0
           export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=4
           timeout 120 ./third_party/OptCuts/build/OptCuts_bin \
-            100 /tmp/onestring_grid_smoke.obj 0.999 1 0 1000 0 0 native-grid-smoke \
-            > /tmp/native-grid-smoke.log 2>&1
-          cat /tmp/native-grid-smoke.log
-          grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-smoke.log
-          test -n "$(find third_party/OptCuts/output -name 'finalResult_mesh.obj' -print -quit 2>/dev/null)"
+            100 /tmp/onestring_grid_smoke.obj 0.999 1 0 1000 0 0 native-grid-init-smoke \
+            > /tmp/native-grid-init-smoke.log 2>&1
+          cat /tmp/native-grid-init-smoke.log
+          grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-init-smoke.log
+          grep -q "optimization converged" /tmp/native-grid-init-smoke.log
+
+      - name: Native Grid-OptCuts split-search smoke test
+        shell: bash
+        run: |
+          export ONESTRING_OPTCUTS_GRID_NATIVE=1
+          export ONESTRING_OPTCUTS_GRID_H=0.5
+          export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0
+          export ONESTRING_OPTCUTS_GRID_PHASE_U=0
+          export ONESTRING_OPTCUTS_GRID_PHASE_V=0
+          export ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS=4
+          timeout 120 ./third_party/OptCuts/build/OptCuts_bin \
+            100 /tmp/onestring_grid_smoke.obj 0.999 2 0 4.1 0 0 native-grid-split-smoke \
+            > /tmp/native-grid-split-smoke.log 2>&1
+          cat /tmp/native-grid-split-smoke.log
+          grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-split-smoke.log
+          grep -q "evaluate vertex splits" /tmp/native-grid-split-smoke.log
 
       - name: Run Grid-OptCuts unit tests
         env:
