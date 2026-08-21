@@ -162,9 +162,9 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_U"] = str(float(phase_u))
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = str(float(phase_v))
             os.environ["ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS"] = str(float(max_snap))
-            # Native Grid mode uses exact trial-cut/global-overlap validation instead
-            # of the original unconstrained free-boundary air scaffold.
-            os.environ["ONESTRING_OPTCUTS_USE_BIJECTIVITY"] = "0"
+            # Native Grid mode keeps the original OptCuts global bijectivity
+            # scaffold active in addition to Grid-specific trial validation.
+            os.environ["ONESTRING_OPTCUTS_USE_BIJECTIVITY"] = "1"
             os.environ["ONESTRING_OPTCUTS_INITIAL_CUT_OPTION"] = "0"
 
         if executable.strip():
