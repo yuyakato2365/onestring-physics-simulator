@@ -2,18 +2,19 @@
 
 OptCuts' UV embedding is already discontinuous along the cuts chosen by OptCuts.
 A later fabrication seam cannot move that discontinuity by merely changing M2D
-connectivity.  This patch therefore treats the OptCuts UV charts as authoritative
-for inverse mapping:
+connectivity. This patch therefore treats the OptCuts UV chart/boundary structure
+as authoritative for inverse mapping:
 
-* UV triangles are split into connected chart components by shared UV edges.
-* Every M2D quad must lie completely inside one chart; chart-crossing quads are
-  removed before M3D.
-* M2D vertices shared by faces from different charts are duplicated so each
-  vertex has one unambiguous chart id.
-* M2D -> M3D inverse mapping is restricted to that vertex's chart.
+* UV triangles are grouped by shared-edge connectivity.
+* Every M2D quad must lie inside one chart component.
+* Crucially, no OptCuts UV boundary edge (outer boundary or either side of a slit)
+  may pass through the strict interior of a kept quad. This catches slit crossings
+  even when the slit does not disconnect the UV domain into two components.
+* Vertices shared by different chart components are duplicated.
+* M2D -> M3D inverse mapping is restricted to the assigned chart component.
 
 The rectilinear OneString seam remains an additional zero-width fabrication cut;
-it no longer pretends to relocate the discontinuity of the original OptCuts map.
+it does not pretend to relocate the discontinuity of the original OptCuts map.
 """
 from __future__ import annotations
 
@@ -49,6 +50,13 @@ def _chart_data(parameterization: Any) -> dict[str, Any]:
         ids = [int(x) for x in face]
         for i in range(3):
             edge_faces[tuple(sorted((ids[i], ids[(i + 1) % 3])))].append(int(fi))
+
+    # These are all UV-domain boundaries, including both sides of OptCuts slits.
+    boundary_segments = np.asarray(
+        [[uv[a], uv[b]] for (a, b), touching in edge_faces.items() if len(touching) == 1],
+        dtype=float,
+    ) if edge_faces else np.zeros((0, 2, 2), dtype=float)
+
     adjacency = [set() for _ in range(len(uf))]
     for touching in edge_faces.values():
         if len(touching) != 2:
@@ -77,7 +85,12 @@ def _chart_data(parameterization: Any) -> dict[str, Any]:
     for ids in charts:
         tris = uv[uf[ids]]
         chart_boxes.append((np.min(tris.reshape(-1, 2), axis=0), np.max(tris.reshape(-1, 2), axis=0)))
-    data = {"face_chart": face_chart, "charts": charts, "chart_boxes": chart_boxes}
+    data = {
+        "face_chart": face_chart,
+        "charts": charts,
+        "chart_boxes": chart_boxes,
+        "boundary_segments": boundary_segments,
+    }
     setattr(parameterization, "_onestring_optcuts_chart_data", data)
     return data
 
@@ -91,7 +104,6 @@ def _point_in_chart(point: np.ndarray, chart_id: int, parameterization: Any, tol
     lo, hi = data["chart_boxes"][int(chart_id)]
     if np.any(p < lo - tol) or np.any(p > hi + tol):
         return False, -1, None
-    best: tuple[float, int, np.ndarray] | None = None
     for fi in ids:
         tri = uv[uf[int(fi)]]
         if np.any(p < np.min(tri, axis=0) - tol) or np.any(p > np.max(tri, axis=0) + tol):
@@ -99,20 +111,65 @@ def _point_in_chart(point: np.ndarray, chart_id: int, parameterization: Any, tol
         bary = _barycentric_2d(p, tri)
         if bary is None:
             continue
-        minimum = float(np.min(bary))
-        if minimum >= -tol:
+        if float(np.min(bary)) >= -tol:
             return True, int(fi), bary
-        score = abs(minimum)
-        if best is None or score < best[0]:
-            best = (score, int(fi), bary)
     return False, -1, None
+
+
+def _segment_hits_strict_rect_interior(a: np.ndarray, b: np.ndarray, lo: np.ndarray, hi: np.ndarray, eps: float) -> bool:
+    """Liang-Barsky test against a slightly shrunken axis-aligned quad interior."""
+    lower = np.asarray(lo, float) + float(eps)
+    upper = np.asarray(hi, float) - float(eps)
+    if np.any(lower >= upper):
+        return False
+    p0 = np.asarray(a, float)
+    p1 = np.asarray(b, float)
+    d = p1 - p0
+    t0, t1 = 0.0, 1.0
+    for axis in range(2):
+        if abs(float(d[axis])) <= 1e-15:
+            if float(p0[axis]) < float(lower[axis]) or float(p0[axis]) > float(upper[axis]):
+                return False
+            continue
+        inv = 1.0 / float(d[axis])
+        enter = (float(lower[axis]) - float(p0[axis])) * inv
+        leave = (float(upper[axis]) - float(p0[axis])) * inv
+        if enter > leave:
+            enter, leave = leave, enter
+        t0 = max(t0, enter)
+        t1 = min(t1, leave)
+        if t0 > t1:
+            return False
+    return t1 >= 0.0 and t0 <= 1.0 and t0 <= t1
+
+
+def _quad_crosses_uv_boundary(points: np.ndarray, parameterization: Any) -> bool:
+    pts = np.asarray(points, dtype=float)[:, :2]
+    lo = np.min(pts, axis=0)
+    hi = np.max(pts, axis=0)
+    scale = max(float(np.max(hi - lo)), 1e-9)
+    eps = max(1e-10, 1e-7 * scale)
+    segments = np.asarray(_chart_data(parameterization)["boundary_segments"], dtype=float)
+    for segment in segments:
+        a, b = np.asarray(segment[0], float), np.asarray(segment[1], float)
+        seg_lo = np.minimum(a, b)
+        seg_hi = np.maximum(a, b)
+        if np.any(seg_hi < lo + eps) or np.any(seg_lo > hi - eps):
+            continue
+        if _segment_hits_strict_rect_interior(a, b, lo, hi, eps):
+            return True
+    return False
 
 
 def _quad_chart(points: np.ndarray, parameterization: Any) -> int | None:
     data = _chart_data(parameterization)
     pts = np.asarray(points, dtype=float)[:, :2]
+    # A slit boundary can leave the whole UV domain connected. Component labels
+    # alone therefore cannot certify a quad. Reject any cell whose strict interior
+    # is pierced by an OptCuts UV boundary edge.
+    if _quad_crosses_uv_boundary(pts, parameterization):
+        return None
     center = np.mean(pts, axis=0)
-    # Center first makes this cheap for the common case.
     candidate: list[int] = []
     for cid in range(len(data["charts"])):
         inside, _fi, _bary = _point_in_chart(center, cid, parameterization)
@@ -147,7 +204,6 @@ def _duplicate_vertices_by_face_chart(vertices: np.ndarray, faces: np.ndarray, f
             for fi in by_chart[int(cid)]:
                 mask = out[int(fi)] == int(vid)
                 out[int(fi), mask] = int(new_id)
-    # Fill any unused ids conservatively from the first incident face.
     for fi, face in enumerate(out):
         cid = int(face_charts[fi])
         for vid in face:
@@ -183,8 +239,14 @@ def install_optcuts_chart_aware_patch(pipeline: Any) -> None:
         keep_faces: list[np.ndarray] = []
         face_charts: list[int] = []
         rejected: list[int] = []
+        boundary_crossing: list[int] = []
         for fi, face in enumerate(faces):
-            cid = _quad_chart(vertices[np.asarray(face, dtype=int)], parameterization)
+            face_points = vertices[np.asarray(face, dtype=int)]
+            if _quad_crosses_uv_boundary(face_points, parameterization):
+                rejected.append(int(fi))
+                boundary_crossing.append(int(fi))
+                continue
+            cid = _quad_chart(face_points, parameterization)
             if cid is None:
                 rejected.append(int(fi))
                 continue
@@ -194,14 +256,14 @@ def install_optcuts_chart_aware_patch(pipeline: Any) -> None:
             raise RuntimeError("OPTCUTS_CHART_AWARE_M2D_EMPTY: no quad lies wholly inside one OptCuts UV chart")
         kept = np.asarray(keep_faces, dtype=int)
         chart_arr = np.asarray(face_charts, dtype=int)
-        new_vertices, new_faces, vertex_charts, duplicated = _duplicate_vertices_by_face_chart(
-            vertices, kept, chart_arr
-        )
+        new_vertices, new_faces, vertex_charts, duplicated = _duplicate_vertices_by_face_chart(vertices, kept, chart_arr)
         metrics = dict(getattr(mesh, "metrics", {}) or {})
         metrics.update({
             "optcuts_chart_aware_m2d": True,
             "optcuts_uv_chart_count": int(len(data["charts"])),
+            "optcuts_uv_boundary_segment_count": int(len(data["boundary_segments"])),
             "optcuts_chart_crossing_quad_removed_count": int(len(rejected)),
+            "optcuts_uv_boundary_crossing_quad_removed_count": int(len(boundary_crossing)),
             "optcuts_chart_crossing_quad_removed_ids_sample": rejected[:128],
             "optcuts_chart_vertex_duplicate_count": int(duplicated),
             "optcuts_chart_aware_face_count": int(len(new_faces)),
@@ -211,8 +273,9 @@ def install_optcuts_chart_aware_patch(pipeline: Any) -> None:
         setattr(out, "_optcuts_vertex_chart_ids", vertex_charts)
         print(
             "[OPTCUTS-CHART-M2D] "
-            f"charts={len(data['charts'])} kept={len(new_faces)} "
-            f"crossing_removed={len(rejected)} chart_vertex_duplicates={duplicated}"
+            f"charts={len(data['charts'])} boundary_segments={len(data['boundary_segments'])} "
+            f"kept={len(new_faces)} rejected={len(rejected)} "
+            f"boundary_crossing_removed={len(boundary_crossing)} chart_vertex_duplicates={duplicated}"
         )
         return out
 
@@ -231,12 +294,8 @@ def install_optcuts_chart_aware_patch(pipeline: Any) -> None:
                 raise RuntimeError(f"OPTCUTS_VERTEX_WITHOUT_CHART: vertex={vi}")
             mapped[vi], tri_ids[vi] = _inverse_in_chart(point[:2], cid, parameterization)
 
-        # Reuse the original report construction by feeding a temporary parameterization
-        # is unsafe because it would globally re-query UV. Construct the same QuadMesh and
-        # a lightweight StageReport directly.
         cls = getattr(getattr(pipeline, "_original", None), "QuadMesh", None) or type(mesh)
         lifted = cls(mapped, np.asarray(mesh.faces, dtype=int).copy(), mesh.grid, "M3D", {}, list(getattr(mesh, "split_lines", [])))
-        # Preserve OptCuts metadata so the K3D validity guard sees the active path.
         lifted.metrics = dict(getattr(mesh, "metrics", {}) or {})
         lifted.metrics.update({
             "parameterization_method": "optcuts",
@@ -247,7 +306,6 @@ def install_optcuts_chart_aware_patch(pipeline: Any) -> None:
             "m3d_quad_count": int(len(mesh.faces)),
             "optcuts_chart_aware_lift": True,
         })
-        # Use original helpers when available for diagnostics/report only.
         planarity_fn = getattr(pipeline, "_quad_planarity_error", None)
         planarity = float(planarity_fn(mapped, mesh.faces)) if callable(planarity_fn) else 0.0
         lifted.metrics["quad_planarity_error"] = planarity
@@ -257,7 +315,7 @@ def install_optcuts_chart_aware_patch(pipeline: Any) -> None:
         counts = counts_fn(lifted) if callable(counts_fn) else {"vertices": int(len(mapped)), "tiles": int(len(mesh.faces))}
         report = report_cls(
             name="M2D -> M3D",
-            objective="Chart-aware OptCuts inverse map: every M2D vertex is mapped only inside its assigned UV chart.",
+            objective="Chart-aware OptCuts inverse map: no M2D quad crosses an OptCuts UV boundary and every vertex maps within its assigned chart.",
             before_error=0.0,
             after_error=0.0,
             constraint_violation=planarity,
@@ -281,4 +339,10 @@ def install_optcuts_chart_aware_patch(pipeline: Any) -> None:
     pipeline._onestring_optcuts_chart_aware_patch_installed = True
 
 
-__all__ = ["install_optcuts_chart_aware_patch", "_chart_data", "_quad_chart", "_inverse_in_chart"]
+__all__ = [
+    "install_optcuts_chart_aware_patch",
+    "_chart_data",
+    "_quad_chart",
+    "_quad_crosses_uv_boundary",
+    "_inverse_in_chart",
+]
