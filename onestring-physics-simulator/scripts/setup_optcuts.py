@@ -37,9 +37,7 @@ def _verify_binary_contains(executable: Path, markers: tuple[str, ...]) -> None:
     data = executable.read_bytes()
     missing = [m for m in markers if m.encode("utf-8") not in data]
     if missing:
-        raise SystemExit(
-            f"OptCuts binary is missing required Grid-OptCuts markers: {missing}"
-        )
+        raise SystemExit(f"OptCuts binary is missing required Grid-OptCuts markers: {missing}")
     print("Verified compiled Grid-OptCuts marker strings.")
 
 
@@ -57,57 +55,79 @@ def _write_tetra_obj(path: Path) -> None:
     )
 
 
+def _write_open_disk_obj(path: Path) -> None:
+    # Two-triangle open disk: this deliberately bypasses the closed-surface
+    # onePointCut path that previously (incorrectly) owned the scaffold marker.
+    path.write_text(
+        "v -1 -1 0\n"
+        "v 1 -1 0\n"
+        "v 1 1 0\n"
+        "v -1 1 0\n"
+        "f 1 2 3\n"
+        "f 1 3 4\n",
+        encoding="utf-8",
+    )
+
+
+def _run_runtime_case(executable: Path, root: Path, obj: Path, tag: str) -> None:
+    env = os.environ.copy()
+    env.update({
+        "ONESTRING_OPTCUTS_GRID_NATIVE": "1",
+        "ONESTRING_OPTCUTS_GRID_H": "0.25",
+        "ONESTRING_OPTCUTS_GRID_ANGLE_RAD": "0",
+        "ONESTRING_OPTCUTS_GRID_PHASE_U": "0",
+        "ONESTRING_OPTCUTS_GRID_PHASE_V": "0",
+        "ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS": "2",
+    })
+    command = [
+        str(executable), "100", str(obj), "0.999", "1", "1", "100", "1", "0", tag,
+    ]
+    print(f"+ runtime smoke [{tag}]:", " ".join(command))
+    combined = ""
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=45.0,
+            check=False,
+        )
+        combined = completed.stdout + "\n" + completed.stderr
+        if completed.returncode != 0:
+            raise SystemExit(
+                f"Grid-OptCuts runtime smoke [{tag}] failed:\n" +
+                "\n".join(combined.splitlines()[-80:])
+            )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        combined = stdout + "\n" + stderr
+
+    missing = [
+        marker
+        for marker in (NATIVE_RUNTIME_MARKER, GRID_BIJECTIVITY_RUNTIME_MARKER)
+        if marker not in combined
+    ]
+    if missing:
+        marker_lines = [line for line in combined.splitlines() if "[ONESTRING-GRID]" in line]
+        raise SystemExit(
+            f"Grid-OptCuts runtime contract [{tag}] failed: "
+            f"missing={missing}; markers_seen={marker_lines[-12:]}"
+        )
+    print(f"Verified Grid-OptCuts runtime contract [{tag}].")
+
+
 def _runtime_smoke_test(executable: Path, root: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="onestring_grid_optcuts_setup_smoke_") as tmp:
-        obj = Path(tmp) / "tetra.obj"
-        _write_tetra_obj(obj)
-        env = os.environ.copy()
-        env.update({
-            "ONESTRING_OPTCUTS_GRID_NATIVE": "1",
-            "ONESTRING_OPTCUTS_GRID_H": "0.25",
-            "ONESTRING_OPTCUTS_GRID_ANGLE_RAD": "0",
-            "ONESTRING_OPTCUTS_GRID_PHASE_U": "0",
-            "ONESTRING_OPTCUTS_GRID_PHASE_V": "0",
-            "ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS": "2",
-        })
-        command = [
-            str(executable), "100", str(obj), "0.999", "1", "1", "100", "1", "0",
-            "onestring_setup_smoke",
-        ]
-        print("+ runtime smoke:", " ".join(command))
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=str(root),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=45.0,
-                check=False,
-            )
-            combined = completed.stdout + "\n" + completed.stderr
-            if completed.returncode != 0:
-                raise SystemExit(
-                    "Grid-OptCuts runtime smoke failed:\n" +
-                    "\n".join(combined.splitlines()[-80:])
-                )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            combined = stdout + "\n" + stderr
-
-        missing = [
-            marker
-            for marker in (NATIVE_RUNTIME_MARKER, GRID_BIJECTIVITY_RUNTIME_MARKER)
-            if marker not in combined
-        ]
-        if missing:
-            marker_lines = [line for line in combined.splitlines() if "[ONESTRING-GRID]" in line]
-            raise SystemExit(
-                "Grid-OptCuts runtime contract failed: "
-                f"missing={missing}; markers_seen={marker_lines[-12:]}"
-            )
-        print("Verified Grid-OptCuts runtime contract.")
+        tmp_path = Path(tmp)
+        tetra = tmp_path / "tetra.obj"
+        open_disk = tmp_path / "open_disk.obj"
+        _write_tetra_obj(tetra)
+        _write_open_disk_obj(open_disk)
+        _run_runtime_case(executable, root, tetra, "closed_tetra")
+        _run_runtime_case(executable, root, open_disk, "open_disk")
 
 
 def patch_nested_cmake_policy(root: Path) -> None:
@@ -205,7 +225,7 @@ def main() -> int:
 
     print("\nOptCuts executable:")
     print(executable)
-    print("\nNative Grid-OptCuts V4 consolidated setup is compiled and runtime-verified.")
+    print("\nNative Grid-OptCuts V4 consolidated setup is compiled and runtime-verified on closed and open inputs.")
     return 0
 
 
