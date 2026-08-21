@@ -40,6 +40,7 @@ from .optcuts_uv_overlap_guard import positive_area_uv_overlaps
 
 NATIVE_GRID_VERSION = 4
 NATIVE_GRID_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=4"
+NATIVE_GRID_BIJECTIVITY_MARKER = "[ONESTRING-GRID] global_bijectivity_scaffold=enabled"
 
 
 @contextmanager
@@ -89,10 +90,10 @@ def run_native_grid_optcuts(
     if int(config.method_type) not in {0, 1, 2, 3}:
         raise ValueError("OptCuts method_type must be 0, 1, 2, or 3")
 
-    # V4 handles injectivity through exact trial-cut inversion tests plus an
-    # exported global UV-overlap audit. The original air scaffold assumes an
-    # unconstrained free boundary and is therefore disabled for this Grid solver.
-    cfg = replace(config, use_bijectivity=False, initial_cut_option=0)
+    # Grid-specific trial checks guarantee local validity, but do NOT guarantee
+    # global injectivity: distant UV regions can overlap without any triangle
+    # flipping. Keep OptCuts' original air/scaffold bijectivity barrier active.
+    cfg = replace(config, use_bijectivity=True, initial_cut_option=0)
     executable = resolve_optcuts_executable(cfg.executable)
     root = _infer_optcuts_root(executable)
     tag = f"onestring_grid_{uuid.uuid4().hex[:12]}"
@@ -119,7 +120,7 @@ def run_native_grid_optcuts(
             "1",
             str(int(cfg.method_type)),
             f"{float(cfg.distortion_bound):.17g}",
-            "0",  # no unconstrained air scaffold in native Grid mode
+            "1",  # retain original OptCuts global bijectivity scaffold
             "0",  # two-edge genus-0 initial cut; V4 parameterizes its boundary on the Grid
             tag,
         ]
@@ -149,10 +150,16 @@ def run_native_grid_optcuts(
             found = marker_lines[-8:] if marker_lines else ["(no Grid-OptCuts marker found)"]
             raise OptCutsError(
                 "OPTCUTS_GRID_NATIVE_BINARY_VERSION_MISMATCH: optcuts_grid requires native Grid-OptCuts "
-                f"V{NATIVE_GRID_VERSION} with paired non-coincident Grid seam sides, persistent junction "
-                "locks, actual trial-cut feasibility, and actual constrained-SD candidate scoring. "
-                "Run `python scripts/setup_optcuts.py` to repatch and rebuild third_party/OptCuts. "
-                f"Markers seen: {found}"
+                f"V{NATIVE_GRID_VERSION}. Run `python scripts/setup_optcuts.py` to repatch and rebuild "
+                f"third_party/OptCuts. Markers seen: {found}"
+            )
+        if NATIVE_GRID_BIJECTIVITY_MARKER not in combined:
+            marker_lines = [line for line in combined.splitlines() if "[ONESTRING-GRID]" in line]
+            raise OptCutsError(
+                "OPTCUTS_GRID_NATIVE_BIJECTIVITY_PATCH_MISSING: the binary has Grid-OptCuts V4 but does "
+                "not keep OptCuts' global bijectivity scaffold active. Run `./.venv/bin/python "
+                "scripts/setup_optcuts.py` and retry. "
+                f"Markers seen: {marker_lines[-8:]}"
             )
 
         result_obj = _find_output_obj(root, tag, started)
@@ -167,9 +174,6 @@ def run_native_grid_optcuts(
         if not loops:
             raise OptCutsOutputError("Native Grid-OptCuts returned no UV boundary loop")
 
-        # _boundary_loops sorts by length, so loops[0] is the outer/main loop used
-        # by OneString for display/domain bounds. Additional loops created by cuts
-        # are legitimate and are preserved in uv_faces.
         reflected = False
         if _signed_area(uv[loops[0]]) < 0.0:
             uv[:, 1] *= -1.0
@@ -188,12 +192,14 @@ def run_native_grid_optcuts(
                 f"count={differential['uv_degenerate_triangle_count']}"
             )
 
+        # Keep the independent Python audit. The scaffold should make this zero;
+        # if not, the solver is still not globally injective and must not continue.
         overlap_count, overlap_examples = positive_area_uv_overlaps(uv, uv_faces)
         if overlap_count:
             raise OptCutsOutputError(
-                "OPTCUTS_GRID_NATIVE_GLOBAL_UV_OVERLAP: local triangle orientation is valid but "
-                f"{overlap_count} non-adjacent triangle pairs overlap with positive area; "
-                f"examples={overlap_examples[:10]}. The selected Grid cut set is not globally injective."
+                "OPTCUTS_GRID_NATIVE_GLOBAL_UV_OVERLAP: OptCuts' global bijectivity scaffold was enabled, "
+                f"but {overlap_count} non-adjacent triangle pairs still overlap with positive area; "
+                f"examples={overlap_examples[:10]}."
             )
 
         metrics: dict[str, object] = {
@@ -210,7 +216,7 @@ def run_native_grid_optcuts(
             "optcuts_lambda_init": float(cfg.lambda_init),
             "optcuts_method_type": int(cfg.method_type),
             "optcuts_distortion_bound": float(cfg.distortion_bound),
-            "optcuts_use_bijectivity": False,
+            "optcuts_use_bijectivity": True,
             "optcuts_initial_cut_option": 0,
             "optcuts_runtime_seconds": float(time.time() - started),
             "optcuts_stdout_tail": "\n".join(completed.stdout.splitlines()[-100:]),
@@ -221,7 +227,7 @@ def run_native_grid_optcuts(
             "optcuts_grid_initial_boundary_on_lattice": True,
             "optcuts_grid_junction_locking": True,
             "optcuts_grid_trial_actual_cut_feasibility": True,
-            "optcuts_grid_actual_constrained_sd_scoring": True,
+            "optcuts_grid_global_bijectivity_scaffold": True,
             "optcuts_grid_global_overlap_guard": True,
             "optcuts_grid_global_overlap_count": 0,
             "optcuts_uv_area_normalization_scale": 1.0,
@@ -246,12 +252,11 @@ def run_native_grid_optcuts(
             "optcuts_grid_max_snap_steps": max_snap,
             "optcuts_grid_merge_enabled": False,
             "optcuts_grid_initial_cut_option_forced": 0,
-            "optcuts_grid_bijectivity_scaffold_enabled": False,
+            "optcuts_grid_bijectivity_scaffold_enabled": True,
             "optcuts_grid_constraint_model": (
-                "OptCuts physical split candidates are evaluated only through exact fixed-h orthogonal "
-                "Grid UV embeddings. Interior two-edge cuts use paired A-B-C / A-D-C boundary sides; "
-                "each candidate is actually trial-cut and scored by resulting Symmetric Dirichlet decrease "
-                "plus the ordinary seam-length term. Accepted seam/junction vertices remain Grid-locked."
+                "OptCuts local split proposals are admitted only when they have an exact fixed-h H/V Grid "
+                "realization that survives an actual trial cut. Accepted seam/junction vertices stay Grid-locked, "
+                "while the original OptCuts global bijectivity scaffold prevents distant UV regions from overlapping."
             ),
             "optcuts_grid_topology_resolution_limit": (
                 "candidate physical cuts still follow existing source triangle-mesh edges; arbitrary "
@@ -272,4 +277,9 @@ def run_native_grid_optcuts(
         temp_ctx.cleanup()
 
 
-__all__ = ["NATIVE_GRID_MARKER", "NATIVE_GRID_VERSION", "run_native_grid_optcuts"]
+__all__ = [
+    "NATIVE_GRID_BIJECTIVITY_MARKER",
+    "NATIVE_GRID_MARKER",
+    "NATIVE_GRID_VERSION",
+    "run_native_grid_optcuts",
+]
