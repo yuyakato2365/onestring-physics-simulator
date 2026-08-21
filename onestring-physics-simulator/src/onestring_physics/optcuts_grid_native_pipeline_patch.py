@@ -1,8 +1,8 @@
 """S -> Omega dispatch for native Grid-Constrained OptCuts.
 
 This wrapper intercepts only ``omega_parameterization_mode == 'optcuts_grid'``.
-Official ``optcuts`` remains the untouched authors' backend.  No Python seam
-post-processing or constrained continuation solve is performed here.
+Official ``optcuts`` remains untouched. No Python seam post-processing or
+continuation reparameterization is performed.
 """
 from __future__ import annotations
 
@@ -38,17 +38,17 @@ def install_native_grid_optcuts_pipeline_patch(pipeline: Any) -> None:
         xyz = np.asarray(surface.vertices, dtype=float)
         faces = np.asarray(surface.faces, dtype=int)[:, :3]
         h = max(float(getattr(params, "tile_size", getattr(grid, "tile_size", 0.0))), 1.0e-10)
-        angle_deg = float(getattr(
+        search_angle_deg = float(getattr(
             params,
             "optcuts_grid_angle_degrees",
             _env_float("ONESTRING_OPTCUTS_GRID_ANGLE_DEGREES", 0.0),
         ))
-        phase_u = float(getattr(
+        requested_phase_u = float(getattr(
             params,
             "optcuts_grid_phase_u",
             _env_float("ONESTRING_OPTCUTS_GRID_PHASE_U", 0.0),
         ))
-        phase_v = float(getattr(
+        requested_phase_v = float(getattr(
             params,
             "optcuts_grid_phase_v",
             _env_float("ONESTRING_OPTCUTS_GRID_PHASE_V", 0.0),
@@ -64,15 +64,19 @@ def install_native_grid_optcuts_pipeline_patch(pipeline: Any) -> None:
             faces,
             _config_from_params(params),
             grid_h=h,
-            angle_degrees=angle_deg,
-            phase_u=phase_u,
-            phase_v=phase_v,
+            angle_degrees=search_angle_deg,
+            phase_u=requested_phase_u,
+            phase_v=requested_phase_v,
             max_snap_steps=max_snap_steps,
         )
         if not result.boundary_loops:
             raise RuntimeError("OPTCUTS_GRID_NATIVE_NO_UV_BOUNDARY")
         loop = [int(v) for v in result.boundary_loops[0]]
         boundary = np.asarray(result.uv_vertices_2d, dtype=float)[loop + [loop[0]]]
+        effective_phase_u = float(result.metrics.get("grid_phase_u", requested_phase_u))
+        effective_phase_v = float(result.metrics.get("grid_phase_v", requested_phase_v))
+        effective_angle = float(result.metrics.get("optcuts_grid_angle_degrees", 0.0))
+
         metrics: dict[str, object] = {
             **result.metrics,
             "parameterization_exactness_label": "native_grid_constrained_optcuts_cpp",
@@ -94,9 +98,10 @@ def install_native_grid_optcuts_pipeline_patch(pipeline: Any) -> None:
             "optcuts_posthoc_extra_seam": False,
             "optcuts_original_uv_used_as_final": True,
             "optcuts_grid_unit": float(h),
-            "grid_phase_u": float(phase_u),
-            "grid_phase_v": float(phase_v),
-            "optcuts_grid_angle_degrees": float(angle_deg),
+            "grid_phase_u": effective_phase_u,
+            "grid_phase_v": effective_phase_v,
+            "optcuts_grid_angle_degrees": effective_angle,
+            "optcuts_grid_search_angle_degrees": search_angle_deg,
             "optcuts_grid_allowed_seam_directions": "two fixed global orthogonal axes",
             "optcuts_grid_seam_geometry": (
                 "native OptCuts candidate paths embedded as H/V/H-V/V-H lattice segments before selection"
@@ -129,7 +134,8 @@ def install_native_grid_optcuts_pipeline_patch(pipeline: Any) -> None:
 
         print(
             "[OPTCUTS-GRID-NATIVE] "
-            f"h={h:g} angle={angle_deg:.3f}deg phase=({phase_u:.6g},{phase_v:.6g}) "
+            f"h={h:g} search_angle={search_angle_deg:.3f}deg final_angle={effective_angle:.3f}deg "
+            f"phase=({effective_phase_u:.6g},{effective_phase_v:.6g}) "
             f"max_snap_steps={max_snap_steps:g} uv_vertices={len(result.uv_vertices_2d)}"
         )
         return parameterization
