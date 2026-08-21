@@ -37,6 +37,9 @@ from onestring_physics.optcuts_grid_seam_patch import (  # noqa: E402
 from onestring_physics.optcuts_grid_seam_topology_patch import (  # noqa: E402
     install_optcuts_grid_seam_topology_patch,
 )
+from onestring_physics.optcuts_seam_extraction_patch import (  # noqa: E402
+    install_robust_optcuts_seam_extraction,
+)
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -150,6 +153,7 @@ def _install_post_simple_split_optcuts_hook() -> None:
 
 
 install_optcuts_pipeline_patch(pipeline)
+install_robust_optcuts_seam_extraction()
 install_optcuts_seam_metadata_patch(pipeline)
 install_fast_assembly_animation_patch()
 _install_post_simple_split_optcuts_hook()
