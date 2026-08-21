@@ -1,14 +1,15 @@
-"""OptCuts trial launcher layered on top of the stable Split validation app.
+"""Grid-constrained OptCuts launcher for OneString.
 
-This launcher adds one UI option, ``optcuts``, to the legacy Omega
-parameterization selector and installs the external OptCuts backend before the
-existing Split/K2D/Omega instrumentation.
+The ``optcuts`` mode now implements one coherent flow:
 
-In OptCuts mode, OptCuts remains the distortion-aware seam proposer.  Its
-original UV chart boundaries remain authoritative for inverse mapping, while
-OneString adds a fixed-unit rectilinear fabrication seam network on top.  The
-existing ``tile_size`` is the minimum unit and the legacy CSF row/column Split
-heuristic is suppressed.  Existing non-OptCuts Split numerics are not modified.
+1. official OptCuts chooses a distortion-relieving cut topology on S;
+2. OneString re-solves that SAME cut topology with hard fabrication constraints:
+   every seam chain is a straight line, all seam lines share one orthogonal frame,
+   and seam endpoints/junctions lie on the fixed ``Tile size`` lattice;
+3. M2D is generated on that exact same lattice.
+
+No second post-hoc seam is added, no free OptCuts seam is snapped afterwards,
+and no seam-strip cell healing/deletion is used to fake alignment.
 """
 
 from __future__ import annotations
@@ -35,26 +36,11 @@ from onestring_physics.fast_assembly_animation_patch import (  # noqa: E402
 )
 from onestring_physics.optcuts_pipeline_patch import install_optcuts_pipeline_patch  # noqa: E402
 from onestring_physics.optcuts_run_flag_patch import install_optcuts_run_flag_patch  # noqa: E402
-from onestring_physics.optcuts_grid_seam_patch import (  # noqa: E402
-    install_optcuts_seam_metadata_patch,
+from onestring_physics.optcuts_grid_constrained_parameterization_patch import (  # noqa: E402
+    install_optcuts_grid_constrained_parameterization_patch,
 )
-from onestring_physics.optcuts_rectilinear_seam_patch import (  # noqa: E402
-    install_optcuts_rectilinear_seam_patch,
-)
-from onestring_physics.optcuts_chart_aware_patch import (  # noqa: E402
-    install_optcuts_chart_aware_patch,
-)
-from onestring_physics.optcuts_chart_vertex_compaction_patch import (  # noqa: E402
-    install_optcuts_chart_vertex_compaction_patch,
-)
-from onestring_physics.optcuts_manifold_guard_patch import (  # noqa: E402
-    install_optcuts_manifold_guard_patch,
-)
-from onestring_physics.optcuts_parameterization_reference_patch import (  # noqa: E402
-    install_optcuts_parameterization_reference_patch,
-)
-from onestring_physics.optcuts_seam_extraction_patch import (  # noqa: E402
-    install_robust_optcuts_seam_extraction,
+from onestring_physics.optcuts_grid_constrained_m2d_patch import (  # noqa: E402
+    install_optcuts_grid_constrained_m2d_patch,
 )
 from onestring_physics.optcuts_k3d_validity_patch import (  # noqa: E402
     install_optcuts_k3d_validity_patch,
@@ -88,10 +74,11 @@ def _install_optcuts_selector() -> None:
 
         if value == "optcuts":
             st.caption(
-                "Official OptCuts (SIGGRAPH Asia 2018) proposes distortion-relieving cuts. "
-                "Its original UV chart boundaries are preserved for a valid inverse map; "
-                "OneString additionally builds connected orthogonal fabrication seams on the "
-                "fixed Tile-size grid. Legacy CSF row/column Split is disabled in this mode."
+                "Grid-constrained OptCuts: official OptCuts first chooses the surface cut topology. "
+                "That same topology is then reparameterized with hard OneString constraints: "
+                "every seam chain is a straight line, all lines are parallel/perpendicular in one "
+                "global frame, and the main Tile size is the fixed lattice unit. M2D uses exactly "
+                "that lattice. No post-hoc extra seam is added."
             )
             executable = st.text_input(
                 "OptCuts executable",
@@ -137,6 +124,14 @@ def _install_optcuts_selector() -> None:
                 step=30.0,
                 key="onestring_optcuts_timeout",
             )
+            grid_opt_iters = st.number_input(
+                "Grid-constrained UV optimization iterations",
+                min_value=20,
+                max_value=2000,
+                value=max(20, int(os.environ.get("ONESTRING_OPTCUTS_GRID_OPT_ITERS", "180"))),
+                step=20,
+                key="onestring_optcuts_grid_opt_iters",
+            )
 
             if executable.strip():
                 os.environ["ONESTRING_OPTCUTS_EXECUTABLE"] = executable.strip()
@@ -148,49 +143,39 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_INITIAL_CUT_OPTION"] = "1" if initial_cut_label.startswith("farthest") else "0"
             os.environ["ONESTRING_OPTCUTS_TIMEOUT_SECONDS"] = str(float(timeout))
             os.environ["ONESTRING_OPTCUTS_METHOD_TYPE"] = "0"
+            os.environ["ONESTRING_OPTCUTS_GRID_OPT_ITERS"] = str(int(grid_opt_iters))
         return value
 
     st.selectbox = patched_selectbox
     st._onestring_optcuts_selector_installed = True
 
 
-def _install_post_simple_split_optcuts_hook() -> None:
-    """Install OptCuts M2D adapters outside the stable Simple Split wrapper."""
-    if getattr(simple_split_module, "_onestring_optcuts_post_split_hook_installed", False):
+def _install_post_simple_split_grid_m2d_hook() -> None:
+    """Keep stable Simple Split for other modes; replace only OptCuts M2D afterwards."""
+    if getattr(simple_split_module, "_onestring_grid_constrained_optcuts_hook_installed", False):
         return
     original_installer = simple_split_module.install_simple_split_panel_patch
 
-    def install_then_optcuts_grid_seam(pipeline_module: Any, optimization_debug_module: Any) -> None:
+    def install_then_grid_constrained_m2d(pipeline_module: Any, optimization_debug_module: Any) -> None:
         original_installer(pipeline_module, optimization_debug_module)
-        install_optcuts_rectilinear_seam_patch(pipeline_module)
-        install_optcuts_manifold_guard_patch(pipeline_module)
-        # Must be outermost: first build the rectilinear fabrication topology,
-        # then reject any quad that crosses an immutable OptCuts UV chart and
-        # attach chart ids used by M2D -> M3D.
-        install_optcuts_chart_aware_patch(pipeline_module)
-        # Chart-aware face rejection leaves unused overlay vertices behind.  They
-        # have no chart by design, so compact/reindex them before M2D -> M3D.
-        install_optcuts_chart_vertex_compaction_patch(pipeline_module)
+        install_optcuts_grid_constrained_m2d_patch(pipeline_module)
 
-    simple_split_module.install_simple_split_panel_patch = install_then_optcuts_grid_seam
-    simple_split_module._onestring_optcuts_post_split_hook_installed = True
+    simple_split_module.install_simple_split_panel_patch = install_then_grid_constrained_m2d
+    simple_split_module._onestring_grid_constrained_optcuts_hook_installed = True
 
 
-# Order matters:
-# 1) official OptCuts S->Omega dispatch;
-# 2) persistent active-run flag;
-# 3) seam metadata and fabrication adapters (installed after Simple Split);
-# 4) chart-aware M2D/M3D mapping and unused-vertex compaction;
-# 5) K3D validity guard and exact T3D preflight.
+# Order matters.
+# Official OptCuts is installed first; the next wrapper reparameterizes the SAME
+# cut topology under hard grid constraints.  The fixed-lattice M2D wrapper is
+# installed after the stable Simple Split installer so it is outermost only for
+# the constrained OptCuts domain.
 install_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
-install_robust_optcuts_seam_extraction()
-install_optcuts_seam_metadata_patch(pipeline)
-install_optcuts_parameterization_reference_patch(pipeline)
+install_optcuts_grid_constrained_parameterization_patch(pipeline)
 install_fast_assembly_animation_patch()
 install_optcuts_k3d_validity_patch(pipeline)
 install_optcuts_k3d_preflight_patch(pipeline)
-_install_post_simple_split_optcuts_hook()
+_install_post_simple_split_grid_m2d_hook()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
