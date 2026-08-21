@@ -37,6 +37,9 @@ from onestring_physics.optcuts_grid_seam_patch import (  # noqa: E402
 from onestring_physics.optcuts_grid_seam_topology_patch import (  # noqa: E402
     install_optcuts_grid_seam_topology_patch,
 )
+from onestring_physics.optcuts_manifold_guard_patch import (  # noqa: E402
+    install_optcuts_manifold_guard_patch,
+)
 from onestring_physics.optcuts_seam_extraction_patch import (  # noqa: E402
     install_robust_optcuts_seam_extraction,
 )
@@ -147,6 +150,7 @@ def _install_post_simple_split_optcuts_hook() -> None:
     def install_then_optcuts_grid_seam(pipeline_module: Any, optimization_debug_module: Any) -> None:
         original_installer(pipeline_module, optimization_debug_module)
         install_optcuts_grid_seam_topology_patch(pipeline_module)
+        install_optcuts_manifold_guard_patch(pipeline_module)
 
     simple_split_module.install_simple_split_panel_patch = install_then_optcuts_grid_seam
     simple_split_module._onestring_optcuts_post_split_hook_installed = True
