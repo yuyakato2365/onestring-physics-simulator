@@ -28,7 +28,7 @@ def _barycentric_2d(point: np.ndarray, tri: np.ndarray) -> np.ndarray | None:
     if abs(denom) <= 1e-14:
         return None
     u = float((v2[0] * v1[1] - v1[0] * v2[1]) / denom)
-    v = float((v0[0] * v2[1] - v2[0] * v0[1]) / denom)
+    v = float((v0[0] * v2[1] - v2[0] * v1[1]) / denom)
     return np.asarray([1.0 - u - v, u, v], dtype=float)
 
 
@@ -108,18 +108,28 @@ def _cell_crossed_by_uv_boundary(points: np.ndarray, data: dict[str, Any], h: fl
 
 
 def _internal_seam_segments(parameterization: Any) -> np.ndarray:
-    """Geometric UV copies of surface edges actually cut by OptCuts."""
+    """Return geometric UV copies of physical surface edges actually cut by OptCuts.
+
+    OBJ texture-coordinate ids are *not* a seam signal: two adjacent faces may
+    legally use different ``vt`` ids for exactly the same UV point.  An edge is
+    therefore considered cut only when the two incident faces map at least one
+    of the shared physical endpoints to genuinely different UV coordinates.
+    """
     sf = np.asarray(parameterization.surface_faces, dtype=int)
     uf = np.asarray(parameterization.uv_faces, dtype=int)
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     if len(sf) != len(uf):
         raise RuntimeError("OPTCUTS_GRID_M2D_FACE_CORRESPONDENCE_MISMATCH")
+
     incidences: dict[tuple[int, int], list[dict[int, int]]] = defaultdict(list)
     for f3, f2 in zip(sf, uf):
         for i, j in ((0, 1), (1, 2), (2, 0)):
             sa, sb = int(f3[i]), int(f3[j])
             key = tuple(sorted((sa, sb)))
             incidences[key].append({sa: int(f2[i]), sb: int(f2[j])})
+
+    scale = max(float(np.max(np.abs(uv))) if uv.size else 1.0, 1.0)
+    coord_tol = max(1e-9 * scale, 1e-10)
     segments: list[np.ndarray] = []
     for (sa, sb), copies in incidences.items():
         if len(copies) != 2:
@@ -127,25 +137,34 @@ def _internal_seam_segments(parameterization: Any) -> np.ndarray:
         c0, c1 = copies
         if sa not in c0 or sb not in c0 or sa not in c1 or sb not in c1:
             continue
-        if c0[sa] == c1[sa] and c0[sb] == c1[sb]:
+
+        a0, b0 = uv[c0[sa]], uv[c0[sb]]
+        a1, b1 = uv[c1[sa]], uv[c1[sb]]
+        same_a = float(np.linalg.norm(a0 - a1)) <= coord_tol
+        same_b = float(np.linalg.norm(b0 - b1)) <= coord_tol
+        if same_a and same_b:
+            # Different OBJ vt ids but geometrically the same UV edge: not a seam.
             continue
-        segments.append(np.asarray([uv[c0[sa]], uv[c0[sb]]], dtype=float))
-        segments.append(np.asarray([uv[c1[sa]], uv[c1[sb]]], dtype=float))
+
+        segments.append(np.asarray([a0, b0], dtype=float))
+        segments.append(np.asarray([a1, b1], dtype=float))
+
     if not segments:
         return np.zeros((0, 2, 2), dtype=float)
+
     # Deduplicate coincident seam copies geometrically.
     unique: dict[tuple[int, ...], np.ndarray] = {}
-    scale = max(float(np.max(np.abs(uv))) if uv.size else 1.0, 1.0)
-    tol = max(1e-10 * scale, 1e-12)
+    dedup_tol = max(1e-10 * scale, 1e-12)
     for seg in segments:
-        pts = sorted([tuple(np.rint(p / tol).astype(np.int64)) for p in seg])
+        pts = sorted([tuple(np.rint(p / dedup_tol).astype(np.int64)) for p in seg])
         unique[tuple(pts[0] + pts[1])] = seg
     return np.asarray(list(unique.values()), dtype=float)
 
 
 def _grid_cut_edges_from_segments(
     segments: np.ndarray,
-    *, origin: np.ndarray,
+    *,
+    origin: np.ndarray,
     h: float,
     nx: int,
     ny: int,
