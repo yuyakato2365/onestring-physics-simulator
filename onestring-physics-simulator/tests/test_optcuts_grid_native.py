@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+from onestring_physics.optcuts_backend import OptCutsConfig
 from onestring_physics.optcuts_grid_constrained_m2d_patch import (
     _disconnect_faces_along_edges,
     _grid_cut_edges_from_segments,
     _internal_seam_segments,
+    install_optcuts_grid_constrained_m2d_patch,
 )
 from onestring_physics.optcuts_grid_native_backend import (
     NATIVE_GRID_MARKER,
     NATIVE_GRID_VERSION,
     _to_fabrication_frame,
+    run_native_grid_optcuts,
 )
+from onestring_physics.optcuts_grid_native_lift_patch import _map_used_vertices
 from onestring_physics.optcuts_grid_native_pipeline_patch import (
     install_native_grid_optcuts_pipeline_patch,
 )
@@ -142,3 +148,123 @@ def test_setup_uses_verified_v4_installer_and_cpp14():
     setup = (root / "scripts" / "setup_optcuts.py").read_text(encoding="utf-8")
     assert "from patch_optcuts_native_grid_v4_final import apply_native_grid_patch" in setup
     assert "-DCMAKE_CXX_STANDARD=14" in setup
+
+
+def test_native_grid_binary_backend_seams_m2d_and_lift_end_to_end():
+    """Real binary integration test, enabled in CI after OptCuts has been built."""
+    executable = os.environ.get("ONESTRING_OPTCUTS_EXECUTABLE", "").strip()
+    if not executable or not Path(executable).is_file():
+        pytest.skip("native Grid-OptCuts executable is not configured")
+
+    h = 0.5
+    xyz = np.asarray(
+        [
+            [1.0, 1.0, 1.0],
+            [-1.0, -1.0, 1.0],
+            [-1.0, 1.0, -1.0],
+            [1.0, -1.0, -1.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray(
+        [[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]], dtype=int
+    )
+    result = run_native_grid_optcuts(
+        xyz,
+        faces,
+        OptCutsConfig(
+            executable=executable,
+            distortion_bound=4.1,
+            lambda_init=0.999,
+            method_type=0,
+            use_bijectivity=False,
+            initial_cut_option=0,
+            timeout_seconds=120.0,
+        ),
+        grid_h=h,
+        angle_degrees=0.0,
+        phase_u=0.0,
+        phase_v=0.0,
+        max_snap_steps=4.0,
+    )
+    assert result.metrics["optcuts_grid_native_version"] == 4
+    assert result.metrics["optcuts_grid_postprocess_used"] is False
+    assert result.metrics["uv_triangle_flip_count"] == 0
+    assert result.metrics["uv_degenerate_triangle_count"] == 0
+    assert result.metrics["optcuts_grid_global_overlap_count"] == 0
+
+    parameterization = SimpleNamespace(
+        surface_vertices_3d=np.asarray(result.surface_vertices_3d, dtype=float),
+        surface_faces=np.asarray(result.surface_faces, dtype=int),
+        uv_vertices_2d=np.asarray(result.uv_vertices_2d, dtype=float),
+        uv_faces=np.asarray(result.uv_faces, dtype=int),
+        boundary_loops=result.boundary_loops,
+        omega_boundary=np.asarray(
+            result.uv_vertices_2d[result.boundary_loops[0] + [result.boundary_loops[0][0]]],
+            dtype=float,
+        ),
+        metrics={
+            **result.metrics,
+            "optcuts_grid_constrained": True,
+            "grid_phase_u": 0.0,
+            "grid_phase_v": 0.0,
+        },
+    )
+
+    # Audit the *actual cut produced by OptCuts*, not a synthetic seam.
+    seam_segments = _internal_seam_segments(parameterization)
+    assert len(seam_segments) > 0
+    lattice_tol = 2.0e-6
+    for segment in seam_segments:
+        a, b = np.asarray(segment, dtype=float)
+        assert np.max(np.abs(a / h - np.rint(a / h))) <= lattice_tol
+        assert np.max(np.abs(b / h - np.rint(b / h))) <= lattice_tol
+        delta = np.abs(b - a)
+        assert float(np.linalg.norm(delta)) > 1.0e-10
+        assert delta[0] <= 1.0e-8 or delta[1] <= 1.0e-8
+
+    # Exercise the same fixed-lattice M2D builder that app_optcuts installs.
+    class FakeQuadMesh:
+        def __init__(self, vertices, quad_faces, grid, stage, metrics, split_lines):
+            self.vertices = np.asarray(vertices, dtype=float)
+            self.faces = np.asarray(quad_faces, dtype=int)
+            self.grid = grid
+            self.stage = stage
+            self.metrics = dict(metrics)
+            self.split_lines = list(split_lines)
+
+    def base_flatten(param, grid, params=None):
+        return SimpleNamespace(
+            uv_vertices=np.zeros((0, 2), dtype=float),
+            boundary=np.asarray(param.omega_boundary, dtype=float),
+            split_lines=[],
+        )
+
+    def base_build(grid, domain, params=None):
+        raise AssertionError("native Grid M2D builder was not selected")
+
+    fake_pipeline = SimpleNamespace(
+        _flatten_to_domain=base_flatten,
+        _build_m2d=base_build,
+        QuadMesh=FakeQuadMesh,
+        _original=None,
+    )
+    install_optcuts_grid_constrained_m2d_patch(fake_pipeline)
+    grid = SimpleNamespace(nx=8, ny=8, tile_size=h, gap_size=0.0)
+    params = SimpleNamespace(tile_size=h, omega_overlay_margin=1)
+    domain = fake_pipeline._flatten_to_domain(parameterization, grid, params)
+    m2d = fake_pipeline._build_m2d(grid, domain, params)
+    assert len(m2d.faces) > 0
+    assert m2d.metrics["optcuts_grid_constrained_m2d"] is True
+    assert m2d.metrics["optcuts_grid_posthoc_seam_snap"] is False
+
+    # Finally audit the real M2D -> physical-surface inverse map.
+    lifted, audit = _map_used_vertices(
+        m2d,
+        parameterization,
+        bary_tol=1.0e-8,
+        agreement_tol=1.0e-6,
+    )
+    assert np.all(np.isfinite(lifted))
+    assert audit["used_vertex_count"] > 0
+    assert audit["max_candidate_3d_spread"] <= 1.0e-6
