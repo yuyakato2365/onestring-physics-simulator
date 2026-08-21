@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Clone, patch, and build OptCuts for the OneString bridge.
 
-The local checkout receives:
-1. compatibility fixes required by modern CMake/GLFW/Eigen; and
-2. the explicit OneString native Grid-OptCuts V4 candidate-search patch.
-
-The Grid patch is dormant unless ONESTRING_OPTCUTS_GRID_NATIVE=1, so the same
-binary still executes the authors' ordinary OptCuts path for ``optcuts``.
+The local checkout receives modern-toolchain compatibility fixes plus the
+OneString native Grid-OptCuts V4 search-space modification. Grid logic remains
+dormant unless ONESTRING_OPTCUTS_GRID_NATIVE=1, so official ``optcuts`` uses the
+same binary without entering the Grid path.
 """
 from __future__ import annotations
 
@@ -16,7 +14,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from patch_optcuts_native_grid_v4 import apply_native_grid_patch
+from patch_optcuts_native_grid_v4_final import apply_native_grid_patch
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
 CMAKE_POLICY_MINIMUM = "3.5"
@@ -92,7 +90,6 @@ def patch_legacy_glfw_policy(root: Path) -> bool:
 
 
 def patch_legacy_eigen_transpositions(root: Path) -> bool:
-    """Fix the old Eigen Transpositions assignment for current Apple/Clang builds."""
     path = root / "ext" / "libigl" / "external" / "eigen" / "Eigen" / "src" / "Core" / "Transpositions.h"
     if not path.is_file():
         print(f"Eigen compatibility patch skipped: {path} was not found")
@@ -149,7 +146,10 @@ def main() -> int:
 
     build = root / "build"
     run([
-        "cmake", "-S", str(root), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+        "cmake", "-S", str(root), "-B", str(build),
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_CXX_STANDARD=14",
+        "-DCMAKE_CXX_STANDARD_REQUIRED=ON",
         f"-DCMAKE_POLICY_VERSION_MINIMUM={CMAKE_POLICY_MINIMUM}",
     ])
     run([
