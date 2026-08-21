@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Clone, patch, and build OptCuts for the OneString bridge.
-
-The local checkout receives modern-toolchain compatibility fixes plus the
-OneString native Grid-OptCuts V4 search-space modification. Grid logic remains
-dormant unless ONESTRING_OPTCUTS_GRID_NATIVE=1, so official ``optcuts`` uses the
-same binary without entering the Grid path.
-"""
+"""Clone, patch, build, and verify OptCuts for the OneString bridge."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +12,10 @@ from patch_optcuts_native_grid_v4_final import apply_native_grid_patch
 from patch_optcuts_native_grid_v4_perf import apply_native_grid_perf_patch
 from patch_optcuts_native_grid_v4_diagnostics import apply_native_grid_diagnostics
 from patch_optcuts_native_grid_v4_trial_relax import apply_trial_relax_patch
-from patch_optcuts_native_grid_v4_bijectivity import apply_grid_bijectivity_patch
+from patch_optcuts_native_grid_v4_bijectivity import (
+    RUNTIME_MARKER as GRID_BIJECTIVITY_RUNTIME_MARKER,
+    apply_grid_bijectivity_patch,
+)
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
 CMAKE_POLICY_MINIMUM = "3.5"
@@ -36,6 +33,16 @@ def executable_candidates(root: Path) -> list[Path]:
         root / "build" / "Release" / "OptCuts_bin.exe",
         root / "build" / "Release" / "OptCuts_bin",
     ]
+
+
+def _verify_binary_marker(executable: Path, marker: str) -> None:
+    data = executable.read_bytes()
+    if marker.encode("utf-8") not in data:
+        raise SystemExit(
+            "OptCuts build completed, but the required native Grid-OptCuts marker was not compiled into "
+            f"{executable}: {marker!r}. Refusing to report setup success."
+        )
+    print(f"Verified compiled Grid-OptCuts marker: {marker}")
 
 
 def patch_nested_cmake_policy(root: Path) -> bool:
@@ -166,9 +173,10 @@ def main() -> int:
 
     for candidate in executable_candidates(root):
         if candidate.is_file():
+            _verify_binary_marker(candidate, GRID_BIJECTIVITY_RUNTIME_MARKER)
             print("\nOptCuts executable:")
             print(candidate)
-            print("\nNative Grid-OptCuts V4 support is compiled in and dormant for official optcuts mode.")
+            print("\nNative Grid-OptCuts V4 support is compiled in and verified.")
             if os.name == "nt":
                 print(f'$env:ONESTRING_OPTCUTS_EXECUTABLE = "{candidate}"')
             else:
