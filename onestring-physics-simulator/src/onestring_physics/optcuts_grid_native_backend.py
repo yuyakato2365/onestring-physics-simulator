@@ -1,10 +1,9 @@
 """Native Grid-OptCuts subprocess bridge.
 
-This path intentionally does NOT call ``run_official_optcuts`` because the
-official OneString bridge recenters/rescales UV area after OptCuts exits.  Such a
-post-scale would destroy the fixed lattice spacing used by native Grid-OptCuts.
-The native bridge therefore invokes the same executable directly and imports the
-raw UV coordinates exactly as written by the patched C++ code.
+This path does not use the official OneString bridge's UV area normalization:
+that would change the fixed fabrication spacing h after OptCuts exits.  Native
+Grid-OptCuts imports raw C++ UVs, applies at most a rigid coordinate-frame
+rotation/reflection that preserves the lattice exactly, and never rescales it.
 """
 from __future__ import annotations
 
@@ -53,6 +52,15 @@ def _temporary_env(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
+def _to_fabrication_frame(uv: np.ndarray, angle_rad: float) -> np.ndarray:
+    """Rigidly express world-UV coordinates in the configured grid (u,v) frame."""
+    pts = np.asarray(uv, dtype=float)
+    c, s = math.cos(angle_rad), math.sin(angle_rad)
+    u = np.asarray([c, s], dtype=float)
+    v = np.asarray([-s, c], dtype=float)
+    return np.column_stack([pts @ u, pts @ v])
+
+
 def run_native_grid_optcuts(
     surface_vertices: np.ndarray,
     surface_faces: np.ndarray,
@@ -71,7 +79,6 @@ def run_native_grid_optcuts(
     max_snap = float(max_snap_steps)
     if not math.isfinite(max_snap) or max_snap < 0.5:
         raise ValueError("Grid-OptCuts max_snap_steps must be >= 0.5")
-
     if not (4.0 < float(config.distortion_bound) < float("inf")):
         raise ValueError("OptCuts distortion_bound must be > 4")
     if not (0.0 < float(config.lambda_init) < 1.0):
@@ -79,10 +86,6 @@ def run_native_grid_optcuts(
     if int(config.method_type) not in {0, 1, 2, 3}:
         raise ValueError("OptCuts method_type must be 0, 1, 2, or 3")
 
-    # Native V1 uses exact coincident seam copies on the fabrication lattice.
-    # The original scaffold assumes separated UV boundaries, therefore V1 uses
-    # OptCuts' orientation-preserving non-scaffold solve.  Triangle inversion is
-    # still rejected by OptCuts and audited again after import.
     cfg = replace(config, use_bijectivity=False, initial_cut_option=0)
     executable = resolve_optcuts_executable(cfg.executable)
     root = _infer_optcuts_root(executable)
@@ -103,26 +106,15 @@ def run_native_grid_optcuts(
         input_obj = temp_dir / "surface.obj"
         _write_triangle_obj(input_obj, surface_vertices, surface_faces)
         command = [
-            str(executable),
-            "100",
-            str(input_obj.resolve()),
-            f"{float(cfg.lambda_init):.17g}",
-            "1",
-            str(int(cfg.method_type)),
-            f"{float(cfg.distortion_bound):.17g}",
-            "0",  # no scaffold in native V1
-            "0",  # grid-aware one-point initial cut
-            tag,
+            str(executable), "100", str(input_obj.resolve()),
+            f"{float(cfg.lambda_init):.17g}", "1", str(int(cfg.method_type)),
+            f"{float(cfg.distortion_bound):.17g}", "0", "0", tag,
         ]
         try:
             with _temporary_env(env_values):
                 completed = subprocess.run(
-                    command,
-                    cwd=str(root),
-                    capture_output=True,
-                    text=True,
-                    timeout=float(cfg.timeout_seconds),
-                    check=False,
+                    command, cwd=str(root), capture_output=True, text=True,
+                    timeout=float(cfg.timeout_seconds), check=False,
                 )
         except subprocess.TimeoutExpired as exc:
             raise OptCutsError(f"Native Grid-OptCuts timed out after {cfg.timeout_seconds:g} s") from exc
@@ -142,7 +134,13 @@ def run_native_grid_optcuts(
             )
 
         result_obj = _find_output_obj(root, tag, started)
-        xyz, faces, uv, uv_faces = _read_obj_with_uv(result_obj)
+        xyz, faces, raw_uv, uv_faces = _read_obj_with_uv(result_obj)
+
+        # Convert to the grid's own orthogonal frame. This is rigid: SD and all
+        # seam/grid incidences are unchanged, while M2D can use an ordinary x/y lattice.
+        uv = _to_fabrication_frame(raw_uv, angle)
+        effective_phase_u = float(phase_u)
+        effective_phase_v = float(phase_v)
         loops = _boundary_loops(uv_faces)
         if len(loops) != 1:
             raise OptCutsOutputError(
@@ -150,14 +148,12 @@ def run_native_grid_optcuts(
                 f"got {len(loops)}"
             )
 
-        # Reflection preserves the lattice only when applied consistently to phase.
-        # Prefer rejecting a globally reversed export over silently changing the
-        # fabrication frame after the C++ search.
+        reflected = False
         if _signed_area(uv[loops[0]]) < 0.0:
-            raise OptCutsOutputError(
-                "OPTCUTS_GRID_NATIVE_REVERSED_UV: raw Grid-OptCuts UV orientation is reversed; "
-                "refusing post-hoc reflection because it would change the configured grid frame."
-            )
+            # Reflecting fabrication-v preserves the exact axis-aligned h-lattice.
+            uv[:, 1] *= -1.0
+            effective_phase_v *= -1.0
+            reflected = True
 
         differential = _triangle_differential_metrics(xyz, faces, uv, uv_faces)
         if int(differential.get("uv_triangle_flip_count", 0)) != 0:
@@ -165,6 +161,7 @@ def run_native_grid_optcuts(
                 "OPTCUTS_GRID_NATIVE_FLIPPED_UV: patched OptCuts returned flipped triangles; "
                 f"count={differential['uv_triangle_flip_count']}"
             )
+
         metrics: dict[str, object] = {
             "parameterization_backend_name": "optcuts_native_grid_constrained",
             "parameterization_backend_version": "official_OptCuts_plus_OneString_native_grid_v1",
@@ -186,6 +183,8 @@ def run_native_grid_optcuts(
             "optcuts_stderr_tail": "\n".join(completed.stderr.splitlines()[-80:]),
             "optcuts_uv_area_normalization_scale": 1.0,
             "optcuts_uv_post_scale_applied": False,
+            "optcuts_uv_fabrication_frame_rotation_degrees": -float(angle_degrees),
+            "optcuts_uv_fabrication_v_reflected": bool(reflected),
             "optcuts_uv_boundary_loop_count": int(len(loops)),
             "optcuts_uv_boundary_vertex_count": int(len(loops[0])),
             "surface_vertex_count_after_cut_export": int(len(xyz)),
@@ -195,11 +194,12 @@ def run_native_grid_optcuts(
             "optcuts_grid_postprocess_used": False,
             "optcuts_grid_candidate_search_modified": True,
             "optcuts_grid_spacing": h,
-            "optcuts_grid_angle_degrees": float(angle_degrees),
-            "optcuts_grid_phase_u": float(phase_u),
-            "optcuts_grid_phase_v": float(phase_v),
-            "grid_phase_u": float(phase_u),
-            "grid_phase_v": float(phase_v),
+            "optcuts_grid_search_angle_degrees": float(angle_degrees),
+            "optcuts_grid_angle_degrees": 0.0,
+            "optcuts_grid_phase_u": effective_phase_u,
+            "optcuts_grid_phase_v": effective_phase_v,
+            "grid_phase_u": effective_phase_u,
+            "grid_phase_v": effective_phase_v,
             "optcuts_grid_max_snap_steps": max_snap,
             "optcuts_grid_merge_enabled": False,
             "optcuts_grid_initial_cut_option_forced": 0,
