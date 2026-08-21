@@ -1,15 +1,14 @@
 """Runtime integration of the official OptCuts executable into S -> Omega.
 
-The patch is deliberately opt-in. Existing BFF, CEPS, free-boundary, and M2D
-Split paths are delegated unchanged unless ``omega_parameterization_mode`` is
-exactly ``"optcuts"``.
+Two modes are intentionally separated:
 
-For OneString's rectilinear fabrication-seam mode, OptCuts is still allowed to
-find an arbitrary distortion-aware cut and UV embedding first.  We then apply a
-rigid UV rotation only: the dominant axis of the OptCuts seam network is aligned
-to the fabrication grid u-axis.  Because this is a rigid 2D transform, it does
-not change the OptCuts distortion; it only chooses the common orthogonal frame
-used by the later fixed-unit rectilinear seam adapter.
+* ``optcuts``: official OptCuts output is used directly.  No OneString grid
+  seam constraint, axis snap, or constrained UV solve is applied.
+* ``optcuts_grid``: official OptCuts is used only as the proposal backend for
+  the experimental grid-constrained pipeline.  This mode may apply the common
+  fabrication-axis rotation and later constrained processing.
+
+All non-OptCuts modes delegate unchanged to the pre-existing pipeline.
 """
 
 from __future__ import annotations
@@ -109,10 +108,8 @@ def _config_from_params(params: Any) -> OptCutsConfig:
 def _align_uv_to_optcuts_seam_axis(parameterization: Any) -> float:
     """Rigidly rotate UV so the dominant OptCuts seam direction becomes +u.
 
-    The direction is estimated by a length-weighted second moment of all robustly
-    extracted seam segments.  Since a seam axis is unoriented (+d and -d are the
-    same axis), this is more stable than selecting an arbitrary first source edge.
-    Returns the applied clockwise rotation angle in degrees.
+    This helper is used only by ``optcuts_grid``.  ``optcuts`` itself keeps the
+    official output unchanged.
     """
     payload = extract_connected_seam_payload_robust(parameterization)
     segments = np.asarray(payload.get("segments", np.zeros((0, 2, 2))), dtype=float)
@@ -139,7 +136,6 @@ def _align_uv_to_optcuts_seam_axis(parameterization: Any) -> float:
     values, vectors = np.linalg.eigh(moment)
     axis = np.asarray(vectors[:, int(np.argmax(values))], dtype=float)
     angle = float(math.atan2(axis[1], axis[0]))
-    # Axis orientation is modulo pi; choose the smaller-magnitude rigid rotation.
     while angle > math.pi / 2.0:
         angle -= math.pi
     while angle <= -math.pi / 2.0:
@@ -170,8 +166,17 @@ def _align_uv_to_optcuts_seam_axis(parameterization: Any) -> float:
     return degrees
 
 
-def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, grid: Any, params: Any):
-    del target, grid  # OptCuts works directly on the triangulated target surface.
+def _build_optcuts_parameterization(
+    pipeline: Any,
+    surface: Any,
+    target: Any,
+    grid: Any,
+    params: Any,
+    requested_mode: str = "optcuts",
+):
+    del target, grid
+    if requested_mode not in {"optcuts", "optcuts_grid"}:
+        raise ValueError(f"unsupported OptCuts mode: {requested_mode}")
 
     surface_vertices = np.asarray(surface.vertices, dtype=float)
     surface_faces = np.asarray(surface.faces, dtype=int)[:, :3]
@@ -179,6 +184,7 @@ def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, gr
     loop = [int(v) for v in result.boundary_loops[0]]
     boundary = result.uv_vertices_2d[loop + [loop[0]]]
 
+    is_grid = requested_mode == "optcuts_grid"
     metrics: dict[str, object] = {
         **result.metrics,
         "parameterization_exactness_label": "official_optcuts_external_backend",
@@ -188,16 +194,17 @@ def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, gr
         ),
         "paper_compliance_status": "experimental_nonpaper_parameterization",
         "omega_boundary_mode": "paper_default",
-        "omega_parameterization_mode": "optcuts",
-        "requested_omega_parameterization_mode": "optcuts",
+        "omega_parameterization_mode": requested_mode,
+        "requested_omega_parameterization_mode": requested_mode,
         "boundary_vertex_count": int(len(loop)),
         "boundary_loop": loop,
         "height_field_shortcut_used": False,
         "harmonic_solve_performed": False,
         "omega_corresponds_to_S": True,
         "omega_correspondence_model": (
-            "official OptCuts cut topology + UV embedding; rigid axis alignment; "
-            "M2D inverse mapping uses paired surface_faces/uv_faces barycentric coordinates"
+            "official OptCuts cut topology + UV embedding"
+            if not is_grid
+            else "official OptCuts proposal + experimental OneString grid-constrained processing"
         ),
         "paper_flow_stage": "S -> Omega by official OptCuts external backend",
         "paper_exactness_warning": (
@@ -205,15 +212,20 @@ def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, gr
         ),
         "bff_implemented": False,
         "optcuts_implemented": True,
+        "optcuts_grid_mode": bool(is_grid),
         "omega_boundary_fixed": False,
         "omega_boundary_forced_rectangle": False,
         "omega_boundary_shape": "free",
-        "omega_boundary_constraint_model": "OptCuts optimized seams + rigid fabrication-axis alignment",
+        "omega_boundary_constraint_model": (
+            "official OptCuts optimized seams"
+            if not is_grid
+            else "official OptCuts proposal followed by explicit grid-constrained stage"
+        ),
         "fallbacks_used": [],
     }
 
     parameterization = pipeline.SurfaceParameterization(
-        method="optcuts",
+        method=requested_mode,
         surface_vertices_3d=np.asarray(result.surface_vertices_3d, dtype=float),
         surface_faces=np.asarray(result.surface_faces, dtype=int),
         uv_vertices_2d=np.asarray(result.uv_vertices_2d, dtype=float),
@@ -223,13 +235,15 @@ def _build_optcuts_parameterization(pipeline: Any, surface: Any, target: Any, gr
         metrics=metrics,
     )
 
-    # OneString-specific fusion: pick the common orthogonal fabrication frame
-    # from OptCuts' own seam network before the regular M2D grid is constructed.
-    _align_uv_to_optcuts_seam_axis(parameterization)
+    if is_grid:
+        _align_uv_to_optcuts_seam_axis(parameterization)
+    else:
+        parameterization.metrics.update({
+            "optcuts_fabrication_axis_status": "not_applied_official_mode",
+            "optcuts_fabrication_axis_rotation_degrees": 0.0,
+            "optcuts_original_uv_used_as_final": True,
+        })
 
-    # Reuse the current branch's generic quality audit only if it can handle the
-    # separate 3D/UV index spaces produced by seams. Failure here must not turn
-    # into a fallback; the backend's own Jacobian/SVD metrics remain available.
     quality_fn = getattr(pipeline, "_omega_quality_metrics", None)
     if callable(quality_fn):
         try:
@@ -255,9 +269,16 @@ def install_optcuts_pipeline_patch(pipeline: Any) -> None:
 
     def optcuts_dispatch(surface: Any, target: Any, grid: Any, params: Any):
         mode = str(getattr(params, "omega_parameterization_mode", ""))
-        if mode != "optcuts":
+        if mode not in {"optcuts", "optcuts_grid"}:
             return original_builder(surface, target, grid, params)
-        return _build_optcuts_parameterization(pipeline, surface, target, grid, params)
+        return _build_optcuts_parameterization(
+            pipeline,
+            surface,
+            target,
+            grid,
+            params,
+            requested_mode=mode,
+        )
 
     optcuts_dispatch.__name__ = "_build_surface_parameterization_with_optcuts"
     optcuts_dispatch.__module__ = __name__
