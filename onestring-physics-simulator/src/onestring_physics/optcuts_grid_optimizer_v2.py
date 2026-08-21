@@ -1,4 +1,4 @@
-"""Continuation solver for the strict grid-constrained OptCuts UV embedding."""
+"""Continuation solver for the grid-constrained OptCuts UV embedding."""
 from __future__ import annotations
 
 import math
@@ -21,15 +21,7 @@ def _strict_optimize_constrained_uv(
     hard_targets: np.ndarray,
     iterations: int,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Move OptCuts UV continuously into the hard rectilinear constraint set.
-
-    The previous prototype imposed the final seam coordinates in one jump.  With
-    the physically correct zero-width seam this can be a large displacement and
-    may flip triangles before the free vertices have time to respond.  We instead
-    use continuation: seam constraints move from the OptCuts proposal to their
-    final lattice positions in several stages, and each stage minimizes Symmetric
-    Dirichlet with an orientation barrier.
-    """
+    """Move OptCuts UV continuously into the hard straight-grid constraint set."""
     if torch is None:
         raise RuntimeError("PyTorch is required for grid-constrained OptCuts reparameterization")
 
@@ -59,8 +51,6 @@ def _strict_optimize_constrained_uv(
     faces = torch.tensor(faces_np, device=device, dtype=torch.long)
     inv_source = torch.tensor(inv_source_np, device=device, dtype=dtype)
 
-    # Preserve the orientation of each OptCuts triangle, rather than assuming all
-    # triangles happen to be positive in this coordinate convention.
     with torch.no_grad():
         tri0 = uv0[faces]
         B0 = torch.stack([tri0[:, 1] - tri0[:, 0], tri0[:, 2] - tri0[:, 0]], dim=2)
@@ -72,24 +62,27 @@ def _strict_optimize_constrained_uv(
             raise RuntimeError(f"OPTCUTS_GRID_INITIAL_UV_DEGENERATE: triangles={bad}")
 
     total_iterations = max(40, int(iterations))
-    stages = int(os.environ.get("ONESTRING_OPTCUTS_GRID_CONTINUATION_STAGES", "6"))
-    stages = max(2, min(stages, 20))
+    stages = int(os.environ.get("ONESTRING_OPTCUTS_GRID_CONTINUATION_STAGES", "8"))
+    stages = max(2, min(stages, 24))
     per_stage = max(8, int(math.ceil(total_iterations / stages)))
     variable = torch.nn.Parameter(uv0.clone())
 
     eps_det = 1.0e-5
     anchor_weight = 1.0e-4
-    flip_weight = 2.0e5
+    flip_weight = 3.0e5
     best_final_loss = float("inf")
     best_final = None
     stage_losses: list[float] = []
+    stage_invalid_counts: list[int] = []
+    stage_min_oriented_det: list[float] = []
 
     for stage in range(1, stages + 1):
         alpha = float(stage) / float(stages)
         stage_targets = uv0.clone()
         stage_targets[fixed] = (1.0 - alpha) * uv0[fixed] + alpha * final_targets[fixed]
-        optimizer = torch.optim.Adam([variable], lr=0.012 if stage < stages else 0.008)
+        optimizer = torch.optim.Adam([variable], lr=0.010 if stage < stages else 0.006)
         best_stage_loss = float("inf")
+        best_stage_uv = None
 
         for _ in range(per_stage):
             optimizer.zero_grad(set_to_none=True)
@@ -103,7 +96,6 @@ def _strict_optimize_constrained_uv(
             oriented_det = ref_sign * det
             abs_det = torch.clamp(torch.abs(det), min=eps_det)
             frob = a * a + b * b + c * c + d * d
-            # ||J||_F^2 + ||J^-1||_F^2 for a 2x2 matrix.
             sd = frob + frob / (abs_det * abs_det)
             barrier = torch.relu(eps_det - oriented_det)
             free_delta = variable - uv0
@@ -115,39 +107,63 @@ def _strict_optimize_constrained_uv(
             loss.backward()
             if variable.grad is not None:
                 variable.grad[fixed] = 0.0
-            torch.nn.utils.clip_grad_norm_([variable], max_norm=100.0)
+            torch.nn.utils.clip_grad_norm_([variable], max_norm=80.0)
             optimizer.step()
             with torch.no_grad():
                 variable[fixed] = stage_targets[fixed]
             value = float(loss.detach().cpu())
-            if math.isfinite(value):
-                best_stage_loss = min(best_stage_loss, value)
+            if math.isfinite(value) and value < best_stage_loss:
+                best_stage_loss = value
+                best_stage_uv = torch.where(fixed[:, None], stage_targets, variable).detach().clone()
                 if stage == stages and value < best_final_loss:
                     best_final_loss = value
-                    best_final = torch.where(fixed[:, None], stage_targets, variable).detach().cpu().numpy()
+                    best_final = best_stage_uv.cpu().numpy()
+
+        if best_stage_uv is None:
+            raise RuntimeError(f"OPTCUTS_GRID_CONSTRAINED_OPTIMIZER_FAILED_AT_STAGE:{stage}")
+        with torch.no_grad():
+            # Continue from the best state of this stage, not merely the last Adam step.
+            variable.copy_(best_stage_uv)
+            tri = best_stage_uv[faces]
+            B = torch.stack([tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]], dim=2)
+            J = torch.bmm(B, inv_source)
+            det = J[:, 0, 0] * J[:, 1, 1] - J[:, 0, 1] * J[:, 1, 0]
+            oriented = ref_sign * det
+            invalid_count = int(torch.count_nonzero(oriented <= 1.0e-10).cpu())
+            min_det = float(torch.min(oriented).cpu())
         stage_losses.append(float(best_stage_loss))
+        stage_invalid_counts.append(invalid_count)
+        stage_min_oriented_det.append(min_det)
+        print(
+            "[OPTCUTS-GRID-CONTINUATION] "
+            f"stage={stage}/{stages} alpha={alpha:.4f} invalid={invalid_count} "
+            f"min_oriented_det={min_det:.6g} best_loss={best_stage_loss:.6g}"
+        )
 
     if best_final is None:
         raise RuntimeError("OPTCUTS_GRID_CONSTRAINED_OPTIMIZER_FAILED")
     best_final[fixed_np] = hard_targets[fixed_np]
 
-    # Final orientation check uses the exact original per-triangle sign.
     final_areas = constrained_param._triangle_signed_areas(best_final, faces_np)
     initial_areas = constrained_param._triangle_signed_areas(uv0_np, faces_np)
     reference = np.where(initial_areas >= 0.0, 1.0, -1.0)
     invalid = np.where(reference * final_areas <= 1.0e-10)[0]
     if len(invalid):
         raise RuntimeError(
-            "OPTCUTS_GRID_CONSTRAINT_INFEASIBLE: final strict seam constraints "
-            f"produce {len(invalid)} flipped/degenerate triangles; examples={invalid[:16].tolist()}"
+            "OPTCUTS_GRID_CONSTRAINT_INFEASIBLE: final straight-grid seam constraints "
+            f"produce {len(invalid)} flipped/degenerate triangles; examples={invalid[:16].tolist()}; "
+            f"stage_invalid_counts={stage_invalid_counts}; "
+            f"stage_min_oriented_det={stage_min_oriented_det}"
         )
 
     return np.asarray(best_final, dtype=float), {
-        "optimizer": "torch_continuation_symmetric_dirichlet_hard_zero_width_grid_seam",
+        "optimizer": "torch_continuation_symmetric_dirichlet_hard_paired_grid_seams",
         "device": str(device),
         "iterations": int(per_stage * stages),
         "continuation_stages": int(stages),
         "stage_best_losses": stage_losses,
+        "stage_invalid_counts": stage_invalid_counts,
+        "stage_min_oriented_det": stage_min_oriented_det,
         "final_loss": float(best_final_loss),
         "fixed_vertex_count": int(np.count_nonzero(fixed_np)),
         "flip_count": 0,
