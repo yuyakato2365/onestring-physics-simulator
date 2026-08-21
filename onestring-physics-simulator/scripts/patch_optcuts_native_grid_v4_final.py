@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Core source patch for OneString native Grid-OptCuts V4.
 
-This module owns the actual OptCuts source modifications.  In particular,
-Grid-mode global bijectivity is decided at Optimizer construction (the only
-place that matters) rather than by a topology-specific initialization marker.
+This module owns the actual OptCuts source modifications. In Grid mode, global
+bijectivity is decided at Optimizer construction and the exact runtime contract
+markers are emitted as full string literals so source, binary and runtime checks
+all validate the same thing.
 """
 from __future__ import annotations
 
@@ -46,15 +47,14 @@ def _patch_main(root: Path) -> None:
         "main.cpp lock initial Grid boundary",
     )
 
-    # This is the authoritative bijectivity decision.  The old implementation
-    # emitted a marker inside onePointCut(), so open/already-cut inputs could use
-    # Grid mode correctly yet fail the Python marker check.  Grid mode now forces
-    # the authors' air/scaffold barrier whenever bijectiveParam is requested and
-    # reports the *actual bool passed to Optimizer* here, independent of topology.
+    # Authoritative bijectivity decision.  Use complete literal strings for the
+    # enabled/disabled markers: setup verifies the built binary, while the Python
+    # bridge verifies runtime stdout.  Both must therefore use the exact same
+    # marker bytes rather than a prefix concatenated with a ternary string.
     text = _replace_once(
         text,
         """    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, bijectiveParam && !rand1PInitCut); // for random one point initial cut, don't need air meshes in the beginning since it's impossible for a quad to intersect itself\n    \n    optimizer->precompute();\n""",
-        """    // ONESTRING_GRID_NATIVE_V4_BIJECTIVITY_SCAFFOLD\n    const bool oneStringUseBijectivityScaffold = oneStringMainGridEnabled()\n        ? bijectiveParam\n        : (bijectiveParam && !rand1PInitCut);\n    if(oneStringMainGridEnabled()) {\n        std::cout << \"[ONESTRING-GRID] native_candidate_search enabled version=4 h=\"\n                  << oneStringMainGridH() << std::endl;\n        std::cout << \"[ONESTRING-GRID] global_bijectivity_scaffold=\"\n                  << (oneStringUseBijectivityScaffold ? \"enabled\" : \"disabled\") << std::endl;\n        if(!oneStringUseBijectivityScaffold) {\n            throw std::runtime_error(\"ONESTRING_GRID_BIJECTIVITY_SCAFFOLD_DISABLED\");\n        }\n    }\n    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, oneStringUseBijectivityScaffold);\n    \n    optimizer->precompute();\n""",
+        """    // ONESTRING_GRID_NATIVE_V4_BIJECTIVITY_SCAFFOLD\n    const bool oneStringUseBijectivityScaffold = oneStringMainGridEnabled()\n        ? bijectiveParam\n        : (bijectiveParam && !rand1PInitCut);\n    if(oneStringMainGridEnabled()) {\n        std::cout << \"[ONESTRING-GRID] native_candidate_search enabled version=4 h=\"\n                  << oneStringMainGridH() << std::endl;\n        if(oneStringUseBijectivityScaffold) {\n            std::cout << \"[ONESTRING-GRID] global_bijectivity_scaffold=enabled\" << std::endl;\n        }\n        else {\n            std::cout << \"[ONESTRING-GRID] global_bijectivity_scaffold=disabled\" << std::endl;\n            throw std::runtime_error(\"ONESTRING_GRID_BIJECTIVITY_SCAFFOLD_DISABLED\");\n        }\n    }\n    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, oneStringUseBijectivityScaffold);\n    \n    optimizer->precompute();\n""",
         "main.cpp Grid runtime and bijectivity contract",
     )
 
