@@ -113,7 +113,8 @@ jobs:
           grep -q "\[ONESTRING-GRID\] native_candidate_search enabled version=4" /tmp/native-grid-split-smoke.log
           grep -q "evaluate vertex splits" /tmp/native-grid-split-smoke.log
 
-      - name: Run Grid-OptCuts unit tests
+      - name: Run Grid-OptCuts unit and end-to-end tests
         env:
           PYTHONPATH: src
+          ONESTRING_OPTCUTS_EXECUTABLE: third_party/OptCuts/build/OptCuts_bin
         run: python -m pytest tests/test_optcuts_grid_native.py tests/test_optcuts_backend.py -q
