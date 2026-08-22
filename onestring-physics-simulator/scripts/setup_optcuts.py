@@ -14,6 +14,7 @@ from patch_optcuts_grid_v4 import (
     NATIVE_RUNTIME_MARKER,
     apply_grid_optcuts_v4,
 )
+from patch_optcuts_initial_search_perf import apply_initial_search_perf_patch
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
 CMAKE_POLICY_MINIMUM = "3.5"
@@ -198,6 +199,7 @@ def main() -> int:
     patch_legacy_glfw_policy(root)
     patch_legacy_eigen_transpositions(root)
     apply_grid_optcuts_v4(root)
+    apply_initial_search_perf_patch(root)
 
     if args.no_build:
         return 0
