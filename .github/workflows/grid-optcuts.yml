@@ -6,6 +6,7 @@ on:
     paths:
       - "onestring-physics-simulator/scripts/patch_optcuts_native_grid*.py"
       - "onestring-physics-simulator/scripts/patch_optcuts_grid_v4.py"
+      - "onestring-physics-simulator/scripts/patch_optcuts_grid_v5_boundary_reparam.py"
       - "onestring-physics-simulator/scripts/setup_optcuts.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_*.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_uv_overlap_guard.py"
@@ -17,6 +18,7 @@ on:
     paths:
       - "onestring-physics-simulator/scripts/patch_optcuts_native_grid*.py"
       - "onestring-physics-simulator/scripts/patch_optcuts_grid_v4.py"
+      - "onestring-physics-simulator/scripts/patch_optcuts_grid_v5_boundary_reparam.py"
       - "onestring-physics-simulator/scripts/setup_optcuts.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_*.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_uv_overlap_guard.py"
@@ -53,6 +55,7 @@ jobs:
             scripts/patch_optcuts_native_grid_v4_final.py \
             scripts/patch_optcuts_native_grid_v4_perf.py \
             scripts/patch_optcuts_grid_v4.py \
+            scripts/patch_optcuts_grid_v5_boundary_reparam.py \
             scripts/setup_optcuts.py \
             src/onestring_physics/optcuts_grid_native_backend.py \
             src/onestring_physics/optcuts_grid_native_pipeline_patch.py \
@@ -68,6 +71,8 @@ jobs:
         run: |
           grep -q "ONESTRING_GRID_NATIVE_V4" third_party/OptCuts/src/TriMesh.cpp
           grep -q "ONESTRING_GRID_NATIVE_V4_FAST_SEARCH" third_party/OptCuts/src/TriMesh.cpp
+          grep -q "ONESTRING_GRID_NATIVE_V5_BOUNDARY_REPARAM" third_party/OptCuts/src/TriMesh.cpp
+          grep -q "ONESTRING_GRID_NATIVE_V5_REPARAM_SHORTLIST" third_party/OptCuts/src/main.cpp
           grep -q "oneStringGridLockedVert" third_party/OptCuts/src/TriMesh.hpp
           grep -q "ONESTRING_GRID_NATIVE_V4_SEAM_SIDECAR" third_party/OptCuts/src/main.cpp
           grep -q "ONESTRING_GRID_NATIVE_V4_HARD_LOCK_STEP_FORWARD" third_party/OptCuts/src/Optimizer.cpp
@@ -92,6 +97,7 @@ jobs:
           timeout 120 ./third_party/OptCuts/build/OptCuts_bin 100 /tmp/grid_tetra.obj 0.999 1 0 1000 1 0 grid-init > /tmp/grid-init.log 2>&1 || { cat /tmp/grid-init.log; exit 1; }
           cat /tmp/grid-init.log
           grep -q "global_bijectivity_scaffold=enabled" /tmp/grid-init.log
+          grep -q "boundary_constrained_reparameterization" /tmp/grid-init.log
           grep -q "final_seam_sidecar=" /tmp/grid-init.log
           grep -q "optimization converged" /tmp/grid-init.log
 
@@ -111,6 +117,7 @@ jobs:
           export ONESTRING_OPTCUTS_GRID_NATIVE=1
           export ONESTRING_OPTCUTS_GRID_ANGLE_RAD=0 ONESTRING_OPTCUTS_GRID_PHASE_U=0 ONESTRING_OPTCUTS_GRID_PHASE_V=0
           export ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX=12 ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS=12
+          export ONESTRING_OPTCUTS_GRID_REPARAM_TRIALS=12
           accepted=0
           for mesh in /tmp/grid_candidate_*.obj; do
             for h in 0.08 0.10 0.15 0.20 0.30; do
@@ -119,7 +126,7 @@ jobs:
                 tag="accepted-$(basename "$mesh" .obj)-h${h}-s${snap}"
                 log="/tmp/${tag}.log"
                 if timeout 30 ./third_party/OptCuts/build/OptCuts_bin 100 "$mesh" 0.001 3 0 4.01 1 0 "$tag" > "$log" 2>&1; then
-                  if grep -Eq "boundary split E_dec =|interior split E_dec =" "$log" && grep -q "final_seam_sidecar=" "$log"; then
+                  if grep -Eq "boundary split E_dec =|interior split E_dec =|constrained_candidate_accept" "$log" && grep -q "final_seam_sidecar=" "$log"; then
                     echo "ACCEPTED GRID SPLIT FIXTURE: mesh=$mesh h=$h snap=$snap"
                     cat "$log"
                     accepted=1
@@ -134,8 +141,8 @@ jobs:
             done
           done
           if [ "$accepted" -ne 1 ]; then
-            echo "No deterministic accepted Grid split was found in the bounded fixture sweep."
-            for log in /tmp/accepted-*.log; do tail -n 15 "$log" 2>/dev/null || true; done
+            echo "No deterministic accepted boundary-constrained Grid split was found in the bounded fixture sweep."
+            for log in /tmp/accepted-*.log; do tail -n 20 "$log" 2>/dev/null || true; done
             exit 1
           fi
 
