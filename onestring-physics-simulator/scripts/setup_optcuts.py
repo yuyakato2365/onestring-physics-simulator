@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Clone, patch, build, and runtime-verify canonical Grid-OptCuts V4."""
+"""Clone, patch, build, and runtime-verify boundary-constrained Grid-OptCuts V5."""
 from __future__ import annotations
 
 import argparse
@@ -14,10 +14,12 @@ from patch_optcuts_grid_v4 import (
     NATIVE_RUNTIME_MARKER,
     apply_grid_optcuts_v4,
 )
+from patch_optcuts_grid_v5_boundary_reparam import apply_boundary_reparameterization_patch
 from patch_optcuts_initial_search_perf import apply_initial_search_perf_patch
 
 OFFICIAL_REPOSITORY = "https://github.com/liminchen/OptCuts.git"
 CMAKE_POLICY_MINIMUM = "3.5"
+V5_BINARY_MARKER = "[ONESTRING-GRID] boundary_constrained_reparameterization"
 
 
 def run(command: list[str], *, cwd: Path | None = None) -> None:
@@ -199,6 +201,7 @@ def main() -> int:
     patch_legacy_glfw_policy(root)
     patch_legacy_eigen_transpositions(root)
     apply_grid_optcuts_v4(root)
+    apply_boundary_reparameterization_patch(root)
     apply_initial_search_perf_patch(root)
 
     if args.no_build:
@@ -222,12 +225,18 @@ def main() -> int:
     if executable is None:
         raise SystemExit("Build finished, but OptCuts_bin was not found")
 
-    _verify_binary_contains(executable, (NATIVE_RUNTIME_MARKER, GRID_BIJECTIVITY_RUNTIME_MARKER))
+    _verify_binary_contains(
+        executable,
+        (NATIVE_RUNTIME_MARKER, GRID_BIJECTIVITY_RUNTIME_MARKER, V5_BINARY_MARKER),
+    )
     _runtime_smoke_test(executable, root)
 
     print("\nOptCuts executable:")
     print(executable)
-    print("\nNative Grid-OptCuts V4 consolidated setup is compiled and runtime-verified on closed and open inputs.")
+    print(
+        "\nNative Grid-OptCuts V5 boundary-constrained setup is compiled and "
+        "runtime-verified on closed and open inputs."
+    )
     return 0
 
 
