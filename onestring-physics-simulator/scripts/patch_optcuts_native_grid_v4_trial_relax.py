@@ -186,7 +186,7 @@ def apply_trial_relax_patch(root: Path) -> bool:
                                             seamLength += (trial.V_rest.row(e[0]) - trial.V_rest.row(e[1])).norm();
                                         }
                                     }
-                                    const double avgSD = totalSD / std::max(1, probe.F.rows());
+                                    const double avgSD = totalSD / std::max<Eigen::Index>(1, probe.F.rows());
                                     const double score = avgSD + 1.0e-3 * seamLength /
                                         std::max(1.0e-12, probe.virtualRadius);
                                     ++feasibleInitial;
