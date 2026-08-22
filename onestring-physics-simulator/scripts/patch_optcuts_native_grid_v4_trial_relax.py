@@ -193,6 +193,11 @@ def apply_trial_relax_patch(root: Path) -> bool:
                                     if(score < bestInitialScore) {
                                         bestInitialScore = score;
                                         bestInitialVertex = candidateVI;
+                                        // Preserve the exact cut topology/rest metadata from the
+                                        // trial, but commit the Grid-feasible harmonic UV that was
+                                        // actually validated above.  The previous code stored the
+                                        // pre-Grid trial UV here, which made coh=0 drift off lattice.
+                                        trial.V = trialUV;
                                         bestInitialMesh = trial;
                                         foundInitial = true;
                                     }
