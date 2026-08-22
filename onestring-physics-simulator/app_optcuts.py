@@ -1,11 +1,13 @@
-"""OptCuts launcher with official and native Grid-Constrained modes.
+"""OptCuts launcher.
 
 ``optcuts``
-    Authors' OptCuts backend, unchanged.
+    Requirement-preserving path:
+    OptCuts chooses seam topology -> Omega straightens each seam chain -> the
+    straight chain is aligned to the fabrication grid -> M2D realizes only that
+    straight grid seam.  The launcher rejects an L/stair approximation.
 
 ``optcuts_grid``
-    OneString native Grid-OptCuts V4. OptCuts' own split search is restricted to
-    the fixed fabrication lattice. No completed free seam is snapped afterward.
+    Experimental native Grid-OptCuts V4 path kept available for comparison.
 """
 from __future__ import annotations
 
@@ -35,6 +37,13 @@ from onestring_physics.optcuts_grid_consistency_patch import install_optcuts_gri
 from onestring_physics.optcuts_k3d_validity_patch import install_optcuts_k3d_validity_patch  # noqa: E402
 from onestring_physics.optcuts_k3d_preflight_patch import install_optcuts_k3d_preflight_patch  # noqa: E402
 from onestring_physics.optcuts_visualization_compat_patch import install_optcuts_visualization_compat_patch  # noqa: E402
+from onestring_physics.optcuts_grid_seam_patch import install_optcuts_seam_metadata_patch  # noqa: E402
+from onestring_physics.optcuts_seam_extraction_patch import install_robust_optcuts_seam_extraction  # noqa: E402
+from onestring_physics.optcuts_rectilinear_seam_patch import install_optcuts_rectilinear_seam_patch  # noqa: E402
+from onestring_physics.optcuts_seam_requirement_patch import (  # noqa: E402
+    install_optcuts_seam_requirement_patch,
+    install_strict_straight_grid_seam_verifier,
+)
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -63,15 +72,15 @@ def _install_optcuts_selector() -> None:
 
         if value == "optcuts":
             st.caption(
-                "Official OptCuts: authors' cut search and UV embedding directly. "
-                "No OneString Grid constraint is applied."
+                "Requirement path: OptCuts determines seam topology, Omega is re-parameterized so "
+                "each seam chain is straight, then that straight seam is aligned to the existing "
+                "fabrication grid. L/stair seam fallback is rejected."
             )
         else:
             st.caption(
-                "Native Grid-OptCuts V4: physical split candidates are generated and scored inside "
-                "OptCuts only through the fixed Tile-size H/V lattice. Interior cuts use two distinct "
-                "Grid boundary sides (A-B-C / A-D-C), not coincident seam copies. Each candidate is "
-                "actually trial-cut and scored by its resulting Symmetric Dirichlet decrease."
+                "Experimental Native Grid-OptCuts V4: split candidates are searched directly on "
+                "the fixed fabrication lattice. This mode is retained for comparison and is not "
+                "the requirement path above."
             )
 
         executable = st.text_input(
@@ -122,6 +131,12 @@ def _install_optcuts_selector() -> None:
             )
             os.environ["ONESTRING_OPTCUTS_USE_BIJECTIVITY"] = "1" if use_bijectivity else "0"
             os.environ["ONESTRING_OPTCUTS_INITIAL_CUT_OPTION"] = "1" if initial_cut_label.startswith("farthest") else "0"
+            # The normal OneString fabrication grid is axis-aligned with zero phase.
+            # Make this explicit so stale settings from optcuts_grid cannot change
+            # the requirement path across Streamlit reruns.
+            os.environ["ONESTRING_OPTCUTS_GRID_ANGLE_DEGREES"] = "0"
+            os.environ["ONESTRING_OPTCUTS_GRID_PHASE_U"] = "0"
+            os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = "0"
         else:
             angle = st.number_input(
                 "Grid reference direction [deg]",
@@ -175,8 +190,6 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = str(float(phase_v))
             os.environ["ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS"] = str(float(max_snap))
             os.environ["ONESTRING_OPTCUTS_GRID_INITIAL_CANDIDATES"] = str(int(initial_candidates))
-            # Native Grid mode keeps the original OptCuts global bijectivity
-            # scaffold active in addition to Grid-specific trial validation.
             os.environ["ONESTRING_OPTCUTS_USE_BIJECTIVITY"] = "1"
             os.environ["ONESTRING_OPTCUTS_INITIAL_CUT_OPTION"] = "0"
 
@@ -194,31 +207,42 @@ def _install_optcuts_selector() -> None:
     st._onestring_optcuts_selector_installed = True
 
 
-def _install_grid_m2d_after_simple_split() -> None:
-    """Use the same fixed h/phase lattice for M2D only when native Grid-OptCuts ran."""
-    if getattr(simple_split_module, "_onestring_grid_constrained_optcuts_hook_installed", False):
+def _install_m2d_after_simple_split() -> None:
+    """Install mode-specific M2D adapters without changing Simple Split numerics."""
+    if getattr(simple_split_module, "_onestring_optcuts_requirement_hook_installed", False):
         return
     original_installer = simple_split_module.install_simple_split_panel_patch
 
-    def install_then_grid_m2d(pipeline_module: Any, optimization_debug_module: Any) -> None:
+    def install_then_optcuts_m2d(pipeline_module: Any, optimization_debug_module: Any) -> None:
+        # Stable Simple Split remains first and unchanged.
         original_installer(pipeline_module, optimization_debug_module)
+        # Requirement path for ordinary OptCuts.  The adapter no-ops when its
+        # seam metadata is absent (including native optcuts_grid runs).
+        install_optcuts_rectilinear_seam_patch(pipeline_module)
+        install_strict_straight_grid_seam_verifier(pipeline_module)
+        # Experimental native Grid-OptCuts adapters are retained and internally
+        # conditional on their own payload.
         install_optcuts_grid_constrained_m2d_patch(pipeline_module)
         install_optcuts_grid_consistency_patch(pipeline_module)
 
-    simple_split_module.install_simple_split_panel_patch = install_then_grid_m2d
-    simple_split_module._onestring_grid_constrained_optcuts_hook_installed = True
+    simple_split_module.install_simple_split_panel_patch = install_then_optcuts_m2d
+    simple_split_module._onestring_optcuts_requirement_hook_installed = True
 
 
-# Official OptCuts first; native Grid-OptCuts intercepts only optcuts_grid.
+# OptCuts computes the seam first.
 install_optcuts_pipeline_patch(pipeline)
 install_native_grid_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
 install_native_grid_optcuts_lift_patch(pipeline)
+# Carry the chosen seam through Omega, then enforce the user's fixed sequence.
+install_robust_optcuts_seam_extraction()
+install_optcuts_seam_metadata_patch(pipeline)
+install_optcuts_seam_requirement_patch(pipeline)
 install_fast_assembly_animation_patch()
 install_optcuts_k3d_validity_patch(pipeline)
 install_optcuts_k3d_preflight_patch(pipeline)
 install_optcuts_visualization_compat_patch()
-_install_grid_m2d_after_simple_split()
+_install_m2d_after_simple_split()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
