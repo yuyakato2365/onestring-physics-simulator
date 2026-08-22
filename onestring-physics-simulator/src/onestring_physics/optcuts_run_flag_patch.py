@@ -5,9 +5,14 @@ from typing import Any
 
 from .optcuts_grid_orientation_patch import install_optcuts_grid_orientation_patch
 from .optcuts_grid_seam_sidecar_patch import install_optcuts_grid_seam_sidecar_patch
+from .optcuts_official_binary_patch import install_official_optcuts_binary_separation
 
 
-# Install before any Grid-OptCuts run.  Orientation stabilizes the backend's
+# Install before any OptCuts run. Ordinary ``optcuts`` must never resolve to the
+# Grid-OptCuts executable; the latter is reserved for ``optcuts_grid`` only.
+install_official_optcuts_binary_separation()
+
+# Install before any Grid-OptCuts run. Orientation stabilizes the backend's
 # global frame first; seam transfer then wraps the native pipeline call and
 # applies the identical final rigid frame transform to the C++ cohE sidecar.
 install_optcuts_grid_orientation_patch()
