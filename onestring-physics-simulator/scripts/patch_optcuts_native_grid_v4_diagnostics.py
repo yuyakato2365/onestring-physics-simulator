@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Add concise diagnostics to native Grid-OptCuts exact trial scoring."""
+"""Add concise diagnostics to native Grid-OptCuts exact trial scoring.
+
+Keep diagnostics orthogonal to the later cheap-trial transformation: this patch
+must not rewrite the SD-scoring block that ``patch_optcuts_grid_v4.py`` uses as
+its anchor.  Rejection and topology-operation diagnostics remain available.
+"""
 from __future__ import annotations
 from pathlib import Path
 
@@ -30,9 +35,14 @@ def apply_native_grid_diagnostics(root: Path) -> bool:
     ]
     for old, new in replacements:
         block = block.replace(old, new)
+
+    # Marker deliberately lives outside the SD-scoring statements.  A later
+    # canonical patch replaces that exact block with a cheap feasibility audit.
+    # Mutating it here used to make setup fail with "expected one anchor, found 0".
     block = block.replace(
-        "const double sdDec = before - after;",
-        'const double sdDec = before - after;\n    std::cout << "[ONESTRING-GRID-TRIAL] before=" << before << " after=" << after << " sdDec=" << sdDec << " seam=" << seamIncrease << std::endl; // ONESTRING_GRID_NATIVE_V4_TRIAL_DIAGNOSTICS'
+        "{\n    // ONESTRING_GRID_NATIVE_V4_LOCAL_TRIAL_SCORE",
+        "{\n    // ONESTRING_GRID_NATIVE_V4_TRIAL_DIAGNOSTICS\n    // ONESTRING_GRID_NATIVE_V4_LOCAL_TRIAL_SCORE",
+        1,
     )
     text = text[:score_start] + block + text[score_end:]
 
