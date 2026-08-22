@@ -153,6 +153,18 @@ def _install_optcuts_selector() -> None:
                 step=0.25,
                 key="onestring_optcuts_grid_max_snap",
             )
+            initial_candidates = st.number_input(
+                "Initial Grid-cut exact candidates",
+                min_value=1,
+                max_value=16,
+                value=max(1, min(16, int(round(_safe_float_env("ONESTRING_OPTCUTS_GRID_INITIAL_CANDIDATES", 2.0))))),
+                step=1,
+                key="onestring_optcuts_grid_initial_candidates",
+                help=(
+                    "Each candidate performs an expensive onePointCut + harmonic solve. "
+                    "For large meshes, 2 is the recommended default; increase only when needed."
+                ),
+            )
             st.caption(
                 "V4 is split-only: unconstrained OptCuts merge is disabled. The physical cut topology "
                 "still follows existing input surface-mesh edges; arbitrary Grid-line / surface-triangle "
@@ -162,6 +174,7 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_U"] = str(float(phase_u))
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = str(float(phase_v))
             os.environ["ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS"] = str(float(max_snap))
+            os.environ["ONESTRING_OPTCUTS_GRID_INITIAL_CANDIDATES"] = str(int(initial_candidates))
             # Native Grid mode keeps the original OptCuts global bijectivity
             # scaffold active in addition to Grid-specific trial validation.
             os.environ["ONESTRING_OPTCUTS_USE_BIJECTIVITY"] = "1"
