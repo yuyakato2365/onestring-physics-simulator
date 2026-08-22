@@ -44,6 +44,7 @@ from onestring_physics.optcuts_seam_requirement_patch import (  # noqa: E402
     install_optcuts_seam_requirement_patch,
     install_strict_straight_grid_seam_verifier,
 )
+from onestring_physics.optcuts_requirement_diagnostics_patch import install_requirement_pipeline_diagnostics  # noqa: E402
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -243,6 +244,9 @@ install_optcuts_k3d_validity_patch(pipeline)
 install_optcuts_k3d_preflight_patch(pipeline)
 install_optcuts_visualization_compat_patch()
 _install_m2d_after_simple_split()
+# Install diagnostics last so it observes the complete requirement path without
+# changing any numerical implementation.
+install_requirement_pipeline_diagnostics(pipeline)
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
