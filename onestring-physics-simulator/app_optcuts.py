@@ -37,6 +37,7 @@ from onestring_physics.optcuts_grid_consistency_patch import install_optcuts_gri
 from onestring_physics.optcuts_k3d_validity_patch import install_optcuts_k3d_validity_patch  # noqa: E402
 from onestring_physics.optcuts_k3d_preflight_patch import install_optcuts_k3d_preflight_patch  # noqa: E402
 from onestring_physics.optcuts_visualization_compat_patch import install_optcuts_visualization_compat_patch  # noqa: E402
+from onestring_physics.optcuts_source_seam_visualization_patch import install_optcuts_source_seam_visualization_patch  # noqa: E402
 from onestring_physics.optcuts_grid_seam_patch import install_optcuts_seam_metadata_patch  # noqa: E402
 from onestring_physics.optcuts_seam_extraction_patch import install_robust_optcuts_seam_extraction  # noqa: E402
 from onestring_physics.optcuts_rectilinear_seam_patch import install_optcuts_rectilinear_seam_patch  # noqa: E402
@@ -242,6 +243,7 @@ install_fast_assembly_animation_patch()
 install_optcuts_k3d_validity_patch(pipeline)
 install_optcuts_k3d_preflight_patch(pipeline)
 install_optcuts_visualization_compat_patch()
+install_optcuts_source_seam_visualization_patch()
 _install_m2d_after_simple_split()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
