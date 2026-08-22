@@ -14,7 +14,7 @@ from patch_optcuts_native_grid_v4_perf import apply_native_grid_perf_patch
 from patch_optcuts_native_grid_v4_diagnostics import apply_native_grid_diagnostics
 from patch_optcuts_native_grid_v4_trial_relax import apply_trial_relax_patch
 
-CANONICAL_PATCH_VERSION = "4.5-authoritative-seam-sidecar"
+CANONICAL_PATCH_VERSION = "4.6-cheap-adaptive-trials-authoritative-seams"
 NATIVE_RUNTIME_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=4"
 GRID_BIJECTIVITY_RUNTIME_MARKER = "[ONESTRING-GRID] global_bijectivity_scaffold=enabled"
 
@@ -23,6 +23,8 @@ _REQUIRED_TRIMESH_MARKERS = (
     "ONESTRING_GRID_NATIVE_V4_FAST_SEARCH",
     "ONESTRING_GRID_NATIVE_V4_ORIGINAL_LOCAL_PROPOSAL",
     "ONESTRING_GRID_NATIVE_V4_DEFER_TRIAL_VALIDATE",
+    "ONESTRING_GRID_NATIVE_V4_CHEAP_TRIAL_AUDIT",
+    "ONESTRING_GRID_NATIVE_V4_ADAPTIVE_TRIAL_BUDGET",
 )
 _REQUIRED_MAIN_MARKERS = (
     "native_candidate_search enabled version=4",
@@ -53,6 +55,40 @@ def _replace_once(text: str, old: str, new: str, label: str) -> str:
     if count != 1:
         raise RuntimeError(f"{label}: expected exactly one anchor, found {count}")
     return text.replace(old, new, 1)
+
+
+def _patch_candidate_cost(root: Path) -> bool:
+    """Keep exact topology validation but remove redundant global SD rescoring.
+
+    The proposal-aware V4 ranks feasible Grid embeddings using OptCuts' original
+    local proposal score.  Recomputing total Symmetric Dirichlet before/after
+    every trial therefore adds O(F) work twice per trial without affecting the
+    selected candidate.  Large meshes also need a smaller exact-trial budget.
+    """
+    path = root / "src" / "TriMesh.cpp"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    text = path.read_text(encoding="utf-8")
+    changed = False
+
+    if "ONESTRING_GRID_NATIVE_V4_CHEAP_TRIAL_AUDIT" not in text:
+        old = '''    const double before = oneStringTotalSD(mesh);\n    const double after = oneStringTotalSD(trial);\n    if(!std::isfinite(before) || !std::isfinite(after)) return -DBL_MAX;\n    const double sdDec = before - after;\n    energyChanges.first = -sdDec;\n    energyChanges.second = seamIncrease;\n    // Sign is intentionally NOT used to decide whether the topology is useful:\n    // the trial has not yet undergone OptCuts relaxation.  Returning a finite\n    // value simply means the exact Grid topology is immediately valid.\n    return (1.0 - lambda_t) * sdDec - lambda_t * seamIncrease;\n'''
+        new = '''    // ONESTRING_GRID_NATIVE_V4_CHEAP_TRIAL_AUDIT\n    // Feasibility only: candidate ranking uses OptCuts' original local proposal\n    // score, so a full-mesh SD before/after pass here is redundant and extremely\n    // expensive on production meshes. Keep the exact topology/inversion/Grid\n    // checks above, then return a finite sentinel.\n    (void)lambda_t;\n    energyChanges.first = 0.0;\n    energyChanges.second = seamIncrease;\n    return 0.0;\n'''
+        text = _replace_once(text, old, new, "Grid trial cheap feasibility audit")
+        changed = True
+
+    if "ONESTRING_GRID_NATIVE_V4_ADAPTIVE_TRIAL_BUDGET" not in text:
+        old = '''    const int targetCap = std::max(1, static_cast<int>(std::llround(\n        oneStringGridEnvDouble("ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX", 4.0))));\n    const int maxTrials = std::max(1, static_cast<int>(std::llround(\n        oneStringGridEnvDouble("ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS", 4.0))));\n'''
+        new = '''    // ONESTRING_GRID_NATIVE_V4_ADAPTIVE_TRIAL_BUDGET\n    // Exact trial cuts copy and validate the current mesh.  Preserve exhaustive\n    // small-mesh behaviour, but automatically cap work for large production\n    // surfaces unless the user explicitly overrides the environment variables.\n    const double defaultTargetCap = mesh.F.rows() >= 8000 ? 2.0 :\n                                    (mesh.F.rows() >= 3000 ? 3.0 : 4.0);\n    const double defaultMaxTrials = mesh.F.rows() >= 3000 ? 1.0 :\n                                    (mesh.F.rows() >= 1000 ? 2.0 : 4.0);\n    const int targetCap = std::max(1, static_cast<int>(std::llround(\n        oneStringGridEnvDouble("ONESTRING_OPTCUTS_GRID_TARGETS_PER_VERTEX", defaultTargetCap))));\n    const int maxTrials = std::max(1, static_cast<int>(std::llround(\n        oneStringGridEnvDouble("ONESTRING_OPTCUTS_GRID_MAX_EXACT_TRIALS", defaultMaxTrials))));\n'''
+        text = _replace_once(text, old, new, "Grid adaptive exact-trial budget")
+        changed = True
+
+    if changed:
+        path.write_text(text, encoding="utf-8")
+        print(f"Applied cheap/adaptive Grid candidate audit: {path}")
+    else:
+        print("Cheap/adaptive Grid candidate audit already present.")
+    return changed
 
 
 def _patch_optimizer_hard_grid_locks(root: Path) -> bool:
@@ -110,6 +146,7 @@ def apply_grid_optcuts_v4(root: Path) -> bool:
     changed = bool(apply_native_grid_perf_patch(root)) or changed
     changed = bool(apply_native_grid_diagnostics(root)) or changed
     changed = bool(apply_trial_relax_patch(root)) or changed
+    changed = bool(_patch_candidate_cost(root)) or changed
     changed = bool(_patch_optimizer_hard_grid_locks(root)) or changed
     changed = bool(_patch_authoritative_grid_seam_sidecar(root)) or changed
 
