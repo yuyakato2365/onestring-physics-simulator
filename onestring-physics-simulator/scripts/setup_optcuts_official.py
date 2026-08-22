@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Build an untouched authors' OptCuts executable for ordinary ``optcuts`` mode.
 
-Algorithmic source files are not modified.  Only build-system compatibility edits
-needed by modern macOS/CMake are applied.  The Grid-OptCuts fork remains under
-``third_party/OptCuts`` and is never used by this script.
+Algorithmic source files are not modified. Only build-system / third-party
+compatibility edits needed by modern macOS/CMake/Clang are applied. The
+Grid-OptCuts fork remains under ``third_party/OptCuts`` and is never used by
+this script.
 """
 from __future__ import annotations
 
@@ -65,14 +66,37 @@ def patch_legacy_glfw_policy(root: Path) -> None:
 
 
 def patch_legacy_eigen_transpositions(root: Path) -> None:
+    """Apply only the minimal Eigen-vs-modern-Clang compatibility edits.
+
+    The bundled Eigen revision assumes ``Transpose<TranspositionsBase<...>>``
+    provides ``derived()``. Modern Clang instantiation exposes that this wrapper
+    has no such member. Passing ``trt`` itself is the intended expression object
+    and does not change OptCuts numerics.
+    """
     path = root / "ext" / "libigl" / "external" / "eigen" / "Eigen" / "src" / "Core" / "Transpositions.h"
     if not path.is_file():
         return
     text = path.read_text(encoding="utf-8")
-    old = "= trt.derived();"
-    new = "= trt; // OneString modern-Eigen compatibility"
-    if old in text and new not in text:
-        path.write_text(text.replace(old, new), encoding="utf-8")
+
+    replacements = (
+        (
+            "= trt.derived();",
+            "= trt; // OneString modern-Eigen compatibility",
+        ),
+        (
+            "Product<OtherDerived, Transpose, AliasFreeProduct>(matrix.derived(), trt.derived())",
+            "Product<OtherDerived, Transpose, AliasFreeProduct>(matrix.derived(), trt)",
+        ),
+    )
+
+    changed = False
+    for old, new in replacements:
+        if old in text:
+            text = text.replace(old, new)
+            changed = True
+
+    if changed:
+        path.write_text(text, encoding="utf-8")
 
 
 def verify_no_grid_patch_markers(root: Path, executable: Path) -> None:
@@ -89,7 +113,6 @@ def verify_no_grid_patch_markers(root: Path, executable: Path) -> None:
             "Official OptCuts build unexpectedly contains OneString Grid-OptCuts markers: "
             + ", ".join(present)
         )
-    # Also reject accidental setup against the Grid working tree.
     if root.name == "OptCuts":
         raise SystemExit("Refusing to use third_party/OptCuts for the official build; use OptCuts_official")
 
@@ -125,7 +148,7 @@ def main() -> int:
     elif not (root / ".git").is_dir():
         raise SystemExit(f"{root} exists but is not a Git checkout")
 
-    # Ensure this remains an authors' tree.  Do not apply any Grid-OptCuts patch.
+    # Ensure this remains an authors' tree. Do not apply any Grid-OptCuts patch.
     run(["git", "reset", "--hard", "HEAD"], cwd=root)
     run(["git", "clean", "-fd", "--exclude=build"], cwd=root)
 
