@@ -1,4 +1,4 @@
-"""Bridge ``optcuts_test`` into the simplified seam-smoothing / clipped-M2D path."""
+"""Bridge ``optcuts_test`` into seam smoothing and polygon-clipped M2D."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,22 +6,16 @@ from typing import Any
 from .optcuts_seam_extraction_patch import extract_connected_seam_payload_robust
 from .optcuts_test_simple_pipeline_patch import install_optcuts_test_simple_pipeline_patch
 from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_clip_m2d_patch
+from .optcuts_test_polygon_visualization_patch import install_optcuts_test_polygon_visualization_patch
 
 
 def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_test_seam_metadata_bridge_installed", False):
         return
 
-    # The launcher still imports the historical experimental test wrapper for
-    # compatibility, but this later wrapper deliberately supersedes its
-    # grid-outline forcing.  optcuts_test is now:
-    # official OptCuts -> seam/boundary smoothing -> harmonic Omega regeneration.
     install_optcuts_test_simple_pipeline_patch(pipeline)
-
-    # Install the M2D clipper before Simple Split is installed.  Simple Split will
-    # wrap the current _build_m2d and therefore retains this implementation below
-    # it.  Ordinary modes no-op through the clipper.
     install_optcuts_test_boundary_clip_m2d_patch(pipeline)
+    install_optcuts_test_polygon_visualization_patch()
 
     base_flatten = pipeline._flatten_to_domain
 
@@ -37,8 +31,6 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
             domain.split_lines = []
         except Exception:
             pass
-        # New requested behavior: boundary-crossing grid cells are clipped to
-        # Omega instead of being discarded wholesale.
         setattr(domain, "_optcuts_test_clip_boundary", True)
         setattr(domain, "_optcuts_test_smoothed_seam", True)
         return domain
