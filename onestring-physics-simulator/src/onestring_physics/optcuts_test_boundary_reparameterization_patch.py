@@ -6,16 +6,17 @@ They must not be treated as a second boundary independent of the Omega outline.
 
 Flow
 ----
-1. Run the known-good ordinary OptCuts backend.  Keep its UV ids, UV faces and
-   cut topology unchanged.
+1. Run the known-good ordinary OptCuts backend. Keep its UV ids, UV faces and cut
+   topology unchanged.
 2. Build the ordinary OneString quad-cell footprint from the initial Omega.
 3. Extract the ordered outer boundary of that retained quad-cell union.
 4. Take the complete ordered OptCuts UV boundary loop (including both copies of
    every seam) and map it monotonically, in the same cyclic order, onto that grid
    outline.
-5. Re-solve interior UV vertices with Symmetric Dirichlet energy while moving the
-   boundary progressively.  Every accepted continuation stage must remain
-   bijective.
+5. Move that boundary by continuation. At every stage, first verify that moving
+   the boundary alone is orientation preserving, then relax only interior UV
+   vertices with a flip-safe Symmetric-Dirichlet solver whose line search rejects
+   every step that would invert or degenerate a triangle.
 
 Thus the seam remains a boundary because it is the same cut boundary topology;
 its 2D coordinates are allowed to move during the new parameterization.
@@ -28,8 +29,13 @@ from typing import Any
 
 import numpy as np
 
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
+
 from .optcuts_grid_constrained_parameterization_patch import (
-    _optimize_constrained_uv,
+    _source_inverse_matrices,
     _surface_seam_records,
 )
 
@@ -265,8 +271,6 @@ def _build_test_targets(parameterization: Any, grid_outline: np.ndarray) -> tupl
     if not loops:
         raise RuntimeError("OPTCUTS_TEST_NO_UV_BOUNDARY_LOOP")
 
-    # The primary OptCuts disk boundary is mapped as one ordered cyclic object.
-    # This boundary already contains both copies of the OptCuts seam.
     primary = max(loops, key=len)
     mapped = _map_closed_loop_to_outline(uv, primary, grid_outline)
     for uid, point in mapped.items():
@@ -302,19 +306,176 @@ def _reference_domain_without_invalid_optcuts_boundary_diagnostic(
             metrics.pop("boundary_loop", None)
 
 
+def _triangle_signed_areas(uv: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    tri = np.asarray(uv, dtype=float)[np.asarray(faces, dtype=int)]
+    return 0.5 * (
+        (tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1])
+        - (tri[:, 1, 1] - tri[:, 0, 1]) * (tri[:, 2, 0] - tri[:, 0, 0])
+    )
+
+
+def _orientation_signature(uv: np.ndarray, faces: np.ndarray) -> tuple[float, float]:
+    areas = _triangle_signed_areas(uv, faces)
+    nonzero = areas[np.abs(areas) > 1e-15]
+    sign = 1.0 if len(nonzero) == 0 or float(np.median(nonzero)) >= 0.0 else -1.0
+    scale = max(float(np.median(np.abs(nonzero))) if len(nonzero) else 1.0, 1e-12)
+    return sign, scale
+
+
+def _invalid_triangle_ids(
+    uv: np.ndarray,
+    faces: np.ndarray,
+    sign: float,
+    area_scale: float,
+) -> np.ndarray:
+    areas = sign * _triangle_signed_areas(uv, faces)
+    eps = max(1e-12, 1e-8 * area_scale)
+    return np.flatnonzero(~np.isfinite(areas) | (areas <= eps))
+
+
+def _flip_safe_relax(
+    parameterization: Any,
+    start_uv: np.ndarray,
+    hard_targets: np.ndarray,
+    iterations: int = 80,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Relax free vertices while *never* accepting an orientation-changing step.
+
+    This solver is intentionally conservative.  The hard boundary is applied
+    first and validated.  Interior gradients use Symmetric Dirichlet plus a
+    logarithmic determinant barrier.  Every gradient step is backtracked until
+    all triangles keep the orientation of the original OptCuts embedding.
+    """
+    if torch is None:
+        raise RuntimeError("OPTCUTS_TEST_REQUIRES_TORCH")
+
+    faces_np = np.asarray(parameterization.uv_faces, dtype=int)
+    initial_reference = np.asarray(parameterization.metrics.get("optcuts_test_initial_uv", []), dtype=float)
+    if initial_reference.shape != np.asarray(start_uv).shape:
+        initial_reference = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    sign, area_scale = _orientation_signature(initial_reference, faces_np)
+
+    fixed = np.all(np.isfinite(hard_targets), axis=1)
+    current = np.asarray(start_uv, dtype=float).copy()
+    current[fixed] = hard_targets[fixed]
+
+    invalid_boundary = _invalid_triangle_ids(current, faces_np, sign, area_scale)
+    if len(invalid_boundary):
+        raise RuntimeError(
+            "OPTCUTS_TEST_BOUNDARY_STEP_INFEASIBLE: moving only the boundary already flips/degenerates "
+            f"{len(invalid_boundary)} triangles; examples={invalid_boundary[:16].tolist()}"
+        )
+
+    inv_source_np = _source_inverse_matrices(parameterization)
+    device = torch.device("cpu")
+    dtype = torch.float64
+    faces = torch.tensor(faces_np, device=device, dtype=torch.long)
+    inv_source = torch.tensor(inv_source_np, device=device, dtype=dtype)
+    fixed_t = torch.tensor(fixed, device=device, dtype=torch.bool)
+    anchor = torch.tensor(current, device=device, dtype=dtype)
+    variable = torch.tensor(current, device=device, dtype=dtype, requires_grad=True)
+
+    accepted_steps = 0
+    rejected_steps = 0
+    last_energy = float("inf")
+    base_lr = 2.0e-3
+
+    def energy_of(x: torch.Tensor) -> torch.Tensor:
+        tri = x[faces]
+        b0 = tri[:, 1] - tri[:, 0]
+        b1 = tri[:, 2] - tri[:, 0]
+        B = torch.stack([b0, b1], dim=2)
+        J = torch.bmm(B, inv_source)
+        a, b = J[:, 0, 0], J[:, 0, 1]
+        c, d = J[:, 1, 0], J[:, 1, 1]
+        det = a * d - b * c
+        det_safe = torch.clamp(det, min=1e-12)
+        frob = a * a + b * b + c * c + d * d
+        sd = frob + frob / (det_safe * det_safe)
+        barrier = -2.0e-3 * torch.log(det_safe)
+        free_delta = x[~fixed_t] - anchor[~fixed_t]
+        anchor_term = 1.0e-6 * torch.mean(free_delta * free_delta) if torch.any(~fixed_t) else 0.0
+        return torch.mean(sd + barrier) + anchor_term
+
+    for _ in range(max(1, int(iterations))):
+        if variable.grad is not None:
+            variable.grad.zero_()
+        loss = energy_of(variable)
+        if not torch.isfinite(loss):
+            break
+        loss.backward()
+        grad = variable.grad.detach().clone()
+        grad[fixed_t] = 0.0
+        grad_norm = float(torch.linalg.vector_norm(grad).detach().cpu())
+        if not np.isfinite(grad_norm) or grad_norm < 1e-9:
+            last_energy = float(loss.detach().cpu())
+            break
+
+        direction = grad / max(grad_norm, 1e-20)
+        step = base_lr
+        old_value = float(loss.detach().cpu())
+        accepted = False
+        old_np = variable.detach().cpu().numpy()
+        for _line in range(24):
+            candidate_t = variable.detach() - step * direction
+            candidate_t[fixed_t] = torch.tensor(hard_targets[fixed], dtype=dtype, device=device)
+            candidate_np = candidate_t.cpu().numpy()
+            invalid = _invalid_triangle_ids(candidate_np, faces_np, sign, area_scale)
+            if len(invalid):
+                step *= 0.5
+                rejected_steps += 1
+                continue
+            with torch.no_grad():
+                candidate_energy = float(energy_of(candidate_t).detach().cpu())
+            if np.isfinite(candidate_energy) and candidate_energy <= old_value + 1e-10:
+                variable = candidate_t.detach().clone().requires_grad_(True)
+                accepted_steps += 1
+                last_energy = candidate_energy
+                accepted = True
+                break
+            step *= 0.5
+            rejected_steps += 1
+        if not accepted:
+            # The current iterate is already legal. Failure to find a descent
+            # step is convergence/stagnation, not a reason to return a flipped UV.
+            variable = torch.tensor(old_np, dtype=dtype, device=device, requires_grad=True)
+            last_energy = old_value
+            break
+
+    result = variable.detach().cpu().numpy()
+    result[fixed] = hard_targets[fixed]
+    invalid_final = _invalid_triangle_ids(result, faces_np, sign, area_scale)
+    if len(invalid_final):
+        raise RuntimeError(
+            "OPTCUTS_TEST_INTERNAL_SOLVER_BUG: flip-safe solver returned invalid triangles "
+            f"{invalid_final[:16].tolist()}"
+        )
+    return result, {
+        "optimizer": "flip_safe_symmetric_dirichlet_backtracking",
+        "iterations_requested": int(iterations),
+        "accepted_gradient_steps": int(accepted_steps),
+        "rejected_line_search_steps": int(rejected_steps),
+        "final_energy": float(last_energy),
+        "boundary_only_invalid_triangle_count": 0,
+        "flip_count": 0,
+    }
+
+
 def _staged_boundary_resolve(parameterization: Any, final_targets: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
     """Progressively map the complete cut boundary onto the grid outline."""
     initial = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    parameterization.metrics["optcuts_test_initial_uv"] = initial.tolist()
     fixed = np.all(np.isfinite(final_targets), axis=1)
     if not np.any(fixed):
         raise RuntimeError("OPTCUTS_TEST_NO_BOUNDARY_TARGETS")
 
     current = initial.copy()
     alpha = 0.0
-    step = 0.10
-    minimum_step = 0.0025
+    step = 0.05
+    minimum_step = 0.00025
     accepted = 0
     retries = 0
+    boundary_rejections = 0
     last_info: dict[str, Any] = {}
 
     while alpha < 1.0 - 1e-12:
@@ -324,32 +485,39 @@ def _staged_boundary_resolve(parameterization: Any, final_targets: np.ndarray) -
             (1.0 - proposed) * initial[fixed] + proposed * final_targets[fixed]
         )
         try:
-            candidate, info = _optimize_constrained_uv(
+            candidate, info = _flip_safe_relax(
                 parameterization,
                 current,
                 stage_targets,
-                120,
+                80,
             )
         except RuntimeError as exc:
-            if "OPTCUTS_GRID_CONSTRAINT_INFEASIBLE" not in str(exc) or step <= minimum_step + 1e-12:
+            text = str(exc)
+            if "OPTCUTS_TEST_BOUNDARY_STEP_INFEASIBLE" not in text:
+                raise
+            boundary_rejections += 1
+            if step <= minimum_step + 1e-15:
                 raise RuntimeError(
-                    "OPTCUTS_TEST_BOUNDARY_REPARAMETERIZATION_INFEASIBLE: even an order-preserving "
-                    f"full-boundary continuation step of {step:.5g} produced flips. Original: {exc}"
+                    "OPTCUTS_TEST_GRID_OUTLINE_GEOMETRICALLY_INFEASIBLE_AT_CURRENT_CORRESPONDENCE: "
+                    "even moving only the ordered OptCuts boundary by a continuation step of "
+                    f"{step:.6g} causes triangle inversion before interior optimization. Original: {exc}"
                 ) from exc
             step *= 0.5
             retries += 1
             continue
+
         current = np.asarray(candidate, dtype=float)
         alpha = proposed
         accepted += 1
         last_info = dict(info)
-        if step < 0.10:
-            step = min(0.10, step * 1.35)
+        if step < 0.05:
+            step = min(0.05, step * 1.35)
 
     return current, {
         **last_info,
         "continuation_accepted_stage_count": int(accepted),
         "continuation_retry_count": int(retries),
+        "continuation_boundary_rejection_count": int(boundary_rejections),
         "continuation_final_alpha": float(alpha),
     }
 
@@ -391,7 +559,7 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             "optcuts_test_model": (
                 "official OptCuts cut topology -> initial Omega -> M2D quad footprint -> "
                 "grid-cell outline -> full OptCuts cut-boundary loop mapped monotonically to outline -> "
-                "bijective staged Symmetric Dirichlet interior resolve"
+                "flip-safe staged Symmetric Dirichlet interior resolve"
             ),
             "optcuts_test_seam_topology_preserved": True,
             "optcuts_test_seam_geometry_fixed_during_resolve": False,
@@ -413,7 +581,8 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             f"boundary_targets={counts['boundary_target_vertex_count']} "
             f"seam_vertices={counts['seam_vertex_count']} "
             f"stages={opt_info.get('continuation_accepted_stage_count', 0)} "
-            f"retries={opt_info.get('continuation_retry_count', 0)}"
+            f"retries={opt_info.get('continuation_retry_count', 0)} "
+            f"boundary_rejections={opt_info.get('continuation_boundary_rejection_count', 0)}"
         )
         return parameterization
 
@@ -438,5 +607,6 @@ __all__ = [
     "_outer_boundary_chains",
     "_build_test_targets",
     "_staged_boundary_resolve",
+    "_flip_safe_relax",
     "_reference_domain_without_invalid_optcuts_boundary_diagnostic",
 ]
