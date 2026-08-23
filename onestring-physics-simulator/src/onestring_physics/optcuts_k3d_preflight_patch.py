@@ -1,10 +1,8 @@
 """Authoritative T3D preflight for the OptCuts seam path.
 
-This is intentionally a final assertion, not a repair layer.  K3D validity is
-repaired earlier by ``optcuts_k3d_validity_patch`` without changing face/tile
-ids.  Immediately before T3D, this module reconstructs the tops through the
-same ``_mesh_tiles`` function used by T3D, applies the exact authoritative
-``validate_top_quad`` check, and logs full geometry if anything is still wrong.
+Ordinary OptCuts keeps this as a final assertion.  OptCuts_test is a diagnostic
+mode: invalid tops are logged and tagged on the mesh, but the pipeline is
+allowed to continue so the offending tiles can be visualized downstream.
 """
 from __future__ import annotations
 
@@ -29,9 +27,25 @@ def _optcuts_active(pipeline: Any, mesh: Any) -> bool:
         metrics.get("optcuts_grid_seam_enabled", False)
         or metrics.get("optcuts_grid_seam_applied", False)
         or metrics.get("flattening_backend") == "official_optcuts_external"
-        or metrics.get("omega_parameterization_mode") == "optcuts"
-        or metrics.get("parameterization_method") == "optcuts"
+        or metrics.get("omega_parameterization_mode") in ("optcuts", "optcuts_test")
+        or metrics.get("parameterization_method") in ("optcuts", "optcuts_test")
     )
+
+
+def _optcuts_test_mode(pipeline: Any, mesh: Any) -> bool:
+    metrics = dict(getattr(mesh, "metrics", {}) or {})
+    if metrics.get("omega_parameterization_mode") == "optcuts_test":
+        return True
+    if metrics.get("parameterization_method") == "optcuts_test":
+        return True
+    if bool(metrics.get("optcuts_test_boundary_clip", False)):
+        return True
+    if bool(getattr(mesh, "_optcuts_test_face_sources", None)):
+        return True
+    if bool(getattr(pipeline, "_onestring_optcuts_test_active_run", False)):
+        return True
+    original_module = getattr(pipeline, "_original", None)
+    return bool(getattr(original_module, "_onestring_optcuts_test_active_run", False))
 
 
 def _t3d_top_tiles(pipeline: Any, mesh: Any) -> np.ndarray:
@@ -84,6 +98,25 @@ def _write_failure_log(mesh: Any, invalid: list[dict[str, Any]]) -> str:
     return str(path)
 
 
+def _tag_invalid_for_visualization(mesh: Any, invalid: list[dict[str, Any]], stage: str) -> None:
+    ids = [int(item["tile_id"]) for item in invalid]
+    reasons = {int(item["tile_id"]): str(item["reason"]) for item in invalid}
+    try:
+        setattr(mesh, "_optcuts_test_invalid_face_ids", ids)
+        setattr(mesh, "_optcuts_test_invalid_face_reasons", reasons)
+        setattr(mesh, "_optcuts_test_invalid_stage", str(stage))
+    except Exception:
+        pass
+    try:
+        mesh.metrics.update({
+            "optcuts_test_invalid_face_ids": ids,
+            "optcuts_test_invalid_face_count": int(len(ids)),
+            "optcuts_test_invalid_stage": str(stage),
+        })
+    except Exception:
+        pass
+
+
 def install_optcuts_k3d_preflight_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_k3d_preflight_installed", False):
         return
@@ -114,16 +147,33 @@ def install_optcuts_k3d_preflight_patch(pipeline: Any) -> None:
 
         if invalid:
             log_path = _write_failure_log(mesh, invalid)
+            _tag_invalid_for_visualization(mesh, invalid, "K3D->T3D preflight")
+            examples = [(i["tile_id"], i["reason"]) for i in invalid[:8]]
+            if _optcuts_test_mode(pipeline, mesh):
+                print(
+                    "[OPTCUTS-TEST-NONFATAL][K3D-PREFLIGHT] "
+                    f"invalid_tops={len(invalid)} reasons={reason_counts} "
+                    f"examples={examples} log={log_path}; continuing to T3D"
+                )
+                try:
+                    result = base_extrude(mesh, thickness, stage)
+                    # Preserve diagnostic ids on the produced T3D object when possible.
+                    out_mesh = result[0] if isinstance(result, tuple) and result else result
+                    if out_mesh is not None:
+                        _tag_invalid_for_visualization(out_mesh, invalid, "K3D->T3D preflight")
+                    return result
+                except Exception as exc:
+                    print(
+                        "[OPTCUTS-TEST][T3D-EXTRUSION-ERROR] "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    raise
+
             print(
                 "[OPTCUTS-K3D-PREFLIGHT] FAILED "
                 f"invalid_tops={len(invalid)} reasons={reason_counts} "
-                f"examples={[(i['tile_id'], i['reason']) for i in invalid[:8]]} "
-                f"log={log_path}"
+                f"examples={examples} log={log_path}"
             )
-            # Do not silently remove faces: that changes tile ids/counts and can
-            # corrupt later T2D/hinge/string correspondence.  The earlier K3D
-            # validity guard should have repaired this; if it did not, stop here
-            # with the exact geometry needed to diagnose the remaining bug.
             raise RuntimeError(
                 "OPTCUTS_K3D_PREFLIGHT_FAILED: authoritative T3D tops are invalid; "
                 f"reasons={reason_counts}; log={log_path}"
