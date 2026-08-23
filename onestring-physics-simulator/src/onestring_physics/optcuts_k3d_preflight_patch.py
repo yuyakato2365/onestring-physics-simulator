@@ -1,8 +1,9 @@
 """Authoritative T3D preflight for the OptCuts seam path.
 
-Ordinary OptCuts keeps this as a final assertion.  In optcuts_test, invalid K3D
-panels are diagnostic artifacts: keep them on K3D for visualization, but remove
-them from the mesh copy passed to T3D and all later processing.
+Ordinary OptCuts keeps this as a final assertion. In optcuts_test, invalid K3D
+panels remain visible on K3D but are removed from the copy passed to T3D and
+all later tile-topology processing.  The retained original face ids are carried
+forward so hinge/gap topology can be rebuilt on the same compact tile indexing.
 """
 from __future__ import annotations
 
@@ -58,7 +59,6 @@ def _optcuts_test_mode(pipeline: Any, mesh: Any) -> bool:
 
 
 def _t3d_top_tiles(pipeline: Any, mesh: Any) -> np.ndarray:
-    """Use the exact tile-construction path consumed by T3D."""
     original_module = getattr(pipeline, "_original", None)
     fn = getattr(original_module, "_mesh_tiles", None)
     if not callable(fn):
@@ -127,12 +127,6 @@ def _tag_invalid_for_visualization(mesh: Any, invalid: list[dict[str, Any]], sta
 
 
 def _filtered_mesh_without_invalid(mesh: Any, invalid: list[dict[str, Any]]) -> tuple[Any, list[int]]:
-    """Return a shallow mesh copy with invalid face/tile rows removed.
-
-    The original K3D mesh is intentionally untouched so the bad panels can still
-    be highlighted.  Only the copy entering T3D is filtered.  Original face ids
-    are stored so later diagnostics can trace each retained tile back to K3D.
-    """
     faces = np.asarray(mesh.faces, dtype=int)
     n_faces = int(len(faces))
     drop = {int(item["tile_id"]) for item in invalid if 0 <= int(item["tile_id"]) < n_faces}
@@ -140,8 +134,6 @@ def _filtered_mesh_without_invalid(mesh: Any, invalid: list[dict[str, Any]]) -> 
     filtered = copy.copy(mesh)
     filtered.faces = faces[np.asarray(keep_ids, dtype=int)].copy()
 
-    # Keep vertices unchanged.  This avoids reindexing and preserves exact K3D
-    # geometry; unused vertices are harmless for extrusion.
     try:
         filtered.metrics = dict(getattr(mesh, "metrics", {}) or {})
         filtered.metrics.update({
@@ -154,9 +146,6 @@ def _filtered_mesh_without_invalid(mesh: Any, invalid: list[dict[str, Any]]) -> 
     except Exception:
         pass
 
-    # Filter known per-face diagnostic payloads when their length matches the
-    # original face count.  They are not required by extrusion but keeping them
-    # aligned prevents misleading downstream diagnostics.
     for name in (
         "_optcuts_test_face_sources",
         "_optcuts_test_face_uv",
@@ -180,8 +169,6 @@ def _filtered_mesh_without_invalid(mesh: Any, invalid: list[dict[str, Any]]) -> 
     try:
         setattr(filtered, "_optcuts_test_retained_original_face_ids", keep_ids)
         setattr(filtered, "_optcuts_test_excluded_original_face_ids", sorted(drop))
-        # Invalid ids referred to the pre-filter K3D indexing, so do not carry
-        # them as if they were ids in the filtered mesh.
         setattr(filtered, "_optcuts_test_invalid_face_ids", [])
         setattr(filtered, "_optcuts_invalid_face_ids", [])
     except Exception:
@@ -189,10 +176,50 @@ def _filtered_mesh_without_invalid(mesh: Any, invalid: list[dict[str, Any]]) -> 
     return filtered, keep_ids
 
 
+def _retained_ids_from_assembly(assembly: Any) -> list[int] | None:
+    value = getattr(assembly, "_optcuts_test_retained_original_face_ids", None)
+    if value is None:
+        value = dict(getattr(assembly, "metrics", {}) or {}).get("optcuts_test_retained_original_face_ids")
+    if value is None:
+        return None
+    try:
+        return [int(v) for v in value]
+    except Exception:
+        return None
+
+
+def _remap_topology_faces(mesh_faces: np.ndarray, assembly: Any, label: str) -> np.ndarray:
+    """Compact original M2D face rows to the retained T3D tile ordering.
+
+    After invalid K3D tiles are dropped, TileAssembly rows are compacted to
+    0..N-1.  Topology builders must therefore use the same retained original
+    face rows; otherwise HingeSpec tile ids still refer to the pre-drop array.
+    """
+    faces = np.asarray(mesh_faces, dtype=int)
+    tile_count = int(getattr(assembly, "tile_count", len(getattr(assembly, "vertices", []))))
+    if len(faces) == tile_count:
+        return faces
+    retained = _retained_ids_from_assembly(assembly)
+    if retained is None or len(retained) != tile_count:
+        return faces
+    if retained and (min(retained) < 0 or max(retained) >= len(faces)):
+        return faces
+    remapped = faces[np.asarray(retained, dtype=int)].copy()
+    print(
+        f"[OPTCUTS-TEST-TOPOLOGY-REMAP][{label}] "
+        f"original_faces={len(faces)} retained_faces={len(remapped)}"
+    )
+    return remapped
+
+
 def install_optcuts_k3d_preflight_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_k3d_preflight_installed", False):
         return
+
     base_extrude = pipeline._extrude_tiles
+    base_hinge = getattr(pipeline, "_build_hinge_graph", None)
+    base_dual = getattr(pipeline, "_optimize_dual_hinges", None)
+    base_gap = getattr(pipeline, "_build_gap_graph", None)
 
     def extrude_with_optcuts_k3d_preflight(mesh: Any, thickness: float, stage: str):
         if str(stage) != "T3D":
@@ -257,15 +284,55 @@ def install_optcuts_k3d_preflight_patch(pipeline: Any) -> None:
         print("[OPTCUTS-K3D-PREFLIGHT] active_run=True invalid_tops=0 source=_mesh_tiles")
         return base_extrude(mesh, thickness, stage)
 
+    def hinge_with_optcuts_remap(grid, mesh_faces, t2d, t3d, dual):
+        faces = _remap_topology_faces(mesh_faces, t3d, "HINGE")
+        return base_hinge(grid, faces, t2d, t3d, dual)
+
+    def dual_with_optcuts_remap(grid, mesh_faces, t2d, t3d, params=None, progress_callback=None):
+        faces = _remap_topology_faces(mesh_faces, t3d, "DUAL")
+        return base_dual(grid, faces, t2d, t3d, params, progress_callback=progress_callback)
+
+    def gap_with_optcuts_remap(mesh_faces, t2d, t3d):
+        faces = _remap_topology_faces(mesh_faces, t3d, "GAP")
+        return base_gap(faces, t2d, t3d)
+
     pipeline._extrude_tiles = extrude_with_optcuts_k3d_preflight
-    for fn in (
+    if callable(base_hinge):
+        pipeline._build_hinge_graph = hinge_with_optcuts_remap
+    if callable(base_dual):
+        pipeline._optimize_dual_hinges = dual_with_optcuts_remap
+    if callable(base_gap):
+        pipeline._build_gap_graph = gap_with_optcuts_remap
+
+    original = getattr(pipeline, "_original", None)
+    if original is not None:
+        if callable(base_hinge):
+            original._build_hinge_graph = hinge_with_optcuts_remap
+        if callable(base_dual):
+            original._optimize_dual_hinges = dual_with_optcuts_remap
+        if callable(base_gap):
+            original._build_gap_graph = gap_with_optcuts_remap
+
+    # The build function and the dual optimizer resolve these helpers through
+    # their module globals, so patch those globals too.
+    functions = [
         getattr(pipeline, "build_onestring_design", None),
         getattr(pipeline, "_ORIGINAL_BUILD_ONESTRING_DESIGN", None),
-        getattr(getattr(pipeline, "_original", None), "build_onestring_design", None),
-    ):
+        getattr(original, "build_onestring_design", None) if original is not None else None,
+        base_dual,
+    ]
+    for fn in functions:
         glb = getattr(fn, "__globals__", None)
-        if isinstance(glb, dict):
-            glb["_extrude_tiles"] = extrude_with_optcuts_k3d_preflight
+        if not isinstance(glb, dict):
+            continue
+        glb["_extrude_tiles"] = extrude_with_optcuts_k3d_preflight
+        if callable(base_hinge):
+            glb["_build_hinge_graph"] = hinge_with_optcuts_remap
+        if callable(base_dual):
+            glb["_optimize_dual_hinges"] = dual_with_optcuts_remap
+        if callable(base_gap):
+            glb["_build_gap_graph"] = gap_with_optcuts_remap
+
     pipeline._onestring_optcuts_k3d_preflight_installed = True
 
 
@@ -273,4 +340,5 @@ __all__ = [
     "install_optcuts_k3d_preflight_patch",
     "_invalid_tops",
     "_filtered_mesh_without_invalid",
+    "_remap_topology_faces",
 ]
