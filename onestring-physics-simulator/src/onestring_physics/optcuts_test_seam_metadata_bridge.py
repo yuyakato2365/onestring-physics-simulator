@@ -4,11 +4,18 @@ from __future__ import annotations
 from typing import Any
 
 from .optcuts_seam_extraction_patch import extract_connected_seam_payload_robust
+from .optcuts_test_harmonic_extension_patch import install_optcuts_test_harmonic_extension_patch
 
 
 def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_test_seam_metadata_bridge_installed", False):
         return
+
+    # Replace only optcuts_test's continuation routine.  This must happen after
+    # optcuts_test_boundary_reparameterization_patch has been imported, but before
+    # the first design run.  Ordinary optcuts / optcuts_grid remain untouched.
+    install_optcuts_test_harmonic_extension_patch()
+
     base_flatten = pipeline._flatten_to_domain
 
     def flatten_with_test_seam(parameterization: Any, grid: Any, params: Any = None):
