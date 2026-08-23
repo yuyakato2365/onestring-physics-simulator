@@ -9,7 +9,7 @@ Flow
    boundary target while preserving all OptCuts seam UV copies as hard boundary
    constraints.
 
-No seam topology is recomputed here.  UV vertex ids / UV faces are unchanged.
+No seam topology is recomputed here. UV vertex ids / UV faces are unchanged.
 The OptCuts seam is therefore the same cut; only the remaining embedding is
 re-solved around the grid-derived outline.
 """
@@ -56,7 +56,7 @@ def _quad_union_boundary(mesh: Any) -> np.ndarray:
         start, nxt = int(first[0]), int(first[1])
         loop = [start, nxt]
         unused.discard(_edge_key(start, nxt))
-        prev, cur = start, nxt
+        cur = nxt
         for _ in range(len(boundary_edges) + 4):
             candidates = [v for v in adjacency[cur] if _edge_key(cur, v) in unused]
             if not candidates:
@@ -67,7 +67,7 @@ def _quad_union_boundary(mesh: Any) -> np.ndarray:
                 loop.append(following)
                 break
             loop.append(following)
-            prev, cur = cur, following
+            cur = following
         if len(loop) >= 4:
             loops.append(loop)
     if not loops:
@@ -131,9 +131,8 @@ def _build_test_targets(parameterization: Any, grid_outline: np.ndarray) -> tupl
     boundary_ids = _uv_boundary_vertices(parameterization)
     outer_ids = sorted(boundary_ids - seam_ids)
 
-    # Strong form of the requested invariant: keep the existing OptCuts seam
-    # boundary coordinates exactly during this experimental re-solve.  This
-    # guarantees that neither seam topology nor seam geometry is silently changed.
+    # Keep the existing OptCuts seam boundary coordinates exactly during this
+    # experimental re-solve. This preserves both cut topology and seam geometry.
     for uid in seam_ids:
         if 0 <= uid < len(uv):
             targets[uid] = uv[uid]
@@ -147,6 +146,34 @@ def _build_test_targets(parameterization: Any, grid_outline: np.ndarray) -> tupl
         "outer_boundary_vertex_count": int(len(outer_ids)),
         "uv_boundary_vertex_count": int(len(boundary_ids)),
     }
+
+
+def _reference_domain_without_invalid_optcuts_boundary_diagnostic(
+    pipeline: Any,
+    parameterization: Any,
+    grid: Any,
+    params: Any,
+):
+    """Build the regular overlay while suppressing one incompatible diagnostic.
+
+    ``_reference_flatten_to_domain`` uses ``metrics['boundary_loop']`` as surface
+    vertex ids only for its Gaussian-curvature diagnostic.  In an OptCuts result,
+    boundary_loop contains UV ids and can include duplicated seam vertices beyond
+    the original surface-vertex count.  The overlay construction itself is valid.
+    Temporarily hiding that loop therefore avoids the invalid UV-id -> surface-id
+    indexing without changing UV geometry, seam topology, or the resulting grid.
+    """
+    metrics = parameterization.metrics
+    had_loop = "boundary_loop" in metrics
+    saved_loop = metrics.get("boundary_loop")
+    metrics["boundary_loop"] = []
+    try:
+        return pipeline._reference_flatten_to_domain(parameterization, grid, params)
+    finally:
+        if had_loop:
+            metrics["boundary_loop"] = saved_loop
+        else:
+            metrics.pop("boundary_loop", None)
 
 
 def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> None:
@@ -170,9 +197,13 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             parameterization.omega_boundary, dtype=float
         ).tolist()
 
-        # Produce the footprint using the same reference Omega->M2D machinery,
-        # before any OptCuts seam-to-grid postprocess is applied.
-        domain = pipeline._reference_flatten_to_domain(parameterization, grid, ordinary_params)
+        # Produce the footprint using the regular Omega overlay.  OptCuts may have
+        # more UV ids than surface vertices because seam copies are duplicated, so
+        # suppress only the reference function's incompatible Gaussian-boundary
+        # diagnostic; all geometry used to construct the overlay stays unchanged.
+        domain = _reference_domain_without_invalid_optcuts_boundary_diagnostic(
+            pipeline, parameterization, grid, ordinary_params
+        )
         footprint = pipeline._build_reference_m2d(grid, domain, ordinary_params)
         outline = _quad_union_boundary(footprint)
         if len(outline) < 4:
@@ -193,7 +224,6 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             iterations,
         )
         parameterization.uv_vertices_2d = np.asarray(uv_final, dtype=float)
-        # The requested outer domain is the quad-cell union boundary itself.
         parameterization.omega_boundary = np.asarray(outline, dtype=float)
         parameterization.metrics.update({
             "optcuts_test_enabled": True,
@@ -236,4 +266,5 @@ __all__ = [
     "install_optcuts_test_boundary_reparameterization_patch",
     "_quad_union_boundary",
     "_build_test_targets",
+    "_reference_domain_without_invalid_optcuts_boundary_diagnostic",
 ]
