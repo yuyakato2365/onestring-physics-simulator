@@ -1,12 +1,13 @@
 """Authoritative T3D preflight for the OptCuts seam path.
 
-Ordinary OptCuts keeps this as a final assertion.  OptCuts_test is a diagnostic
-mode: invalid tops are logged and tagged on the mesh, but the pipeline is
-allowed to continue so the offending tiles can be visualized downstream.
+Ordinary OptCuts keeps this as a final assertion.  In optcuts_test, invalid K3D
+panels are diagnostic artifacts: keep them on K3D for visualization, but remove
+them from the mesh copy passed to T3D and all later processing.
 """
 from __future__ import annotations
 
 from collections import Counter
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,15 @@ def _optcuts_test_mode(pipeline: Any, mesh: Any) -> bool:
         return True
     if bool(metrics.get("optcuts_test_boundary_clip", False)):
         return True
+    if bool(metrics.get("optcuts_k3d_nonfatal_diagnostic_mode", False)):
+        return True
+    if bool(metrics.get("optcuts_test_invalid_face_ids", [])):
+        return True
     if bool(getattr(mesh, "_optcuts_test_face_sources", None)):
+        return True
+    if bool(getattr(mesh, "_optcuts_invalid_face_ids", None)):
+        return True
+    if bool(getattr(mesh, "_optcuts_test_invalid_face_ids", None)):
         return True
     if bool(getattr(pipeline, "_onestring_optcuts_test_active_run", False)):
         return True
@@ -117,6 +126,69 @@ def _tag_invalid_for_visualization(mesh: Any, invalid: list[dict[str, Any]], sta
         pass
 
 
+def _filtered_mesh_without_invalid(mesh: Any, invalid: list[dict[str, Any]]) -> tuple[Any, list[int]]:
+    """Return a shallow mesh copy with invalid face/tile rows removed.
+
+    The original K3D mesh is intentionally untouched so the bad panels can still
+    be highlighted.  Only the copy entering T3D is filtered.  Original face ids
+    are stored so later diagnostics can trace each retained tile back to K3D.
+    """
+    faces = np.asarray(mesh.faces, dtype=int)
+    n_faces = int(len(faces))
+    drop = {int(item["tile_id"]) for item in invalid if 0 <= int(item["tile_id"]) < n_faces}
+    keep_ids = [i for i in range(n_faces) if i not in drop]
+    filtered = copy.copy(mesh)
+    filtered.faces = faces[np.asarray(keep_ids, dtype=int)].copy()
+
+    # Keep vertices unchanged.  This avoids reindexing and preserves exact K3D
+    # geometry; unused vertices are harmless for extrusion.
+    try:
+        filtered.metrics = dict(getattr(mesh, "metrics", {}) or {})
+        filtered.metrics.update({
+            "optcuts_test_invalid_panels_excluded": True,
+            "optcuts_test_excluded_original_face_ids": sorted(drop),
+            "optcuts_test_excluded_face_count": int(len(drop)),
+            "optcuts_test_retained_face_count": int(len(keep_ids)),
+            "optcuts_test_retained_original_face_ids": keep_ids,
+        })
+    except Exception:
+        pass
+
+    # Filter known per-face diagnostic payloads when their length matches the
+    # original face count.  They are not required by extrusion but keeping them
+    # aligned prevents misleading downstream diagnostics.
+    for name in (
+        "_optcuts_test_face_sources",
+        "_optcuts_test_face_uv",
+        "_polygon_faces",
+        "_polygon_face_sources",
+    ):
+        value = getattr(mesh, name, None)
+        if value is None:
+            continue
+        try:
+            if len(value) != n_faces:
+                continue
+            if isinstance(value, np.ndarray):
+                new_value = value[np.asarray(keep_ids, dtype=int)].copy()
+            else:
+                new_value = [value[i] for i in keep_ids]
+            setattr(filtered, name, new_value)
+        except Exception:
+            pass
+
+    try:
+        setattr(filtered, "_optcuts_test_retained_original_face_ids", keep_ids)
+        setattr(filtered, "_optcuts_test_excluded_original_face_ids", sorted(drop))
+        # Invalid ids referred to the pre-filter K3D indexing, so do not carry
+        # them as if they were ids in the filtered mesh.
+        setattr(filtered, "_optcuts_test_invalid_face_ids", [])
+        setattr(filtered, "_optcuts_invalid_face_ids", [])
+    except Exception:
+        pass
+    return filtered, keep_ids
+
+
 def install_optcuts_k3d_preflight_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_k3d_preflight_installed", False):
         return
@@ -150,24 +222,27 @@ def install_optcuts_k3d_preflight_patch(pipeline: Any) -> None:
             _tag_invalid_for_visualization(mesh, invalid, "K3D->T3D preflight")
             examples = [(i["tile_id"], i["reason"]) for i in invalid[:8]]
             if _optcuts_test_mode(pipeline, mesh):
+                filtered_mesh, keep_ids = _filtered_mesh_without_invalid(mesh, invalid)
                 print(
-                    "[OPTCUTS-TEST-NONFATAL][K3D-PREFLIGHT] "
-                    f"invalid_tops={len(invalid)} reasons={reason_counts} "
-                    f"examples={examples} log={log_path}; continuing to T3D"
+                    "[OPTCUTS-TEST-DROP-INVALID][K3D-PREFLIGHT] "
+                    f"excluded={len(invalid)} retained={len(keep_ids)} "
+                    f"reasons={reason_counts} examples={examples} log={log_path}; "
+                    "extruding only valid panels"
                 )
-                try:
-                    result = base_extrude(mesh, thickness, stage)
-                    # Preserve diagnostic ids on the produced T3D object when possible.
-                    out_mesh = result[0] if isinstance(result, tuple) and result else result
-                    if out_mesh is not None:
-                        _tag_invalid_for_visualization(out_mesh, invalid, "K3D->T3D preflight")
-                    return result
-                except Exception as exc:
-                    print(
-                        "[OPTCUTS-TEST][T3D-EXTRUSION-ERROR] "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    raise
+                result = base_extrude(filtered_mesh, thickness, stage)
+                out_mesh = result[0] if isinstance(result, tuple) and result else result
+                if out_mesh is not None:
+                    try:
+                        out_mesh.metrics.update({
+                            "optcuts_test_invalid_panels_excluded": True,
+                            "optcuts_test_excluded_original_face_ids": [int(i["tile_id"]) for i in invalid],
+                            "optcuts_test_retained_original_face_ids": keep_ids,
+                        })
+                        setattr(out_mesh, "_optcuts_test_retained_original_face_ids", keep_ids)
+                        setattr(out_mesh, "_optcuts_test_excluded_original_face_ids", [int(i["tile_id"]) for i in invalid])
+                    except Exception:
+                        pass
+                return result
 
             print(
                 "[OPTCUTS-K3D-PREFLIGHT] FAILED "
@@ -194,4 +269,8 @@ def install_optcuts_k3d_preflight_patch(pipeline: Any) -> None:
     pipeline._onestring_optcuts_k3d_preflight_installed = True
 
 
-__all__ = ["install_optcuts_k3d_preflight_patch", "_invalid_tops"]
+__all__ = [
+    "install_optcuts_k3d_preflight_patch",
+    "_invalid_tops",
+    "_filtered_mesh_without_invalid",
+]
