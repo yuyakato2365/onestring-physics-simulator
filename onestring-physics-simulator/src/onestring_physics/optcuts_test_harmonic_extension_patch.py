@@ -1,16 +1,9 @@
 """Flip-safe harmonic continuation for ``optcuts_test``.
 
-The previous experimental continuation tested a boundary move while every
-interior UV vertex was frozen.  That is too strict: a perfectly feasible domain
-motion can invert a very small boundary-adjacent triangle unless its interior
-vertex moves at the same time.
-
-This patch replaces only the ``optcuts_test`` continuation routine.  At each
-stage it extends the prescribed boundary displacement harmonically through the
-cut UV mesh, then backtracks the *whole* displacement until every triangle keeps
-its original orientation.  The already-existing flip-safe Symmetric Dirichlet
-relaxation is then allowed to improve the legal candidate without ever accepting
-an inverted step.
+Boundary motion is extended harmonically through the cut UV mesh and accepted
+only when every triangle keeps its orientation.  The boundary correspondence is
+installed together with this solver so optcuts_test uses the monotone optimized
+mapping rather than uniform arclength.
 """
 from __future__ import annotations
 
@@ -26,6 +19,9 @@ except Exception:  # pragma: no cover
     factorized = None
 
 from . import optcuts_test_boundary_reparameterization_patch as test_module
+from .optcuts_test_monotone_correspondence_patch import (
+    install_optcuts_test_monotone_correspondence_patch,
+)
 
 
 def _uniform_laplacian_solver(
@@ -33,20 +29,17 @@ def _uniform_laplacian_solver(
     faces: np.ndarray,
     fixed: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, Callable[[np.ndarray], np.ndarray] | None, Any]:
-    """Build the Dirichlet combinatorial-Laplacian system once for continuation."""
     edges: set[tuple[int, int]] = set()
     for face in np.asarray(faces, dtype=int):
         ids = [int(v) for v in face]
         for a, b in ((ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])):
-            if a == b:
-                continue
-            edges.add((a, b) if a < b else (b, a))
+            if a != b:
+                edges.add((a, b) if a < b else (b, a))
 
     fixed_ids = np.flatnonzero(fixed)
     free_ids = np.flatnonzero(~fixed)
     if len(free_ids) == 0:
         return free_ids, fixed_ids, None, None
-
     if coo_matrix is None or factorized is None:
         return free_ids, fixed_ids, None, edges
 
@@ -55,14 +48,9 @@ def _uniform_laplacian_solver(
     data: list[float] = []
     degree = np.zeros(vertex_count, dtype=float)
     for a, b in edges:
-        rows.extend([a, b])
-        cols.extend([b, a])
-        data.extend([-1.0, -1.0])
-        degree[a] += 1.0
-        degree[b] += 1.0
-    rows.extend(range(vertex_count))
-    cols.extend(range(vertex_count))
-    data.extend(degree.tolist())
+        rows.extend([a, b]); cols.extend([b, a]); data.extend([-1.0, -1.0])
+        degree[a] += 1.0; degree[b] += 1.0
+    rows.extend(range(vertex_count)); cols.extend(range(vertex_count)); data.extend(degree.tolist())
     L = coo_matrix((data, (rows, cols)), shape=(vertex_count, vertex_count)).tocsc()
     Lii = L[free_ids][:, free_ids].tocsc()
     Lib = L[free_ids][:, fixed_ids].tocsc()
@@ -81,8 +69,7 @@ def _iterative_harmonic_extension(
 ) -> np.ndarray:
     adjacency: list[list[int]] = [[] for _ in range(vertex_count)]
     for a, b in edges:
-        adjacency[a].append(b)
-        adjacency[b].append(a)
+        adjacency[a].append(b); adjacency[b].append(a)
     delta = np.zeros((vertex_count, 2), dtype=float)
     delta[fixed] = boundary_delta[fixed]
     free_ids = np.flatnonzero(~fixed)
@@ -105,7 +92,6 @@ def _harmonic_extension(
     system: tuple[np.ndarray, np.ndarray, Callable[[np.ndarray], np.ndarray] | None, Any],
     faces: np.ndarray,
 ) -> np.ndarray:
-    """Return a full-mesh displacement whose boundary equals the requested move."""
     free_ids, fixed_ids, solve, auxiliary = system
     boundary_delta = np.zeros_like(current)
     boundary_delta[fixed] = target_boundary[fixed] - current[fixed]
@@ -114,15 +100,16 @@ def _harmonic_extension(
     if len(free_ids) == 0:
         return full
 
-    if solve is not None:
+    local_solve = solve
+    if local_solve is not None:
         Lib = auxiliary
         rhs = -(Lib @ boundary_delta[fixed_ids])
         try:
-            full[free_ids, 0] = np.asarray(solve(np.asarray(rhs[:, 0]).reshape(-1)), dtype=float)
-            full[free_ids, 1] = np.asarray(solve(np.asarray(rhs[:, 1]).reshape(-1)), dtype=float)
+            full[free_ids, 0] = np.asarray(local_solve(np.asarray(rhs[:, 0]).reshape(-1)), dtype=float)
+            full[free_ids, 1] = np.asarray(local_solve(np.asarray(rhs[:, 1]).reshape(-1)), dtype=float)
         except Exception:
-            solve = None
-    if solve is None:
+            local_solve = None
+    if local_solve is None:
         edges = auxiliary
         if not isinstance(edges, set):
             edges = set()
@@ -179,8 +166,6 @@ def _staged_boundary_resolve_harmonic(
         accepted_alpha = alpha
         for _ in range(32):
             candidate = current + beta * displacement
-            # Harmonic extension is linear; enforce the same beta on boundary
-            # explicitly to remove sparse-solver roundoff.
             candidate[fixed] = current[fixed] + beta * (requested_boundary[fixed] - current[fixed])
             invalid = test_module._invalid_triangle_ids(candidate, faces, sign, area_scale)
             if len(invalid) == 0:
@@ -193,18 +178,14 @@ def _staged_boundary_resolve_harmonic(
         if accepted_candidate is None or accepted_alpha <= alpha + minimum_step * 0.25:
             if nominal_step <= minimum_step + 1e-15:
                 raise RuntimeError(
-                    "OPTCUTS_TEST_HARMONIC_CONTINUATION_STALLED: even simultaneous harmonic motion "
-                    f"of boundary and interior cannot advance beyond alpha={alpha:.9f}. "
-                    "This now indicates the current boundary correspondence/path is the likely issue, "
-                    "not the previous boundary-only test."
+                    "OPTCUTS_TEST_HARMONIC_CONTINUATION_STALLED: simultaneous harmonic motion cannot "
+                    f"advance beyond alpha={alpha:.9f}. The active boundary correspondence is still "
+                    "geometrically incompatible at this point."
                 )
             nominal_step *= 0.5
             continuation_retries += 1
             continue
 
-        # The candidate is already legal.  Improve distortion while keeping the
-        # newly reached boundary fixed; the existing relaxation has strict
-        # orientation-preserving line search.
         stage_targets = np.full_like(final_targets, np.nan)
         stage_targets[fixed] = accepted_candidate[fixed]
         relaxed, info = test_module._flip_safe_relax(
@@ -244,6 +225,9 @@ def _staged_boundary_resolve_harmonic(
 
 
 def install_optcuts_test_harmonic_extension_patch() -> None:
+    # Install the correspondence first so the enclosing optcuts_test builder
+    # resolves _build_test_targets to the optimized monotone mapper at runtime.
+    install_optcuts_test_monotone_correspondence_patch()
     test_module._staged_boundary_resolve = _staged_boundary_resolve_harmonic
 
 
