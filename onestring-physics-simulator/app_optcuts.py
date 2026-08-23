@@ -35,6 +35,9 @@ from onestring_physics.optcuts_run_flag_patch import install_optcuts_run_flag_pa
 from onestring_physics.optcuts_test_boundary_reparameterization_patch import (  # noqa: E402
     install_optcuts_test_boundary_reparameterization_patch,
 )
+from onestring_physics.optcuts_test_seam_metadata_bridge import (  # noqa: E402
+    install_optcuts_test_seam_metadata_bridge,
+)
 from onestring_physics.optcuts_grid_native_pipeline_patch import install_native_grid_optcuts_pipeline_patch  # noqa: E402
 from onestring_physics.optcuts_grid_native_lift_patch import install_native_grid_optcuts_lift_patch  # noqa: E402
 from onestring_physics.optcuts_grid_constrained_m2d_patch import install_optcuts_grid_constrained_m2d_patch  # noqa: E402
@@ -77,9 +80,7 @@ def _install_optcuts_selector() -> None:
             return value
 
         if value == "optcuts":
-            st.caption(
-                "Official OptCuts baseline. The saved stable mode is not modified by optcuts_test."
-            )
+            st.caption("Official OptCuts baseline. The saved stable mode is not modified by optcuts_test.")
         elif value == "optcuts_test":
             st.caption(
                 "OptCuts_test: keep the official OptCuts seam/cut topology, build the ordinary M2D "
@@ -237,6 +238,9 @@ install_optcuts_pipeline_patch(pipeline)
 install_native_grid_optcuts_pipeline_patch(pipeline)
 install_optcuts_run_flag_patch(pipeline)
 install_optcuts_test_boundary_reparameterization_patch(pipeline)
+# Install before the generic seam metadata wrapper.  The generic wrapper will
+# then call through this bridge and leave optcuts_test metadata intact.
+install_optcuts_test_seam_metadata_bridge(pipeline)
 install_native_grid_optcuts_lift_patch(pipeline)
 install_robust_optcuts_seam_extraction()
 install_optcuts_seam_metadata_patch(pipeline)
