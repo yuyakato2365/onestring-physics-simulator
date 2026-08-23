@@ -1,20 +1,27 @@
-"""Bridge OptCuts_test seam metadata into the existing M2D seam projection path."""
+"""Bridge ``optcuts_test`` into the simplified seam-smoothing / clipped-M2D path."""
 from __future__ import annotations
 
 from typing import Any
 
 from .optcuts_seam_extraction_patch import extract_connected_seam_payload_robust
-from .optcuts_test_harmonic_extension_patch import install_optcuts_test_harmonic_extension_patch
+from .optcuts_test_simple_pipeline_patch import install_optcuts_test_simple_pipeline_patch
+from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_clip_m2d_patch
 
 
 def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_test_seam_metadata_bridge_installed", False):
         return
 
-    # Replace only optcuts_test's continuation routine.  This must happen after
-    # optcuts_test_boundary_reparameterization_patch has been imported, but before
-    # the first design run.  Ordinary optcuts / optcuts_grid remain untouched.
-    install_optcuts_test_harmonic_extension_patch()
+    # The launcher still imports the historical experimental test wrapper for
+    # compatibility, but this later wrapper deliberately supersedes its
+    # grid-outline forcing.  optcuts_test is now:
+    # official OptCuts -> seam/boundary smoothing -> harmonic Omega regeneration.
+    install_optcuts_test_simple_pipeline_patch(pipeline)
+
+    # Install the M2D clipper before Simple Split is installed.  Simple Split will
+    # wrap the current _build_m2d and therefore retains this implementation below
+    # it.  Ordinary modes no-op through the clipper.
+    install_optcuts_test_boundary_clip_m2d_patch(pipeline)
 
     base_flatten = pipeline._flatten_to_domain
 
@@ -30,7 +37,10 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
             domain.split_lines = []
         except Exception:
             pass
-        setattr(domain, "_optcuts_test_grid_outline", getattr(parameterization, "_optcuts_test_grid_outline", None))
+        # New requested behavior: boundary-crossing grid cells are clipped to
+        # Omega instead of being discarded wholesale.
+        setattr(domain, "_optcuts_test_clip_boundary", True)
+        setattr(domain, "_optcuts_test_smoothed_seam", True)
         return domain
 
     pipeline._flatten_to_domain = flatten_with_test_seam
