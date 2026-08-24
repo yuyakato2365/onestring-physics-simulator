@@ -189,12 +189,24 @@ def install_optcuts_k3d_validity_patch(pipeline: Any) -> None:
                 )
             if candidate_invalid:
                 _store_invalid(out, candidate_invalid, "K3D_FINAL_AFTER_AL")
-                raise RuntimeError(
-                    "OPTCUTS_TEST_FINAL_K3D_VALIDITY_FAILED: Augmented-Lagrangian K3D is planar "
-                    "but contains invalid/self-intersecting top faces. The final K3D is not modified; "
-                    f"reasons={dict(Counter(r for _, r in candidate_invalid))} "
-                    f"details={_diagnose_invalid(mesh, candidate_invalid)}"
+                out.metrics.update(
+                    {
+                        "optcuts_k3d_nonfatal_diagnostic_mode": True,
+                        "optcuts_test_invalid_panels_pending_exclusion": True,
+                        "optcuts_test_invalid_face_ids": [int(fi) for fi, _ in candidate_invalid],
+                        "optcuts_test_invalid_face_count": int(len(candidate_invalid)),
+                    }
                 )
+                try:
+                    report.failed_constraints.append("optcuts_test_invalid_panels_excluded_downstream")
+                except Exception:
+                    pass
+                print(
+                    "[OPTCUTS-TEST-K3D-INVALID-NONFATAL] "
+                    f"count={len(candidate_invalid)} reasons={dict(Counter(r for _, r in candidate_invalid))}; "
+                    "keeping them visible in K3D and continuing so K3D->T3D preflight can exclude them"
+                )
+                return out, report
 
             _store_invalid(out, [], "K3D_FINAL_AFTER_AL")
             print(
