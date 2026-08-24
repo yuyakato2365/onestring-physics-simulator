@@ -14,6 +14,7 @@ from .optcuts_test_simple_pipeline_patch import install_optcuts_test_simple_pipe
 from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_clip_m2d_patch
 from .optcuts_test_polygon_visualization_patch import install_optcuts_test_polygon_visualization_patch
 from .optcuts_test_k2d_relative_layout_patch import install_optcuts_test_k2d_relative_layout_patch
+from .optcuts_test_k3d_pre_al_validity_patch import install_optcuts_test_k3d_pre_al_validity_patch
 from .optcuts_test_k3d_augmented_lagrangian_patch import install_optcuts_test_k3d_augmented_lagrangian_patch
 
 
@@ -21,13 +22,20 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_test_seam_metadata_bridge_installed", False):
         return
 
-    # This wrapper is installed after the older grid-outline experiment.  For
+    # This wrapper is installed after the older grid-outline experiment. For
     # optcuts_test it deliberately calls ordinary official OptCuts and then runs
     # equal-arclength + Taubin smoothing + harmonic Omega regeneration, so the
     # grid-outline forcing path is bypassed.
     install_optcuts_test_simple_pipeline_patch(pipeline)
     install_optcuts_test_boundary_clip_m2d_patch(pipeline)
+
+    # K3D wrapper order is intentional:
+    # ordinary K3D -> validity repair -> Augmented Lagrangian hard planarity.
+    # The generic outer validity guard installed by app_optcuts.py then performs
+    # assertion-only checks on AL output and is forbidden to backtrack it.
+    install_optcuts_test_k3d_pre_al_validity_patch(pipeline)
     install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline)
+
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
     install_optcuts_test_polygon_visualization_patch()
 
@@ -60,10 +68,12 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
         setattr(domain, "_optcuts_test_smoothed_seam", True)
         setattr(domain, "_optcuts_test_rectilinear_seam_disabled", True)
         try:
-            parameterization.metrics.update({
-                "optcuts_test_rectilinear_seam_disabled": True,
-                "optcuts_test_source_seam_kept_for_diagnostics_only": True,
-            })
+            parameterization.metrics.update(
+                {
+                    "optcuts_test_rectilinear_seam_disabled": True,
+                    "optcuts_test_source_seam_kept_for_diagnostics_only": True,
+                }
+            )
         except Exception:
             pass
         return domain
