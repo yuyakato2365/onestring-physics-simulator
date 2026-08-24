@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from itertools import combinations
 from typing import Any
 import numpy as np
 
@@ -25,19 +26,41 @@ def _invalid_faces(vertices: np.ndarray, faces: np.ndarray) -> list[tuple[int, s
 
 
 def _quad_plane_distances(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
-    """Distance of the fourth corner from the plane through the first three."""
+    """Robust quad planarity distance using the maximum-area base triangle.
+
+    The old check always used corners (0,1,2). For clipped triangle->quad
+    surrogates those can be A-mid(A,B)-B and therefore collinear, making the
+    plane undefined and producing false huge distances. For each quad we select
+    the largest-area triangle among its four corners and measure the remaining
+    corner to that plane.
+    """
     verts = np.asarray(vertices, dtype=float)
     f = np.asarray(faces, dtype=int)[:, :4]
     if len(f) == 0:
         return np.zeros(0, dtype=float)
-    q = verts[f]
-    a = q[:, 1] - q[:, 0]
-    b = q[:, 2] - q[:, 0]
-    c = q[:, 3] - q[:, 0]
-    n = np.cross(a, b)
-    n_norm = np.linalg.norm(n, axis=1)
-    triple = np.abs(np.einsum("ij,ij->i", c, n))
-    return triple / np.maximum(n_norm, 1e-15)
+    out = np.full(len(f), np.inf, dtype=float)
+    local_ids = (0, 1, 2, 3)
+    for fi, face in enumerate(f):
+        pts = verts[face]
+        best_combo = None
+        best_area = -1.0
+        for combo in combinations(local_ids, 3):
+            a, b, c = pts[list(combo)]
+            area2 = float(np.linalg.norm(np.cross(b - a, c - a)))
+            if area2 > best_area:
+                best_area = area2
+                best_combo = combo
+        if best_combo is None or best_area <= 1e-12:
+            continue
+        remaining = next(idx for idx in local_ids if idx not in best_combo)
+        p0, p1, p2 = pts[list(best_combo)]
+        p3 = pts[remaining]
+        normal = np.cross(p1 - p0, p2 - p0)
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm <= 1e-12:
+            continue
+        out[fi] = abs(float(np.dot(p3 - p0, normal))) / normal_norm
+    return out
 
 
 def _diagnose_invalid(mesh: Any, invalid: list[tuple[int, str]], limit: int = 12):
@@ -123,11 +146,6 @@ def install_optcuts_k3d_validity_patch(pipeline: Any) -> None:
         candidate_invalid = _invalid_faces(candidate, faces)
         metrics = dict(getattr(out, "metrics", {}) or {})
 
-        # IMPORTANT: once optcuts_test has passed through the Augmented Lagrangian
-        # planarizer, this candidate is authoritative.  The old guard used to
-        # blend it back toward non-planar M3D to repair self intersections, which
-        # silently destroyed the hard-planarity result.  From here on we perform
-        # assertions only: never rewrite AL vertices.
         al_applied = bool(metrics.get("k3d_augmented_lagrangian_applied", False))
         if test_mode and al_applied:
             distances = _quad_plane_distances(candidate, faces)
@@ -139,7 +157,8 @@ def install_optcuts_k3d_validity_patch(pipeline: Any) -> None:
                 for face in faces[:, :4]:
                     tile = candidate[np.asarray(face, dtype=int)]
                     edges = [float(np.linalg.norm(tile[(i + 1) % 4] - tile[i])) for i in range(4)]
-                    scales.append(float(np.median(edges)))
+                    positive = [e for e in edges if e > 1e-10]
+                    scales.append(float(np.median(positive if positive else edges)))
                 tile_scale = float(np.median(scales)) if scales else 1.0
                 tolerance = max(1e-10, tile_scale * 1e-6)
 
@@ -151,6 +170,7 @@ def install_optcuts_k3d_validity_patch(pipeline: Any) -> None:
                     "optcuts_k3d_validity_backtracked": False,
                     "optcuts_k3d_invalid_final_count": int(len(candidate_invalid)),
                     "optcuts_k3d_invalid_final_reason_counts": dict(Counter(r for _, r in candidate_invalid)),
+                    "k3d_hard_planarity_final_metric": "max-area base triangle to remaining corner distance",
                     "k3d_hard_planarity_max_distance_final_authoritative": final_max_plane,
                     "k3d_hard_planarity_rms_distance_final_authoritative": final_rms_plane,
                     "k3d_hard_planarity_tolerance_final_authoritative": tolerance,
@@ -159,10 +179,11 @@ def install_optcuts_k3d_validity_patch(pipeline: Any) -> None:
             )
             out.metrics.update(metrics)
 
-            if final_max_plane > tolerance:
+            if not np.isfinite(final_max_plane) or final_max_plane > tolerance:
                 raise RuntimeError(
                     "OPTCUTS_TEST_FINAL_K3D_PLANARITY_FAILED: final authoritative K3D after "
-                    "Augmented Lagrangian is not planar within tolerance; "
+                    "Augmented Lagrangian is not planar within tolerance under the robust max-area "
+                    "base-triangle metric; "
                     f"max_plane_distance={final_max_plane:.9g}, tolerance={tolerance:.9g}. "
                     "No M3D backtracking was applied."
                 )
@@ -179,7 +200,7 @@ def install_optcuts_k3d_validity_patch(pipeline: Any) -> None:
             print(
                 "[OPTCUTS-TEST-K3D-FINAL] "
                 f"planarity_ok=True max_plane_dist={final_max_plane:.6g} tol={tolerance:.6g} "
-                "validity_ok=True authoritative_AL=True no_backtracking=True"
+                "validity_ok=True authoritative_AL=True no_backtracking=True robust_metric=True"
             )
             try:
                 report.constraint_violation = final_max_plane
