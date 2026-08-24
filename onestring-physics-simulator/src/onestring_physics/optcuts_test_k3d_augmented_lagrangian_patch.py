@@ -1,13 +1,20 @@
 """OptCuts_test K3D hard planarity via an Augmented Lagrangian solve.
 
 The ordinary K3D optimizer remains responsible for surface fitting and square
-quality.  In ``optcuts_test`` only, this patch takes that K3D solution as a
-reference and enforces one equality constraint per quadrilateral:
+quality. In ``optcuts_test`` only, this patch takes that K3D solution as a
+reference and enforces one equality constraint per quadrilateral.
+
+A naive scalar-triple constraint based on corners (0,1,2) is degenerate when
+those three corners are collinear. This occurs for clipped boundary panels that
+were promoted from a triangle to a four-corner representation by inserting an
+edge midpoint. Therefore each face first selects the maximum-area triangle among
+its four corners; the remaining corner is constrained to that triangle's plane.
+
+For reordered corners (x0,x1,x2,x3),
 
     g_q(x) = (x1-x0) dot ((x2-x0) cross (x3-x0)) = 0.
 
-The scalar triple product vanishes iff the four vertices are coplanar (up to
-degenerate cases).  We solve
+We solve
 
     min  0.5*w_anchor*||x-x_ref||^2
     s.t. g_q(x)=0
@@ -16,12 +23,11 @@ with the augmented Lagrangian
 
     L_A = E + sum lambda_q c_q + 0.5*rho*sum c_q^2,
 
-where c_q = g_q / s_q^3 is a scale-normalized constraint.  The existing K3D
-solution therefore remains the preferred shape while planarity is driven to a
-hard numerical tolerance without requiring an enormous soft ``w_planar``.
+where c_q = g_q / s_q^3 is a scale-normalized constraint.
 """
 from __future__ import annotations
 
+from itertools import combinations
 from typing import Any
 
 import numpy as np
@@ -32,17 +38,45 @@ except Exception:  # pragma: no cover
     minimize = None
 
 
+def _robust_constraint_faces(reference: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Reorder each quad so corners 0,1,2 form its maximum-area triangle.
+
+    Returns (reordered_faces, base_triangle_double_areas). The fourth index is
+    the remaining corner. This avoids the degenerate A-mid(A,B)-B base triangle
+    that occurs for triangle-to-quad boundary surrogates.
+    """
+    ref = np.asarray(reference, dtype=float)
+    f4 = np.asarray(faces, dtype=int)[:, :4]
+    reordered = np.empty_like(f4)
+    areas = np.zeros(len(f4), dtype=float)
+    local_ids = (0, 1, 2, 3)
+    for fi, face in enumerate(f4):
+        pts = ref[face]
+        best_combo = (0, 1, 2)
+        best_area = -1.0
+        for combo in combinations(local_ids, 3):
+            a, b, c = pts[list(combo)]
+            area2 = float(np.linalg.norm(np.cross(b - a, c - a)))
+            if area2 > best_area:
+                best_area = area2
+                best_combo = combo
+        remaining = next(idx for idx in local_ids if idx not in best_combo)
+        reordered[fi] = np.asarray(
+            [face[best_combo[0]], face[best_combo[1]], face[best_combo[2]], face[remaining]],
+            dtype=int,
+        )
+        areas[fi] = max(best_area, 0.0)
+    return reordered, areas
+
+
 def _quad_constraint_values_and_gradient(
     vertices: np.ndarray,
-    faces: np.ndarray,
+    constraint_faces: np.ndarray,
     scales: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return normalized scalar-triple constraints and per-corner gradients.
-
-    gradients has shape (F, 4, 3), corresponding to the four face vertices.
-    """
+    """Return normalized scalar-triple constraints and per-corner gradients."""
     v = np.asarray(vertices, dtype=float)
-    f = np.asarray(faces, dtype=int)[:, :4]
+    f = np.asarray(constraint_faces, dtype=int)[:, :4]
     q = v[f]
     x0, x1, x2, x3 = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
     a = x1 - x0
@@ -65,10 +99,10 @@ def _quad_constraint_values_and_gradient(
     return values, grad
 
 
-def _quad_plane_distances(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
-    """Absolute fourth-point distance to the plane through the first 3 vertices."""
+def _quad_plane_distances(vertices: np.ndarray, constraint_faces: np.ndarray) -> np.ndarray:
+    """Distance of the remaining corner to a robust maximum-area base plane."""
     v = np.asarray(vertices, dtype=float)
-    f = np.asarray(faces, dtype=int)[:, :4]
+    f = np.asarray(constraint_faces, dtype=int)[:, :4]
     q = v[f]
     a = q[:, 1] - q[:, 0]
     b = q[:, 2] - q[:, 0]
@@ -76,7 +110,10 @@ def _quad_plane_distances(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray
     n = np.cross(a, b)
     n_norm = np.linalg.norm(n, axis=1)
     triple = np.abs(np.einsum("ij,ij->i", c, n))
-    return triple / np.maximum(n_norm, 1e-15)
+    out = np.full(len(f), np.inf, dtype=float)
+    good = n_norm > 1e-12
+    out[good] = triple[good] / n_norm[good]
+    return out
 
 
 def _face_scales(reference: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -87,7 +124,8 @@ def _face_scales(reference: np.ndarray, faces: np.ndarray) -> np.ndarray:
             float(np.linalg.norm(tile[(i + 1) % 4] - tile[i]))
             for i in range(4)
         ]
-        vals.append(max(float(np.median(lengths)), 1e-8))
+        positive = [length for length in lengths if length > 1e-10]
+        vals.append(max(float(np.median(positive if positive else lengths)), 1e-8))
     return np.asarray(vals, dtype=float)
 
 
@@ -97,8 +135,8 @@ def _augmented_lagrangian_planarize(
     *,
     anchor_weight: float = 1.0,
     rho0: float = 10.0,
-    outer_iterations: int = 10,
-    inner_iterations: int = 35,
+    outer_iterations: int = 16,
+    inner_iterations: int = 70,
     relative_plane_tolerance: float = 1e-6,
 ) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
     ref = np.asarray(reference, dtype=float)
@@ -112,16 +150,24 @@ def _augmented_lagrangian_planarize(
         }
 
     f4 = f[:, :4]
+    constraint_faces, base_areas = _robust_constraint_faces(ref, f4)
     scales = _face_scales(ref, f4)
     tile_scale = float(np.median(scales)) if len(scales) else 1.0
     plane_tol = max(1e-10, tile_scale * float(relative_plane_tolerance))
+
+    degenerate_base_count = int(np.sum(base_areas <= np.maximum(scales * scales * 1e-10, 1e-16)))
+    if degenerate_base_count:
+        raise RuntimeError(
+            "OPTCUTS_TEST_K3D_PLANARITY_CONSTRAINT_DEGENERATE: "
+            f"{degenerate_base_count} panels have no non-collinear triple among their four corners."
+        )
 
     x = ref.copy()
     lambdas = np.zeros(len(f4), dtype=float)
     rho = max(float(rho0), 1e-6)
     w_anchor = max(float(anchor_weight), 1e-10)
 
-    before_dist = _quad_plane_distances(x, f4)
+    before_dist = _quad_plane_distances(x, constraint_faces)
     max_before = float(np.max(before_dist)) if len(before_dist) else 0.0
     rms_before = float(np.sqrt(np.mean(before_dist * before_dist))) if len(before_dist) else 0.0
 
@@ -129,6 +175,8 @@ def _augmented_lagrangian_planarize(
     inner_total = 0
     converged = False
     outer_done = 0
+    last_inner_success = True
+    last_inner_message = ""
 
     def objective_and_grad(flat: np.ndarray) -> tuple[float, np.ndarray]:
         verts = np.asarray(flat, dtype=float).reshape(ref.shape)
@@ -136,15 +184,15 @@ def _augmented_lagrangian_planarize(
         energy = 0.5 * w_anchor * float(np.sum(delta * delta))
         grad_total = w_anchor * delta
 
-        constraints, local_grad = _quad_constraint_values_and_gradient(verts, f4, scales)
+        constraints, local_grad = _quad_constraint_values_and_gradient(verts, constraint_faces, scales)
         coeff = lambdas + rho * constraints
         energy += float(np.dot(lambdas, constraints) + 0.5 * rho * np.dot(constraints, constraints))
 
         contribution = coeff[:, None, None] * local_grad
-        np.add.at(grad_total, f4[:, 0], contribution[:, 0])
-        np.add.at(grad_total, f4[:, 1], contribution[:, 1])
-        np.add.at(grad_total, f4[:, 2], contribution[:, 2])
-        np.add.at(grad_total, f4[:, 3], contribution[:, 3])
+        np.add.at(grad_total, constraint_faces[:, 0], contribution[:, 0])
+        np.add.at(grad_total, constraint_faces[:, 1], contribution[:, 1])
+        np.add.at(grad_total, constraint_faces[:, 2], contribution[:, 2])
+        np.add.at(grad_total, constraint_faces[:, 3], contribution[:, 3])
         return energy, grad_total.ravel()
 
     for outer in range(max(1, int(outer_iterations))):
@@ -155,51 +203,55 @@ def _augmented_lagrangian_planarize(
             jac=lambda z: objective_and_grad(z)[1],
             method="L-BFGS-B",
             options={
-                "maxiter": max(5, int(inner_iterations)),
-                "ftol": 1e-12,
-                "gtol": 1e-9,
-                "maxls": 30,
+                "maxiter": max(10, int(inner_iterations)),
+                "ftol": 1e-13,
+                "gtol": 1e-10,
+                "maxls": 50,
             },
         )
         inner_total += int(getattr(result, "nit", 0))
+        last_inner_success = bool(getattr(result, "success", False))
+        last_inner_message = str(getattr(result, "message", ""))
         x = np.asarray(result.x, dtype=float).reshape(ref.shape)
 
-        constraints, _ = _quad_constraint_values_and_gradient(x, f4, scales)
+        constraints, _ = _quad_constraint_values_and_gradient(x, constraint_faces, scales)
         lambdas = lambdas + rho * constraints
 
-        distances = _quad_plane_distances(x, f4)
+        distances = _quad_plane_distances(x, constraint_faces)
         max_dist = float(np.max(distances)) if len(distances) else 0.0
         normalized_violation = float(np.max(np.abs(constraints))) if len(constraints) else 0.0
         print(
             "[OPTCUTS-TEST-K3D-AL] "
             f"outer={outer_done} rho={rho:.6g} max_plane_dist={max_dist:.6g} "
-            f"max_constraint={normalized_violation:.6g}"
+            f"max_constraint={normalized_violation:.6g} inner_success={last_inner_success}"
         )
         if max_dist <= plane_tol:
             converged = True
             break
 
-        # Standard AL policy: if the equality violation stalls, strengthen rho;
-        # otherwise keep rho and let the multiplier update do the work.
         if normalized_violation > 0.5 * previous_violation:
-            rho = min(rho * 5.0, 1e10)
+            rho = min(rho * 5.0, 1e12)
         previous_violation = normalized_violation
 
-    after_dist = _quad_plane_distances(x, f4)
+    after_dist = _quad_plane_distances(x, constraint_faces)
     max_after = float(np.max(after_dist)) if len(after_dist) else 0.0
     rms_after = float(np.sqrt(np.mean(after_dist * after_dist))) if len(after_dist) else 0.0
     displacement = np.linalg.norm(x - ref, axis=1)
 
     return x, {
         "k3d_augmented_lagrangian_applied": True,
-        "k3d_planarity_constraint_type": "scalar triple product equality per quad",
-        "k3d_planarity_constraint": "(x1-x0) dot ((x2-x0) cross (x3-x0)) = 0",
-        "k3d_augmented_lagrangian_reference": "ordinary K3D square+surface solution",
+        "k3d_planarity_constraint_type": "robust max-area scalar triple product equality per quad",
+        "k3d_planarity_constraint": "max-area base triangle; remaining corner coplanar",
+        "k3d_planarity_constraint_reordered_faces": True,
+        "k3d_planarity_degenerate_base_count": int(degenerate_base_count),
+        "k3d_augmented_lagrangian_reference": "validity-repaired ordinary K3D square+surface solution",
         "k3d_augmented_lagrangian_anchor_weight": float(w_anchor),
         "k3d_augmented_lagrangian_rho_initial": float(rho0),
         "k3d_augmented_lagrangian_rho_final": float(rho),
         "k3d_augmented_lagrangian_outer_iterations": int(outer_done),
         "k3d_augmented_lagrangian_inner_iterations_total": int(inner_total),
+        "k3d_augmented_lagrangian_last_inner_success": bool(last_inner_success),
+        "k3d_augmented_lagrangian_last_inner_message": str(last_inner_message),
         "k3d_augmented_lagrangian_converged": bool(converged),
         "k3d_hard_planarity_tolerance": float(plane_tol),
         "k3d_hard_planarity_max_distance_before": float(max_before),
@@ -230,15 +282,16 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
             np.asarray(k3d.faces, dtype=int),
             anchor_weight=float(getattr(params, "k3d_al_anchor_weight", 1.0)),
             rho0=float(getattr(params, "k3d_al_rho0", 10.0)),
-            outer_iterations=int(getattr(params, "k3d_al_outer_iterations", 10)),
-            inner_iterations=int(getattr(params, "k3d_al_inner_iterations", 35)),
+            outer_iterations=int(getattr(params, "k3d_al_outer_iterations", 16)),
+            inner_iterations=int(getattr(params, "k3d_al_inner_iterations", 70)),
             relative_plane_tolerance=float(getattr(params, "k3d_al_relative_planarity_tolerance", 1e-6)),
         )
         k3d.vertices[:] = solved
         try:
             k3d.metrics.update(al_metrics)
-            k3d.metrics["k3d_planarity_mode"] = "hard equality via augmented Lagrangian"
+            k3d.metrics["k3d_planarity_mode"] = "hard equality via robust augmented Lagrangian"
             k3d.metrics["k3d_soft_w_planar_is_authoritative"] = False
+            k3d.metrics["k3d_al_authoritative_result"] = True
         except Exception:
             pass
         try:
@@ -264,4 +317,8 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
     pipeline._onestring_optcuts_test_k3d_al_installed = True
 
 
-__all__ = ["install_optcuts_test_k3d_augmented_lagrangian_patch"]
+__all__ = [
+    "install_optcuts_test_k3d_augmented_lagrangian_patch",
+    "_robust_constraint_faces",
+    "_quad_plane_distances",
+]
