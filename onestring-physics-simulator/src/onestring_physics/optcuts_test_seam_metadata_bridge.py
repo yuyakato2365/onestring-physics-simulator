@@ -14,6 +14,7 @@ from .optcuts_test_simple_pipeline_patch import install_optcuts_test_simple_pipe
 from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_clip_m2d_patch
 from .optcuts_test_polygon_visualization_patch import install_optcuts_test_polygon_visualization_patch
 from .optcuts_test_k2d_relative_layout_patch import install_optcuts_test_k2d_relative_layout_patch
+from .optcuts_test_k3d_augmented_lagrangian_patch import install_optcuts_test_k3d_augmented_lagrangian_patch
 
 
 def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
@@ -26,6 +27,7 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     # grid-outline forcing path is bypassed.
     install_optcuts_test_simple_pipeline_patch(pipeline)
     install_optcuts_test_boundary_clip_m2d_patch(pipeline)
+    install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline)
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
     install_optcuts_test_polygon_visualization_patch()
 
