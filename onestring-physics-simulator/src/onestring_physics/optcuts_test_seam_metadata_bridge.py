@@ -17,6 +17,9 @@ from .optcuts_test_k2d_relative_layout_patch import install_optcuts_test_k2d_rel
 from .optcuts_test_k3d_pre_al_validity_patch import install_optcuts_test_k3d_pre_al_validity_patch
 from .optcuts_test_k3d_augmented_lagrangian_patch import install_optcuts_test_k3d_augmented_lagrangian_patch
 from .optcuts_test_k3d_slsqp_polish_patch import install_optcuts_test_k3d_slsqp_polish_patch
+from .optcuts_test_k3d_practical_planarity_tolerance_patch import (
+    install_optcuts_test_k3d_practical_planarity_tolerance_patch,
+)
 
 
 def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
@@ -32,12 +35,13 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
 
     # K3D wrapper order is intentional:
     # ordinary K3D -> validity repair -> Augmented Lagrangian hard planarity
-    # -> explicit SLSQP equality polishing.
-    # The generic outer validity guard installed by app_optcuts.py then performs
-    # assertion-only checks on the polished result and is forbidden to backtrack it.
+    # -> explicit SLSQP equality polishing -> fabrication-practical acceptance
+    # tolerance publication. The generic outer validity guard installed by
+    # app_optcuts.py then checks the polished result without backtracking it.
     install_optcuts_test_k3d_pre_al_validity_patch(pipeline)
     install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline)
     install_optcuts_test_k3d_slsqp_polish_patch(pipeline)
+    install_optcuts_test_k3d_practical_planarity_tolerance_patch(pipeline)
 
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
     install_optcuts_test_polygon_visualization_patch()
