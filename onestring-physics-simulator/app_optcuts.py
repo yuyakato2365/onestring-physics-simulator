@@ -145,6 +145,28 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_ANGLE_DEGREES"] = "0"
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_U"] = "0"
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = "0"
+
+            if value == "optcuts_test":
+                st.markdown("**K3D hard-planarity (Augmented Lagrangian)**")
+                anchor_weight = st.number_input(
+                    "K3D AL anchor weight (w_a)",
+                    min_value=0.001,
+                    max_value=10.0,
+                    value=max(0.001, min(10.0, _safe_float_env("ONESTRING_K3D_AL_ANCHOR_WEIGHT", 1.0))),
+                    step=0.05,
+                    format="%.3f",
+                    key="onestring_k3d_al_anchor_weight",
+                    help=(
+                        "Weight for staying close to the validity-repaired ordinary K3D. "
+                        "Smaller values allow vertices to move more freely to satisfy planarity. "
+                        "Try 1.0, 0.3, 0.1, or 0.03."
+                    ),
+                )
+                os.environ["ONESTRING_K3D_AL_ANCHOR_WEIGHT"] = str(float(anchor_weight))
+                st.caption(
+                    "Smaller w_a = stronger freedom to planarize; larger w_a = stronger preservation "
+                    "of the original K3D shape."
+                )
         else:
             angle = st.number_input(
                 "Grid reference direction [deg]",
@@ -214,6 +236,43 @@ def _install_optcuts_selector() -> None:
     st._onestring_optcuts_selector_installed = True
 
 
+def _install_optcuts_test_k3d_ui_params(pipeline_module: Any) -> None:
+    """Inject optcuts_test K3D AL UI values into the runtime params object."""
+    if getattr(pipeline_module, "_onestring_optcuts_test_k3d_ui_params_installed", False):
+        return
+
+    base_optimize = pipeline_module._optimize_k3d
+
+    def optimize_with_ui_params(target: Any, mesh: Any, parameterization: Any, params: Any):
+        if str(getattr(params, "omega_parameterization_mode", "")) == "optcuts_test":
+            anchor_weight = max(1e-6, _safe_float_env("ONESTRING_K3D_AL_ANCHOR_WEIGHT", 1.0))
+            try:
+                setattr(params, "k3d_al_anchor_weight", float(anchor_weight))
+            except Exception:
+                try:
+                    object.__setattr__(params, "k3d_al_anchor_weight", float(anchor_weight))
+                except Exception:
+                    pass
+            setattr(pipeline_module, "_optcuts_test_k3d_al_anchor_weight_ui", float(anchor_weight))
+            print(f"[OPTCUTS-TEST-K3D-UI] anchor_weight={anchor_weight:.6g}")
+        return base_optimize(target, mesh, parameterization, params)
+
+    pipeline_module._optimize_k3d = optimize_with_ui_params
+    original = getattr(pipeline_module, "_original", None)
+    if original is not None:
+        original._optimize_k3d = optimize_with_ui_params
+    for fn in (
+        getattr(pipeline_module, "build_onestring_design", None),
+        getattr(pipeline_module, "_ORIGINAL_BUILD_ONESTRING_DESIGN", None),
+        getattr(original, "build_onestring_design", None) if original is not None else None,
+    ):
+        glb = getattr(fn, "__globals__", None)
+        if isinstance(glb, dict):
+            glb["_optimize_k3d"] = optimize_with_ui_params
+
+    pipeline_module._onestring_optcuts_test_k3d_ui_params_installed = True
+
+
 def _install_m2d_after_simple_split() -> None:
     """Install mode-specific M2D adapters without changing Simple Split numerics."""
     if getattr(simple_split_module, "_onestring_optcuts_requirement_hook_installed", False):
@@ -241,6 +300,9 @@ install_optcuts_test_boundary_reparameterization_patch(pipeline)
 # Install before the generic seam metadata wrapper.  The generic wrapper will
 # then call through this bridge and leave optcuts_test metadata intact.
 install_optcuts_test_seam_metadata_bridge(pipeline)
+# Install immediately outside the AL wrapper so UI values are injected before
+# the AL implementation reads params.k3d_al_anchor_weight.
+_install_optcuts_test_k3d_ui_params(pipeline)
 install_native_grid_optcuts_lift_patch(pipeline)
 install_robust_optcuts_seam_extraction()
 install_optcuts_seam_metadata_patch(pipeline)
