@@ -24,6 +24,14 @@ with the augmented Lagrangian
     L_A = E + sum lambda_q c_q + 0.5*rho*sum c_q^2,
 
 where c_q = g_q / s_q^3 is a scale-normalized constraint.
+
+Because a large shared-vertex quad mesh can be poorly conditioned for a pure
+L-BFGS augmented-Lagrangian solve, every outer iteration is followed by a
+feasibility-restoration step.  Each quad is projected to its current best-fit
+plane and the multiple projected positions proposed for a shared vertex are
+averaged (consensus projection).  Repeating this projection drives the iterate
+back toward the manifold where all quads are planar before the multiplier
+update.  A final feasibility-polishing pass is applied before accepting K3D.
 """
 from __future__ import annotations
 
@@ -129,6 +137,80 @@ def _face_scales(reference: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return np.asarray(vals, dtype=float)
 
 
+def _consensus_planarity_restore(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    sweeps: int,
+    relaxation: float = 1.0,
+    tolerance: float | None = None,
+    constraint_faces: np.ndarray | None = None,
+) -> tuple[np.ndarray, int, float]:
+    """Project all quads to best-fit planes and average shared-vertex proposals.
+
+    The per-face projection is exact for that face. Shared vertices receive
+    several proposals, so consensus averaging can reintroduce a small residual;
+    repeated sweeps are therefore used. This is an alternating-projection style
+    feasibility restoration, not a replacement for the AL objective.
+    """
+    x = np.asarray(vertices, dtype=float).copy()
+    f4 = np.asarray(faces, dtype=int)[:, :4]
+    if len(x) == 0 or len(f4) == 0:
+        return x, 0, 0.0
+
+    alpha = float(np.clip(relaxation, 0.05, 1.0))
+    counts = np.zeros(len(x), dtype=float)
+    flat_ids = f4.reshape(-1)
+    np.add.at(counts, flat_ids, 1.0)
+    active = counts > 0.0
+    used = 0
+    last_max = float("inf")
+
+    for sweep in range(max(0, int(sweeps))):
+        q = x[f4]
+        centers = np.mean(q, axis=1)
+        centered = q - centers[:, None, :]
+
+        # The right singular vector associated with the smallest singular value
+        # is the best-fit plane normal. numpy supports stacked SVD here.
+        try:
+            _, _, vh = np.linalg.svd(centered, full_matrices=False)
+            normals = vh[:, -1, :]
+        except np.linalg.LinAlgError:
+            # Rare fallback for an ill-conditioned batch.
+            normals = np.empty((len(f4), 3), dtype=float)
+            for fi, tile in enumerate(centered):
+                _, _, vh_i = np.linalg.svd(tile, full_matrices=False)
+                normals[fi] = vh_i[-1]
+
+        n_norm = np.linalg.norm(normals, axis=1)
+        good = n_norm > 1e-15
+        normals[good] /= n_norm[good, None]
+        normals[~good] = np.array([0.0, 0.0, 1.0])
+
+        signed = np.einsum("fki,fi->fk", centered, normals)
+        projected = q - signed[:, :, None] * normals[:, None, :]
+
+        accum = np.zeros_like(x)
+        for corner in range(4):
+            np.add.at(accum, f4[:, corner], projected[:, corner])
+        consensus = x.copy()
+        consensus[active] = accum[active] / counts[active, None]
+        x[active] = (1.0 - alpha) * x[active] + alpha * consensus[active]
+        used = sweep + 1
+
+        if tolerance is not None and constraint_faces is not None:
+            distances = _quad_plane_distances(x, constraint_faces)
+            last_max = float(np.max(distances)) if len(distances) else 0.0
+            if last_max <= float(tolerance):
+                break
+
+    if constraint_faces is not None:
+        distances = _quad_plane_distances(x, constraint_faces)
+        last_max = float(np.max(distances)) if len(distances) else 0.0
+    return x, used, float(last_max)
+
+
 def _augmented_lagrangian_planarize(
     reference: np.ndarray,
     faces: np.ndarray,
@@ -138,6 +220,8 @@ def _augmented_lagrangian_planarize(
     outer_iterations: int = 16,
     inner_iterations: int = 70,
     relative_plane_tolerance: float = 1e-6,
+    restoration_sweeps: int = 8,
+    final_polish_sweeps: int = 400,
 ) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
     ref = np.asarray(reference, dtype=float)
     f = np.asarray(faces, dtype=int)
@@ -173,6 +257,7 @@ def _augmented_lagrangian_planarize(
 
     previous_violation = float("inf")
     inner_total = 0
+    restoration_total = 0
     converged = False
     outer_done = 0
     last_inner_success = True
@@ -214,6 +299,20 @@ def _augmented_lagrangian_planarize(
         last_inner_message = str(getattr(result, "message", ""))
         x = np.asarray(result.x, dtype=float).reshape(ref.shape)
 
+        before_restore = _quad_plane_distances(x, constraint_faces)
+        max_before_restore = float(np.max(before_restore)) if len(before_restore) else 0.0
+        x, used, max_after_restore = _consensus_planarity_restore(
+            x,
+            f4,
+            sweeps=max(0, int(restoration_sweeps)),
+            relaxation=1.0,
+            tolerance=plane_tol,
+            constraint_faces=constraint_faces,
+        )
+        restoration_total += int(used)
+
+        # Update multipliers using the restored iterate. This makes lambda track
+        # the residual of the actual candidate that will seed the next outer step.
         constraints, _ = _quad_constraint_values_and_gradient(x, constraint_faces, scales)
         lambdas = lambdas + rho * constraints
 
@@ -222,7 +321,9 @@ def _augmented_lagrangian_planarize(
         normalized_violation = float(np.max(np.abs(constraints))) if len(constraints) else 0.0
         print(
             "[OPTCUTS-TEST-K3D-AL] "
-            f"outer={outer_done} rho={rho:.6g} max_plane_dist={max_dist:.6g} "
+            f"outer={outer_done} rho={rho:.6g} "
+            f"plane_before_restore={max_before_restore:.6g} "
+            f"max_plane_dist={max_dist:.6g} restore_sweeps={used} "
             f"max_constraint={normalized_violation:.6g} inner_success={last_inner_success}"
         )
         if max_dist <= plane_tol:
@@ -233,10 +334,34 @@ def _augmented_lagrangian_planarize(
             rho = min(rho * 5.0, 1e12)
         previous_violation = normalized_violation
 
+    # Hard-feasibility polishing.  This stage does not change the target
+    # objective; it only alternates exact per-face plane projections and shared
+    # vertex consensus until the equality constraints are numerically satisfied.
+    polish_used = 0
+    pre_polish_dist = _quad_plane_distances(x, constraint_faces)
+    pre_polish_max = float(np.max(pre_polish_dist)) if len(pre_polish_dist) else 0.0
+    if pre_polish_max > plane_tol and int(final_polish_sweeps) > 0:
+        x, polish_used, _ = _consensus_planarity_restore(
+            x,
+            f4,
+            sweeps=max(0, int(final_polish_sweeps)),
+            relaxation=1.0,
+            tolerance=plane_tol,
+            constraint_faces=constraint_faces,
+        )
+        restoration_total += int(polish_used)
+
     after_dist = _quad_plane_distances(x, constraint_faces)
     max_after = float(np.max(after_dist)) if len(after_dist) else 0.0
     rms_after = float(np.sqrt(np.mean(after_dist * after_dist))) if len(after_dist) else 0.0
+    converged = bool(max_after <= plane_tol)
     displacement = np.linalg.norm(x - ref, axis=1)
+
+    print(
+        "[OPTCUTS-TEST-K3D-AL-FINAL] "
+        f"pre_polish={pre_polish_max:.6g} max_plane_dist={max_after:.6g} "
+        f"tol={plane_tol:.6g} polish_sweeps={polish_used} converged={converged}"
+    )
 
     return x, {
         "k3d_augmented_lagrangian_applied": True,
@@ -253,6 +378,9 @@ def _augmented_lagrangian_planarize(
         "k3d_augmented_lagrangian_last_inner_success": bool(last_inner_success),
         "k3d_augmented_lagrangian_last_inner_message": str(last_inner_message),
         "k3d_augmented_lagrangian_converged": bool(converged),
+        "k3d_planarity_restoration_sweeps_total": int(restoration_total),
+        "k3d_planarity_final_polish_sweeps": int(polish_used),
+        "k3d_planarity_pre_final_polish_max_distance": float(pre_polish_max),
         "k3d_hard_planarity_tolerance": float(plane_tol),
         "k3d_hard_planarity_max_distance_before": float(max_before),
         "k3d_hard_planarity_rms_distance_before": float(rms_before),
@@ -285,17 +413,19 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
             outer_iterations=int(getattr(params, "k3d_al_outer_iterations", 16)),
             inner_iterations=int(getattr(params, "k3d_al_inner_iterations", 70)),
             relative_plane_tolerance=float(getattr(params, "k3d_al_relative_planarity_tolerance", 1e-6)),
+            restoration_sweeps=int(getattr(params, "k3d_al_restoration_sweeps", 8)),
+            final_polish_sweeps=int(getattr(params, "k3d_al_final_polish_sweeps", 400)),
         )
         k3d.vertices[:] = solved
         try:
             k3d.metrics.update(al_metrics)
-            k3d.metrics["k3d_planarity_mode"] = "hard equality via robust augmented Lagrangian"
+            k3d.metrics["k3d_planarity_mode"] = "hard equality via robust augmented Lagrangian + feasibility restoration"
             k3d.metrics["k3d_soft_w_planar_is_authoritative"] = False
             k3d.metrics["k3d_al_authoritative_result"] = True
         except Exception:
             pass
         try:
-            report.objective = str(getattr(report, "objective", "")) + " + hard quad planarity (Augmented Lagrangian)"
+            report.objective = str(getattr(report, "objective", "")) + " + hard quad planarity (Augmented Lagrangian + feasibility restoration)"
             report.constraint_violation = float(al_metrics.get("k3d_hard_planarity_max_distance_after", 0.0))
         except Exception:
             pass
@@ -321,4 +451,5 @@ __all__ = [
     "install_optcuts_test_k3d_augmented_lagrangian_patch",
     "_robust_constraint_faces",
     "_quad_plane_distances",
+    "_consensus_planarity_restore",
 ]
