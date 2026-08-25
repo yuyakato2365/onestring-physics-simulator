@@ -14,7 +14,7 @@ from .optcuts_test_simple_pipeline_patch import install_optcuts_test_simple_pipe
 from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_clip_m2d_patch
 from .optcuts_test_polygon_visualization_patch import install_optcuts_test_polygon_visualization_patch
 from .optcuts_test_k2d_relative_layout_patch import install_optcuts_test_k2d_relative_layout_patch
-from .optcuts_test_k2d_overlap_nonfatal_patch import install_optcuts_test_k2d_overlap_nonfatal_patch
+from .optcuts_test_k2d_hard_feasibility_patch import install_optcuts_test_k2d_hard_feasibility_patch
 from .optcuts_test_k2d_overlap_visualization_patch import install_optcuts_test_k2d_overlap_visualization_patch
 from .optcuts_test_k3d_pre_al_validity_patch import install_optcuts_test_k3d_pre_al_validity_patch
 from .optcuts_test_k3d_augmented_lagrangian_patch import install_optcuts_test_k3d_augmented_lagrangian_patch
@@ -39,11 +39,14 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     install_optcuts_test_k3d_slsqp_polish_patch(pipeline)
     install_optcuts_test_k3d_practical_planarity_tolerance_patch(pipeline)
 
-    # K2D first performs the rigid SE(2)+SAT separation solve. Residual overlaps
-    # are then converted into non-fatal diagnostics and highlighted in the K2D
-    # view rather than aborting the rest of the pipeline.
+    # K2D hard feasibility is authoritative.  Patch the feasibility operator
+    # before installing the rigid-layout wrapper so the returned K2D layout must
+    # have zero positive-area overlaps.  If sequential SAT projection stalls,
+    # rigid tile centres are minimally expanded until a feasible layout exists.
+    install_optcuts_test_k2d_hard_feasibility_patch()
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
-    install_optcuts_test_k2d_overlap_nonfatal_patch()
+    # Keep the diagnostic renderer installed; under the hard constraint it should
+    # normally have no overlap tiles to highlight.
     install_optcuts_test_k2d_overlap_visualization_patch()
     install_optcuts_test_polygon_visualization_patch()
 
