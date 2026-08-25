@@ -8,6 +8,14 @@ independent rigid tiles.  Each K3D quad is flattened to its intrinsic best-fit
 plane, rigidly aligned to the corresponding M2D tile, and then optimized only by
 one SE(2) pose per tile with OneString-style hinge/collision/anchor terms.
 
+For ``optcuts_test`` collision avoidance is now an acceptance constraint, not
+only a soft energy.  After the ordinary OneString-style SE(2) solve, an SAT-based
+rigid feasibility projection translates penetrating tiles apart by their minimum
+translation vectors (MTVs) until no positive-area overlap remains.  Point/edge
+contact at a hinge is allowed; actual penetration is not.  If any penetration
+remains after the hard projection, K2D is rejected rather than silently passed
+downstream.
+
 The resulting independent layout is injected into ``_make_flat_tile_layout`` so
 K2D visualization and T2D construction use the rigid linkage, not the legacy
 shared-vertex embedding.
@@ -46,12 +54,7 @@ def _rigid_align_2d(source: np.ndarray, target: np.ndarray) -> np.ndarray:
 
 
 def _flatten_k3d_tile(points_3d: np.ndarray, m2d_reference: np.ndarray) -> np.ndarray:
-    """Flatten one K3D quad without changing its in-plane rigid geometry.
-
-    K3D should already be nearly planar.  SVD gives its best-fit plane; the two
-    in-plane coordinates are then rigidly aligned to the corresponding M2D tile.
-    No vertex of the tile is independently optimized after this step.
-    """
+    """Flatten one K3D quad without changing its in-plane rigid geometry."""
     p = np.asarray(points_3d, dtype=float)
     c = np.mean(p, axis=0)
     q = p - c
@@ -110,6 +113,98 @@ def _relative_center_rms(layout: np.ndarray, reference: np.ndarray, constraints:
     return float(np.sqrt(np.mean(vals * vals))) if vals.size else 0.0
 
 
+def _collision_backend(pipeline: Any):
+    owner = getattr(pipeline, "_original", None)
+    pair_fn = getattr(owner, "_spatial_candidate_pairs_for_tiles", None) or getattr(pipeline, "_spatial_candidate_pairs_for_tiles", None)
+    sat_fn = getattr(owner, "_sat_polygon_mtv", None) or getattr(pipeline, "_sat_polygon_mtv", None)
+    return pair_fn, sat_fn
+
+
+def _tile_scale(tiles: np.ndarray) -> float:
+    t = np.asarray(tiles, dtype=float)
+    if not t.size:
+        return 1.0
+    lengths = np.linalg.norm(np.roll(t, -1, axis=1) - t, axis=2)
+    positive = lengths[lengths > 1e-12]
+    return float(np.median(positive)) if positive.size else 1.0
+
+
+def _penetrating_pairs(pipeline: Any, tiles: np.ndarray, penetration_tolerance: float) -> list[tuple[int, int, np.ndarray, float]]:
+    """Return only positive-area penetrations; hinge point/edge contact is allowed."""
+    t = np.asarray(tiles, dtype=float)
+    if len(t) < 2:
+        return []
+    pair_fn, sat_fn = _collision_backend(pipeline)
+    if pair_fn is None or sat_fn is None:
+        raise RuntimeError("OPTCUTS_TEST_K2D_HARD_COLLISION_BACKEND_UNAVAILABLE")
+    scale = _tile_scale(t)
+    pairs = pair_fn(t, pad=max(scale * 0.08, 1e-5))
+    bad: list[tuple[int, int, np.ndarray, float]] = []
+    tol = max(float(penetration_tolerance), scale * 1e-12, 1e-12)
+    for i, j in pairs:
+        overlap, mtv, signed = sat_fn(t[i], t[j], clearance=0.0)
+        mtv = np.asarray(mtv, dtype=float)
+        depth = float(np.linalg.norm(mtv)) if overlap else 0.0
+        # _sat_polygon_mtv reports touching polygons as overlap with zero MTV.
+        # That contact is intentional at vertex hinges and is not penetration.
+        if overlap and depth > tol and float(signed) < -tol:
+            bad.append((int(i), int(j), mtv, depth))
+    return bad
+
+
+def _hard_nonoverlap_project(
+    pipeline: Any,
+    tiles: np.ndarray,
+    *,
+    max_sweeps: int,
+    penetration_tolerance: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Rigidly translate penetrating tiles until SAT penetration is zero.
+
+    Each correction is a pure translation, so per-tile K3D intrinsic geometry is
+    preserved exactly.  We use the SAT minimum translation vector and split it
+    equally between the two tiles.  The global centroid is therefore preserved.
+    """
+    x = np.asarray(tiles, dtype=float).copy()
+    before = _penetrating_pairs(pipeline, x, penetration_tolerance)
+    initial_count = len(before)
+    max_depth_before = max((item[3] for item in before), default=0.0)
+    sweeps_used = 0
+
+    for sweep in range(max(1, int(max_sweeps))):
+        bad = _penetrating_pairs(pipeline, x, penetration_tolerance)
+        if not bad:
+            break
+        shifts = np.zeros((len(x), 2), dtype=float)
+        counts = np.zeros(len(x), dtype=float)
+        for i, j, mtv, _depth in bad:
+            # mtv points from j toward i; half on each tile separates the pair.
+            shifts[i] += 0.5 * mtv
+            shifts[j] -= 0.5 * mtv
+            counts[i] += 1.0
+            counts[j] += 1.0
+        active = counts > 0.0
+        if not np.any(active):
+            break
+        shifts[active] /= counts[active, None]
+        x[active] += shifts[active, None, :]
+        sweeps_used = sweep + 1
+
+    after = _penetrating_pairs(pipeline, x, penetration_tolerance)
+    max_depth_after = max((item[3] for item in after), default=0.0)
+    return x, {
+        "onestring_k2d_hard_nonoverlap_applied": True,
+        "onestring_k2d_hard_nonoverlap_model": "SAT MTV rigid-translation feasibility projection",
+        "onestring_k2d_hard_nonoverlap_touching_allowed": True,
+        "onestring_k2d_hard_nonoverlap_initial_penetration_count": int(initial_count),
+        "onestring_k2d_hard_nonoverlap_final_penetration_count": int(len(after)),
+        "onestring_k2d_hard_nonoverlap_max_depth_before": float(max_depth_before),
+        "onestring_k2d_hard_nonoverlap_max_depth_after": float(max_depth_after),
+        "onestring_k2d_hard_nonoverlap_sweeps": int(sweeps_used),
+        "onestring_k2d_hard_nonoverlap_satisfied": bool(len(after) == 0),
+    }
+
+
 def _build_rigid_k2d_layout(pipeline: Any, mesh_2d: Any, mesh_3d: Any, params: Any, progress_callback=None):
     faces = np.asarray(mesh_2d.faces, dtype=int)
     if len(faces) == 0:
@@ -120,7 +215,6 @@ def _build_rigid_k2d_layout(pipeline: Any, mesh_2d: Any, mesh_3d: Any, params: A
     m2d_tiles = m2d_vertices[faces, :2]
     k3d_tiles = k3d_vertices[faces, :3]
 
-    # Per-tile intrinsic geometry comes from K3D.  Its pose comes from M2D.
     rest = np.asarray(
         [_flatten_k3d_tile(k3d_tiles[i], m2d_tiles[i]) for i in range(len(faces))],
         dtype=float,
@@ -138,16 +232,10 @@ def _build_rigid_k2d_layout(pipeline: Any, mesh_2d: Any, mesh_3d: Any, params: A
 
     tile_size = max(float(getattr(mesh_2d.grid, "tile_size", 1.0)), 1e-8)
     gap_size = max(float(getattr(mesh_2d.grid, "gap_size", 0.0)), 0.0)
-    # A small positive clearance asks neighboring rigid tiles to open only as much
-    # as fabrication needs.  Strong E_Conn keeps the selected vertex hinge nearly
-    # coincident, so the motion is predominantly rotation about the hinge rather
-    # than arbitrary translation/scattering.
     clearance = max(gap_size * 0.20, tile_size * 0.008, 1e-6)
     iterations = max(80, int(getattr(params, "hinge_layout_iterations", 120)))
     connection_weight = max(8.0, float(getattr(params, "hinge_layout_connection_weight", 3.0)) * 2.5)
     collision_weight = max(1.5, float(getattr(params, "hinge_layout_collision_weight", 0.35)) * 3.0)
-    # This anchor is deliberately much stronger than the later T2D optimizer: K2D
-    # should stay in the M2D neighborhood and only open the linkage locally.
     anchor_weight = max(0.75, float(getattr(params, "hinge_layout_anchor_weight", 0.03)) * 12.0)
     max_drift = min(0.75, max(0.25, float(getattr(params, "hinge_layout_max_center_drift_tiles", 2.0))))
 
@@ -172,28 +260,40 @@ def _build_rigid_k2d_layout(pipeline: Any, mesh_2d: Any, mesh_3d: Any, params: A
         progress_callback=progress_callback,
     )
     solved = np.asarray(solved, dtype=float)
-    after_hinge = _hinge_rms(solved, constraints)
-    after_rel = _relative_center_rms(solved, rest, constraints)
     shape_rms_after, shape_max_after = _tile_shape_error_to_k3d(solved, k3d_tiles)
 
-    # SE(2)-only optimization should preserve the per-tile K3D intrinsic shape to
-    # numerical precision.  If not, fail safe to the rigid rest placement.
     if shape_max_after > max(shape_max_before + 1e-7, 1e-5 * tile_size):
         solved = rest.copy()
-        after_hinge = before_hinge
-        after_rel = before_rel
         shape_rms_after, shape_max_after = shape_rms_before, shape_max_before
         fallback = True
     else:
         fallback = False
 
+    penetration_tol = max(tile_size * float(getattr(params, "k2d_hard_nonoverlap_relative_tolerance", 1e-9)), 1e-12)
+    solved, hard_metrics = _hard_nonoverlap_project(
+        pipeline,
+        solved,
+        max_sweeps=int(getattr(params, "k2d_hard_nonoverlap_max_sweeps", 400)),
+        penetration_tolerance=penetration_tol,
+    )
+    after_hinge = _hinge_rms(solved, constraints)
+    after_rel = _relative_center_rms(solved, rest, constraints)
+    shape_rms_after, shape_max_after = _tile_shape_error_to_k3d(solved, k3d_tiles)
+
+    if int(hard_metrics.get("onestring_k2d_hard_nonoverlap_final_penetration_count", 0)) > 0:
+        raise RuntimeError(
+            "OPTCUTS_TEST_K2D_HARD_NONOVERLAP_FAILED: rigid K2D still contains positive-area "
+            f"tile penetrations after hard SAT projection; count={hard_metrics.get('onestring_k2d_hard_nonoverlap_final_penetration_count')} "
+            f"max_depth={hard_metrics.get('onestring_k2d_hard_nonoverlap_max_depth_after'):.9g}."
+        )
+
     metrics = {
         "onestring_k2d_rigid_layout_applied": True,
         "onestring_k2d_authoritative_representation": "independent rigid tiles; shared QuadMesh retained only for topology compatibility",
-        "onestring_k2d_model": "K3D intrinsic quad -> per-tile flatten -> SE(2) pose optimization with E_Rigid + E_Conn + E_Collision + M2D anchor",
+        "onestring_k2d_model": "K3D intrinsic quad -> per-tile flatten -> SE(2) soft solve -> hard SAT non-overlap projection",
         "onestring_k2d_shared_vertex_metric_embedding_authoritative": False,
-        "onestring_k2d_tile_pose_dof": "SE(2): theta, tx, ty per tile",
-        "onestring_k2d_hinge_model": "one alternating vertex joint per neighboring tile pair",
+        "onestring_k2d_tile_pose_dof": "SE(2): theta, tx, ty per tile; hard projection uses rigid translation only",
+        "onestring_k2d_hinge_model": "one alternating vertex joint per neighboring tile pair; hinge proximity remains soft, non-overlap is hard",
         "onestring_k2d_hinge_constraint_count": int(len(constraints)),
         "onestring_k2d_clearance": float(clearance),
         "onestring_k2d_connection_weight": float(connection_weight),
@@ -210,13 +310,17 @@ def _build_rigid_k2d_layout(pipeline: Any, mesh_2d: Any, mesh_3d: Any, params: A
         "onestring_k2d_shape_max_error_to_K3D_after": float(shape_max_after),
         "onestring_k2d_tile_rigidity_preserved": bool(shape_max_after <= max(shape_max_before + 1e-7, 1e-5 * tile_size)),
         "onestring_k2d_rigid_fallback_used": bool(fallback),
+        "onestring_k2d_hard_nonoverlap_penetration_tolerance": float(penetration_tol),
         **dict(solver_metrics or {}),
+        **hard_metrics,
     }
     print(
-        "[OPTCUTS-TEST-K2D-ONESTRING] "
+        "[OPTCUTS-TEST-K2D-HARD] "
         f"tiles={len(solved)} hinges={len(constraints)} "
-        f"hinge_rms={before_hinge:.6g}->{after_hinge:.6g} "
-        f"relative={after_rel:.6g} shape_max={shape_max_after:.6g} fallback={fallback}"
+        f"penetrations={hard_metrics.get('onestring_k2d_hard_nonoverlap_initial_penetration_count', 0)}"
+        f"->{hard_metrics.get('onestring_k2d_hard_nonoverlap_final_penetration_count', 0)} "
+        f"max_depth={hard_metrics.get('onestring_k2d_hard_nonoverlap_max_depth_after', 0.0):.6g} "
+        f"hinge_rms={before_hinge:.6g}->{after_hinge:.6g} shape_max={shape_max_after:.6g} fallback={fallback}"
     )
     return solved, metrics
 
@@ -225,21 +329,11 @@ def _layout_collision_metrics(pipeline: Any, tiles: np.ndarray) -> tuple[int, fl
     t = np.asarray(tiles, dtype=float)
     if len(t) < 2:
         return 0, 0.0
-    owner = getattr(pipeline, "_original", None)
-    pair_fn = getattr(owner, "_spatial_candidate_pairs_for_tiles", None) or getattr(pipeline, "_spatial_candidate_pairs_for_tiles", None)
-    sat_fn = getattr(owner, "_sat_polygon_mtv", None) or getattr(pipeline, "_sat_polygon_mtv", None)
-    if pair_fn is None or sat_fn is None:
-        return 0, 0.0
-    scale = float(np.median(np.linalg.norm(np.roll(t, -1, axis=1) - t, axis=2))) if t.size else 1.0
-    pairs = pair_fn(t, pad=max(scale * 0.05, 1e-5))
-    collisions = 0
-    min_clear = float("inf")
-    for i, j in pairs:
-        overlap, _mtv, signed = sat_fn(t[i], t[j], clearance=0.0)
-        if overlap:
-            collisions += 1
-        min_clear = min(min_clear, float(signed))
-    return int(collisions), float(min_clear if np.isfinite(min_clear) else 0.0)
+    scale = _tile_scale(t)
+    tol = max(scale * 1e-9, 1e-12)
+    bad = _penetrating_pairs(pipeline, t, tol)
+    min_clear = -max((item[3] for item in bad), default=0.0)
+    return int(len(bad)), float(min_clear)
 
 
 def install_optcuts_test_k2d_relative_layout_patch(pipeline: Any) -> None:
@@ -251,9 +345,6 @@ def install_optcuts_test_k2d_relative_layout_patch(pipeline: Any) -> None:
     base_make_layout = pipeline._make_flat_tile_layout
 
     def optimize(mesh_2d: Any, mesh_3d: Any, params: Any, progress_callback=None):
-        # Keep the legacy shared K2D mesh only as a topology carrier, because many
-        # later functions still expect face/vertex ids from it.  Its scattered
-        # vertex embedding is no longer used as the physical K2D configuration.
         result = base_optimize(mesh_2d, mesh_3d, params, progress_callback=progress_callback)
         k2d_mesh, report = result
         if str(getattr(params, "omega_parameterization_mode", "")) != "optcuts_test":
@@ -270,14 +361,14 @@ def install_optcuts_test_k2d_relative_layout_patch(pipeline: Any) -> None:
         setattr(k2d_mesh, "_onestring_k2d_m2d_reference_xy", np.asarray(mesh_2d.vertices, dtype=float)[np.asarray(mesh_2d.faces, int), :2])
         try:
             k2d_mesh.metrics.update(metrics)
-            k2d_mesh.metrics["objective"] = "OneString K2D: rigid tile poses with E_Rigid + E_Conn + E_Collision + M2D-relative anchor"
-            k2d_mesh.metrics["actual_backend"] = "OneString SE2 rigid-tile layout"
-            k2d_mesh.metrics["dominant_backend"] = "cpu rigid-tile local/global"
+            k2d_mesh.metrics["objective"] = "OneString K2D rigid tiles; collision-free placement is a hard acceptance constraint"
+            k2d_mesh.metrics["actual_backend"] = "OneString SE2 + hard SAT non-overlap projection"
+            k2d_mesh.metrics["dominant_backend"] = "cpu rigid-tile local/global + SAT feasibility projection"
         except Exception:
             pass
         try:
-            report.objective = "OneString rigid-tile flat linkage; vertex hinges preserved while collision opens local gaps."
-            report.constraint_violation = float(metrics.get("onestring_k2d_hinge_rms_after", 0.0))
+            report.objective = "Rigid-tile flat linkage with hard positive-area non-overlap constraint."
+            report.constraint_violation = float(metrics.get("onestring_k2d_hard_nonoverlap_final_penetration_count", 0.0))
         except Exception:
             pass
         return k2d_mesh, report
@@ -291,19 +382,23 @@ def install_optcuts_test_k2d_relative_layout_patch(pipeline: Any) -> None:
         if rigid.ndim != 3 or rigid.shape[1:] != (4, 2) or len(rigid) != len(layout.tile_top_vertices_2d):
             return layout
         layout.tile_top_vertices_2d = rigid.copy()
-        # Gap polygons produced from the obsolete shared embedding are invalid.
-        # Downstream gap graph is rebuilt from the actual T2D linkage anyway.
         layout.gap_polygons = []
         collisions, min_clear = _layout_collision_metrics(pipeline, rigid)
+        if collisions > 0:
+            raise RuntimeError(
+                "OPTCUTS_TEST_K2D_LAYOUT_HARD_NONOVERLAP_ASSERTION_FAILED: authoritative rigid K2D "
+                f"contains {collisions} positive-area overlaps after optimization."
+            )
         try:
             layout.metrics.update(dict(getattr(mesh, "metrics", {}) or {}))
             layout.metrics.update({
-                "layout_type": "OneString rigid-tile vertex-hinge flat linkage",
+                "layout_type": "OneString rigid-tile vertex-hinge flat linkage with hard non-overlap",
                 "tile_overlap_count": int(collisions),
                 "min_clearance": float(min_clear),
                 "k2d_gap_count": int(len(getattr(layout, "hinge_pairs", []) or [])),
                 "onestring_k2d_flat_layout_uses_authoritative_rigid_tiles": True,
                 "onestring_k2d_legacy_shared_layout_discarded": True,
+                "onestring_k2d_hard_nonoverlap_final_assertion": True,
             })
         except Exception:
             pass
