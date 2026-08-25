@@ -14,6 +14,8 @@ from .optcuts_test_simple_pipeline_patch import install_optcuts_test_simple_pipe
 from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_clip_m2d_patch
 from .optcuts_test_polygon_visualization_patch import install_optcuts_test_polygon_visualization_patch
 from .optcuts_test_k2d_relative_layout_patch import install_optcuts_test_k2d_relative_layout_patch
+from .optcuts_test_k2d_overlap_nonfatal_patch import install_optcuts_test_k2d_overlap_nonfatal_patch
+from .optcuts_test_k2d_overlap_visualization_patch import install_optcuts_test_k2d_overlap_visualization_patch
 from .optcuts_test_k3d_pre_al_validity_patch import install_optcuts_test_k3d_pre_al_validity_patch
 from .optcuts_test_k3d_augmented_lagrangian_patch import install_optcuts_test_k3d_augmented_lagrangian_patch
 from .optcuts_test_k3d_slsqp_polish_patch import install_optcuts_test_k3d_slsqp_polish_patch
@@ -26,24 +28,23 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_test_seam_metadata_bridge_installed", False):
         return
 
-    # This wrapper is installed after the older grid-outline experiment. For
-    # optcuts_test it deliberately calls ordinary official OptCuts and then runs
-    # equal-arclength + Taubin smoothing + harmonic Omega regeneration, so the
-    # grid-outline forcing path is bypassed.
     install_optcuts_test_simple_pipeline_patch(pipeline)
     install_optcuts_test_boundary_clip_m2d_patch(pipeline)
 
     # K3D wrapper order is intentional:
     # ordinary K3D -> validity repair -> Augmented Lagrangian hard planarity
-    # -> explicit SLSQP equality polishing -> fabrication-practical acceptance
-    # tolerance publication. The generic outer validity guard installed by
-    # app_optcuts.py then checks the polished result without backtracking it.
+    # -> explicit SLSQP equality polishing -> fabrication-practical acceptance.
     install_optcuts_test_k3d_pre_al_validity_patch(pipeline)
     install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline)
     install_optcuts_test_k3d_slsqp_polish_patch(pipeline)
     install_optcuts_test_k3d_practical_planarity_tolerance_patch(pipeline)
 
+    # K2D first performs the rigid SE(2)+SAT separation solve. Residual overlaps
+    # are then converted into non-fatal diagnostics and highlighted in the K2D
+    # view rather than aborting the rest of the pipeline.
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
+    install_optcuts_test_k2d_overlap_nonfatal_patch()
+    install_optcuts_test_k2d_overlap_visualization_patch()
     install_optcuts_test_polygon_visualization_patch()
 
     base_flatten = pipeline._flatten_to_domain
@@ -53,9 +54,6 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
         if str(getattr(parameterization, "method", "")) != "optcuts_test":
             return domain
 
-        # Keep the actual OptCuts source seam for diagnostics/visualization only.
-        # DO NOT expose it through _optcuts_grid_seam_payload: that is the legacy
-        # trigger which converts it into rectilinear H/V grid paths.
         payload = extract_connected_seam_payload_robust(parameterization)
         setattr(domain, "_optcuts_test_source_seam_payload", payload)
         setattr(parameterization, "_optcuts_test_source_seam_payload", payload)
