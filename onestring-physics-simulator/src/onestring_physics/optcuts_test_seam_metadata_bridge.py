@@ -13,6 +13,7 @@ from .optcuts_seam_extraction_patch import extract_connected_seam_payload_robust
 from .optcuts_test_simple_pipeline_patch import install_optcuts_test_simple_pipeline_patch
 from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_clip_m2d_patch
 from .optcuts_test_polygon_visualization_patch import install_optcuts_test_polygon_visualization_patch
+from .optcuts_test_performance_patch import install_optcuts_test_performance_patch
 from .optcuts_test_k2d_relative_layout_patch import install_optcuts_test_k2d_relative_layout_patch
 from .optcuts_test_k2d_hard_feasibility_patch import install_optcuts_test_k2d_hard_feasibility_patch
 from .optcuts_test_k2d_hard_hinge_patch import install_optcuts_test_k2d_hard_hinge_patch
@@ -32,6 +33,11 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     install_optcuts_test_simple_pipeline_patch(pipeline)
     install_optcuts_test_boundary_clip_m2d_patch(pipeline)
 
+    # Install bounded performance defaults before the expensive wrappers capture
+    # their base functions.  The mathematical model is unchanged; only iteration
+    # and collision-candidate budgets are reduced for interactive use.
+    install_optcuts_test_performance_patch(pipeline)
+
     # K3D wrapper order is intentional:
     # ordinary K3D -> validity repair -> Augmented Lagrangian hard planarity
     # -> explicit SLSQP equality polishing -> fabrication-practical acceptance.
@@ -40,12 +46,12 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     install_optcuts_test_k3d_slsqp_polish_patch(pipeline)
     install_optcuts_test_k3d_practical_planarity_tolerance_patch(pipeline)
 
-    # K2D hard-feasibility stack:
-    # 1) make collision-only SAT projection strict and consistent,
-    # 2) install rigid SE(2) K2D layout,
-    # 3) wrap its final result with joint hard feasibility for both hinge
-    #    coincidence and non-overlap.  The joint stage intentionally does not use
-    #    global centre expansion because that would break hinge coincidence.
+    # K2D stack:
+    # 1) collision-only hard feasibility provides an initialization,
+    # 2) the rigid-layout wrapper constructs the authoritative independent tiles,
+    # 3) kinematic spanning-forest parameterization makes tree hinges exact by
+    #    construction and optimizes only loop closure + collisions.  Remaining
+    #    violations are diagnostic/non-fatal so downstream stages remain visible.
     install_optcuts_test_k2d_hard_feasibility_patch()
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
     install_optcuts_test_k2d_hard_hinge_patch(pipeline)
