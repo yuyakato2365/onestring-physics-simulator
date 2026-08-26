@@ -1,23 +1,33 @@
 """Kinematic hard-hinge parameterization for ``optcuts_test`` K2D.
 
-Tree hinges are not repaired after the fact.  A spanning forest of the hinge
-network is used as the coordinate system itself: every non-root tile is placed
-from its parent hinge, so every tree hinge is coincident by construction for any
-choice of tile angles.  Only loop-closing hinges and positive-area collisions
-remain as feasibility residuals.
+For the original ``optcuts_test`` variant, tree hinges are coincident by
+construction and loop-closing hinges are optimized as zero-gap closures.
 
-The solver attempts to drive loop-closure and collision residuals to zero while
-keeping the kinematic layout near the ordinary K2D initialization.  If the
-remaining constraints are numerically unsatisfied, the best result is still
-returned and the failure is published in metrics instead of aborting the rest of
-the pipeline.
+For ``optcuts_test2`` only, the hard hinge model is different: every hinge keeps
+its reference relative vector from the collision-free initial K2D layout,
+
+    p_b - p_a = d_ab^0.
+
+Tree-edge relative vectors are satisfied by construction by the kinematic
+parameterization.  Only loop-edge relative-vector errors and positive-area
+collisions remain as feasibility residuals.  This preserves the intentional K2D
+gap instead of forcing neighboring hinge points to the same point.
+
+If numerical constraints are not fully satisfied, the best result is still
+returned and published as a nonfatal diagnostic so downstream stages can be
+inspected.
 """
 from __future__ import annotations
 
 from collections import deque
+import os
 from typing import Any
 
 import numpy as np
+
+
+def _is_test2() -> bool:
+    return os.environ.get("ONESTRING_OPTCUTS_TEST_VARIANT", "1").strip() == "2"
 
 
 def _rot(theta: float) -> np.ndarray:
@@ -35,6 +45,28 @@ def _hinge_errors(tiles: np.ndarray, constraints: list[tuple[int, int, int, int]
         else:
             vals.append(float("inf"))
     return np.asarray(vals, dtype=float)
+
+
+def _relative_hinge_vectors(
+    tiles: np.ndarray,
+    constraints: list[tuple[int, int, int, int]],
+) -> np.ndarray:
+    x = np.asarray(tiles, dtype=float)
+    out = np.zeros((len(constraints), 2), dtype=float)
+    for edge_id, (ia, ca, ib, cb) in enumerate(constraints):
+        if 0 <= ia < len(x) and 0 <= ib < len(x):
+            out[edge_id] = x[ib, cb] - x[ia, ca]
+    return out
+
+
+def _relative_hinge_errors(
+    tiles: np.ndarray,
+    constraints: list[tuple[int, int, int, int]],
+    reference_vectors: np.ndarray,
+) -> np.ndarray:
+    current = _relative_hinge_vectors(tiles, constraints)
+    ref = np.asarray(reference_vectors, dtype=float)
+    return np.linalg.norm(current - ref, axis=1)
 
 
 def _build_spanning_forest(
@@ -101,22 +133,43 @@ def _kinematic_layout(
     root_centres: np.ndarray,
     theta: np.ndarray,
     forest: dict[str, Any],
+    *,
+    constraints: list[tuple[int, int, int, int]] | None = None,
+    reference_vectors: np.ndarray | None = None,
 ) -> np.ndarray:
+    """Place a spanning forest using either zero-gap or reference-vector hinges."""
     local = np.asarray(local_tiles, dtype=float)
     angles = np.asarray(theta, dtype=float)
     out = np.zeros_like(local)
     for root in forest["roots"]:
         r = _rot(float(angles[root]))
         out[root] = local[root] @ r + root_centres[root][None, :]
+
     parent = forest["parent"]
+    pe = forest["parent_edge"]
     pc = forest["parent_corner"]
     cc = forest["child_corner"]
+    use_relative = constraints is not None and reference_vectors is not None
+
     for child in forest["order"]:
         p = int(parent[child])
         r = _rot(float(angles[child]))
-        hinge_world = out[p, int(pc[child])]
         translated = local[child] @ r
-        t = hinge_world - translated[int(cc[child])]
+        parent_hinge = out[p, int(pc[child])]
+
+        desired_child_hinge = parent_hinge
+        if use_relative:
+            edge_id = int(pe[child])
+            ia, _ca, ib, _cb = constraints[edge_id]
+            d0 = np.asarray(reference_vectors[edge_id], dtype=float)
+            # d0 is defined as hinge_B - hinge_A.  Reverse it when the tree
+            # traverses the edge from B to A.
+            if p == ia and child == ib:
+                desired_child_hinge = parent_hinge + d0
+            elif p == ib and child == ia:
+                desired_child_hinge = parent_hinge - d0
+
+        t = desired_child_hinge - translated[int(cc[child])]
         out[child] = translated + t[None, :]
     return out
 
@@ -139,12 +192,17 @@ def _loop_error_details(
     tiles: np.ndarray,
     constraints: list[tuple[int, int, int, int]],
     loop_edges: list[int],
+    reference_vectors: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[int]]:
     vals: list[float] = []
     ids: list[int] = []
     for edge_id in loop_edges:
         ia, ca, ib, cb = constraints[edge_id]
-        d = float(np.linalg.norm(tiles[ia, ca] - tiles[ib, cb]))
+        current = tiles[ib, cb] - tiles[ia, ca]
+        if reference_vectors is None:
+            d = float(np.linalg.norm(current))
+        else:
+            d = float(np.linalg.norm(current - reference_vectors[edge_id]))
         vals.append(d)
         ids.append(int(edge_id))
     return np.asarray(vals, dtype=float), ids
@@ -169,6 +227,8 @@ def install_optcuts_test_k2d_hard_hinge_patch(pipeline: Any) -> None:
         if n == 0 or not constraints:
             return initial, dict(metrics or {})
 
+        relative_mode = _is_test2()
+        reference_vectors = _relative_hinge_vectors(initial, constraints) if relative_mode else None
         forest = _build_spanning_forest(n, constraints)
         centres0 = np.mean(initial, axis=1)
         local = initial - centres0[:, None, :]
@@ -188,16 +248,33 @@ def install_optcuts_test_k2d_hard_hinge_patch(pipeline: Any) -> None:
                 a[tile] = float(z[k])
             return a
 
+        def layout_from_z(zv: np.ndarray) -> np.ndarray:
+            return _kinematic_layout(
+                local,
+                root_centres,
+                unpack(zv),
+                forest,
+                constraints=constraints if relative_mode else None,
+                reference_vectors=reference_vectors,
+            )
+
         z = np.zeros(len(variable_tiles), dtype=float)
-        current = _kinematic_layout(local, root_centres, theta, forest)
+        current = layout_from_z(z)
         pair_fn, sat_fn = mod._collision_backend(pipeline_obj)
         loop_edges = list(forest["loop_edges"])
         scipy_used = False
         solver_messages: list[str] = []
 
-        # Repeatedly rebuild a fixed collision-candidate set, then solve the
-        # smooth-ish feasibility residuals in angle space. Tree hinges never
-        # appear as residuals because they are exact by construction.
+        if relative_mode:
+            initial_rel_err = _relative_hinge_errors(current, constraints, reference_vectors)
+            initial_overlap_count = len(mod._penetrating_pairs(pipeline_obj, current, collision_tol))
+            print(
+                "[OPTCUTS-TEST2-K2D-RELATIVE-HINGE] "
+                f"tree_hinges={len(forest['tree_edges'])} loop_hinges={len(loop_edges)} "
+                f"initial_relative_max={float(np.max(initial_rel_err)) if initial_rel_err.size else 0.0:.6g} "
+                f"initial_overlaps={initial_overlap_count}"
+            )
+
         try:
             from scipy.optimize import least_squares
             from scipy.sparse import lil_matrix
@@ -206,18 +283,16 @@ def install_optcuts_test_k2d_hard_hinge_patch(pipeline: Any) -> None:
             outer_passes = max(1, min(6, int(getattr(params, "k2d_kinematic_outer_passes", 4))))
             max_nfev = max(20, int(getattr(params, "k2d_kinematic_max_nfev", 70)))
             for outer in range(outer_passes):
-                current = _kinematic_layout(local, root_centres, unpack(z), forest)
+                current = layout_from_z(z)
                 if pair_fn is not None:
                     collision_pairs = list(pair_fn(current, pad=max(scale * 0.20, 1e-5)))
                 else:
                     collision_pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
-                # Keep the residual size bounded on very large layouts while
-                # always retaining currently penetrating pairs.
+
                 bad_now = mod._penetrating_pairs(pipeline_obj, current, collision_tol)
-                bad_keys = {(min(i, j), max(i, j)) for i, j, _m, _d in bad_now}
-                ordered_pairs = []
+                ordered_pairs: list[tuple[int, int]] = []
                 seen_pairs: set[tuple[int, int]] = set()
-                for i, j in [*( (i, j) for i, j, _m, _d in bad_now ), *collision_pairs]:
+                for i, j in [*((i, j) for i, j, _m, _d in bad_now), *collision_pairs]:
                     key = (min(int(i), int(j)), max(int(i), int(j)))
                     if key not in seen_pairs:
                         seen_pairs.add(key)
@@ -231,11 +306,15 @@ def install_optcuts_test_k2d_hard_hinge_patch(pipeline: Any) -> None:
                 w_angle = float(getattr(params, "k2d_kinematic_angle_weight", 0.002))
 
                 def residual(zv: np.ndarray) -> np.ndarray:
-                    layout = _kinematic_layout(local, root_centres, unpack(zv), forest)
+                    layout = layout_from_z(zv)
                     vals: list[float] = []
                     for edge_id in loop_edges:
                         ia, ca, ib, cb = constraints[edge_id]
-                        diff = (layout[ia, ca] - layout[ib, cb]) / scale
+                        current_vec = layout[ib, cb] - layout[ia, ca]
+                        if relative_mode:
+                            diff = (current_vec - reference_vectors[edge_id]) / scale
+                        else:
+                            diff = current_vec / scale
                         vals.extend((np.sqrt(w_loop) * diff).tolist())
                     if sat_fn is not None:
                         for i, j in collision_pairs:
@@ -248,8 +327,6 @@ def install_optcuts_test_k2d_hard_hinge_patch(pipeline: Any) -> None:
                     vals.extend((np.sqrt(w_angle) * np.asarray(zv, dtype=float)).tolist())
                     return np.asarray(vals, dtype=float)
 
-                # Dependency sparsity follows the tree ancestry.  This makes
-                # finite-difference Jacobians practical for hundreds of tiles.
                 rows = 2 * len(loop_edges) + len(collision_pairs) + 2 * n + len(variable_tiles)
                 sparsity = lil_matrix((rows, len(variable_tiles)), dtype=int)
                 row = 0
@@ -288,20 +365,36 @@ def install_optcuts_test_k2d_hard_hinge_patch(pipeline: Any) -> None:
                     verbose=0,
                 )
                 z = np.asarray(result.x, dtype=float)
-                solver_messages.append(f"pass={outer + 1} success={bool(result.success)} nfev={int(result.nfev)} cost={float(result.cost):.6g}")
+                solver_messages.append(
+                    f"pass={outer + 1} success={bool(result.success)} "
+                    f"nfev={int(result.nfev)} cost={float(result.cost):.6g}"
+                )
 
-                current = _kinematic_layout(local, root_centres, unpack(z), forest)
-                loop_err, _ = _loop_error_details(current, constraints, loop_edges)
+                current = layout_from_z(z)
+                loop_err, _ = _loop_error_details(
+                    current,
+                    constraints,
+                    loop_edges,
+                    reference_vectors if relative_mode else None,
+                )
                 overlaps = mod._penetrating_pairs(pipeline_obj, current, collision_tol)
                 if (loop_err.size == 0 or float(np.max(loop_err)) <= hinge_tol) and not overlaps:
                     break
         except Exception as exc:
             solver_messages.append(f"kinematic least_squares unavailable/failed: {type(exc).__name__}: {exc}")
 
-        final = _kinematic_layout(local, root_centres, unpack(z), forest)
-        all_err = _hinge_errors(final, constraints)
+        final = layout_from_z(z)
+        if relative_mode:
+            all_err = _relative_hinge_errors(final, constraints, reference_vectors)
+        else:
+            all_err = _hinge_errors(final, constraints)
         tree_err = all_err[np.asarray(forest["tree_edges"], dtype=int)] if forest["tree_edges"] else np.zeros(0)
-        loop_err, loop_edge_ids = _loop_error_details(final, constraints, loop_edges)
+        loop_err, loop_edge_ids = _loop_error_details(
+            final,
+            constraints,
+            loop_edges,
+            reference_vectors if relative_mode else None,
+        )
         final_overlaps = mod._penetrating_pairs(pipeline_obj, final, collision_tol)
         overlap_pairs = [(int(i), int(j)) for i, j, _m, _d in final_overlaps]
         overlap_tile_ids = sorted({v for pair in overlap_pairs for v in pair})
@@ -315,12 +408,20 @@ def install_optcuts_test_k2d_hard_hinge_patch(pipeline: Any) -> None:
         loop_max = float(np.max(loop_err)) if loop_err.size else 0.0
         loop_rms = float(np.sqrt(np.mean(loop_err * loop_err))) if loop_err.size else 0.0
         all_max = float(np.max(all_err)) if all_err.size else 0.0
-        feasible = bool(tree_max <= max(hinge_tol * 1e-3, 1e-10) and loop_max <= hinge_tol and len(final_overlaps) == 0)
+        tree_tol = max(hinge_tol * 1e-3, 1e-10)
+        feasible = bool(tree_max <= tree_tol and loop_max <= hinge_tol and len(final_overlaps) == 0)
 
         metrics = dict(metrics or {})
         metrics.update({
             "onestring_k2d_kinematic_parameterization_applied": True,
-            "onestring_k2d_kinematic_model": "spanning-forest hinge kinematics; tree hinges exact by construction; loop closures and SAT collision residuals optimized in angle space",
+            "onestring_k2d_kinematic_model": (
+                "spanning-forest reference-relative hinge kinematics; tree relative vectors exact by construction; "
+                "loop relative-vector closures and SAT collision residuals optimized in angle space"
+                if relative_mode
+                else
+                "spanning-forest zero-gap hinge kinematics; tree hinges exact by construction; loop closures and SAT collision residuals optimized in angle space"
+            ),
+            "onestring_k2d_hinge_constraint_semantics": "reference relative vector hard constraint" if relative_mode else "zero-gap hinge coincidence hard constraint",
             "onestring_k2d_kinematic_component_count": int(len(forest["roots"])),
             "onestring_k2d_kinematic_tree_hinge_count": int(len(forest["tree_edges"])),
             "onestring_k2d_kinematic_loop_hinge_count": int(len(loop_edges)),
@@ -346,22 +447,20 @@ def install_optcuts_test_k2d_hard_hinge_patch(pipeline: Any) -> None:
             "onestring_k2d_tile_rigidity_preserved": True,
         })
 
+        prefix = "OPTCUTS-TEST2-K2D-RELATIVE" if relative_mode else "OPTCUTS-TEST-K2D-KINEMATIC"
         print(
-            "[OPTCUTS-TEST-K2D-KINEMATIC] "
+            f"[{prefix}] "
             f"tree_hinges={len(forest['tree_edges'])} tree_max={tree_max:.6g} "
             f"loop_hinges={len(loop_edges)} loop_max={loop_max:.6g} tol={hinge_tol:.6g} "
             f"overlaps={len(final_overlaps)} feasible={feasible}"
         )
         if not feasible:
             print(
-                "[OPTCUTS-TEST-K2D-KINEMATIC-NONFATAL] constraints not satisfied; "
+                f"[{prefix}-NONFATAL] constraints not satisfied; "
                 "continuing pipeline with diagnostic best-effort K2D layout"
             )
         return final, metrics
 
-    # The old flat-layout wrapper aborts if any residual overlap remains.  In the
-    # kinematic diagnostic mode we intentionally continue, while preserving the
-    # actual overlap count from mesh.metrics for visualization and reporting.
     def permissive_layout_collision_metrics(pipeline_obj: Any, tiles: np.ndarray) -> tuple[int, float]:
         _actual_count, min_clear = original_layout_collision_metrics(pipeline_obj, tiles)
         return 0, float(min_clear)
