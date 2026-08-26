@@ -8,6 +8,11 @@
     existing M2D quad-cell footprint -> grid-cell outer boundary -> Omega
     reparameterization while the OptCuts seam remains a hard boundary.
 
+``optcuts_test2``
+    Same numerical path as optcuts_test, but with separate faster K3D/K2D
+    runtime budgets for profiling and iteration.  optcuts_test itself is kept
+    unchanged for direct comparison.
+
 ``optcuts_grid``
     Experimental native Grid-OptCuts V4 path kept available for comparison.
 """
@@ -37,6 +42,9 @@ from onestring_physics.optcuts_test_boundary_reparameterization_patch import (  
 )
 from onestring_physics.optcuts_test_seam_metadata_bridge import (  # noqa: E402
     install_optcuts_test_seam_metadata_bridge,
+)
+from onestring_physics.optcuts_test2_acceleration_patch import (  # noqa: E402
+    install_optcuts_test2_acceleration_patch,
 )
 from onestring_physics.optcuts_grid_native_pipeline_patch import install_native_grid_optcuts_pipeline_patch  # noqa: E402
 from onestring_physics.optcuts_grid_native_lift_patch import install_native_grid_optcuts_lift_patch  # noqa: E402
@@ -72,11 +80,12 @@ def _install_optcuts_selector() -> None:
         if label != "Omega parameterization mode":
             return original_selectbox(label, options, *args, **kwargs)
 
-        for mode in ("optcuts", "optcuts_test", "optcuts_grid"):
+        for mode in ("optcuts", "optcuts_test", "optcuts_test2", "optcuts_grid"):
             if mode not in option_list:
                 option_list.append(mode)
         value = original_selectbox(label, option_list, *args, **kwargs)
-        if value not in {"optcuts", "optcuts_test", "optcuts_grid"}:
+        if value not in {"optcuts", "optcuts_test", "optcuts_test2", "optcuts_grid"}:
+            os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "0"
             return value
 
         if value == "optcuts":
@@ -87,6 +96,12 @@ def _install_optcuts_selector() -> None:
                 "quad-cell footprint from the initial Omega, use that footprint's outer boundary as "
                 "the new Omega boundary target, and re-solve UV while the OptCuts seam remains fixed "
                 "as a boundary."
+            )
+        elif value == "optcuts_test2":
+            st.caption(
+                "OptCuts_test2: same geometry/constraint pipeline as OptCuts_test, but with a shorter "
+                "K3D AL budget and an accelerated K2D kinematic solve. OptCuts_test remains unchanged "
+                "for comparison."
             )
         else:
             st.caption(
@@ -127,7 +142,7 @@ def _install_optcuts_selector() -> None:
             key="onestring_optcuts_timeout",
         )
 
-        if value in {"optcuts", "optcuts_test"}:
+        if value in {"optcuts", "optcuts_test", "optcuts_test2"}:
             use_bijectivity = st.checkbox(
                 "OptCuts enforce bijectivity",
                 value=os.environ.get("ONESTRING_OPTCUTS_USE_BIJECTIVITY", "1").lower()
@@ -146,7 +161,7 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_U"] = "0"
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = "0"
 
-            if value == "optcuts_test":
+            if value in {"optcuts_test", "optcuts_test2"}:
                 st.markdown("**K3D hard-planarity (Augmented Lagrangian)**")
                 anchor_weight = st.number_input(
                     "K3D AL anchor weight (w_a)",
@@ -167,6 +182,11 @@ def _install_optcuts_selector() -> None:
                     "Smaller w_a = stronger freedom to planarize; larger w_a = stronger preservation "
                     "of the original K3D shape."
                 )
+                if value == "optcuts_test2":
+                    st.caption(
+                        "Test2 speed profile: K3D AL outer=8; K2D kinematic outer<=2, nfev<=40, "
+                        "collision candidates<=900; SciPy finite-difference workers are used when supported."
+                    )
         else:
             angle = st.number_input(
                 "Grid reference direction [deg]",
@@ -194,7 +214,7 @@ def _install_optcuts_selector() -> None:
                 "Max candidate displacement [Grid units]",
                 min_value=0.5,
                 max_value=8.0,
-                value=max(0.5, _safe_float_env("ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS", 2.0)),
+                value=max(0.5, _safe_float_env("ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS", 2.0),),
                 step=0.25,
                 key="onestring_optcuts_grid_max_snap",
             )
@@ -230,6 +250,17 @@ def _install_optcuts_selector() -> None:
         os.environ["ONESTRING_OPTCUTS_LAMBDA_INIT"] = str(float(lambda_init))
         os.environ["ONESTRING_OPTCUTS_TIMEOUT_SECONDS"] = str(float(timeout))
         os.environ["ONESTRING_OPTCUTS_METHOD_TYPE"] = "0"
+
+        # Keep the visible selector value distinct while routing test2 through the
+        # mature optcuts_test patch stack.  The environment flag is the only
+        # behavioral difference and is read by the acceleration wrapper.
+        if value == "optcuts_test2":
+            os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "2"
+            return "optcuts_test"
+        if value == "optcuts_test":
+            os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "1"
+        else:
+            os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "0"
         return value
 
     st.selectbox = patched_selectbox
@@ -313,6 +344,9 @@ install_optcuts_k3d_preflight_patch(pipeline)
 install_optcuts_visualization_compat_patch()
 install_optcuts_source_seam_visualization_patch()
 _install_m2d_after_simple_split()
+# Outermost runtime-budget wrapper.  It is a no-op unless the visible selector
+# chose optcuts_test2 (ONESTRING_OPTCUTS_TEST_VARIANT=2).
+install_optcuts_test2_acceleration_patch(pipeline)
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
