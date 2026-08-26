@@ -15,6 +15,7 @@ from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_
 from .optcuts_test_polygon_visualization_patch import install_optcuts_test_polygon_visualization_patch
 from .optcuts_test_k2d_relative_layout_patch import install_optcuts_test_k2d_relative_layout_patch
 from .optcuts_test_k2d_hard_feasibility_patch import install_optcuts_test_k2d_hard_feasibility_patch
+from .optcuts_test_k2d_hard_hinge_patch import install_optcuts_test_k2d_hard_hinge_patch
 from .optcuts_test_k2d_overlap_visualization_patch import install_optcuts_test_k2d_overlap_visualization_patch
 from .optcuts_test_k3d_pre_al_validity_patch import install_optcuts_test_k3d_pre_al_validity_patch
 from .optcuts_test_k3d_augmented_lagrangian_patch import install_optcuts_test_k3d_augmented_lagrangian_patch
@@ -39,14 +40,15 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     install_optcuts_test_k3d_slsqp_polish_patch(pipeline)
     install_optcuts_test_k3d_practical_planarity_tolerance_patch(pipeline)
 
-    # K2D hard feasibility is authoritative.  Patch the feasibility operator
-    # before installing the rigid-layout wrapper so the returned K2D layout must
-    # have zero positive-area overlaps.  If sequential SAT projection stalls,
-    # rigid tile centres are minimally expanded until a feasible layout exists.
+    # K2D hard-feasibility stack:
+    # 1) make collision-only SAT projection strict and consistent,
+    # 2) install rigid SE(2) K2D layout,
+    # 3) wrap its final result with joint hard feasibility for both hinge
+    #    coincidence and non-overlap.  The joint stage intentionally does not use
+    #    global centre expansion because that would break hinge coincidence.
     install_optcuts_test_k2d_hard_feasibility_patch()
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
-    # Keep the diagnostic renderer installed; under the hard constraint it should
-    # normally have no overlap tiles to highlight.
+    install_optcuts_test_k2d_hard_hinge_patch(pipeline)
     install_optcuts_test_k2d_overlap_visualization_patch()
     install_optcuts_test_polygon_visualization_patch()
 
