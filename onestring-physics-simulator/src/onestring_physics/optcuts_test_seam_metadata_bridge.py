@@ -9,6 +9,7 @@ from .optcuts_test_performance_patch import install_optcuts_test_performance_pat
 from .optcuts_test_k2d_relative_layout_patch import install_optcuts_test_k2d_relative_layout_patch
 from .optcuts_test_k2d_hard_feasibility_patch import install_optcuts_test_k2d_hard_feasibility_patch
 from .optcuts_test_k2d_hard_hinge_patch import install_optcuts_test_k2d_hard_hinge_patch
+from .optcuts_test2_k2d_global_runtime_patch import install_optcuts_test2_k2d_global_runtime_patch
 from .optcuts_test_k2d_overlap_visualization_patch import install_optcuts_test_k2d_overlap_visualization_patch
 from .optcuts_k2d_global_history import install_k2d_history_recorder
 from .optcuts_test_k3d_pre_al_validity_patch import install_optcuts_test_k3d_pre_al_validity_patch
@@ -29,10 +30,21 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
 
     install_optcuts_test_k2d_hard_feasibility_patch()
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
-    # Capture the collision-free rigid K2D *before* the experimental kinematic
-    # wrapper changes it.  This is the reusable checkpoint for new solvers.
+
+    # Capture the collision-free rigid K2D builder before the experimental
+    # spanning-tree hard-hinge wrapper.  optcuts_test2 uses this path directly
+    # so the old tree/loop solve is genuinely bypassed, not merely overwritten.
+    from . import optcuts_test_k2d_relative_layout_patch as k2d_relative_mod
+
     install_k2d_history_recorder(pipeline)
+    test2_global_base_builder = k2d_relative_mod._build_rigid_k2d_layout
+
+    # Keep optcuts_test unchanged as the comparison baseline.
     install_optcuts_test_k2d_hard_hinge_patch(pipeline)
+
+    # Outermost K2D numeric wrapper: optcuts_test2 -> global all-hinge Phase 1;
+    # optcuts_test -> legacy spanning-tree/loop solver.
+    install_optcuts_test2_k2d_global_runtime_patch(pipeline, test2_global_base_builder)
     install_optcuts_test_k2d_overlap_visualization_patch()
     install_optcuts_test_polygon_visualization_patch()
 
