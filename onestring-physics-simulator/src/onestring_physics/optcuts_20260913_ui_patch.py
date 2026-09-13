@@ -12,8 +12,8 @@ from typing import Any
 VERSION_ID = "2026-09-13-surface-constrained-k3d"
 VERSION_LABEL = "2026-09-13 K3D Surface-Constrained Planarization"
 VERSION_DESCRIPTION = (
-    "OptCuts-test2系を土台に、K3Dの各頂点を元の入力メッシュ表面へ最近傍投影しながら、"
-    "quad平面化との交互射影を行う実験版。K2Dはglobal all-hinge Phase 1を使用します。"
+    "K3Dの各頂点を元の入力メッシュ表面へ最近傍投影しながらquad平面化との交互射影を行う実験版。"
+    "K2Dはglobal all-hinge Phase 1を使用します。"
 )
 OMEGA_TEST2_LABEL = "2026-09-13 Surface-Constrained K3D + Global All-Hinge K2D"
 
@@ -24,6 +24,7 @@ def install_20260913_ui_patch(st: Any) -> None:
 
     original_selectbox = st.selectbox
     original_number_input = st.number_input
+    original_caption = st.caption
 
     def patched_selectbox(label: str, options: Any, *args: Any, **kwargs: Any):
         option_list = list(options)
@@ -66,8 +67,23 @@ def install_20260913_ui_patch(st: Any) -> None:
             kwargs["value"] = 0.1
         return original_number_input(label, *args, **kwargs)
 
+    def patched_caption(body: Any, *args: Any, **kwargs: Any):
+        text = str(body)
+        if text.startswith("OptCuts_test2:"):
+            body = (
+                f"{OMEGA_TEST2_LABEL}: official OptCuts seam/cut topology + M2D boundary "
+                "reparameterization, target-surface-constrained K3D planarization, and global all-hinge K2D Phase 1."
+            )
+        elif text.startswith("Test2 speed profile:"):
+            body = (
+                "2026-09-13 runtime profile: K3D AL outer=8 before surface-constrained alternating projection; "
+                "K2D uses the global all-hinge feasibility solve."
+            )
+        return original_caption(body, *args, **kwargs)
+
     st.selectbox = patched_selectbox
     st.number_input = patched_number_input
+    st.caption = patched_caption
     st._onestring_20260913_ui_patch_installed = True
 
 
