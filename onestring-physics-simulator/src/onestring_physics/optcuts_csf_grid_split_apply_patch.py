@@ -1,22 +1,10 @@
 """Bridge measured OptCuts CSF splits into the actual M2D grid topology.
 
 The CSF diagnostic/planner runs at S -> Omega time and stores complete row/column
-cut requests on the flattened domain.  The Simple Split topology patch, however,
-decides whether to cut from ``mesh.metrics['csf_split_applied']``.  Without this
-bridge the requests are visible in logs but never reach the fabricated M2D mesh.
-
-This module makes the paper-style behavior explicit:
-
-* measure the OptCuts scale factor;
-* if a part still needs scale factor > 2, request a complete row/column cut;
-* snap that request to an existing M2D fabrication-grid line (performed by
-  ``simple_split_panel_patch``);
-* duplicate interface vertices so the two sides are topologically disconnected;
-* discard any fabrication-grid cell crossed by the Omega outer boundary instead
-  of keeping a clipped partial tile.
-
-No fake clamping of CSF values is performed.  The measured/planned residual is
-carried through for diagnostics.
+cut requests on the flattened domain. The Simple Split topology patch decides
+whether to cut from ``mesh.metrics['csf_split_applied']``. This module propagates
+those requests and also forces the final runtime M2D route to remove clipped
+boundary panels after all diagnostic wrappers are installed.
 """
 from __future__ import annotations
 
@@ -46,11 +34,7 @@ def install_optcuts_csf_grid_split_apply_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_csf_grid_split_apply_patch_installed", False):
         return
 
-    # The previous diagnostic default of 16 was intentionally small.  For the
-    # paper-style route, keep splitting until sigma<=2 in normal Bunny-scale
-    # examples, while still retaining a finite emergency budget.
     os.environ.setdefault("ONESTRING_OPTCUTS_CSF_MAX_SPLITS", str(DEFAULT_MAX_SPLITS))
-
     base_build = pipeline._build_m2d
 
     def build_m2d_with_csf_split_metadata(grid: Any, domain: Any, params: Any = None):
@@ -60,6 +44,8 @@ def install_optcuts_csf_grid_split_apply_patch(pipeline: Any) -> None:
             return mesh
 
         split_lines = list(_domain_value(domain, "split_lines", []) or [])
+        if not split_lines:
+            split_lines = list(_domain_value(domain, "localized_split_segments", []) or [])
         csf_before = _domain_value(domain, "csf_before", float("nan"))
         csf_after = _domain_value(domain, "csf_after_split", float("nan"))
         threshold = _domain_value(domain, "csf_split_threshold", 2.0)
@@ -67,14 +53,12 @@ def install_optcuts_csf_grid_split_apply_patch(pipeline: Any) -> None:
         metrics = dict(getattr(mesh, "metrics", {}) or {})
         metrics.update(
             {
-                # Canonical flag consumed by simple_split_panel_patch.
                 "csf_split_applied": bool(split_lines),
                 "split_locations": [tuple(line[:2]) for line in split_lines],
                 "csf_split_lines": [tuple(line[:2]) for line in split_lines],
                 "csf_split_threshold": float(threshold),
                 "csf_before": float(csf_before),
                 "csf_after_split": float(csf_after),
-                # Compatibility keys still read by the legacy Streamlit UI.
                 "max_csf_before_split": float(csf_before),
                 "max_csf_after_split": float(csf_after),
                 "paper_style_grid_split_requested": bool(split_lines),
@@ -83,9 +67,6 @@ def install_optcuts_csf_grid_split_apply_patch(pipeline: Any) -> None:
             }
         )
         mesh.metrics.update(metrics)
-
-        # Preserve the requests on the mesh as well.  This is useful for debug
-        # visualizations and makes the hand-off independent of domain lifetime.
         try:
             mesh.split_lines = list(split_lines)
         except Exception:
@@ -113,13 +94,54 @@ def install_optcuts_csf_grid_split_apply_patch(pipeline: Any) -> None:
         if isinstance(glb, dict):
             glb["_build_m2d"] = build_m2d_with_csf_split_metadata
 
-    # Wrap the metadata bridge with strict whole-cell cropping.  Installation is
-    # here (rather than another __init__ hook) so reloads preserve the ordering:
-    # legacy M2D -> CSF metadata -> remove boundary-crossing cells -> Simple Split.
     pipeline._onestring_optcuts_strict_boundary_grid_crop_patch_installed = False
     install_optcuts_strict_boundary_grid_crop_patch(pipeline)
-
     pipeline._onestring_optcuts_csf_grid_split_apply_patch_installed = True
+
+
+def _install_post_diagnostic_grid_policy_hook() -> None:
+    """Make whole-cell cleanup the outermost runtime M2D step.
+
+    app_split_panels installs split_diagnostics after package initialization. That
+    changes the active _build_m2d function. Hook the diagnostics installer itself
+    so the final policy is installed *after* diagnostic_build_m2d and therefore
+    cannot be bypassed by the launcher wiring.
+    """
+    try:
+        from . import split_diagnostics as diagnostics
+        from .final_m2d_grid_policy_patch import install_final_m2d_grid_policy_patch
+    except Exception:
+        return
+
+    if getattr(diagnostics, "_onestring_final_grid_policy_hooked", False):
+        return
+    original_installer = diagnostics.install_split_diagnostics
+
+    def install_and_finalize(pipeline_module: Any, final_module: Any, project_root: Any):
+        result = original_installer(pipeline_module, final_module, project_root)
+        pipeline_module._final_m2d_grid_policy_patch_installed = False
+        install_final_m2d_grid_policy_patch(pipeline_module)
+        active = pipeline_module._build_m2d
+        try:
+            pipeline_module._original._build_m2d = active
+        except Exception:
+            pass
+        for fn in (
+            getattr(pipeline_module, "build_onestring_design", None),
+            getattr(pipeline_module, "_ORIGINAL_BUILD_ONESTRING_DESIGN", None),
+            getattr(getattr(pipeline_module, "_original", None), "build_onestring_design", None),
+        ):
+            glb = getattr(fn, "__globals__", None)
+            if isinstance(glb, dict):
+                glb["_build_m2d"] = active
+        print("[OPTCUTS-FINAL-M2D-GRID-ROUTE] installed after split diagnostics")
+        return result
+
+    diagnostics.install_split_diagnostics = install_and_finalize
+    diagnostics._onestring_final_grid_policy_hooked = True
+
+
+_install_post_diagnostic_grid_policy_hook()
 
 
 __all__ = ["DEFAULT_MAX_SPLITS", "install_optcuts_csf_grid_split_apply_patch"]
