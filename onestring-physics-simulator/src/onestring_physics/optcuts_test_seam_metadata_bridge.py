@@ -18,6 +18,7 @@ from .optcuts_test_k3d_augmented_lagrangian_patch import install_optcuts_test_k3
 from .optcuts_test_k3d_slsqp_polish_patch import install_optcuts_test_k3d_slsqp_polish_patch
 from .optcuts_test_k3d_practical_planarity_tolerance_patch import install_optcuts_test_k3d_practical_planarity_tolerance_patch
 from .optcuts_test2_surface_constrained_k3d_patch import install_optcuts_test2_surface_constrained_k3d_patch
+from .optcuts_test2_surface_result_metadata_patch import install_optcuts_test2_surface_result_metadata_patch
 from .optcuts_20260913_ui_patch import install_20260913_ui_patch
 
 
@@ -37,10 +38,12 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     install_optcuts_test_k3d_slsqp_polish_patch(pipeline)
     install_optcuts_test_k3d_practical_planarity_tolerance_patch(pipeline)
 
-    # Outermost K3D experiment for internal variant=2: after the existing hard
-    # planarity stack, alternate quad-planarity projection and closest-point
-    # projection onto the original target triangle mesh.
+    # 2026-09-13 variant=2: start from the existing hard-planarity result, then
+    # alternate quad planarity and closest-point projection onto the original
+    # target triangle mesh.  The final surface-projected geometry is explicitly
+    # recorded as the experiment's authoritative K3D result.
     install_optcuts_test2_surface_constrained_k3d_patch(pipeline)
+    install_optcuts_test2_surface_result_metadata_patch(pipeline)
 
     install_optcuts_test_k2d_hard_feasibility_patch()
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
