@@ -185,8 +185,6 @@ def main() -> int:
         )
 
     # Always start from the exact source tracked by the checked-out OptCuts commit.
-    # This avoids accumulated local experiments and avoids fragile unified-diff
-    # context matching entirely.
     upstream = subprocess.run(
         ["git", "show", "HEAD:src/TriMesh.cpp"], cwd=str(optcuts),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True,
@@ -212,7 +210,11 @@ def main() -> int:
 
     build = optcuts / "build_onestring"
     build.mkdir(parents=True, exist_ok=True)
-    run(["cmake", "-S", str(optcuts), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release"])
+    run([
+        "cmake", "-S", str(optcuts), "-B", str(build),
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    ])
     jobs = str(max(1, min(12, os.cpu_count() or 1)))
     run(["cmake", "--build", str(build), "--config", "Release", "-j", jobs])
 
