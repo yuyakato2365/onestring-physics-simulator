@@ -24,6 +24,16 @@ def run(cmd: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
+def check_apply(optcuts: Path, patch: Path, reverse: bool = False) -> subprocess.CompletedProcess[str]:
+    cmd = ["git", "apply"]
+    if reverse:
+        cmd.append("--reverse")
+    cmd.extend(["--check", str(patch)])
+    return subprocess.run(
+        cmd, cwd=str(optcuts), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -37,35 +47,39 @@ def main() -> int:
     root = project_root()
     optcuts = (args.optcuts_root or (root / "third_party" / "OptCuts")).expanduser().resolve()
     patch = root / "vendor" / "optcuts_onestring" / "0001-scale-aware-seam-objective.patch"
-    if not (optcuts / "src" / "TriMesh.cpp").is_file():
+    cpp = optcuts / "src" / "TriMesh.cpp"
+    if not cpp.is_file():
         raise SystemExit(
             f"OptCuts checkout not found at {optcuts}. Clone https://github.com/liminchen/OptCuts there first."
         )
     if not patch.is_file():
         raise SystemExit(f"tracked OneString patch missing: {patch}")
 
-    # Apply exactly the tracked source change. If the reverse check succeeds,
-    # the source is already at the desired OneString revision.
-    forward = subprocess.run(
-        ["git", "apply", "--check", str(patch)], cwd=str(optcuts),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
+    # Apply exactly the tracked source change. If a previous experimental
+    # runtime-patcher left its backup behind, restore that clean upstream source
+    # before applying the tracked patch so old experiments cannot contaminate
+    # the dedicated binary.
+    forward = check_apply(optcuts, patch)
+    reverse = check_apply(optcuts, patch, reverse=True) if forward.returncode != 0 else None
+    if forward.returncode != 0 and (reverse is None or reverse.returncode != 0):
+        legacy_backup = cpp.with_suffix(".cpp.onestring_original")
+        if legacy_backup.is_file():
+            print(f"[OPTCUTS-ONESTRING-SOURCE] restoring legacy backup {legacy_backup}")
+            shutil.copy2(legacy_backup, cpp)
+            forward = check_apply(optcuts, patch)
+            reverse = check_apply(optcuts, patch, reverse=True) if forward.returncode != 0 else None
+
     if forward.returncode == 0:
         run(["git", "apply", str(patch)], cwd=optcuts)
         print("[OPTCUTS-ONESTRING-SOURCE] applied tracked source patch")
+    elif reverse is not None and reverse.returncode == 0:
+        print("[OPTCUTS-ONESTRING-SOURCE] tracked source patch already applied")
     else:
-        reverse = subprocess.run(
-            ["git", "apply", "--reverse", "--check", str(patch)], cwd=str(optcuts),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        sys.stderr.write(forward.stderr)
+        raise SystemExit(
+            "Local OptCuts source does not match the upstream source expected by the tracked OneString patch. "
+            "Restore third_party/OptCuts/src/TriMesh.cpp from upstream and rerun this script."
         )
-        if reverse.returncode == 0:
-            print("[OPTCUTS-ONESTRING-SOURCE] tracked source patch already applied")
-        else:
-            sys.stderr.write(forward.stderr)
-            raise SystemExit(
-                "Local OptCuts source does not match the pinned upstream revision closely enough for the tracked patch. "
-                "Restore/refresh the upstream checkout and rerun this script."
-            )
 
     build = optcuts / "build_onestring"
     build.mkdir(parents=True, exist_ok=True)
