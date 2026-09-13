@@ -37,6 +37,7 @@ onestring_abd_upgrade_patch_*/
 onestring_abd_upgrade_patch_*.zip
 *.before_isfinite_fix
 *.before_onestring_predicates_fix
+.onestring_optcuts_binary
 
 # Autodesk ABD build outputs
 third_party/affine-body-dynamics/build/
