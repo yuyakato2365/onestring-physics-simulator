@@ -1,24 +1,25 @@
-"""Inject OneString scale-aware selection into the official OptCuts call used by test2.
+"""Enable the internally modified OptCuts seam objective for ``optcuts_test2``.
 
-The important implementation detail is that we do *not* replace the existing
-``optcuts_test`` S->Omega wrapper.  That wrapper has accumulated seam metadata,
-grid-outline reparameterization, diagnostics, and compatibility layers.  Instead
-we replace only the module-global ``run_official_optcuts`` function looked up by
-``optcuts_pipeline_patch._build_optcuts_parameterization`` at runtime.
+Unlike the previous temporary implementation, this module does not run OptCuts
+multiple times and choose a completed result in Python.  It patches/rebuilds the
+local OptCuts C++ source once, then the *original OptCuts topology search itself*
+evaluates OneString scale-factor improvement for every split/merge candidate.
 
-Thus the normal stack remains:
-    official OptCuts result -> optcuts_test grid-outline reparameterization -> ...
-with the sole test2 change that the first result is selected from several official
-OptCuts solutions using seam length + distortion + OneString scale-factor score.
+The rebuilt binary is shared with the baselines, but the new term is gated by
+``ONESTRING_OPTCUTS_INTERNAL_SCALE_ENABLED``.  Therefore ordinary ``optcuts`` and
+``optcuts_test`` retain the upstream objective; only visible ``optcuts_test2``
+enables the extra term.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import os
+from pathlib import Path
 from typing import Any
 
 from .optcuts_backend import OptCutsConfig
+from .optcuts_internal_scale_factor_patch import ensure_internal_scale_binary
 from . import optcuts_pipeline_patch as optcuts_pipeline
-from .optcuts_scale_aware_selection_patch import run_scale_aware_optcuts
 
 
 def _is_test2() -> bool:
@@ -30,24 +31,52 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
         return
 
     original_run = optcuts_pipeline.run_official_optcuts
-    if getattr(original_run, "_onestring_scale_aware_dispatch", False):
+    if getattr(original_run, "_onestring_internal_scale_dispatch", False):
         pipeline._onestring_test2_scale_aware_parameterization_installed = True
         return
 
     def run_dispatch(surface_vertices, surface_faces, config=None):
         cfg = config if config is not None else OptCutsConfig()
         if _is_test2():
-            return run_scale_aware_optcuts(surface_vertices, surface_faces, cfg)
+            os.environ["ONESTRING_OPTCUTS_INTERNAL_SCALE_ENABLED"] = "1"
+            os.environ.setdefault("ONESTRING_OPTCUTS_INTERNAL_SCALE_BOUND", "2.0")
+            os.environ.setdefault("ONESTRING_OPTCUTS_INTERNAL_SCALE_WEIGHT", "40.0")
+            requested = Path(cfg.executable).expanduser() if cfg.executable else None
+            binary = ensure_internal_scale_binary(requested)
+            cfg = replace(cfg, executable=str(binary))
+            result = original_run(surface_vertices, surface_faces, cfg)
+            result.metrics.update(
+                {
+                    "optcuts_internal_scale_factor_enabled": True,
+                    "optcuts_internal_scale_factor_model": (
+                        "upstream OptCuts split/merge score + soft decrease of area-weighted "
+                        "OneString log-scale-band violation"
+                    ),
+                    "optcuts_internal_scale_factor_bound": float(
+                        os.environ.get("ONESTRING_OPTCUTS_INTERNAL_SCALE_BOUND", "2.0")
+                    ),
+                    "optcuts_internal_scale_factor_weight": float(
+                        os.environ.get("ONESTRING_OPTCUTS_INTERNAL_SCALE_WEIGHT", "40.0")
+                    ),
+                    "optcuts_internal_scale_factor_source_patched": True,
+                    "optcuts_outer_multi_run_selector_used": False,
+                }
+            )
+            return result
+
+        # The same rebuilt binary is safe for the baselines: the C++ term is a
+        # no-op unless this environment flag is true.
+        os.environ["ONESTRING_OPTCUTS_INTERNAL_SCALE_ENABLED"] = "0"
         return original_run(surface_vertices, surface_faces, cfg)
 
-    run_dispatch._onestring_scale_aware_dispatch = True
+    run_dispatch._onestring_internal_scale_dispatch = True
     run_dispatch._onestring_original_run_official_optcuts = original_run
     optcuts_pipeline.run_official_optcuts = run_dispatch
 
     pipeline._onestring_test2_scale_aware_parameterization_installed = True
     print(
-        "[OPTCUTS-TEST2-SCALE-AWARE-ROUTE] installed at official OptCuts call; "
-        "ordinary optcuts/optcuts_test wrapper stack preserved"
+        "[OPTCUTS-TEST2-INTERNAL-SCALE-ROUTE] installed; "
+        "test2 patches/rebuilds OptCuts C++ and changes its internal candidate score"
     )
 
 
