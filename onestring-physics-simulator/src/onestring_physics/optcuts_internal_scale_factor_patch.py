@@ -76,9 +76,9 @@ _HELPER_BLOCK = r'''
             Eigen::Matrix2d dg;
             IglUtils::computeDeformationGradient(x3D, uv, dg); // surface -> UV
 
-            const double a = Eigen::Vector2d(dg.col(0)).squaredNorm();
-            const double b = Eigen::Vector2d(dg.col(0)).dot(Eigen::Vector2d(dg.col(1)));
-            const double c = Eigen::Vector2d(dg.col(1)).squaredNorm();
+            const double a = dg.col(0).squaredNorm();
+            const double b = dg.col(0).dot(dg.col(1));
+            const double c = dg.col(1).squaredNorm();
             const double trace = a + c;
             const double disc = std::sqrt(std::max(0.0, (a - c) * (a - c) + 4.0 * b * b));
             const double sigmaMinSq = std::max(1.0e-24, 0.5 * (trace - disc));
@@ -92,8 +92,8 @@ _HELPER_BLOCK = r'''
 
         if(rangeOut) { *rangeOut = std::exp(maxLog - minLog); }
 
-        // Remove the arbitrary global UV similarity scale.  The best center for
-        // the hard multiplicative band is the midpoint of the log-scale extrema.
+        // Remove arbitrary global UV similarity scaling.  The midpoint of the
+        // log extrema is the best center for a multiplicative hard band.
         const double center = 0.5 * (minLog + maxLog);
         double penalty = 0.0;
         double weightSum = 0.0;
@@ -132,12 +132,17 @@ def patch_trimesh_cpp(source: str) -> str:
 
     source = _replace_once(
         source,
+        "#include <fstream>\n",
+        "#include <fstream>\n#include <cstdlib>\n#include <cmath>\n#include <string>\n",
+        "standard include insertion point",
+    )
+    source = _replace_once(
+        source,
         "namespace OptCuts {\n",
         "namespace OptCuts {\n" + _HELPER_BLOCK,
         "namespace insertion point",
     )
 
-    # Merge candidate: keep original OptCuts score and add scale-violation decrease.
     source = _replace_once(
         source,
         "                    return lambda_t * seDec - (1.0 - lambda_t) * SDInc;\n",
@@ -154,7 +159,6 @@ def patch_trimesh_cpp(source: str) -> str:
         "merge candidate score",
     )
 
-    # Boundary split candidate.
     source = _replace_once(
         source,
         "                    const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n",
@@ -168,7 +172,6 @@ def patch_trimesh_cpp(source: str) -> str:
         "boundary split candidate score",
     )
 
-    # Interior split candidate.
     source = _replace_once(
         source,
         "                    const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n",
@@ -181,8 +184,6 @@ def patch_trimesh_cpp(source: str) -> str:
         "interior split candidate score",
     )
 
-    # Selected-operation diagnostics.  This runs only once per accepted topology
-    # change (not once per candidate), so logs remain readable.
     source = _replace_once(
         source,
         "        if(EwDec_max > EDecThres) {\n            if(isMerge) {\n",
