@@ -6,7 +6,7 @@ commit, applies the OneString scale-aware objective directly to that C++ source,
 verifies the modified objective, and builds a dedicated binary under
 ``third_party/OptCuts/build_onestring``.
 
-Nothing is rewritten when Streamlit runs.  This is a build-time creation of a
+Nothing is rewritten when Streamlit runs. This is a build-time creation of a
 separate modified OptCuts binary.
 """
 from __future__ import annotations
@@ -73,8 +73,8 @@ HELPER = r'''
 
         if(rangeOut) { *rangeOut = std::exp(maxLog - minLog); }
 
-        // Remove the arbitrary global UV similarity scale.  The multiplicative
-        // band has total width `bound`, so its log half-width is log(bound)/2.
+        // Remove arbitrary global UV similarity scale. The multiplicative band
+        // has total width `bound`, so its log half-width is log(bound)/2.
         const double center = 0.5 * (minLog + maxLog);
         double penalty = 0.0;
         double weightSum = 0.0;
@@ -89,11 +89,42 @@ HELPER = r'''
         return penalty / std::max(weightSum, 1.0e-16);
     }
 
-    static double oneStringScaleReward(const TriMesh& before, const TriMesh& after)
+    static double oneStringRelaxedScalePenalty(const TriMesh& candidate, double* rangeOut = NULL)
+    {
+        // A seam/topology edit does not by itself change per-triangle UV metrics.
+        // Therefore evaluate the candidate *after* a few genuine OptCuts
+        // Symmetric-Dirichlet geometry iterations. This exposes the freedom that
+        // the proposed seam creates instead of returning an identically-zero
+        // scale reward for every candidate.
+        const int relaxIters = std::max(
+            1, static_cast<int>(std::round(
+                oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_RELAX_ITERS", 4.0))));
+
+        std::vector<Energy*> energyTerms;
+        energyTerms.emplace_back(new SymDirichletEnergy());
+        std::vector<double> energyParams(1, 1.0);
+
+        Optimizer optimizer(candidate, energyTerms, energyParams, 0, true, false);
+        optimizer.precompute();
+        optimizer.setRelGL2Tol(1.0e-4);
+        optimizer.solve(relaxIters);
+
+        const double penalty = oneStringScalePenalty(optimizer.getResult(), rangeOut);
+        for(Energy* energy : energyTerms) {
+            delete energy;
+        }
+        return penalty;
+    }
+
+    static double oneStringScaleReward(const TriMesh& before, const TriMesh& candidate)
     {
         const double weight = std::max(
             0.0, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_WEIGHT", 40.0));
-        return weight * (oneStringScalePenalty(before) - oneStringScalePenalty(after));
+        if(weight == 0.0) { return 0.0; }
+
+        const double beforePenalty = oneStringScalePenalty(before);
+        const double afterPenalty = oneStringRelaxedScalePenalty(candidate);
+        return weight * (beforePenalty - afterPenalty);
     }
 '''
 
@@ -162,6 +193,7 @@ def make_onestring_source(upstream: str) -> str:
         "                    double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n"
         "                    TriMesh candidate(*this);\n"
         "                    candidate.cutPath(path, true, 1, newVertPos);\n"
+        "                    candidate.updateFeatures();\n"
         "                    EwDec += oneStringScaleReward(*this, candidate);\n",
         "interior split candidate objective",
     )
@@ -195,7 +227,8 @@ def main() -> int:
 
     required = (
         "oneStringScalePenalty",
-        "oneStringScaleReward",
+        "oneStringRelaxedScalePenalty",
+        "ONESTRING_OPTCUTS_SCALE_RELAX_ITERS",
         "objectiveDec += oneStringScaleReward(*this, candidate)",
         "curEwDec += oneStringScaleReward(*this, candidate)",
         "EwDec += oneStringScaleReward(*this, candidate)",
@@ -203,10 +236,10 @@ def main() -> int:
     missing = [token for token in required if token not in modified]
     if missing:
         raise SystemExit(
-            "OptCuts source verification failed; scale-aware objective is not present: "
+            "OptCuts source verification failed; relaxed scale-aware objective is not present: "
             + ", ".join(missing)
         )
-    print("[OPTCUTS-ONESTRING-OBJECTIVE] verified scale-factor term in TriMesh::computeLocalLDec")
+    print("[OPTCUTS-ONESTRING-OBJECTIVE] verified relaxed scale-factor term in TriMesh::computeLocalLDec")
 
     build = optcuts / "build_onestring"
     build.mkdir(parents=True, exist_ok=True)
