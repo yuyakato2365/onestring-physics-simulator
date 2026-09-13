@@ -5,12 +5,14 @@ The visible UI mode ``optcuts_test2`` is internally routed through the existing
 flag selects this variant.
 
 Test2 now changes:
-- initial OptCuts seam solution selection is OneString scale-aware: several
-  official OptCuts solutions are compared with a soft seam/distortion/scale
-  objective, with R<=2 used as the hard final preference;
+- the local OptCuts C++ source is patched/rebuilt once so OneString scale-factor
+  violation participates directly in every internal split/merge candidate score;
 - K3D Augmented Lagrangian outer iterations: 8 instead of 16;
 - When the installed SciPy ``least_squares`` supports ``workers``, finite-
   difference residual evaluations use a ThreadPoolExecutor.
+
+The old temporary strategy of running several completed OptCuts solves and
+choosing one afterward has been removed.
 
 K2D numerical budgets are deliberately identical to ``optcuts_test``:
 - kinematic outer passes: 4
@@ -40,13 +42,8 @@ def install_optcuts_test2_acceleration_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_test2_acceleration_installed", False):
         return
 
-    # Install outermost after the ordinary optcuts_test builder has already been
-    # wired.  The wrapper is a no-op unless ONESTRING_OPTCUTS_TEST_VARIANT=2.
     install_optcuts_test2_scale_aware_parameterization_patch(pipeline)
 
-    # Inject only the K3D AL budget change. K2D budgets intentionally remain
-    # identical to optcuts_test so test2 does not trade constraint quality for
-    # runtime. K2D acceleration is limited to SciPy workers when available.
     base_k3d = pipeline._optimize_k3d
     base_k2d = pipeline._optimize_k2d
 
@@ -64,8 +61,6 @@ def install_optcuts_test2_acceleration_patch(pipeline: Any) -> None:
 
     def k2d_full_budget(mesh_2d: Any, mesh_3d: Any, params: Any, progress_callback=None):
         if _is_test2() and str(getattr(params, "omega_parameterization_mode", "")) == "optcuts_test":
-            # Explicitly restore the same numerical budgets as optcuts_test in
-            # case a reused params object still carries older test2 fast values.
             values = {
                 "k2d_kinematic_outer_passes": 4,
                 "k2d_kinematic_max_nfev": 70,
@@ -101,9 +96,6 @@ def install_optcuts_test2_acceleration_patch(pipeline: Any) -> None:
             glb["_optimize_k3d"] = k3d_fast
             glb["_optimize_k2d"] = k2d_full_budget
 
-    # SciPy added a workers hook to least_squares in newer versions. Wrap it
-    # once and only supply workers for test2; older SciPy versions continue with
-    # the ordinary serial call without error.
     try:
         import scipy.optimize as spo
 
