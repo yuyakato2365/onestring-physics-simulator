@@ -11,7 +11,9 @@ This module makes the paper-style behavior explicit:
 * if a part still needs scale factor > 2, request a complete row/column cut;
 * snap that request to an existing M2D fabrication-grid line (performed by
   ``simple_split_panel_patch``);
-* duplicate interface vertices so the two sides are topologically disconnected.
+* duplicate interface vertices so the two sides are topologically disconnected;
+* discard any fabrication-grid cell crossed by the Omega outer boundary instead
+  of keeping a clipped partial tile.
 
 No fake clamping of CSF values is performed.  The measured/planned residual is
 carried through for diagnostics.
@@ -20,6 +22,8 @@ from __future__ import annotations
 
 import os
 from typing import Any
+
+from .optcuts_strict_boundary_grid_crop_patch import install_optcuts_strict_boundary_grid_crop_patch
 
 
 DEFAULT_MAX_SPLITS = 128
@@ -108,6 +112,12 @@ def install_optcuts_csf_grid_split_apply_patch(pipeline: Any) -> None:
         glb = getattr(fn, "__globals__", None)
         if isinstance(glb, dict):
             glb["_build_m2d"] = build_m2d_with_csf_split_metadata
+
+    # Wrap the metadata bridge with strict whole-cell cropping.  Installation is
+    # here (rather than another __init__ hook) so reloads preserve the ordering:
+    # legacy M2D -> CSF metadata -> remove boundary-crossing cells -> Simple Split.
+    pipeline._onestring_optcuts_strict_boundary_grid_crop_patch_installed = False
+    install_optcuts_strict_boundary_grid_crop_patch(pipeline)
 
     pipeline._onestring_optcuts_csf_grid_split_apply_patch_installed = True
 
