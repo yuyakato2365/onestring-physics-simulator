@@ -24,13 +24,26 @@ def run(cmd: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
-def check_apply(optcuts: Path, patch: Path, reverse: bool = False) -> subprocess.CompletedProcess[str]:
-    cmd = ["git", "apply", "--recount"]
+def _apply_cmd(patch: Path, *, reverse: bool = False, check: bool = False) -> list[str]:
+    # The upstream file contains whitespace-only blank lines around the namespace
+    # and computeLocalLDec blocks.  The tracked modification is anchored on the
+    # actual C++ statements, so ignore whitespace-only context differences while
+    # still requiring every semantic anchor to match exactly.
+    cmd = [
+        "git", "apply", "--recount", "--ignore-space-change", "--ignore-whitespace"
+    ]
     if reverse:
         cmd.append("--reverse")
-    cmd.extend(["--check", str(patch)])
+    if check:
+        cmd.append("--check")
+    cmd.append(str(patch))
+    return cmd
+
+
+def check_apply(optcuts: Path, patch: Path, reverse: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        cmd, cwd=str(optcuts), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        _apply_cmd(patch, reverse=reverse, check=True),
+        cwd=str(optcuts), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
 
 
@@ -68,15 +81,25 @@ def main() -> int:
     reverse = check_apply(optcuts, patch, reverse=True) if forward.returncode != 0 else None
 
     if forward.returncode == 0:
-        run(["git", "apply", "--recount", str(patch)], cwd=optcuts)
+        run(_apply_cmd(patch), cwd=optcuts)
         print("[OPTCUTS-ONESTRING-SOURCE] applied tracked source modification")
     elif reverse is not None and reverse.returncode == 0:
         print("[OPTCUTS-ONESTRING-SOURCE] tracked source modification already applied")
     else:
+        # Print enough diagnostics to distinguish an upstream-revision mismatch
+        # from a malformed modification without asking the user to guess.
+        try:
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=str(optcuts),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+            ).stdout.strip()
+        except Exception:
+            head = "unknown"
         sys.stderr.write(forward.stderr)
         raise SystemExit(
-            "Local OptCuts source does not match the expected upstream TriMesh.cpp. "
-            "Run `git -C third_party/OptCuts checkout -- src/TriMesh.cpp` and rerun this script."
+            "Tracked OneString OptCuts modification still does not apply. "
+            f"Local OptCuts HEAD={head}. This is a build-script/source-modification mismatch, "
+            "not a OneString parameter-setting issue."
         )
 
     # Hard verification: do not compile unless the actual C++ objective contains
