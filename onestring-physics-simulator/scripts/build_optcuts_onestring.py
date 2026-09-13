@@ -1,18 +1,101 @@
 #!/usr/bin/env python3
 """Build the dedicated OneString-aware OptCuts binary.
 
-This script applies the repository-tracked source modification to the local
-upstream OptCuts checkout and builds into ``third_party/OptCuts/build_onestring``.
-The Streamlit app never rewrites C++ source at runtime.
+This script restores ``src/TriMesh.cpp`` from the checked-out upstream OptCuts
+commit, applies the OneString scale-aware objective directly to that C++ source,
+verifies the modified objective, and builds a dedicated binary under
+``third_party/OptCuts/build_onestring``.
+
+Nothing is rewritten when Streamlit runs.  This is a build-time creation of a
+separate modified OptCuts binary.
 """
 from __future__ import annotations
 
 import argparse
 import os
 from pathlib import Path
-import shutil
 import subprocess
-import sys
+
+
+HELPER = r'''
+
+    // OneString: scale-factor term for OptCuts seam-topology optimization.
+    static double oneStringScaleEnv(const char* name, double fallback)
+    {
+        const char* raw = std::getenv(name);
+        if(!raw) { return fallback; }
+        try {
+            const double value = std::stod(std::string(raw));
+            return std::isfinite(value) ? value : fallback;
+        }
+        catch(...) {
+            return fallback;
+        }
+    }
+
+    static double oneStringScalePenalty(const TriMesh& mesh, double* rangeOut = NULL)
+    {
+        if(mesh.F.rows() == 0) {
+            if(rangeOut) { *rangeOut = 1.0; }
+            return 0.0;
+        }
+
+        const double bound = std::max(
+            1.000001, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_BOUND", 2.0));
+        const double halfBand = 0.5 * std::log(bound);
+        std::vector<double> logLambda(mesh.F.rows(), 0.0);
+        double minLog = __DBL_MAX__;
+        double maxLog = -__DBL_MAX__;
+
+        for(int triI = 0; triI < mesh.F.rows(); ++triI) {
+            const Eigen::Vector3i tri = mesh.F.row(triI);
+            const Eigen::Vector3d x3D[3] = {
+                mesh.V_rest.row(tri[0]), mesh.V_rest.row(tri[1]), mesh.V_rest.row(tri[2])
+            };
+            const Eigen::Vector2d uv[3] = {
+                mesh.V.row(tri[0]), mesh.V.row(tri[1]), mesh.V.row(tri[2])
+            };
+
+            Eigen::Matrix2d dg;
+            IglUtils::computeDeformationGradient(x3D, uv, dg); // surface -> UV
+            const double a = dg.col(0).squaredNorm();
+            const double b = dg.col(0).dot(dg.col(1));
+            const double c = dg.col(1).squaredNorm();
+            const double trace = a + c;
+            const double disc = std::sqrt(std::max(0.0, (a-c)*(a-c) + 4.0*b*b));
+            const double sigmaMinSq = std::max(1.0e-24, 0.5 * (trace - disc));
+            const double lambda = 1.0 / std::sqrt(sigmaMinSq); // sigma_max(UV -> surface)
+            const double ll = std::log(std::max(lambda, 1.0e-12));
+            logLambda[triI] = ll;
+            minLog = std::min(minLog, ll);
+            maxLog = std::max(maxLog, ll);
+        }
+
+        if(rangeOut) { *rangeOut = std::exp(maxLog - minLog); }
+
+        // Remove the arbitrary global UV similarity scale.  The multiplicative
+        // band has total width `bound`, so its log half-width is log(bound)/2.
+        const double center = 0.5 * (minLog + maxLog);
+        double penalty = 0.0;
+        double weightSum = 0.0;
+        for(int triI = 0; triI < mesh.F.rows(); ++triI) {
+            const double violation = std::max(
+                0.0, std::abs(logLambda[triI] - center) - halfBand);
+            const double w = (triI < mesh.triArea.size())
+                ? std::max(mesh.triArea[triI], 1.0e-16) : 1.0;
+            penalty += w * violation * violation;
+            weightSum += w;
+        }
+        return penalty / std::max(weightSum, 1.0e-16);
+    }
+
+    static double oneStringScaleReward(const TriMesh& before, const TriMesh& after)
+    {
+        const double weight = std::max(
+            0.0, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_WEIGHT", 40.0));
+        return weight * (oneStringScalePenalty(before) - oneStringScalePenalty(after));
+    }
+'''
 
 
 def project_root() -> Path:
@@ -24,88 +107,94 @@ def run(cmd: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
-def _apply_cmd(patch: Path, *, reverse: bool = False, check: bool = False) -> list[str]:
-    # The upstream file contains whitespace-only blank lines around the namespace
-    # and computeLocalLDec blocks.  The tracked modification is anchored on the
-    # actual C++ statements, so ignore whitespace-only context differences while
-    # still requiring every semantic anchor to match exactly.
-    cmd = [
-        "git", "apply", "--recount", "--ignore-space-change", "--ignore-whitespace"
-    ]
-    if reverse:
-        cmd.append("--reverse")
-    if check:
-        cmd.append("--check")
-    cmd.append(str(patch))
-    return cmd
+def replace_once(source: str, old: str, new: str, label: str) -> str:
+    count = source.count(old)
+    if count != 1:
+        raise SystemExit(
+            f"OptCuts source mismatch while editing {label}: expected 1 exact anchor, found {count}."
+        )
+    return source.replace(old, new, 1)
 
 
-def check_apply(optcuts: Path, patch: Path, reverse: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        _apply_cmd(patch, reverse=reverse, check=True),
-        cwd=str(optcuts), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+def make_onestring_source(upstream: str) -> str:
+    source = upstream
+    source = replace_once(
+        source,
+        "#include <fstream>\n",
+        "#include <fstream>\n#include <cmath>\n#include <cstdlib>\n#include <string>\n",
+        "standard includes",
     )
+    source = replace_once(
+        source,
+        "namespace OptCuts {\n",
+        "namespace OptCuts {\n" + HELPER,
+        "OptCuts namespace",
+    )
+
+    source = replace_once(
+        source,
+        "                    return lambda_t * seDec - (1.0 - lambda_t) * SDInc;\n",
+        "                    double objectiveDec = lambda_t * seDec - (1.0 - lambda_t) * SDInc;\n"
+        "                    TriMesh candidate(*this);\n"
+        "                    candidate.mergeBoundaryEdges(\n"
+        "                        std::pair<int, int>(path_max[0], path_max[1]),\n"
+        "                        std::pair<int, int>(path_max[1], path_max[2]), finder->second);\n"
+        "                    candidate.computeFeatures();\n"
+        "                    objectiveDec += oneStringScaleReward(*this, candidate);\n"
+        "                    return objectiveDec;\n",
+        "merge candidate objective",
+    )
+
+    source = replace_once(
+        source,
+        "                    const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n",
+        "                    double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n"
+        "                    TriMesh candidate(*this);\n"
+        "                    candidate.splitEdgeOnBoundary(edge, newVertPosI);\n"
+        "                    candidate.updateFeatures();\n"
+        "                    curEwDec += oneStringScaleReward(*this, candidate);\n",
+        "boundary split candidate objective",
+    )
+
+    source = replace_once(
+        source,
+        "                    const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n",
+        "                    double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n"
+        "                    TriMesh candidate(*this);\n"
+        "                    candidate.cutPath(path, true, 1, newVertPos);\n"
+        "                    EwDec += oneStringScaleReward(*this, candidate);\n",
+        "interior split candidate objective",
+    )
+    return source
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--optcuts-root",
-        type=Path,
-        default=None,
+        "--optcuts-root", type=Path, default=None,
         help="upstream OptCuts checkout (default: third_party/OptCuts)",
     )
     args = parser.parse_args()
 
     root = project_root()
     optcuts = (args.optcuts_root or (root / "third_party" / "OptCuts")).expanduser().resolve()
-    patch = root / "vendor" / "optcuts_onestring" / "0001-scale-aware-seam-objective.patch"
     cpp = optcuts / "src" / "TriMesh.cpp"
-    if not cpp.is_file():
+    if not cpp.is_file() or not (optcuts / ".git").exists():
         raise SystemExit(
             f"OptCuts checkout not found at {optcuts}. Clone https://github.com/liminchen/OptCuts there first."
         )
-    if not patch.is_file():
-        raise SystemExit(f"tracked OneString source modification missing: {patch}")
 
-    # If the earlier experimental runtime patcher touched the local checkout,
-    # restore its clean backup first.  From this point on only the repository-
-    # tracked source modification is allowed to define the dedicated binary.
-    legacy_backup = cpp.with_suffix(".cpp.onestring_original")
-    source_text = cpp.read_text(encoding="utf-8", errors="replace")
-    if "ONESTRING_INTERNAL_SCALE_FACTOR_PATCH_V1" in source_text and legacy_backup.is_file():
-        print(f"[OPTCUTS-ONESTRING-SOURCE] restoring legacy runtime-patch backup {legacy_backup}")
-        shutil.copy2(legacy_backup, cpp)
+    # Always start from the exact source tracked by the checked-out OptCuts commit.
+    # This avoids accumulated local experiments and avoids fragile unified-diff
+    # context matching entirely.
+    upstream = subprocess.run(
+        ["git", "show", "HEAD:src/TriMesh.cpp"], cwd=str(optcuts),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True,
+    ).stdout
+    modified = make_onestring_source(upstream)
+    cpp.write_text(modified, encoding="utf-8")
+    print("[OPTCUTS-ONESTRING-SOURCE] wrote scale-aware TriMesh.cpp from upstream HEAD")
 
-    forward = check_apply(optcuts, patch)
-    reverse = check_apply(optcuts, patch, reverse=True) if forward.returncode != 0 else None
-
-    if forward.returncode == 0:
-        run(_apply_cmd(patch), cwd=optcuts)
-        print("[OPTCUTS-ONESTRING-SOURCE] applied tracked source modification")
-    elif reverse is not None and reverse.returncode == 0:
-        print("[OPTCUTS-ONESTRING-SOURCE] tracked source modification already applied")
-    else:
-        # Print enough diagnostics to distinguish an upstream-revision mismatch
-        # from a malformed modification without asking the user to guess.
-        try:
-            head = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=str(optcuts),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
-            ).stdout.strip()
-        except Exception:
-            head = "unknown"
-        sys.stderr.write(forward.stderr)
-        raise SystemExit(
-            "Tracked OneString OptCuts modification still does not apply. "
-            f"Local OptCuts HEAD={head}. This is a build-script/source-modification mismatch, "
-            "not a OneString parameter-setting issue."
-        )
-
-    # Hard verification: do not compile unless the actual C++ objective contains
-    # the scale-factor term.  This prevents a route/setup log from being mistaken
-    # for a successfully modified optimizer.
-    source_text = cpp.read_text(encoding="utf-8", errors="replace")
     required = (
         "oneStringScalePenalty",
         "oneStringScaleReward",
@@ -113,20 +202,17 @@ def main() -> int:
         "curEwDec += oneStringScaleReward(*this, candidate)",
         "EwDec += oneStringScaleReward(*this, candidate)",
     )
-    missing = [token for token in required if token not in source_text]
+    missing = [token for token in required if token not in modified]
     if missing:
         raise SystemExit(
-            "OptCuts source verification failed; scale-aware objective is not actually present: "
+            "OptCuts source verification failed; scale-aware objective is not present: "
             + ", ".join(missing)
         )
     print("[OPTCUTS-ONESTRING-OBJECTIVE] verified scale-factor term in TriMesh::computeLocalLDec")
 
     build = optcuts / "build_onestring"
     build.mkdir(parents=True, exist_ok=True)
-    run([
-        "cmake", "-S", str(optcuts), "-B", str(build),
-        "-DCMAKE_BUILD_TYPE=Release",
-    ])
+    run(["cmake", "-S", str(optcuts), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release"])
     jobs = str(max(1, min(12, os.cpu_count() or 1)))
     run(["cmake", "--build", str(build), "--config", "Release", "-j", jobs])
 
