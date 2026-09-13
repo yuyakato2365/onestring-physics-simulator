@@ -1,6 +1,7 @@
 """Bridge ``optcuts_test`` into seam smoothing and polygon-clipped M2D."""
 from __future__ import annotations
 from typing import Any
+import streamlit as st
 from .optcuts_seam_extraction_patch import extract_connected_seam_payload_robust
 from .optcuts_test_simple_pipeline_patch import install_optcuts_test_simple_pipeline_patch
 from .optcuts_test_boundary_clip_m2d_patch import install_optcuts_test_boundary_clip_m2d_patch
@@ -16,10 +17,18 @@ from .optcuts_test_k3d_pre_al_validity_patch import install_optcuts_test_k3d_pre
 from .optcuts_test_k3d_augmented_lagrangian_patch import install_optcuts_test_k3d_augmented_lagrangian_patch
 from .optcuts_test_k3d_slsqp_polish_patch import install_optcuts_test_k3d_slsqp_polish_patch
 from .optcuts_test_k3d_practical_planarity_tolerance_patch import install_optcuts_test_k3d_practical_planarity_tolerance_patch
+from .optcuts_test2_surface_constrained_k3d_patch import install_optcuts_test2_surface_constrained_k3d_patch
+from .optcuts_20260913_ui_patch import install_20260913_ui_patch
 
 
 def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     if getattr(pipeline,"_onestring_optcuts_test_seam_metadata_bridge_installed",False): return
+
+    # Display/default changes only.  app_optcuts captures st.selectbox after this
+    # bridge is installed, so its internal optcuts_test2 identifier can stay
+    # stable while the user sees the dated experiment name.
+    install_20260913_ui_patch(st)
+
     install_optcuts_test_simple_pipeline_patch(pipeline)
     install_optcuts_test_boundary_clip_m2d_patch(pipeline)
     install_optcuts_test_performance_patch(pipeline)
@@ -27,6 +36,11 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
     install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline)
     install_optcuts_test_k3d_slsqp_polish_patch(pipeline)
     install_optcuts_test_k3d_practical_planarity_tolerance_patch(pipeline)
+
+    # Outermost K3D experiment for internal variant=2: after the existing hard
+    # planarity stack, alternate quad-planarity projection and closest-point
+    # projection onto the original target triangle mesh.
+    install_optcuts_test2_surface_constrained_k3d_patch(pipeline)
 
     install_optcuts_test_k2d_hard_feasibility_patch()
     install_optcuts_test_k2d_relative_layout_patch(pipeline)
