@@ -4,8 +4,11 @@ The visible UI mode ``optcuts_test2`` is internally routed through the existing
 ``optcuts_test`` implementation so test1 remains unchanged. A process environment
 flag selects this variant.
 
-Test2 now changes only:
-- K3D Augmented Lagrangian outer iterations: 8 instead of 16.
+Test2 now changes:
+- initial OptCuts seam solution selection is OneString scale-aware: several
+  official OptCuts solutions are compared with a soft seam/distortion/scale
+  objective, with R<=2 used as the hard final preference;
+- K3D Augmented Lagrangian outer iterations: 8 instead of 16;
 - When the installed SciPy ``least_squares`` supports ``workers``, finite-
   difference residual evaluations use a ThreadPoolExecutor.
 
@@ -24,6 +27,10 @@ import inspect
 import os
 from typing import Any
 
+from .optcuts_test2_scale_aware_parameterization_patch import (
+    install_optcuts_test2_scale_aware_parameterization_patch,
+)
+
 
 def _is_test2() -> bool:
     return os.environ.get("ONESTRING_OPTCUTS_TEST_VARIANT", "1").strip() == "2"
@@ -32,6 +39,10 @@ def _is_test2() -> bool:
 def install_optcuts_test2_acceleration_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_test2_acceleration_installed", False):
         return
+
+    # Install outermost after the ordinary optcuts_test builder has already been
+    # wired.  The wrapper is a no-op unless ONESTRING_OPTCUTS_TEST_VARIANT=2.
+    install_optcuts_test2_scale_aware_parameterization_patch(pipeline)
 
     # Inject only the K3D AL budget change. K2D budgets intentionally remain
     # identical to optcuts_test so test2 does not trade constraint quality for
