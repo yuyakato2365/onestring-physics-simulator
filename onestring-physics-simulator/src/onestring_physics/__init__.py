@@ -23,6 +23,7 @@ from .large_steps_mesh_conditioning import (
 from .large_steps_pipeline_patch import install_large_steps_conditioning
 from .official_ceps import install_official_ceps
 from .optcuts_csf_split_patch import install_optcuts_csf_split_patch
+from .optcuts_csf_grid_split_apply_patch import install_optcuts_csf_grid_split_apply_patch
 
 
 install_ceps_paired_output(_official_ceps)
@@ -38,6 +39,7 @@ def _install_parameterization_backends(module: Any) -> None:
     module._FAST_T3D_PREVIEW_PATCH_INSTALLED = False
     module._LARGE_STEPS_CONDITIONING_PATCH_INSTALLED = False
     module._K2D_CORRESPONDENCE_ANIMATION_PATCH_INSTALLED = False
+    module._onestring_optcuts_csf_grid_split_apply_patch_installed = False
     install_discrete_bff(module)
     install_bijective_free_boundary(module)
     install_large_steps_conditioning(module)
@@ -45,6 +47,7 @@ def _install_parameterization_backends(module: Any) -> None:
     install_ceps_strict_adapter(module)
     install_fast_t3d_preview(module)
     install_optcuts_csf_split_patch(module)
+    install_optcuts_csf_grid_split_apply_patch(module)
 
     backend_build = module._build_surface_parameterization
 
