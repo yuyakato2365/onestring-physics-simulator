@@ -1,14 +1,10 @@
-"""Enable the internally modified OptCuts seam objective for ``optcuts_test2``.
+"""Use the dedicated source-modified OptCuts binary for ``optcuts_test2``.
 
-Unlike the previous temporary implementation, this module does not run OptCuts
-multiple times and choose a completed result in Python.  It patches/rebuilds the
-local OptCuts C++ source once, then the *original OptCuts topology search itself*
-evaluates OneString scale-factor improvement for every split/merge candidate.
-
-The rebuilt binary is shared with the baselines, but the new term is gated by
-``ONESTRING_OPTCUTS_INTERNAL_SCALE_ENABLED``.  Therefore ordinary ``optcuts`` and
-``optcuts_test`` retain the upstream objective; only visible ``optcuts_test2``
-enables the extra term.
+The OneString scale-factor term lives in OptCuts' own ``TriMesh::computeLocalLDec``
+candidate objective.  This module does not rewrite C++ source and does not select
+among completed OptCuts runs.  Build the modified binary once with
+``python3 scripts/build_optcuts_onestring.py``; test2 then invokes that binary
+directly while test1 continues to use the ordinary upstream OptCuts binary.
 """
 from __future__ import annotations
 
@@ -19,8 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from .optcuts_backend import OptCutsConfig
-from .optcuts_internal_scale_factor_patch import ensure_internal_scale_binary
+from .optcuts_backend import OptCutsConfig, OptCutsUnavailableError
 from . import optcuts_pipeline_patch as optcuts_pipeline
 
 
@@ -28,13 +23,40 @@ def _is_test2() -> bool:
     return os.environ.get("ONESTRING_OPTCUTS_TEST_VARIANT", "0").strip() == "2"
 
 
-def _hard_scale_audit(result: Any, bound: float) -> tuple[float, bool]:
-    """Audit the finished OptCuts map with the same UV->surface scale convention.
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
-    ``per_triangle_sigma2`` is sigma_min(surface->UV), so the local
-    sigma_max(UV->surface) is its reciprocal.  The max/min ratio is therefore
-    identical to max(sigma2)/min(sigma2), after removing global similarity scale.
-    """
+
+def _onestring_binary() -> Path:
+    root = _project_root()
+    stamp = root / ".onestring_optcuts_binary"
+    candidates: list[Path] = []
+    if stamp.is_file():
+        try:
+            value = stamp.read_text(encoding="utf-8").strip()
+            if value:
+                candidates.append(Path(value).expanduser())
+        except Exception:
+            pass
+    build = root / "third_party" / "OptCuts" / "build_onestring"
+    candidates.extend([
+        build / "OptCuts_bin",
+        build / "OptCuts_bin.exe",
+        build / "Release" / "OptCuts_bin",
+        build / "Release" / "OptCuts_bin.exe",
+    ])
+    for path in candidates:
+        if path.is_file():
+            return path.resolve()
+    raise OptCutsUnavailableError(
+        "The source-modified OneString OptCuts binary is not built. Run:\n"
+        "  python3 scripts/build_optcuts_onestring.py\n"
+        "This applies the repository-tracked OptCuts source change and builds "
+        "third_party/OptCuts/build_onestring/OptCuts_bin."
+    )
+
+
+def _hard_scale_audit(result: Any, bound: float) -> tuple[float, bool]:
     sigma2 = np.asarray(result.metrics.get("per_triangle_sigma2", []), dtype=float)
     sigma2 = sigma2[np.isfinite(sigma2) & (sigma2 > 1.0e-15)]
     if len(sigma2) == 0:
@@ -48,58 +70,54 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
         return
 
     original_run = optcuts_pipeline.run_official_optcuts
-    if getattr(original_run, "_onestring_internal_scale_dispatch", False):
+    if getattr(original_run, "_onestring_source_modified_dispatch", False):
         pipeline._onestring_test2_scale_aware_parameterization_installed = True
         return
 
     def run_dispatch(surface_vertices, surface_faces, config=None):
         cfg = config if config is not None else OptCutsConfig()
         if _is_test2():
-            os.environ["ONESTRING_OPTCUTS_INTERNAL_SCALE_ENABLED"] = "1"
-            os.environ.setdefault("ONESTRING_OPTCUTS_INTERNAL_SCALE_BOUND", "2.0")
-            os.environ.setdefault("ONESTRING_OPTCUTS_INTERNAL_SCALE_WEIGHT", "40.0")
-            requested = Path(cfg.executable).expanduser() if cfg.executable else None
-            binary = ensure_internal_scale_binary(requested)
+            bound = float(os.environ.get("ONESTRING_OPTCUTS_SCALE_BOUND", "2.0"))
+            weight = float(os.environ.get("ONESTRING_OPTCUTS_SCALE_WEIGHT", "40.0"))
+            os.environ["ONESTRING_OPTCUTS_SCALE_BOUND"] = str(bound)
+            os.environ["ONESTRING_OPTCUTS_SCALE_WEIGHT"] = str(weight)
+            binary = _onestring_binary()
             cfg = replace(cfg, executable=str(binary))
-            result = original_run(surface_vertices, surface_faces, cfg)
-            bound = float(os.environ.get("ONESTRING_OPTCUTS_INTERNAL_SCALE_BOUND", "2.0"))
-            scale_range, hard_feasible = _hard_scale_audit(result, bound)
-            result.metrics.update(
-                {
-                    "optcuts_internal_scale_factor_enabled": True,
-                    "optcuts_internal_scale_factor_model": (
-                        "upstream OptCuts split/merge score + soft decrease of area-weighted "
-                        "OneString log-scale-band violation"
-                    ),
-                    "optcuts_internal_scale_factor_bound": bound,
-                    "optcuts_internal_scale_factor_weight": float(
-                        os.environ.get("ONESTRING_OPTCUTS_INTERNAL_SCALE_WEIGHT", "40.0")
-                    ),
-                    "optcuts_internal_scale_factor_source_patched": True,
-                    "optcuts_outer_multi_run_selector_used": False,
-                    "optcuts_internal_scale_factor_final_range": scale_range,
-                    "optcuts_internal_scale_factor_final_hard_feasible": hard_feasible,
-                }
+            print(
+                "[OPTCUTS-TEST2-SOURCE-MODIFIED] "
+                f"binary={binary} scale_bound={bound:g} scale_weight={weight:g}"
             )
+            result = original_run(surface_vertices, surface_faces, cfg)
+            scale_range, hard_feasible = _hard_scale_audit(result, bound)
+            result.metrics.update({
+                "optcuts_internal_scale_factor_enabled": True,
+                "optcuts_internal_scale_factor_model": (
+                    "OptCuts TriMesh::computeLocalLDec seam/distortion objective + "
+                    "soft OneString scale-factor violation decrease"
+                ),
+                "optcuts_internal_scale_factor_bound": bound,
+                "optcuts_internal_scale_factor_weight": weight,
+                "optcuts_source_modified_binary": str(binary),
+                "optcuts_runtime_source_patch_used": False,
+                "optcuts_outer_multi_run_selector_used": False,
+                "optcuts_internal_scale_factor_final_range": scale_range,
+                "optcuts_internal_scale_factor_final_hard_feasible": hard_feasible,
+            })
             print(
                 "[OPTCUTS-INTERNAL-SCALE-FINAL] "
                 f"range={scale_range:.9g} bound={bound:.9g} hard_feasible={hard_feasible}"
             )
             return result
-
-        # The same rebuilt binary is safe for the baselines: the C++ term is a
-        # no-op unless this environment flag is true.
-        os.environ["ONESTRING_OPTCUTS_INTERNAL_SCALE_ENABLED"] = "0"
         return original_run(surface_vertices, surface_faces, cfg)
 
-    run_dispatch._onestring_internal_scale_dispatch = True
+    run_dispatch._onestring_source_modified_dispatch = True
     run_dispatch._onestring_original_run_official_optcuts = original_run
     optcuts_pipeline.run_official_optcuts = run_dispatch
 
     pipeline._onestring_test2_scale_aware_parameterization_installed = True
     print(
-        "[OPTCUTS-TEST2-INTERNAL-SCALE-ROUTE] installed; "
-        "test2 patches/rebuilds OptCuts C++ and changes its internal candidate score"
+        "[OPTCUTS-TEST2-SOURCE-MODIFIED-ROUTE] installed; "
+        "test2 uses a dedicated OptCuts binary built from the tracked source modification"
     )
 
 
