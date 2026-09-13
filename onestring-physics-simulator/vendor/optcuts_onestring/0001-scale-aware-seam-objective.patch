@@ -1,5 +1,4 @@
 diff --git a/src/TriMesh.cpp b/src/TriMesh.cpp
-index 6c17cfc..onestring 100644
 --- a/src/TriMesh.cpp
 +++ b/src/TriMesh.cpp
 @@ -18,6 +18,9 @@
@@ -10,7 +9,7 @@ index 6c17cfc..onestring 100644
  
  extern std::ofstream logFile;
  extern Timer timer_step;
-@@ -28,6 +31,88 @@ extern int inSplitTotalAmt;
+@@ -28,6 +31,88 @@
  
  namespace OptCuts {
 +
@@ -55,9 +54,9 @@ index 6c17cfc..onestring 100644
 +            Eigen::Matrix2d dg;
 +            IglUtils::computeDeformationGradient(x3D, uv, dg); // surface -> UV
 +
-+            const double a = Eigen::Vector2d(dg.col(0)).squaredNorm();
-+            const double b = Eigen::Vector2d(dg.col(0)).dot(Eigen::Vector2d(dg.col(1)));
-+            const double c = Eigen::Vector2d(dg.col(1)).squaredNorm();
++            const double a = dg.col(0).squaredNorm();
++            const double b = dg.col(0).dot(dg.col(1));
++            const double c = dg.col(1).squaredNorm();
 +            const double trace = a + c;
 +            const double disc = std::sqrt(std::max(0.0, (a-c)*(a-c) + 4.0*b*b));
 +            const double sigmaMinSq = std::max(1.0e-24, 0.5 * (trace - disc));
@@ -92,7 +91,7 @@ index 6c17cfc..onestring 100644
 +            oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_WEIGHT", 40.0));
 +        return weight * (oneStringScalePenalty(before) - oneStringScalePenalty(after));
 +    }
-@@ -1680,7 +1765,14 @@ double TriMesh::computeLocalLDec(int vI, double lambda_t,
+@@ -1680,7 +1765,14 @@
                      auto finder = newVertPos.find(path_max[0]);
                      assert(finder != newVertPos.end());
                      newVertPos_max.resize(1, 2);
@@ -109,7 +108,7 @@ index 6c17cfc..onestring 100644
                  }
              }
              else {
-@@ -1712,7 +1804,12 @@ double TriMesh::computeLocalLDec(int vI, double lambda_t,
+@@ -1712,7 +1804,12 @@
                      const double SDDec = queryLocalEdDec_bSplit(edge, newVertPosI);
                      const double seInc = (V_rest.row(vI) - V_rest.row(nbVI)).norm() /
                          virtualRadius * (vertWeight[vI] + vertWeight[nbVI]) / 2.0;
@@ -122,7 +121,7 @@ index 6c17cfc..onestring 100644
                      if(curEwDec > maxEwDec) {
                          maxEwDec = curEwDec;
                          path_max[0] = vI;
-@@ -1764,7 +1861,11 @@ double TriMesh::computeLocalLDec(int vI, double lambda_t,
+@@ -1764,7 +1861,11 @@
                      const double seInc = ((V_rest.row(path[0]) - V_rest.row(path[1])).norm() * (vertWeight[path[0]] + vertWeight[path[1]]) +
                                            (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]])) / virtualRadius / 2.0;
 -                    const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;
