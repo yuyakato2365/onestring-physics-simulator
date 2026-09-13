@@ -22,6 +22,7 @@ from .large_steps_mesh_conditioning import (
 )
 from .large_steps_pipeline_patch import install_large_steps_conditioning
 from .official_ceps import install_official_ceps
+from .optcuts_csf_split_patch import install_optcuts_csf_split_patch
 
 
 install_ceps_paired_output(_official_ceps)
@@ -43,6 +44,7 @@ def _install_parameterization_backends(module: Any) -> None:
     install_official_ceps(module)
     install_ceps_strict_adapter(module)
     install_fast_t3d_preview(module)
+    install_optcuts_csf_split_patch(module)
 
     backend_build = module._build_surface_parameterization
 
