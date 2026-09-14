@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Build and force-enable the OneString scale-sum objective in OptCuts.
 
-This is intentionally more explicit than the original source patch:
+This script makes the OneString scale objective an explicit physical-mesh term:
 
-* physical OptCuts energy is augmented in Optimizer::computeEnergyVal;
-* physical OptCuts gradient is augmented in Optimizer::computeGradient;
+    E_physical = lambda_SD * E_SD + weight * SUM_i residual_i^2
+
+The scale term is deliberately OUTSIDE OptCuts' SD multiplier. In the normal
+OneString test2 configuration ``lambda_init=0.999``, OptCuts starts with
+``lambda_SD = 1 - lambda_init = 0.001``; putting E_scale inside the SD term
+would therefore weaken it by 1000x, which is not the intended objective.
+
+Other guarantees:
+
 * scaffold/air-mesh energy remains plain Symmetric Dirichlet;
 * candidate discovery still receives the scale gradient through
   SymDirichletEnergy::computeLocalGradient;
-* candidate-local optimization uses the exact same physical objective;
-* E_scale is an UNNORMALIZED sum of per-triangle violation residuals.
-
-The existing build_optcuts_onestring.py is first used to restore/patch the
-upstream checkout.  This script then rewires the generated C++ so the scale
-term is injected at the Optimizer level instead of relying on the physical and
-scaffold calls sharing SymDirichletEnergy.
+* candidate-local optimization uses the same physical scale objective;
+* E_scale is an UNNORMALIZED sum of per-triangle violation residuals;
+* the exact runtime physical-energy path writes an activation file so Python
+  can fail closed instead of silently accepting an unmodified run.
 """
 from __future__ import annotations
 
@@ -118,8 +122,9 @@ def main() -> int:
 
     # ------------------------------------------------------------------
     # 2. Optimizer: add scale energy/gradient explicitly to the PHYSICAL data.
-    #    Scaffold computation later in these functions still constructs a
-    #    fresh SymDirichletEnergy and therefore never sees E_scale.
+    #    IMPORTANT: E_scale is outside energyParams[0]. OptCuts uses
+    #    energyParams[0] as its SD multiplier, which is ~0.001 initially in the
+    #    OneString route. Scaling E_scale by that value was the key bug.
     # ------------------------------------------------------------------
     decl_anchor = """    void oneStringSetGlobalScaleReference(const TriMesh& data);\n    void oneStringSetDiagnosticScope(bool localScope);\n"""
     decl_replacement = decl_anchor + """    double oneStringPhysicalScaleEnergy(const TriMesh& data);\n    void oneStringPhysicalScaleGradient(const TriMesh& data, Eigen::VectorXd& gradient);\n    void oneStringPhysicalScaleDiagnostics(\n        const TriMesh& data,\n        const Eigen::VectorXd& sdGradient,\n        const Eigen::VectorXd& scaleGradient);\n"""
@@ -129,33 +134,34 @@ def main() -> int:
     )
 
     energy_anchor = """        energyTerms[0]->computeEnergyVal(data, energyVal_ET[0]);\n        energyVal = energyParams[0] * energyVal_ET[0];\n"""
-    energy_replacement = """        energyTerms[0]->computeEnergyVal(data, energyVal_ET[0]);\n        const double oneStringScaleEnergy = oneStringPhysicalScaleEnergy(data);\n        energyVal_ET[0] += oneStringScaleEnergy;\n        energyVal = energyParams[0] * energyVal_ET[0];\n"""
+    energy_replacement = """        energyTerms[0]->computeEnergyVal(data, energyVal_ET[0]);\n        const double oneStringScaleEnergy = oneStringPhysicalScaleEnergy(data);\n        energyVal = energyParams[0] * energyVal_ET[0] + oneStringScaleEnergy;\n"""
     optimizer = replace_once(
         optimizer, energy_anchor, energy_replacement,
         "physical Optimizer energy injection",
     )
 
     grad_anchor = """        energyTerms[0]->computeGradient(data, gradient_ET[0]);\n        gradient = energyParams[0] * gradient_ET[0];\n"""
-    grad_replacement = """        energyTerms[0]->computeGradient(data, gradient_ET[0]);\n        Eigen::VectorXd oneStringSDGradient = gradient_ET[0];\n        Eigen::VectorXd oneStringScaleGradient;\n        oneStringPhysicalScaleGradient(data, oneStringScaleGradient);\n        gradient_ET[0] += oneStringScaleGradient;\n        oneStringPhysicalScaleDiagnostics(\n            data, oneStringSDGradient, oneStringScaleGradient);\n        gradient = energyParams[0] * gradient_ET[0];\n"""
+    grad_replacement = """        energyTerms[0]->computeGradient(data, gradient_ET[0]);\n        Eigen::VectorXd oneStringSDGradient = gradient_ET[0];\n        Eigen::VectorXd oneStringScaleGradient;\n        oneStringPhysicalScaleGradient(data, oneStringScaleGradient);\n        oneStringPhysicalScaleDiagnostics(\n            data, oneStringSDGradient, oneStringScaleGradient);\n        gradient = energyParams[0] * gradient_ET[0] + oneStringScaleGradient;\n"""
     optimizer = replace_once(
         optimizer, grad_anchor, grad_replacement,
         "physical Optimizer gradient injection",
     )
 
-    # Runtime marker is emitted from the exact physical energy path, not merely
-    # from initialization. This makes it impossible to silently fall back to SD.
-    marker_anchor = """        const double oneStringScaleEnergy = oneStringPhysicalScaleEnergy(data);\n        energyVal_ET[0] += oneStringScaleEnergy;\n"""
-    marker_replacement = marker_anchor + """        static std::atomic<bool> oneStringPhysicalObjectivePrinted(false);\n        bool oneStringExpected = false;\n        if(oneStringPhysicalObjectivePrinted.compare_exchange_strong(\n               oneStringExpected, true)) {\n            std::cerr\n                << \"[OPTCUTS-ONESTRING-PHYSICAL-OBJECTIVE-ACTIVE] scale_energy=\"\n                << oneStringScaleEnergy\n                << \" model=sum_residual_squared_no_area_normalization\"\n                << std::endl;\n        }\n"""
+    # Runtime proof from the exact physical energy path. Besides stderr, write a
+    # marker file requested by Python. This is robust to truncated subprocess
+    # output and makes the test2 route fail closed if this code did not execute.
+    marker_anchor = """        const double oneStringScaleEnergy = oneStringPhysicalScaleEnergy(data);\n        energyVal = energyParams[0] * energyVal_ET[0] + oneStringScaleEnergy;\n"""
+    marker_replacement = marker_anchor + """        static std::atomic<bool> oneStringPhysicalObjectivePrinted(false);\n        bool oneStringExpected = false;\n        if(oneStringPhysicalObjectivePrinted.compare_exchange_strong(\n               oneStringExpected, true)) {\n            std::cerr\n                << \"[OPTCUTS-ONESTRING-PHYSICAL-OBJECTIVE-ACTIVE] scale_energy=\"\n                << oneStringScaleEnergy\n                << \" sd_multiplier=\" << energyParams[0]\n                << \" model=sum_residual_squared_no_area_normalization\"\n                << std::endl;\n            const char* activePath = std::getenv(\n                \"ONESTRING_OPTCUTS_ACTIVE_PATH\");\n            if(activePath && *activePath) {\n                std::ofstream active(activePath, std::ios::trunc);\n                if(active.good()) {\n                    active << \"active\\n\"\n                           << \"scale_energy=\" << oneStringScaleEnergy << \"\\n\"\n                           << \"sd_multiplier=\" << energyParams[0] << \"\\n\";\n                }\n            }\n        }\n"""
     optimizer = replace_once(
         optimizer, marker_anchor, marker_replacement,
         "physical objective runtime marker",
     )
 
-    # Optimizer.cpp now uses atomic/iostream directly for the hard marker.
+    # Optimizer.cpp now uses atomic/iostream/getenv directly for the hard marker.
     optimizer = replace_once(
         optimizer,
         "#include <fstream>\n",
-        "#include <fstream>\n#include <atomic>\n#include <iostream>\n",
+        "#include <fstream>\n#include <atomic>\n#include <cstdlib>\n#include <iostream>\n",
         "Optimizer runtime marker includes",
     )
 
@@ -164,8 +170,10 @@ def main() -> int:
 
     required_optimizer = (
         "oneStringPhysicalScaleEnergy(data)",
-        "oneStringPhysicalScaleGradient(data, oneStringScaleGradient)",
+        "energyVal = energyParams[0] * energyVal_ET[0] + oneStringScaleEnergy",
+        "gradient = energyParams[0] * gradient_ET[0] + oneStringScaleGradient",
         "[OPTCUTS-ONESTRING-PHYSICAL-OBJECTIVE-ACTIVE]",
+        "ONESTRING_OPTCUTS_ACTIVE_PATH",
     )
     required_sd = (
         "double oneStringPhysicalScaleEnergy(const TriMesh& data)",
@@ -198,8 +206,9 @@ def main() -> int:
         str(binary.resolve()) + "\n", encoding="utf-8"
     )
     print(
-        "[OPTCUTS-ONESTRING-FORCE-ENABLED] physical Optimizer now evaluates "
-        "E_SD + weight * SUM(residual^2); scaffold remains SD-only"
+        "[OPTCUTS-ONESTRING-FORCE-ENABLED] physical objective is now "
+        "lambda_SD * E_SD + weight * SUM(residual^2); scale is NOT multiplied "
+        "by lambda_SD; scaffold remains SD-only"
     )
     print(f"[OPTCUTS-ONESTRING-BUILD] binary={binary.resolve()}")
     return 0
