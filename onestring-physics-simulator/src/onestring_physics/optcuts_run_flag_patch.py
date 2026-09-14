@@ -150,43 +150,150 @@ def _count_overlaps(tiles: np.ndarray, tolerance: float) -> tuple[int, float]:
     return count, max_depth
 
 
+def _gauss_seidel_cleanup(
+    tiles: np.ndarray,
+    tolerance: float,
+    max_sweeps: int,
+) -> tuple[np.ndarray, int, int, float]:
+    """Rigid-translation SAT cleanup. Tile shapes are never modified."""
+    out = np.asarray(tiles, dtype=float).copy()
+    used = 0
+    final_count, final_depth = _count_overlaps(out, tolerance)
+    for sweep in range(1, max(0, int(max_sweeps)) + 1):
+        moved = False
+        for i, j in list(_aabb_candidate_pairs(out, tolerance)):
+            mtv = _sat_mtv(out[i], out[j], tolerance)
+            if mtv is None:
+                continue
+            out[i] += 0.5 * mtv
+            out[j] -= 0.5 * mtv
+            moved = True
+        used = sweep
+        final_count, final_depth = _count_overlaps(out, tolerance)
+        if final_count == 0 or not moved:
+            break
+    return out, int(used), int(final_count), float(final_depth)
+
+
+def _expand_tile_centers(tiles: np.ndarray, factor: float) -> np.ndarray:
+    """Expand tile centers about their global centroid without changing any tile shape."""
+    out = np.asarray(tiles, dtype=float).copy()
+    if len(out) == 0 or abs(float(factor) - 1.0) <= 1e-15:
+        return out
+    centers = np.mean(out, axis=1)
+    global_center = np.mean(centers, axis=0)
+    shifts = (float(factor) - 1.0) * (centers - global_center)
+    out += shifts[:, None, :]
+    return out
+
+
+def _minimal_collision_free_expansion(
+    tiles: np.ndarray,
+    tolerance: float,
+    *,
+    max_factor: float = 1.50,
+    binary_steps: int = 28,
+) -> tuple[np.ndarray, float, int, float]:
+    """Find the smallest uniform center expansion that is SAT collision-free.
+
+    The geometry of every panel remains rigid. Only panel-center translations are
+    changed. This is a feasibility fallback for dense jammed layouts, not a
+    relaxation of the hard overlap condition.
+    """
+    base = np.asarray(tiles, dtype=float)
+    count0, depth0 = _count_overlaps(base, tolerance)
+    if count0 == 0:
+        return base.copy(), 1.0, 0, float(depth0)
+
+    lo = 1.0
+    increment = 5e-4
+    hi = 1.0 + increment
+    hi_count = count0
+    hi_depth = depth0
+    while hi <= float(max_factor) + 1e-12:
+        candidate = _expand_tile_centers(base, hi)
+        hi_count, hi_depth = _count_overlaps(candidate, tolerance)
+        if hi_count == 0:
+            break
+        increment *= 2.0
+        hi = 1.0 + increment
+
+    if hi_count != 0:
+        hi = float(max_factor)
+        candidate = _expand_tile_centers(base, hi)
+        hi_count, hi_depth = _count_overlaps(candidate, tolerance)
+        if hi_count != 0:
+            return candidate, hi, int(hi_count), float(hi_depth)
+
+    for _ in range(max(1, int(binary_steps))):
+        mid = 0.5 * (lo + hi)
+        candidate = _expand_tile_centers(base, mid)
+        mid_count, _mid_depth = _count_overlaps(candidate, tolerance)
+        if mid_count == 0:
+            hi = mid
+        else:
+            lo = mid
+
+    result = _expand_tile_centers(base, hi)
+    final_count, final_depth = _count_overlaps(result, tolerance)
+    return result, float(hi), int(final_count), float(final_depth)
+
+
 def _solve_nonpenetrating_translations(polygons: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, float | int]]:
-    """Gauss-Seidel feasibility projection using rigid XY translations only."""
+    """Hard SAT feasibility: local projection, minimal expansion, final cleanup.
+
+    The previous solver could jam on dense nearly-touching grids: resolving one
+    pair recreated another overlap. We now first run local Gauss-Seidel SAT
+    projection. If it stalls, we find the minimum global expansion of tile
+    centers that removes the jam, then run a final local cleanup. Panel geometry
+    is rigid throughout and the final acceptance condition remains overlap=0.
+    """
     original = np.asarray(polygons, dtype=float)
     tiles = original.copy()
     if len(tiles) < 2:
-        return tiles, np.zeros((len(tiles), 2), dtype=float), {"initial": 0, "final": 0, "sweeps": 0, "depth": 0.0}
+        return tiles, np.zeros((len(tiles), 2), dtype=float), {
+            "initial": 0, "final": 0, "sweeps": 0, "depth": 0.0, "expansion_factor": 1.0
+        }
 
     edge_lengths = np.linalg.norm(np.roll(tiles, -1, axis=1) - tiles, axis=2)
     positive = edge_lengths[edge_lengths > 1e-12]
     scale = float(np.median(positive)) if positive.size else 1.0
     tolerance = max(1e-10, scale * 1e-7)
     initial_count, initial_depth = _count_overlaps(tiles, tolerance)
-    max_sweeps = 500
-    sweep = 0
 
-    for sweep in range(1, max_sweeps + 1):
-        moved = False
-        # Rebuild candidates every sweep. Pair corrections are applied immediately,
-        # so collision cannot be hidden by averaging mutually cancelling updates.
-        for i, j in list(_aabb_candidate_pairs(tiles, tolerance)):
-            mtv = _sat_mtv(tiles[i], tiles[j], tolerance)
-            if mtv is None:
-                continue
-            tiles[i] += 0.5 * mtv
-            tiles[j] -= 0.5 * mtv
-            moved = True
-        final_count, final_depth = _count_overlaps(tiles, tolerance)
-        if final_count == 0:
-            break
-        if not moved:
-            break
+    # Stage 1: cheap local feasibility projection. Do not waste 500 sweeps on a
+    # jammed dense grid; expansion is specifically the escape mechanism.
+    tiles, local_sweeps, final_count, final_depth = _gauss_seidel_cleanup(
+        tiles, tolerance, max_sweeps=120
+    )
+    expansion_factor = 1.0
+    expansion_count_before_cleanup = final_count
+
+    # Stage 2: if local pairwise corrections jam, separate tile centers by the
+    # smallest global scale that makes the current rigid panel set collision-free.
+    if final_count != 0:
+        tiles, expansion_factor, expansion_count, expansion_depth = _minimal_collision_free_expansion(
+            tiles, tolerance, max_factor=1.50, binary_steps=28
+        )
+        print(
+            "[HARD-NONPENETRATION-EXPAND] "
+            f"jam_pairs={expansion_count_before_cleanup} factor={expansion_factor:.9g} "
+            f"pairs_after_expansion={expansion_count} depth={expansion_depth:.6g}"
+        )
+
+        # Stage 3: cleanup numerical edge cases at the expanded configuration.
+        tiles, cleanup_sweeps, final_count, final_depth = _gauss_seidel_cleanup(
+            tiles, tolerance, max_sweeps=120
+        )
+    else:
+        cleanup_sweeps = 0
 
     final_count, final_depth = _count_overlaps(tiles, tolerance)
     if final_count != 0:
         raise RuntimeError(
             "HARD_NONPENETRATION_INFEASIBLE: "
-            f"{final_count} overlapping tile pairs remain after {max_sweeps} final-stage sweeps "
+            f"{final_count} overlapping tile pairs remain after local SAT projection + "
+            f"minimal center expansion (factor={expansion_factor:.9g}) + final cleanup "
             f"(max penetration proxy={final_depth:.6g})."
         )
 
@@ -194,8 +301,9 @@ def _solve_nonpenetrating_translations(polygons: np.ndarray) -> tuple[np.ndarray
     return tiles, delta, {
         "initial": int(initial_count),
         "final": int(final_count),
-        "sweeps": int(sweep),
+        "sweeps": int(local_sweeps + cleanup_sweeps),
         "depth": float(initial_depth),
+        "expansion_factor": float(expansion_factor),
     }
 
 
@@ -209,11 +317,15 @@ def _project_hard_nonpenetration(layout: Any) -> Any:
             "hard_nonpenetration_initial_overlap_pairs": stats["initial"],
             "hard_nonpenetration_final_overlap_pairs": stats["final"],
             "hard_nonpenetration_sweeps": stats["sweeps"],
+            "hard_nonpenetration_expansion_factor": stats.get("expansion_factor", 1.0),
             "hard_nonpenetration_acceptance": "final SAT overlap count must equal zero",
         })
     except Exception:
         pass
-    print(f"[HARD-NONPENETRATION-FLAT] initial={stats['initial']} final=0 sweeps={stats['sweeps']}")
+    print(
+        f"[HARD-NONPENETRATION-FLAT] initial={stats['initial']} final=0 "
+        f"sweeps={stats['sweeps']} expansion={stats.get('expansion_factor', 1.0):.9g}"
+    )
     return layout
 
 
@@ -228,8 +340,6 @@ def _project_dual_hinge_hard_nonpenetration(out: Any, hinge_graph: Any) -> None:
         transforms[:, 0, 3] += delta[:, 0]
         transforms[:, 1, 3] += delta[:, 1]
 
-    # Hard projection happens after the dual-hinge solver, so refresh every
-    # stored hinge point from the actual final geometry.
     for hinge in getattr(hinge_graph, "hinges", []):
         a = int(hinge.tile_a)
         b = int(hinge.tile_b)
@@ -243,6 +353,7 @@ def _project_dual_hinge_hard_nonpenetration(out: Any, hinge_graph: Any) -> None:
         "hard_nonpenetration_initial_overlap_pairs": stats["initial"],
         "hard_nonpenetration_final_overlap_pairs": stats["final"],
         "hard_nonpenetration_sweeps": stats["sweeps"],
+        "hard_nonpenetration_expansion_factor": stats.get("expansion_factor", 1.0),
         "hard_nonpenetration_acceptance": "final Dual Hinge SAT overlap count must equal zero",
     }
     try:
@@ -253,7 +364,10 @@ def _project_dual_hinge_hard_nonpenetration(out: Any, hinge_graph: Any) -> None:
         hinge_graph.metrics.update(metrics)
     except Exception:
         pass
-    print(f"[HARD-NONPENETRATION-DUAL] initial={stats['initial']} final=0 sweeps={stats['sweeps']}")
+    print(
+        f"[HARD-NONPENETRATION-DUAL] initial={stats['initial']} final=0 "
+        f"sweeps={stats['sweeps']} expansion={stats.get('expansion_factor', 1.0):.9g}"
+    )
 
 
 def _wire_dual_hard_wrapper(pipeline: Any) -> None:
@@ -297,9 +411,6 @@ def install_optcuts_run_flag_patch(pipeline: Any) -> None:
 
     _wire_dual_hard_wrapper(pipeline)
 
-    # Simple Split is installed later by app_split_panels.py. Re-wrap the final
-    # dual-hinge entry point after that installer too, so no later routing can
-    # silently bypass the hard final acceptance check.
     try:
         from . import simple_split_panel_patch as simple_split_module
         if not getattr(simple_split_module, "_onestring_hard_nonpenetration_rewire_installed", False):
