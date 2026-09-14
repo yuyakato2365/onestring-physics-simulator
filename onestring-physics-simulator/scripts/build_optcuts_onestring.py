@@ -13,6 +13,12 @@ OneString-aware objective. No global optimizer is run per candidate.
 The scale term contributes energy and gradient. The original SPD
 Symmetric-Dirichlet Hessian is retained as an inexact-Newton preconditioner;
 line search still evaluates the full augmented energy.
+
+This build also instruments the augmented objective. At runtime, when
+ONESTRING_OPTCUTS_SCALE_DIAG_PATH is set, it appends CSV rows containing
+SD energy, raw/weighted scale energy, SD/scale gradient norms, violation count,
+and scale range. Large-mesh/global calls are logged every time; local candidate
+relaxations are sampled to keep the file manageable.
 """
 from __future__ import annotations
 
@@ -184,6 +190,128 @@ HELPER = r"""
             }
         }
     }
+
+    static double oneStringSDEnergy(const TriMesh& data, bool uniformWeight)
+    {
+        const double normalizer_div = std::max(data.surfaceArea, 1.0e-16);
+        double total = 0.0;
+        for(int triI = 0; triI < data.F.rows(); ++triI) {
+            const Eigen::Vector3i triVInd = data.F.row(triI);
+            const Eigen::RowVector2d U1 = data.V.row(triVInd[0]);
+            const Eigen::RowVector2d U2 = data.V.row(triVInd[1]);
+            const Eigen::RowVector2d U3 = data.V.row(triVInd[2]);
+            const Eigen::RowVector2d U2m1 = U2 - U1;
+            const Eigen::RowVector2d U3m1 = U3 - U1;
+            const double area_U = 0.5 *
+                (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
+            if(std::abs(area_U) < 1.0e-16) { continue; }
+            const double w = uniformWeight
+                ? 1.0 : data.triArea[triI] / normalizer_div;
+            total += w *
+                (1.0 + data.triAreaSq[triI] / area_U / area_U) *
+                ((U3m1.squaredNorm() * data.e0SqLen[triI] +
+                  U2m1.squaredNorm() * data.e1SqLen[triI]) /
+                     4.0 / data.triAreaSq[triI] -
+                 U3m1.dot(U2m1) * data.e0dote1[triI] /
+                     2.0 / data.triAreaSq[triI]);
+        }
+        return total;
+    }
+
+    static void oneStringScaleStats(
+        const TriMesh& data,
+        bool uniformWeight,
+        double& rawScaleEnergy,
+        int& violating,
+        double& scaleRange)
+    {
+        rawScaleEnergy = 0.0;
+        violating = 0;
+        scaleRange = 1.0;
+        if(data.F.rows() == 0) { return; }
+
+        const double center = oneStringScaleCenter(data);
+        const double halfBand = oneStringScaleHalfBand();
+        const double normalizer_div = std::max(data.surfaceArea, 1.0e-16);
+        double minLog = __DBL_MAX__;
+        double maxLog = -__DBL_MAX__;
+
+        for(int triI = 0; triI < data.F.rows(); ++triI) {
+            const double q = oneStringLogLambda(data, triI);
+            minLog = std::min(minLog, q);
+            maxLog = std::max(maxLog, q);
+            const double r = oneStringScaleResidual(q, center, halfBand);
+            if(r > 0.0) { ++violating; }
+            const double w = uniformWeight
+                ? 1.0 : data.triArea[triI] / normalizer_div;
+            rawScaleEnergy += w * r * r;
+        }
+        scaleRange = std::exp(maxLog - minLog);
+    }
+
+    static void oneStringLogDiagnostics(
+        const TriMesh& data,
+        bool uniformWeight,
+        const Eigen::VectorXd& sdGradient,
+        const Eigen::VectorXd& scaleGradient)
+    {
+        const char* path = std::getenv("ONESTRING_OPTCUTS_SCALE_DIAG_PATH");
+        if(!path || !*path) { return; }
+
+        static long globalCalls = 0;
+        static long localCalls = 0;
+        const bool globalLike = data.F.rows() >= 1000;
+        long callIndex = 0;
+        bool shouldLog = false;
+        if(globalLike) {
+            callIndex = ++globalCalls;
+            shouldLog = true;
+        }
+        else {
+            callIndex = ++localCalls;
+            // Capture initial local candidate behaviour, then sample sparsely.
+            shouldLog = (callIndex <= 25 || (callIndex % 500) == 0);
+        }
+        if(!shouldLog) { return; }
+
+        double rawScaleEnergy = 0.0;
+        double scaleRange = 1.0;
+        int violating = 0;
+        oneStringScaleStats(
+            data, uniformWeight, rawScaleEnergy, violating, scaleRange);
+        const double sdEnergy = oneStringSDEnergy(data, uniformWeight);
+        const double weightedScaleEnergy =
+            oneStringScaleWeight() * rawScaleEnergy;
+        const double energyRatio = weightedScaleEnergy /
+            std::max(std::abs(sdEnergy), 1.0e-30);
+        const double sdGradNorm = sdGradient.norm();
+        const double scaleGradNorm = scaleGradient.norm();
+        const double gradRatio = scaleGradNorm /
+            std::max(sdGradNorm, 1.0e-30);
+
+        bool writeHeader = false;
+        {
+            std::ifstream check(path);
+            writeHeader = !check.good() || check.peek() == std::ifstream::traits_type::eof();
+        }
+        std::ofstream out(path, std::ios::app);
+        if(!out.good()) { return; }
+        if(writeHeader) {
+            out << "scope,call,n_vertices,n_faces,sd_energy,scale_energy_raw,"
+                   "scale_energy_weighted,scale_to_sd,sd_grad_norm,"
+                   "scale_grad_norm,scale_grad_to_sd_grad,violating,"
+                   "scale_range,scale_weight\n";
+        }
+        out << (globalLike ? "global" : "local") << ','
+            << callIndex << ','
+            << data.V.rows() << ',' << data.F.rows() << ','
+            << std::setprecision(17)
+            << sdEnergy << ',' << rawScaleEnergy << ','
+            << weightedScaleEnergy << ',' << energyRatio << ','
+            << sdGradNorm << ',' << scaleGradNorm << ',' << gradRatio << ','
+            << violating << ',' << scaleRange << ',' << oneStringScaleWeight()
+            << '\n';
+    }
 """
 
 
@@ -211,7 +339,7 @@ def make_onestring_symdirichlet_source(upstream: str) -> str:
     source = replace_once(
         source,
         "#include <cfloat>\n",
-        "#include <cfloat>\n#include <cmath>\n#include <cstdlib>\n#include <string>\n",
+        "#include <cfloat>\n#include <cmath>\n#include <cstdlib>\n#include <string>\n#include <iomanip>\n",
         "SymDirichlet standard includes",
     )
     source = replace_once(
@@ -261,10 +389,21 @@ def make_onestring_symdirichlet_source(upstream: str) -> str:
             gradient[2 * fixedVI + 1] = 0.0;
         }
 """
-    replacement = """        oneStringAddScaleGradient(data, gradient, uniformWeight);
+    replacement = """        Eigen::VectorXd oneStringSDGradient = gradient;
+        Eigen::VectorXd oneStringScaleGradient = Eigen::VectorXd::Zero(gradient.size());
+        oneStringAddScaleGradient(data, oneStringScaleGradient, uniformWeight);
+        for(const auto fixedVI : data.fixedVert) {
+            oneStringSDGradient[2 * fixedVI] = 0.0;
+            oneStringSDGradient[2 * fixedVI + 1] = 0.0;
+            oneStringScaleGradient[2 * fixedVI] = 0.0;
+            oneStringScaleGradient[2 * fixedVI + 1] = 0.0;
+        }
+        gradient += oneStringScaleGradient;
+        oneStringLogDiagnostics(
+            data, uniformWeight, oneStringSDGradient, oneStringScaleGradient);
 
 """ + anchor
-    source = replace_once(source, anchor, replacement, "augmented gradient")
+    source = replace_once(source, anchor, replacement, "augmented gradient + diagnostics")
     return source
 
 
@@ -319,15 +458,17 @@ def main() -> int:
     required = (
         "oneStringAddScaleGradient",
         "oneStringScalePenaltyByElem",
+        "oneStringLogDiagnostics",
+        "scale_grad_to_sd_grad",
         "energyValPerElem[triI] += oneStringScalePenaltyByElem",
         "energyVal += oneStringScalePenaltyByElem",
-        "oneStringAddScaleGradient(data, gradient, uniformWeight)",
+        "gradient += oneStringScaleGradient",
     )
     missing = [token for token in required if token not in modified_sd]
     if missing:
         raise SystemExit(
             "OptCuts source verification failed; augmented OneString geometry "
-            "objective is incomplete: " + ", ".join(missing)
+            "objective/diagnostics are incomplete: " + ", ".join(missing)
         )
 
     print(
@@ -338,6 +479,10 @@ def main() -> int:
         "[OPTCUTS-ONESTRING-OBJECTIVE] "
         "E_geom = E_SD + weight * E_scale in global and local UV solves; "
         "SD Hessian retained as inexact-Newton preconditioner"
+    )
+    print(
+        "[OPTCUTS-ONESTRING-DIAGNOSTICS] energy/gradient contribution logging enabled "
+        "when ONESTRING_OPTCUTS_SCALE_DIAG_PATH is set"
     )
 
     build = optcuts / "build_onestring"
