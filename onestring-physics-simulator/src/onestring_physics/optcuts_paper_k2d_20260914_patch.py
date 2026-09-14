@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from .lscm_latest_omega_hybrid_20260914_patch import install_deferred_hybrid_hook
+
 
 VARIANT = "3"
 VERSION_ID = "2026-09-14-paper-k2d-eq5-stage-separated"
@@ -207,6 +209,10 @@ def _install_simple_split_bypass() -> None:
 
 
 def install_optcuts_paper_k2d_20260914_patch(pipeline: Any) -> None:
+    # Register the clean diagnostic hybrid while the LSCM downstream functions
+    # are still available, before app_optcuts stacks its OptCuts-specific routes.
+    install_deferred_hybrid_hook(pipeline)
+
     if getattr(pipeline, "_onestring_optcuts_paper_k2d_20260914_installed", False):
         return
 
