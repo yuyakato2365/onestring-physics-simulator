@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """Build the dedicated OneString-aware OptCuts binary.
 
-For optcuts_test2 this build changes OptCuts' distortion model itself from
-plain Symmetric Dirichlet to:
+This source-level patch keeps OptCuts' original topology/parameterization
+algorithm, but changes the distortion model used by both the global UV solve
+and the candidate-local UV relaxation from plain Symmetric Dirichlet to
 
-    E_geom = E_SD + scale_weight * E_scale
+    E_geom = E_SD + scale_weight * E_scale.
 
-Because OptCuts uses SymDirichletEnergy in both its ordinary embedding solve
-and its local topology-candidate relaxation, both stages see the same
-OneString-aware objective. No global optimizer is run per candidate.
+Important implementation rule: the scale band is defined by a GLOBAL reference
+center frozen for one global OptCuts iteration. Candidate-local optimizers reuse
+that same reference instead of re-centering on their local stencil. This makes
+local candidate relaxation approximate improvement of the same global
+lambda_max/lambda_min objective.
 
-The scale term contributes energy and gradient. The original SPD
-Symmetric-Dirichlet Hessian is retained as an inexact-Newton preconditioner;
-line search still evaluates the full augmented energy.
-
-This build also instruments the augmented objective. At runtime, when
-ONESTRING_OPTCUTS_SCALE_DIAG_PATH is set, it appends CSV rows containing
-SD energy, raw/weighted scale energy, SD/scale gradient norms, violation count,
-and scale range. Large-mesh/global calls are logged every time; local candidate
-relaxations are sampled to keep the file manageable.
+The center is refreshed before each global Newton iteration (block-coordinate
+update), then held fixed during its gradient + line-search evaluations. The
+original SD Hessian remains an inexact-Newton SPD preconditioner.
 """
 from __future__ import annotations
 
@@ -30,7 +27,15 @@ import subprocess
 
 HELPER = r"""
 
+    // ------------------------------------------------------------------
     // OneString scale-aware extension.
+    // ------------------------------------------------------------------
+    static std::atomic<double> oneStringGlobalCenter(0.0);
+    static std::atomic<double> oneStringGlobalSurfaceArea(1.0);
+    static std::atomic<bool> oneStringGlobalReferenceValid(false);
+    static thread_local bool oneStringDiagnosticLocalScope = false;
+    static std::mutex oneStringDiagnosticMutex;
+
     static double oneStringScaleEnv(const char* name, double fallback)
     {
         const char* raw = std::getenv(name);
@@ -39,9 +44,7 @@ HELPER = r"""
             const double value = std::stod(std::string(raw));
             return std::isfinite(value) ? value : fallback;
         }
-        catch(...) {
-            return fallback;
-        }
+        catch(...) { return fallback; }
     }
 
     static double oneStringScaleWeight()
@@ -55,6 +58,11 @@ HELPER = r"""
         const double bound = std::max(
             1.000001, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_BOUND", 2.0));
         return 0.5 * std::log(bound);
+    }
+
+    static double oneStringScaleBound()
+    {
+        return std::exp(2.0 * oneStringScaleHalfBand());
     }
 
     static double oneStringLogLambdaFromUV(
@@ -97,7 +105,7 @@ HELPER = r"""
         return oneStringLogLambdaFromUV(data, triI, uv);
     }
 
-    static double oneStringScaleCenter(const TriMesh& data)
+    static double oneStringCurrentMeshCenter(const TriMesh& data)
     {
         if(data.F.rows() == 0) { return 0.0; }
         double minLog = __DBL_MAX__;
@@ -107,15 +115,57 @@ HELPER = r"""
             minLog = std::min(minLog, q);
             maxLog = std::max(maxLog, q);
         }
-        // Removes arbitrary global UV similarity scale.
         return 0.5 * (minLog + maxLog);
+    }
+
+    // Called only by the non-muted/global Optimizer. Local candidate optimizers
+    // deliberately do NOT overwrite this value.
+    void oneStringSetGlobalScaleReference(const TriMesh& data)
+    {
+        if(data.F.rows() == 0) { return; }
+        const double center = oneStringCurrentMeshCenter(data);
+        oneStringGlobalCenter.store(center, std::memory_order_relaxed);
+        oneStringGlobalSurfaceArea.store(
+            std::max(data.surfaceArea, 1.0e-16), std::memory_order_relaxed);
+        oneStringGlobalReferenceValid.store(true, std::memory_order_release);
+
+        static std::atomic<bool> printed(false);
+        bool expected = false;
+        if(printed.compare_exchange_strong(expected, true)) {
+            std::cerr
+                << "[OPTCUTS-SCALE-CPP-ACTIVE] weight=" << oneStringScaleWeight()
+                << " bound=" << oneStringScaleBound()
+                << " center_mode=global-frozen-per-iteration"
+                << std::endl;
+        }
+    }
+
+    void oneStringSetDiagnosticScope(bool localScope)
+    {
+        oneStringDiagnosticLocalScope = localScope;
+    }
+
+    static double oneStringReferenceCenter(const TriMesh& data)
+    {
+        if(oneStringGlobalReferenceValid.load(std::memory_order_acquire)) {
+            return oneStringGlobalCenter.load(std::memory_order_relaxed);
+        }
+        return oneStringCurrentMeshCenter(data);
+    }
+
+    static double oneStringReferenceArea(const TriMesh& data)
+    {
+        if(oneStringGlobalReferenceValid.load(std::memory_order_acquire)) {
+            return std::max(
+                oneStringGlobalSurfaceArea.load(std::memory_order_relaxed), 1.0e-16);
+        }
+        return std::max(data.surfaceArea, 1.0e-16);
     }
 
     static double oneStringScaleResidual(
         double logLambda, double center, double halfBand)
     {
-        return std::max(
-            0.0, std::abs(logLambda - center) - halfBand);
+        return std::max(0.0, std::abs(logLambda - center) - halfBand);
     }
 
     static double oneStringScalePenaltyByElem(
@@ -134,8 +184,56 @@ HELPER = r"""
 
         const double w = uniformWeight
             ? 1.0
-            : data.triArea[triI] / std::max(data.surfaceArea, 1.0e-16);
+            : data.triArea[triI] / oneStringReferenceArea(data);
         return scaleWeight * w * r * r;
+    }
+
+    static void oneStringTriangleScaleGradient(
+        const TriMesh& data,
+        int triI,
+        double center,
+        bool uniformWeight,
+        Eigen::Matrix<double, 3, 2>& triGradient)
+    {
+        triGradient.setZero();
+        const double scaleWeight = oneStringScaleWeight();
+        if(scaleWeight <= 0.0) { return; }
+
+        const Eigen::Vector3i tri = data.F.row(triI);
+        Eigen::Matrix<double, 3, 2> uv;
+        uv.row(0) = data.V.row(tri[0]);
+        uv.row(1) = data.V.row(tri[1]);
+        uv.row(2) = data.V.row(tri[2]);
+
+        const double q = oneStringLogLambdaFromUV(data, triI, uv);
+        const double delta = q - center;
+        const double r = std::abs(delta) - oneStringScaleHalfBand();
+        if(r <= 0.0) { return; }
+
+        const double sign = (delta >= 0.0) ? 1.0 : -1.0;
+        const double w = uniformWeight
+            ? 1.0
+            : data.triArea[triI] / oneStringReferenceArea(data);
+
+        double uvScale = 0.0;
+        for(int lv = 0; lv < 3; ++lv) {
+            uvScale = std::max(uvScale, uv.row(lv).norm());
+        }
+        const double eps = 1.0e-6 * std::max(1.0e-3, uvScale);
+
+        for(int lv = 0; lv < 3; ++lv) {
+            for(int d = 0; d < 2; ++d) {
+                Eigen::Matrix<double, 3, 2> uvPlus = uv;
+                Eigen::Matrix<double, 3, 2> uvMinus = uv;
+                uvPlus(lv, d) += eps;
+                uvMinus(lv, d) -= eps;
+                const double qPlus = oneStringLogLambdaFromUV(data, triI, uvPlus);
+                const double qMinus = oneStringLogLambdaFromUV(data, triI, uvMinus);
+                const double dq = (qPlus - qMinus) / (2.0 * eps);
+                triGradient(lv, d) =
+                    scaleWeight * w * 2.0 * r * sign * dq;
+            }
+        }
     }
 
     static void oneStringAddScaleGradient(
@@ -143,51 +241,30 @@ HELPER = r"""
         Eigen::VectorXd& gradient,
         bool uniformWeight)
     {
-        const double scaleWeight = oneStringScaleWeight();
-        if(scaleWeight <= 0.0 || data.F.rows() == 0) { return; }
-
-        const double center = oneStringScaleCenter(data);
-        const double halfBand = oneStringScaleHalfBand();
-
+        if(oneStringScaleWeight() <= 0.0 || data.F.rows() == 0) { return; }
+        const double center = oneStringReferenceCenter(data);
         for(int triI = 0; triI < data.F.rows(); ++triI) {
             const Eigen::Vector3i tri = data.F.row(triI);
-            Eigen::Matrix<double, 3, 2> uv;
-            uv.row(0) = data.V.row(tri[0]);
-            uv.row(1) = data.V.row(tri[1]);
-            uv.row(2) = data.V.row(tri[2]);
-
-            const double q = oneStringLogLambdaFromUV(data, triI, uv);
-            const double delta = q - center;
-            const double r = std::abs(delta) - halfBand;
-            if(r <= 0.0) { continue; }
-
-            const double sign = (delta >= 0.0) ? 1.0 : -1.0;
-            const double w = uniformWeight
-                ? 1.0
-                : data.triArea[triI] / std::max(data.surfaceArea, 1.0e-16);
-
-            double uvScale = 0.0;
+            Eigen::Matrix<double, 3, 2> triGradient;
+            oneStringTriangleScaleGradient(
+                data, triI, center, uniformWeight, triGradient);
             for(int lv = 0; lv < 3; ++lv) {
-                uvScale = std::max(uvScale, uv.row(lv).norm());
+                gradient[2 * tri[lv]] += triGradient(lv, 0);
+                gradient[2 * tri[lv] + 1] += triGradient(lv, 1);
             }
-            const double eps = 1.0e-6 * std::max(1.0e-3, uvScale);
+        }
+    }
 
-            for(int lv = 0; lv < 3; ++lv) {
-                for(int d = 0; d < 2; ++d) {
-                    Eigen::Matrix<double, 3, 2> uvPlus = uv;
-                    Eigen::Matrix<double, 3, 2> uvMinus = uv;
-                    uvPlus(lv, d) += eps;
-                    uvMinus(lv, d) -= eps;
-                    const double qPlus =
-                        oneStringLogLambdaFromUV(data, triI, uvPlus);
-                    const double qMinus =
-                        oneStringLogLambdaFromUV(data, triI, uvMinus);
-                    const double dq = (qPlus - qMinus) / (2.0 * eps);
-
-                    gradient[2 * tri[lv] + d] +=
-                        scaleWeight * w * 2.0 * r * sign * dq;
-                }
-            }
+    static void oneStringAddScaleLocalGradient(
+        const TriMesh& data,
+        Eigen::MatrixXd& localGradients)
+    {
+        if(oneStringScaleWeight() <= 0.0 || data.F.rows() == 0) { return; }
+        const double center = oneStringReferenceCenter(data);
+        for(int triI = 0; triI < data.F.rows(); ++triI) {
+            Eigen::Matrix<double, 3, 2> triGradient;
+            oneStringTriangleScaleGradient(data, triI, center, false, triGradient);
+            localGradients.block<3, 2>(triI * 3, 0) += triGradient;
         }
     }
 
@@ -230,12 +307,10 @@ HELPER = r"""
         scaleRange = 1.0;
         if(data.F.rows() == 0) { return; }
 
-        const double center = oneStringScaleCenter(data);
+        const double center = oneStringReferenceCenter(data);
         const double halfBand = oneStringScaleHalfBand();
-        const double normalizer_div = std::max(data.surfaceArea, 1.0e-16);
         double minLog = __DBL_MAX__;
         double maxLog = -__DBL_MAX__;
-
         for(int triI = 0; triI < data.F.rows(); ++triI) {
             const double q = oneStringLogLambda(data, triI);
             minLog = std::min(minLog, q);
@@ -243,7 +318,7 @@ HELPER = r"""
             const double r = oneStringScaleResidual(q, center, halfBand);
             if(r > 0.0) { ++violating; }
             const double w = uniformWeight
-                ? 1.0 : data.triArea[triI] / normalizer_div;
+                ? 1.0 : data.triArea[triI] / oneStringReferenceArea(data);
             rawScaleEnergy += w * r * r;
         }
         scaleRange = std::exp(maxLog - minLog);
@@ -258,21 +333,11 @@ HELPER = r"""
         const char* path = std::getenv("ONESTRING_OPTCUTS_SCALE_DIAG_PATH");
         if(!path || !*path) { return; }
 
-        static long globalCalls = 0;
-        static long localCalls = 0;
-        const bool globalLike = data.F.rows() >= 1000;
-        long callIndex = 0;
-        bool shouldLog = false;
-        if(globalLike) {
-            callIndex = ++globalCalls;
-            shouldLog = true;
-        }
-        else {
-            callIndex = ++localCalls;
-            // Capture initial local candidate behaviour, then sample sparsely.
-            shouldLog = (callIndex <= 25 || (callIndex % 500) == 0);
-        }
-        if(!shouldLog) { return; }
+        static std::atomic<long> globalCalls(0);
+        static std::atomic<long> localCalls(0);
+        const bool local = oneStringDiagnosticLocalScope;
+        const long callIndex = local ? ++localCalls : ++globalCalls;
+        if(local && !(callIndex <= 25 || (callIndex % 500) == 0)) { return; }
 
         double rawScaleEnergy = 0.0;
         double scaleRange = 1.0;
@@ -280,8 +345,7 @@ HELPER = r"""
         oneStringScaleStats(
             data, uniformWeight, rawScaleEnergy, violating, scaleRange);
         const double sdEnergy = oneStringSDEnergy(data, uniformWeight);
-        const double weightedScaleEnergy =
-            oneStringScaleWeight() * rawScaleEnergy;
+        const double weightedScaleEnergy = oneStringScaleWeight() * rawScaleEnergy;
         const double energyRatio = weightedScaleEnergy /
             std::max(std::abs(sdEnergy), 1.0e-30);
         const double sdGradNorm = sdGradient.norm();
@@ -289,28 +353,37 @@ HELPER = r"""
         const double gradRatio = scaleGradNorm /
             std::max(sdGradNorm, 1.0e-30);
 
+        std::lock_guard<std::mutex> guard(oneStringDiagnosticMutex);
         bool writeHeader = false;
         {
             std::ifstream check(path);
-            writeHeader = !check.good() || check.peek() == std::ifstream::traits_type::eof();
+            writeHeader = !check.good() ||
+                check.peek() == std::ifstream::traits_type::eof();
         }
         std::ofstream out(path, std::ios::app);
-        if(!out.good()) { return; }
+        if(!out.good()) {
+            static bool warned = false;
+            if(!warned) {
+                warned = true;
+                std::cerr << "[OPTCUTS-SCALE-DIAG-CPP-ERROR] cannot open "
+                          << path << std::endl;
+            }
+            return;
+        }
         if(writeHeader) {
             out << "scope,call,n_vertices,n_faces,sd_energy,scale_energy_raw,"
                    "scale_energy_weighted,scale_to_sd,sd_grad_norm,"
                    "scale_grad_norm,scale_grad_to_sd_grad,violating,"
-                   "scale_range,scale_weight\n";
+                   "scale_range,scale_weight,reference_center\n";
         }
-        out << (globalLike ? "global" : "local") << ','
-            << callIndex << ','
-            << data.V.rows() << ',' << data.F.rows() << ','
+        out << (local ? "local" : "global") << ','
+            << callIndex << ',' << data.V.rows() << ',' << data.F.rows() << ','
             << std::setprecision(17)
             << sdEnergy << ',' << rawScaleEnergy << ','
             << weightedScaleEnergy << ',' << energyRatio << ','
             << sdGradNorm << ',' << scaleGradNorm << ',' << gradRatio << ','
-            << violating << ',' << scaleRange << ',' << oneStringScaleWeight()
-            << '\n';
+            << violating << ',' << scaleRange << ',' << oneStringScaleWeight() << ','
+            << oneStringReferenceCenter(data) << '\n';
     }
 """
 
@@ -339,7 +412,7 @@ def make_onestring_symdirichlet_source(upstream: str) -> str:
     source = replace_once(
         source,
         "#include <cfloat>\n",
-        "#include <cfloat>\n#include <cmath>\n#include <cstdlib>\n#include <string>\n#include <iomanip>\n",
+        "#include <cfloat>\n#include <cmath>\n#include <cstdlib>\n#include <string>\n#include <iomanip>\n#include <atomic>\n#include <mutex>\n#include <iostream>\n",
         "SymDirichlet standard includes",
     )
     source = replace_once(
@@ -355,33 +428,54 @@ def make_onestring_symdirichlet_source(upstream: str) -> str:
         for(int triI = 0; triI < data.F.rows(); triI++) {
 """,
         """        energyValPerElem.resize(data.F.rows());
-        const double oneStringCenter = oneStringScaleCenter(data);
+        const double oneStringCenter = oneStringReferenceCenter(data);
         for(int triI = 0; triI < data.F.rows(); triI++) {
 """,
-        "per-element scale center",
+        "per-element shared scale center",
     )
 
     anchor = """            energyValPerElem[triI] = w * (1.0 + data.triAreaSq[triI] / area_U / area_U) *
                 ((U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) / 4 / data.triAreaSq[triI] -
                 U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]);
 """
-    replacement = anchor + """            energyValPerElem[triI] += oneStringScalePenaltyByElem(
-                data, triI, oneStringCenter, uniformWeight);
-"""
     source = replace_once(
-        source, anchor, replacement, "per-element augmented energy"
+        source,
+        anchor,
+        anchor + """            energyValPerElem[triI] += oneStringScalePenaltyByElem(
+                data, triI, oneStringCenter, uniformWeight);
+""",
+        "per-element augmented energy",
     )
 
     anchor = """        energyVal = w * (1.0 + data.triAreaSq[triI] / area_U / area_U) *
         ((U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) / 4 / data.triAreaSq[triI] -
          U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]);
 """
-    replacement = anchor + """        const double oneStringCenter = oneStringScaleCenter(data);
+    source = replace_once(
+        source,
+        anchor,
+        anchor + """        const double oneStringCenter = oneStringReferenceCenter(data);
         energyVal += oneStringScalePenaltyByElem(
             data, triI, oneStringCenter, uniformWeight);
+""",
+        "single-element augmented energy",
+    )
+
+    # Candidate discovery uses computeLocalGradient -> computeDivGradPerVert.
+    # Add the scale term there too, so candidate generation is not SD-only.
+    local_grad_end = """            localGradients.row(startRowI + 2) = w * (dLeft3 * rightTerm + dRight3 * leftTerm);
+        }
+    }
 """
     source = replace_once(
-        source, anchor, replacement, "single-element augmented energy"
+        source,
+        local_grad_end,
+        """            localGradients.row(startRowI + 2) = w * (dLeft3 * rightTerm + dRight3 * leftTerm);
+        }
+        oneStringAddScaleLocalGradient(data, localGradients);
+    }
+""",
+        "candidate-discovery augmented local gradient",
     )
 
     anchor = """        for(const auto fixedVI : data.fixedVert) {
@@ -403,7 +497,58 @@ def make_onestring_symdirichlet_source(upstream: str) -> str:
             data, uniformWeight, oneStringSDGradient, oneStringScaleGradient);
 
 """ + anchor
-    source = replace_once(source, anchor, replacement, "augmented gradient + diagnostics")
+    source = replace_once(
+        source, anchor, replacement, "augmented gradient + diagnostics"
+    )
+    return source
+
+
+def make_onestring_optimizer_source(upstream: str) -> str:
+    source = upstream
+    source = replace_once(
+        source,
+        "namespace OptCuts {\n",
+        """namespace OptCuts {
+    // Implemented by the OneString patch in SymDirichletEnergy.cpp.
+    void oneStringSetGlobalScaleReference(const TriMesh& data);
+    void oneStringSetDiagnosticScope(bool localScope);
+""",
+        "Optimizer OneString declarations",
+    )
+
+    # Initial global energy must use a valid global reference too.
+    source = replace_once(
+        source,
+        """        computeEnergyVal(result, scaffold, lastEnergyVal);
+        if(!mute) {
+""",
+        """        if(!mute) {
+            oneStringSetGlobalScaleReference(result);
+        }
+        computeEnergyVal(result, scaffold, lastEnergyVal);
+        if(!mute) {
+""",
+        "Optimizer precompute global scale reference",
+    )
+
+    # The non-muted optimizer is the real/global solve. Candidate-local
+    # Optimizers are constructed mute=true in TriMesh.cpp. Refresh the global
+    # center once per global Newton iteration and freeze it for the ensuing
+    # gradient + line-search. Local solves inherit that reference unchanged.
+    source = replace_once(
+        source,
+        """            if(!mute) { timer.start(1); }
+            computeGradient(result, scaffold, gradient);
+""",
+        """            if(!mute) { timer.start(1); }
+            oneStringSetDiagnosticScope(mute);
+            if(!mute) {
+                oneStringSetGlobalScaleReference(result);
+            }
+            computeGradient(result, scaffold, gradient);
+""",
+        "Optimizer solve shared scale reference",
+    )
     return source
 
 
@@ -420,9 +565,11 @@ def main() -> int:
         args.optcuts_root or (root / "third_party" / "OptCuts")
     ).expanduser().resolve()
     tri_cpp = optcuts / "src" / "TriMesh.cpp"
+    optimizer_cpp = optcuts / "src" / "Optimizer.cpp"
     sd_cpp = optcuts / "src" / "Energy" / "SymDirichletEnergy.cpp"
     if (
         not tri_cpp.is_file()
+        or not optimizer_cpp.is_file()
         or not sd_cpp.is_file()
         or not (optcuts / ".git").exists()
     ):
@@ -431,58 +578,66 @@ def main() -> int:
             "Clone https://github.com/liminchen/OptCuts there first."
         )
 
-    upstream_tri = subprocess.run(
-        ["git", "show", "HEAD:src/TriMesh.cpp"],
-        cwd=str(optcuts),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    ).stdout
-    upstream_sd = subprocess.run(
-        ["git", "show", "HEAD:src/Energy/SymDirichletEnergy.cpp"],
-        cwd=str(optcuts),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    ).stdout
+    def upstream(path: str) -> str:
+        return subprocess.run(
+            ["git", "show", f"HEAD:{path}"],
+            cwd=str(optcuts),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        ).stdout
 
-    # Remove the old topology-only boundary-exposure proxy. Candidate ranking
-    # now inherits the same augmented distortion through OptCuts' own local
-    # SymDirichletEnergy relaxation.
+    upstream_tri = upstream("src/TriMesh.cpp")
+    upstream_optimizer = upstream("src/Optimizer.cpp")
+    upstream_sd = upstream("src/Energy/SymDirichletEnergy.cpp")
+
+    # Remove the old topology-only proxy. Keep original topology operations,
+    # but make their local UV relaxation and candidate discovery use the same
+    # augmented distortion objective as the global solve.
     tri_cpp.write_text(upstream_tri, encoding="utf-8")
+    modified_optimizer = make_onestring_optimizer_source(upstream_optimizer)
     modified_sd = make_onestring_symdirichlet_source(upstream_sd)
+    optimizer_cpp.write_text(modified_optimizer, encoding="utf-8")
     sd_cpp.write_text(modified_sd, encoding="utf-8")
 
-    required = (
+    required_sd = (
+        "oneStringSetGlobalScaleReference",
+        "oneStringReferenceCenter",
         "oneStringAddScaleGradient",
+        "oneStringAddScaleLocalGradient",
         "oneStringScalePenaltyByElem",
         "oneStringLogDiagnostics",
-        "scale_grad_to_sd_grad",
-        "energyValPerElem[triI] += oneStringScalePenaltyByElem",
-        "energyVal += oneStringScalePenaltyByElem",
         "gradient += oneStringScaleGradient",
+        "oneStringAddScaleLocalGradient(data, localGradients)",
     )
-    missing = [token for token in required if token not in modified_sd]
+    required_optimizer = (
+        "oneStringSetGlobalScaleReference(result)",
+        "oneStringSetDiagnosticScope(mute)",
+    )
+    missing = [token for token in required_sd if token not in modified_sd]
+    missing += [token for token in required_optimizer if token not in modified_optimizer]
     if missing:
         raise SystemExit(
-            "OptCuts source verification failed; augmented OneString geometry "
-            "objective/diagnostics are incomplete: " + ", ".join(missing)
+            "OptCuts source verification failed; shared OneString objective is "
+            "incomplete: " + ", ".join(missing)
         )
 
     print(
-        "[OPTCUTS-ONESTRING-SOURCE] restored upstream TriMesh.cpp; "
-        "patched SymDirichletEnergy.cpp"
+        "[OPTCUTS-ONESTRING-SOURCE] restored upstream TriMesh.cpp; patched "
+        "Optimizer.cpp + SymDirichletEnergy.cpp"
     )
     print(
-        "[OPTCUTS-ONESTRING-OBJECTIVE] "
-        "E_geom = E_SD + weight * E_scale in global and local UV solves; "
-        "SD Hessian retained as inexact-Newton preconditioner"
+        "[OPTCUTS-ONESTRING-OBJECTIVE] E_geom = E_SD + weight * E_scale; "
+        "global center frozen per global Newton iteration and reused by local candidates"
     )
     print(
-        "[OPTCUTS-ONESTRING-DIAGNOSTICS] energy/gradient contribution logging enabled "
-        "when ONESTRING_OPTCUTS_SCALE_DIAG_PATH is set"
+        "[OPTCUTS-ONESTRING-CANDIDATES] scale gradient added to "
+        "computeLocalGradient candidate discovery"
+    )
+    print(
+        "[OPTCUTS-ONESTRING-DIAGNOSTICS] scope comes from Optimizer mute/global state, "
+        "not mesh face count"
     )
 
     build = optcuts / "build_onestring"
