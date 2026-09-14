@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from typing import Any
 
 from . import onestring_pipeline as _onestring_pipeline
@@ -22,6 +23,17 @@ from .large_steps_mesh_conditioning import (
 )
 from .large_steps_pipeline_patch import install_large_steps_conditioning
 from .official_ceps import install_official_ceps
+from .optcuts_paper_k2d_20260914_patch import install_optcuts_paper_k2d_20260914_patch
+
+
+LATEST_OPTCUTS_VERSION_ID = "2026-09-14-paper-k2d-eq5-stage-separated"
+LATEST_OPTCUTS_VERSION_LABEL = "2026-09-14 — Paper K2D Eq.(5) / hinge stage separated"
+LATEST_OPTCUTS_OMEGA_LABEL = "2026-09-14 | Paper K2D Eq.(5), hinge stage separated"
+LATEST_OPTCUTS_VERSION_DESCRIPTION = (
+    "2026-09-14最新版。OptCutsで得た固定Ωからpaper-style M2Dを作り、K2Dは共有頂点のEq.(5)段階として"
+    "K3D辺長合わせ＋K2D内collisionを行います。rigid-tile/hinge repositioningは論文Section 4.4の後段へ分離。"
+    "EFabの厳密式はmain paperに無くSupplement Appendix A参照のため、未確認部分をpaper-exactとは扱いません。"
+)
 
 
 install_ceps_paired_output(_official_ceps)
@@ -43,6 +55,7 @@ def _install_parameterization_backends(module: Any) -> None:
     install_official_ceps(module)
     install_ceps_strict_adapter(module)
     install_fast_t3d_preview(module)
+    install_optcuts_paper_k2d_20260914_patch(module)
 
     backend_build = module._build_surface_parameterization
 
@@ -94,7 +107,7 @@ def _install_reload_guard() -> None:
 
 
 def _install_streamlit_parameterization_options() -> None:
-    """Expose installed modes and the conditioned-S inspection stage."""
+    """Expose installed modes, latest OptCuts variant, and conditioned-S inspection."""
     try:
         import streamlit as st
     except Exception:
@@ -105,6 +118,29 @@ def _install_streamlit_parameterization_options() -> None:
 
     def selectbox_with_installed_modes(*args: Any, **kwargs: Any) -> Any:
         label = args[0] if args else kwargs.get("label")
+        latest_optcuts_visible = False
+
+        if label == "version" and bool(getattr(st, "_onestring_optcuts_selector_installed", False)):
+            if len(args) >= 2:
+                options = list(args[1])
+                if not any(isinstance(v, dict) and v.get("id") == LATEST_OPTCUTS_VERSION_ID for v in options):
+                    options.append({
+                        "id": LATEST_OPTCUTS_VERSION_ID,
+                        "label": LATEST_OPTCUTS_VERSION_LABEL,
+                        "description": LATEST_OPTCUTS_VERSION_DESCRIPTION,
+                    })
+                kwargs = {**kwargs, "index": len(options) - 1}
+                args = (args[0], options, *args[2:])
+            elif "options" in kwargs:
+                options = list(kwargs["options"])
+                if not any(isinstance(v, dict) and v.get("id") == LATEST_OPTCUTS_VERSION_ID for v in options):
+                    options.append({
+                        "id": LATEST_OPTCUTS_VERSION_ID,
+                        "label": LATEST_OPTCUTS_VERSION_LABEL,
+                        "description": LATEST_OPTCUTS_VERSION_DESCRIPTION,
+                    })
+                kwargs = {**kwargs, "options": options, "index": len(options) - 1}
+
         if label == "Omega parameterization mode":
             if len(args) >= 2:
                 options = list(args[1])
@@ -114,6 +150,14 @@ def _install_streamlit_parameterization_options() -> None:
                 if "bijective_free_boundary" not in options:
                     insertion = options.index("bff") + 1 if "bff" in options else 0
                     options.insert(insertion, "bijective_free_boundary")
+                # app_optcuts adds optcuts_test2 before delegating to this wrapper.
+                # Only expose the dated research mode in that launcher so ordinary
+                # app.py remains unchanged.
+                if "optcuts_test2" in options:
+                    latest_optcuts_visible = True
+                    if LATEST_OPTCUTS_OMEGA_LABEL not in options:
+                        options.append(LATEST_OPTCUTS_OMEGA_LABEL)
+                    kwargs = {**kwargs, "index": options.index(LATEST_OPTCUTS_OMEGA_LABEL)}
                 args = (args[0], options, *args[2:])
             elif "options" in kwargs:
                 options = list(kwargs["options"])
@@ -123,7 +167,13 @@ def _install_streamlit_parameterization_options() -> None:
                 if "bijective_free_boundary" not in options:
                     insertion = options.index("bff") + 1 if "bff" in options else 0
                     options.insert(insertion, "bijective_free_boundary")
-                kwargs = {**kwargs, "options": options}
+                if "optcuts_test2" in options:
+                    latest_optcuts_visible = True
+                    if LATEST_OPTCUTS_OMEGA_LABEL not in options:
+                        options.append(LATEST_OPTCUTS_OMEGA_LABEL)
+                    kwargs = {**kwargs, "options": options, "index": options.index(LATEST_OPTCUTS_OMEGA_LABEL)}
+                else:
+                    kwargs = {**kwargs, "options": options}
         elif label == "View stage":
             if len(args) >= 2:
                 options = list(args[1])
@@ -139,6 +189,22 @@ def _install_streamlit_parameterization_options() -> None:
                 kwargs = {**kwargs, "options": options}
 
         selected = original_selectbox(*args, **kwargs)
+
+        if label == "Omega parameterization mode" and latest_optcuts_visible:
+            if selected == LATEST_OPTCUTS_OMEGA_LABEL:
+                os.environ["ONESTRING_PAPER_K2D_20260914"] = "1"
+                try:
+                    st.caption(
+                        "2026-09-14 latest: shared-vertex Paper K2D Eq.(5) stage; collision stays in K2D; "
+                        "rigid hinge repositioning is deferred to Section 4.4."
+                    )
+                except Exception:
+                    pass
+                # The outer app_optcuts selector then routes test2 to the mature
+                # internal optcuts_test implementation.  The environment flag
+                # above activates only the new K2D semantics.
+                return "optcuts_test2"
+            os.environ.pop("ONESTRING_PAPER_K2D_20260914", None)
 
         if label == "Omega parameterization mode" and selected == "bijective_free_boundary":
             try:
@@ -319,5 +385,8 @@ __all__ = [
     "install_large_steps_conditioning",
     "install_abd_layout_compatibility",
     "install_bijective_free_boundary",
+    "LATEST_OPTCUTS_VERSION_ID",
+    "LATEST_OPTCUTS_VERSION_LABEL",
+    "LATEST_OPTCUTS_OMEGA_LABEL",
     "__version__",
 ]
