@@ -11,6 +11,7 @@ caller gets an explicit error instead of a silent fallback.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
@@ -42,6 +43,51 @@ def _timestamp() -> str:
 
 def _log(message: str) -> None:
     print(f"[{_timestamp()}] {message}", flush=True)
+
+
+def _progress_snapshot() -> str:
+    """Best-effort view into the source-modified OptCuts diagnostics.
+
+    The C++ scale-aware build appends one CSV row per diagnostic evaluation.
+    Reading the file from the parent process gives useful progress information
+    without changing the optimizer or guessing a percentage from wall time.
+    """
+    active_raw = os.environ.get("ONESTRING_OPTCUTS_ACTIVE_PATH", "").strip()
+    diag_raw = os.environ.get("ONESTRING_OPTCUTS_SCALE_DIAG_PATH", "").strip()
+    active = bool(active_raw and Path(active_raw).is_file())
+    if not diag_raw:
+        return f"objective_active={str(active).lower()} diag=unavailable"
+    path = Path(diag_raw)
+    if not path.is_file():
+        return f"objective_active={str(active).lower()} diag_rows=0"
+    try:
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+    except Exception as exc:
+        return (
+            f"objective_active={str(active).lower()} "
+            f"diag_read_error={type(exc).__name__}"
+        )
+    if not rows:
+        return f"objective_active={str(active).lower()} diag_rows=0"
+    global_rows = sum(1 for row in rows if row.get("scope") == "global")
+    local_rows = sum(1 for row in rows if row.get("scope") == "local")
+    last = rows[-1]
+    fields = [
+        f"objective_active={str(active).lower()}",
+        f"diag_rows={len(rows)}",
+        f"global_rows={global_rows}",
+        f"local_rows={local_rows}",
+        f"last_scope={last.get('scope', '?')}",
+        f"last_call={last.get('call', '?')}",
+    ]
+    scale_range = last.get("scale_range", "")
+    violating = last.get("violating", "")
+    if scale_range:
+        fields.append(f"range={scale_range}")
+    if violating:
+        fields.append(f"violating={violating}")
+    return " ".join(fields)
 
 
 @dataclass(frozen=True)
@@ -318,6 +364,7 @@ def run_official_optcuts(
         input_obj = temp_dir / "surface.obj"
         stdout_path = temp_dir / "optcuts_stdout.log"
         stderr_path = temp_dir / "optcuts_stderr.log"
+        _log(f"[OPTCUTS-PROGRESS] stage=1/4 name=prepare_input tag={tag}")
         _write_triangle_obj(input_obj, surface_vertices, surface_faces)
         command = [
             str(executable), "100", str(input_obj.resolve()),
@@ -331,6 +378,10 @@ def run_official_optcuts(
             f"timeout={float(cfg.timeout_seconds):g}s executable={executable}"
         )
         _log("[OPTCUTS-RUN-COMMAND] " + " ".join(command))
+        _log(
+            f"[OPTCUTS-PROGRESS] stage=2/4 name=optimize_uv_and_cuts tag={tag} "
+            "progress=started"
+        )
 
         process: subprocess.Popen[str] | None = None
         try:
@@ -363,9 +414,11 @@ def run_official_optcuts(
                             f"Official OptCuts timed out after {cfg.timeout_seconds:g} s"
                         )
                     if now >= next_heartbeat:
+                        snapshot = _progress_snapshot()
                         _log(
-                            f"[OPTCUTS-RUN-HEARTBEAT] tag={tag} elapsed={elapsed_now:.1f}s "
-                            f"pid={process.pid} status=running"
+                            f"[OPTCUTS-RUN-HEARTBEAT] tag={tag} stage=2/4 "
+                            f"name=optimize_uv_and_cuts elapsed={elapsed_now:.1f}s "
+                            f"pid={process.pid} status=running {snapshot}"
                         )
                         while next_heartbeat <= now:
                             next_heartbeat += heartbeat_interval
@@ -390,6 +443,7 @@ def run_official_optcuts(
                 f"Official OptCuts exited with code {process.returncode}.\nLast output:\n{tail}"
             )
 
+        _log(f"[OPTCUTS-PROGRESS] stage=3/4 name=load_and_validate_output tag={tag}")
         result_obj = _find_output_obj(root, tag, started)
         _log(f"[OPTCUTS-OUTPUT-FOUND] tag={tag} path={result_obj}")
         xyz, faces, uv, uv_faces = _read_obj_with_uv(result_obj)
@@ -403,6 +457,7 @@ def run_official_optcuts(
         if _signed_area(uv[loops[0]]) < 0.0:
             uv[:, 1] *= -1.0
 
+        _log(f"[OPTCUTS-PROGRESS] stage=4/4 name=compute_quality_metrics tag={tag}")
         differential = _triangle_differential_metrics(xyz, faces, uv, uv_faces)
         metrics: dict[str, object] = {
             "uv_area_normalization_scale": uv_scale,
@@ -417,6 +472,7 @@ def run_official_optcuts(
             f"[OPTCUTS-RUN-IMPORTED] tag={tag} elapsed={time.time() - started:.3f}s "
             f"output_vertices={len(xyz)} output_faces={len(faces)}"
         )
+        _log(f"[OPTCUTS-PROGRESS] stage=4/4 name=complete tag={tag} progress=done")
         return OptCutsResult(xyz, faces, uv, uv_faces, metrics)
     finally:
         temp_ctx.cleanup()
