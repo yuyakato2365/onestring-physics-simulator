@@ -1,11 +1,19 @@
 """Use the dedicated source-modified OptCuts binary for ``optcuts_test2``.
 
-The dedicated build changes OptCuts' Symmetric Dirichlet energy itself to
-``E_SD + scale_weight * E_scale``. The global UV optimizer refreshes a global
-scale-band reference once per Newton iteration and freezes it through that
-iteration; candidate-local optimizers reuse the same reference rather than
-re-centering on their local stencil. Candidate discovery also receives the
-scale-gradient contribution.
+The dedicated build uses
+
+    E_geom = E_SD + scale_weight * SUM_i residual_i^2
+
+for the physical surface. The OneString scale term is intentionally not
+area-normalized: every violating triangle contributes directly. The global UV
+optimizer refreshes a global scale-band center once per Newton iteration and
+freezes it through that iteration; candidate-local optimizers reuse the same
+reference. Candidate discovery also receives the scale-gradient contribution.
+
+OptCuts' local SD score bookkeeping rescales by local/global surface area. The
+C++ patch compensates this internally so the OneString scale SUM remains an
+unnormalized sum in candidate-local comparisons. Scaffold/air-mesh evaluations
+are excluded from the OneString scale term.
 
 Each test2 run writes ``logs/optcuts_scale_objective.csv`` and prints a summary
 comparing SD vs scale energy/gradient contributions.
@@ -197,7 +205,9 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
         cfg = config if config is not None else OptCutsConfig()
         if _is_test2():
             bound = float(os.environ.get("ONESTRING_OPTCUTS_SCALE_BOUND", "2.0"))
-            weight = float(os.environ.get("ONESTRING_OPTCUTS_SCALE_WEIGHT", "40.0"))
+            # The old area-averaged objective needed a large multiplier. The new
+            # objective is an unnormalized SUM, so 1.0 is already much stronger.
+            weight = float(os.environ.get("ONESTRING_OPTCUTS_SCALE_WEIGHT", "1.0"))
             os.environ["ONESTRING_OPTCUTS_SCALE_BOUND"] = str(bound)
             os.environ["ONESTRING_OPTCUTS_SCALE_WEIGHT"] = str(weight)
             diag_path = _prepare_scale_diagnostics()
@@ -206,6 +216,7 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
             print(
                 "[OPTCUTS-TEST2-SOURCE-MODIFIED] "
                 f"binary={binary} scale_bound={bound:g} scale_weight={weight:g} "
+                "scale_model=sum_residual_squared_no_area_normalization "
                 f"diag={diag_path}"
             )
             result = original_run(surface_vertices, surface_faces, cfg)
@@ -230,9 +241,11 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
             result.metrics.update({
                 "optcuts_internal_scale_factor_enabled": True,
                 "optcuts_internal_scale_factor_model": (
-                    "E_geom = E_SD + weight * E_scale; global scale center frozen "
-                    "per global Newton iteration and shared by candidate-local relaxation; "
-                    "scale gradient included in candidate discovery"
+                    "E_geom = E_SD + weight * SUM(residual^2), no area normalization; "
+                    "global scale center frozen per global Newton iteration and shared "
+                    "by candidate-local relaxation; local OptCuts area bookkeeping "
+                    "compensated; scaffold excluded; scale gradient included in "
+                    "candidate discovery"
                 ),
                 "optcuts_internal_scale_factor_bound": bound,
                 "optcuts_internal_scale_factor_weight": weight,
@@ -260,8 +273,9 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
     pipeline._onestring_test2_scale_aware_parameterization_installed = True
     print(
         "[OPTCUTS-TEST2-SOURCE-MODIFIED-ROUTE] installed; test2 uses a dedicated "
-        "OptCuts binary with shared global/local SD+scale objective, scale-aware "
-        "candidate discovery, and automatic contribution diagnostics"
+        "OptCuts binary with unnormalized scale-violation SUM objective, shared "
+        "global/local center, scale-aware candidate discovery, scaffold exclusion, "
+        "and automatic contribution diagnostics"
     )
 
 
