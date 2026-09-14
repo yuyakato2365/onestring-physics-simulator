@@ -52,7 +52,24 @@ def _onestring_binary() -> Path:
     ])
     for path in candidates:
         if path.is_file():
-            return path.resolve()
+            resolved = path.resolve()
+            # The generated shell runner is intentionally not tracked by git.
+            # If its executable bit was lost locally, restore it here rather than
+            # silently falling through to an unrelated OptCuts executable.
+            if resolved.name == "OptCuts_onestring_runner" and not os.access(resolved, os.X_OK):
+                try:
+                    resolved.chmod(resolved.stat().st_mode | 0o111)
+                except OSError as exc:
+                    raise OptCutsUnavailableError(
+                        f"OneString OptCuts runner exists but is not executable and chmod failed: "
+                        f"{resolved}: {exc}"
+                    ) from exc
+            if not os.access(resolved, os.X_OK):
+                raise OptCutsUnavailableError(
+                    f"OneString OptCuts executable is not executable: {resolved}. "
+                    "Re-run `python3 scripts/enable_optcuts_scale_sum.py`."
+                )
+            return resolved
     raise OptCutsUnavailableError(
         "The source-modified OneString OptCuts binary is not built. Run:\n"
         "  python3 scripts/enable_optcuts_scale_sum.py\n"
