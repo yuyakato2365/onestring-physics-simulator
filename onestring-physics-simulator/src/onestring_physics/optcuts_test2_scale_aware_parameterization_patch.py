@@ -1,14 +1,14 @@
 """Use the dedicated source-modified OptCuts binary for ``optcuts_test2``.
 
 The dedicated build changes OptCuts' Symmetric Dirichlet energy itself to
-``E_SD + scale_weight * E_scale``. Because OptCuts uses that same energy in
-both its ordinary UV optimization and its local topology-candidate relaxation,
-test2 makes seam selection and subsequent parameterization optimize the same
-OneString-aware objective.
+``E_SD + scale_weight * E_scale``. The global UV optimizer refreshes a global
+scale-band reference once per Newton iteration and freezes it through that
+iteration; candidate-local optimizers reuse the same reference rather than
+re-centering on their local stencil. Candidate discovery also receives the
+scale-gradient contribution.
 
-Each test2 run also writes ``logs/optcuts_scale_objective.csv`` and prints a
-summary comparing SD vs scale energy/gradient contributions. This prevents a
-silent no-op when the scale term is numerically negligible.
+Each test2 run writes ``logs/optcuts_scale_objective.csv`` and prints a summary
+comparing SD vs scale energy/gradient contributions.
 """
 from __future__ import annotations
 
@@ -137,6 +137,8 @@ def _summarize_scale_diagnostics(path: Path) -> dict[str, Any]:
         "last_range": last_range,
         "first_violating": first_viol,
         "last_violating": last_viol,
+        "first_reference_center": _f(first, "reference_center"),
+        "last_reference_center": _f(last, "reference_center"),
     })
 
     print(
@@ -148,8 +150,6 @@ def _summarize_scale_diagnostics(path: Path) -> dict[str, Any]:
         f"violating={first_viol}->{last_viol} path={path}"
     )
 
-    # A contribution below 1e-4 in both energy and gradient is effectively
-    # invisible relative to SD for this experiment; flag it explicitly.
     peak_energy_ratio = max(
         (_f(r, "scale_to_sd") for r in global_rows), default=float("nan")
     )
@@ -168,8 +168,7 @@ def _summarize_scale_diagnostics(path: Path) -> dict[str, Any]:
         print(
             "[OPTCUTS-SCALE-DIAG-WARNING] scale term is numerically negligible "
             f"relative to SD: peak_energy_ratio={peak_energy_ratio:.6g} "
-            f"peak_grad_ratio={peak_grad_ratio:.6g}. "
-            "Changing seam topology is not expected at this weight."
+            f"peak_grad_ratio={peak_grad_ratio:.6g}."
         )
     elif np.isfinite(first_range) and np.isfinite(last_range) and last_range >= first_range - 1.0e-8:
         summary["status"] = "active_but_no_range_improvement"
@@ -210,19 +209,37 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
                 f"diag={diag_path}"
             )
             result = original_run(surface_vertices, surface_faces, cfg)
+
+            stderr_tail = str(result.metrics.get("optcuts_stderr_tail", ""))
+            cpp_marker = next(
+                (line for line in stderr_tail.splitlines()
+                 if "[OPTCUTS-SCALE-CPP-ACTIVE]" in line),
+                "",
+            )
+            if cpp_marker:
+                print(cpp_marker)
+                print("[OPTCUTS-SCALE-CPP-CONFIRMED] patched C++ objective executed")
+            else:
+                print(
+                    "[OPTCUTS-SCALE-CPP-WARNING] C++ activation marker was not found "
+                    "in OptCuts stderr tail"
+                )
+
             diag = _summarize_scale_diagnostics(diag_path)
             scale_range, hard_feasible = _hard_scale_audit(result, bound)
             result.metrics.update({
                 "optcuts_internal_scale_factor_enabled": True,
                 "optcuts_internal_scale_factor_model": (
-                    "E_geom = E_SD + weight * E_scale in both OptCuts global "
-                    "UV optimization and local topology-candidate relaxation"
+                    "E_geom = E_SD + weight * E_scale; global scale center frozen "
+                    "per global Newton iteration and shared by candidate-local relaxation; "
+                    "scale gradient included in candidate discovery"
                 ),
                 "optcuts_internal_scale_factor_bound": bound,
                 "optcuts_internal_scale_factor_weight": weight,
                 "optcuts_source_modified_binary": str(binary),
                 "optcuts_runtime_source_patch_used": False,
                 "optcuts_outer_multi_run_selector_used": False,
+                "optcuts_cpp_activation_marker_seen": bool(cpp_marker),
                 "optcuts_internal_scale_factor_final_range": scale_range,
                 "optcuts_internal_scale_factor_final_hard_feasible": hard_feasible,
                 "optcuts_scale_objective_diagnostics": diag,
@@ -242,9 +259,9 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
 
     pipeline._onestring_test2_scale_aware_parameterization_installed = True
     print(
-        "[OPTCUTS-TEST2-SOURCE-MODIFIED-ROUTE] installed; "
-        "test2 uses a dedicated OptCuts binary with a shared SD+scale objective "
-        "for topology and parameterization, with automatic contribution diagnostics"
+        "[OPTCUTS-TEST2-SOURCE-MODIFIED-ROUTE] installed; test2 uses a dedicated "
+        "OptCuts binary with shared global/local SD+scale objective, scale-aware "
+        "candidate discovery, and automatic contribution diagnostics"
     )
 
 
