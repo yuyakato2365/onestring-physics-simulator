@@ -27,12 +27,13 @@ from .optcuts_paper_k2d_20260914_patch import install_optcuts_paper_k2d_20260914
 
 
 LATEST_OPTCUTS_VERSION_ID = "2026-09-14-paper-k2d-eq5-stage-separated"
-LATEST_OPTCUTS_VERSION_LABEL = "2026-09-14 — Paper K2D Eq.(5) / hinge stage separated"
-LATEST_OPTCUTS_OMEGA_LABEL = "2026-09-14 | Paper K2D Eq.(5), hinge stage separated"
+LATEST_OPTCUTS_VERSION_LABEL = "2026-09-14 — LSCM-equivalent K2D / hinge stage separated"
+LATEST_OPTCUTS_OMEGA_LABEL = "2026-09-14 | LSCM-equivalent K2D, hinge stage separated"
 LATEST_OPTCUTS_VERSION_DESCRIPTION = (
-    "2026-09-14最新版。OptCutsで得た固定Ωからpaper-style M2Dを作り、K2Dは共有頂点のEq.(5)段階として"
-    "K3D辺長合わせ＋K2D内collisionを行います。rigid-tile/hinge repositioningは論文Section 4.4の後段へ分離。"
-    "EFabの厳密式はmain paperに無くSupplement Appendix A参照のため、未確認部分をpaper-exactとは扱いません。"
+    "2026-09-14最新版。OptCutsで得た固定ΩからM2D/K3DまではOptCuts経路を使いますが、"
+    "K2DはLSCMと同じ共通_optimize_k2dをそのまま使用します。OptCuts専用のindependent-rigid-tile、"
+    "hard-SAT、all-tile SE(2) K2D差し替え、およびK2D後のM2D重心への再配置は無効化します。"
+    "通常のK2D後段flat-tile/T2D/hinge処理はLSCMと同じ共通pipelineを使用します。"
 )
 
 
@@ -150,9 +151,6 @@ def _install_streamlit_parameterization_options() -> None:
                 if "bijective_free_boundary" not in options:
                     insertion = options.index("bff") + 1 if "bff" in options else 0
                     options.insert(insertion, "bijective_free_boundary")
-                # app_optcuts adds optcuts_test2 before delegating to this wrapper.
-                # Only expose the dated research mode in that launcher so ordinary
-                # app.py remains unchanged.
                 if "optcuts_test2" in options:
                     latest_optcuts_visible = True
                     if LATEST_OPTCUTS_OMEGA_LABEL not in options:
@@ -195,14 +193,11 @@ def _install_streamlit_parameterization_options() -> None:
                 os.environ["ONESTRING_PAPER_K2D_20260914"] = "1"
                 try:
                     st.caption(
-                        "2026-09-14 latest: shared-vertex Paper K2D Eq.(5) stage; collision stays in K2D; "
-                        "rigid hinge repositioning is deferred to Section 4.4."
+                        "2026-09-14 latest: K2D uses the same common solver as LSCM; "
+                        "OptCuts-only rigid/hard/global K2D replacement is disabled; hinge/T2D stays downstream."
                     )
                 except Exception:
                     pass
-                # The outer app_optcuts selector then routes test2 to the mature
-                # internal optcuts_test implementation.  The environment flag
-                # above activates only the new K2D semantics.
                 return "optcuts_test2"
             os.environ.pop("ONESTRING_PAPER_K2D_20260914", None)
 
