@@ -125,12 +125,13 @@ def _render_live_preview(context: dict[str, Any], vertices: np.ndarray, faces: n
             placeholder = st.empty()
             context["preview_placeholder"] = placeholder
         started = time.perf_counter()
+        serial = int(context.get("preview_serial", 0))
         placeholder.plotly_chart(
             _preview_figure(vertices, faces, title),
             width="stretch",
-            key=f"onestring_k3d_live_{int(context.get('preview_serial', 0)) % 2}",
+            key=f"onestring_k3d_live_{serial}",
         )
-        context["preview_serial"] = int(context.get("preview_serial", 0)) + 1
+        context["preview_serial"] = serial + 1
         render_sec = float(time.perf_counter() - started)
         context["last_preview_render_sec"] = render_sec
         if render_sec > 0.25:
@@ -215,9 +216,6 @@ def install_optcuts_test2_acceleration_patch(pipeline: Any) -> None:
     _install_streamlit_progress_capture()
     _install_k3d_al_live_instrumentation()
 
-    # Inject only the K3D AL budget change. K2D budgets intentionally remain
-    # identical to optcuts_test so test2 does not trade constraint quality for
-    # runtime. K2D acceleration is limited to SciPy workers when available.
     base_k3d = pipeline._optimize_k3d
     base_k2d = pipeline._optimize_k2d
 
