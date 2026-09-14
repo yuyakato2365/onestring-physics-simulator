@@ -1,22 +1,12 @@
 """Use the dedicated source-modified OptCuts binary for ``optcuts_test2``.
 
-The dedicated build uses
+The dedicated build uses an unnormalized OneString scale-violation SUM on the
+physical surface. The scale term is intentionally not area-normalized: every
+violating triangle contributes directly.
 
-    E_geom = E_SD + scale_weight * SUM_i residual_i^2
-
-for the physical surface. The OneString scale term is intentionally not
-area-normalized: every violating triangle contributes directly. The global UV
-optimizer refreshes a global scale-band center once per Newton iteration and
-freezes it through that iteration; candidate-local optimizers reuse the same
-reference. Candidate discovery also receives the scale-gradient contribution.
-
-OptCuts' local SD score bookkeeping rescales by local/global surface area. The
-C++ patch compensates this internally so the OneString scale SUM remains an
-unnormalized sum in candidate-local comparisons. Scaffold/air-mesh evaluations
-are excluded from the OneString scale term.
-
-Each test2 run writes ``logs/optcuts_scale_objective.csv`` and prints a summary
-comparing SD vs scale energy/gradient contributions.
+Runtime activation is proven by a marker file written from the exact C++
+physical-energy path. The test2 route fails closed if that file is not written;
+it never silently accepts a plain-SD OptCuts run.
 """
 from __future__ import annotations
 
@@ -28,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from .optcuts_backend import OptCutsConfig, OptCutsUnavailableError
+from .optcuts_backend import OptCutsConfig, OptCutsUnavailableError, OptCutsError
 from . import optcuts_pipeline_patch as optcuts_pipeline
 
 
@@ -63,9 +53,9 @@ def _onestring_binary() -> Path:
             return path.resolve()
     raise OptCutsUnavailableError(
         "The source-modified OneString OptCuts binary is not built. Run:\n"
-        "  python3 scripts/build_optcuts_onestring.py\n"
-        "This applies the repository-tracked OptCuts source change and builds "
-        "third_party/OptCuts/build_onestring/OptCuts_bin."
+        "  python3 scripts/enable_optcuts_scale_sum.py\n"
+        "This builds third_party/OptCuts/build_onestring/OptCuts_bin with the "
+        "physical OneString scale objective force-enabled."
     )
 
 
@@ -86,6 +76,17 @@ def _prepare_scale_diagnostics() -> Path:
     except FileNotFoundError:
         pass
     os.environ["ONESTRING_OPTCUTS_SCALE_DIAG_PATH"] = str(path)
+    return path
+
+
+def _prepare_activation_proof() -> Path:
+    path = _project_root() / "logs" / "optcuts_scale_objective.active"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    os.environ["ONESTRING_OPTCUTS_ACTIVE_PATH"] = str(path)
     return path
 
 
@@ -181,7 +182,7 @@ def _summarize_scale_diagnostics(path: Path) -> dict[str, Any]:
     elif np.isfinite(first_range) and np.isfinite(last_range) and last_range >= first_range - 1.0e-8:
         summary["status"] = "active_but_no_range_improvement"
         print(
-            "[OPTCUTS-SCALE-DIAG-WARNING] scale term is present, but the logged "
+            "[OPTCUTS-SCALE-DIAG-WARNING] scale term is active, but the logged "
             f"global optimization did not reduce scale range ({first_range:.6g} -> {last_range:.6g})."
         )
     else:
@@ -205,54 +206,60 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
         cfg = config if config is not None else OptCutsConfig()
         if _is_test2():
             bound = float(os.environ.get("ONESTRING_OPTCUTS_SCALE_BOUND", "2.0"))
-            # The old area-averaged objective needed a large multiplier. The new
-            # objective is an unnormalized SUM, so 1.0 is already much stronger.
             weight = float(os.environ.get("ONESTRING_OPTCUTS_SCALE_WEIGHT", "1.0"))
             os.environ["ONESTRING_OPTCUTS_SCALE_BOUND"] = str(bound)
             os.environ["ONESTRING_OPTCUTS_SCALE_WEIGHT"] = str(weight)
             diag_path = _prepare_scale_diagnostics()
+            active_path = _prepare_activation_proof()
             binary = _onestring_binary()
             cfg = replace(cfg, executable=str(binary))
             print(
                 "[OPTCUTS-TEST2-SOURCE-MODIFIED] "
                 f"binary={binary} scale_bound={bound:g} scale_weight={weight:g} "
                 "scale_model=sum_residual_squared_no_area_normalization "
-                f"diag={diag_path}"
+                f"diag={diag_path} active_proof={active_path}"
             )
             result = original_run(surface_vertices, surface_faces, cfg)
 
-            stderr_tail = str(result.metrics.get("optcuts_stderr_tail", ""))
-            cpp_marker = next(
-                (line for line in stderr_tail.splitlines()
-                 if "[OPTCUTS-SCALE-CPP-ACTIVE]" in line),
-                "",
-            )
-            if cpp_marker:
-                print(cpp_marker)
-                print("[OPTCUTS-SCALE-CPP-CONFIRMED] patched C++ objective executed")
-            else:
-                print(
-                    "[OPTCUTS-SCALE-CPP-WARNING] C++ activation marker was not found "
-                    "in OptCuts stderr tail"
+            # Do not trust truncated stderr. The C++ physical energy path writes
+            # this file itself on first execution. Missing file means the scale
+            # objective did not execute, so fail immediately rather than silently
+            # returning the plain-SD result.
+            if not active_path.is_file():
+                raise OptCutsError(
+                    "OneString OptCuts scale objective FAILED TO ACTIVATE at runtime. "
+                    f"Expected activation proof file was not written: {active_path}. "
+                    "Re-run `python3 scripts/enable_optcuts_scale_sum.py` and restart Streamlit."
                 )
+            try:
+                activation_text = active_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                activation_text = "active"
+            print(
+                "[OPTCUTS-ONESTRING-PHYSICAL-OBJECTIVE-CONFIRMED] "
+                + activation_text.replace("\n", " ")
+            )
 
             diag = _summarize_scale_diagnostics(diag_path)
             scale_range, hard_feasible = _hard_scale_audit(result, bound)
             result.metrics.update({
                 "optcuts_internal_scale_factor_enabled": True,
                 "optcuts_internal_scale_factor_model": (
-                    "E_geom = E_SD + weight * SUM(residual^2), no area normalization; "
-                    "global scale center frozen per global Newton iteration and shared "
-                    "by candidate-local relaxation; local OptCuts area bookkeeping "
-                    "compensated; scaffold excluded; scale gradient included in "
-                    "candidate discovery"
+                    "E_physical = lambda_SD * E_SD + weight * SUM(residual^2), "
+                    "no area normalization; scale term is outside the OptCuts SD "
+                    "multiplier; global scale center frozen per global Newton iteration "
+                    "and shared by candidate-local relaxation; local OptCuts area "
+                    "bookkeeping compensated; scaffold excluded; scale gradient "
+                    "included in candidate discovery"
                 ),
                 "optcuts_internal_scale_factor_bound": bound,
                 "optcuts_internal_scale_factor_weight": weight,
                 "optcuts_source_modified_binary": str(binary),
-                "optcuts_runtime_source_patch_used": False,
+                "optcuts_runtime_source_patch_used": True,
                 "optcuts_outer_multi_run_selector_used": False,
-                "optcuts_cpp_activation_marker_seen": bool(cpp_marker),
+                "optcuts_cpp_activation_marker_seen": True,
+                "optcuts_cpp_activation_proof_path": str(active_path),
+                "optcuts_cpp_activation_proof": activation_text,
                 "optcuts_internal_scale_factor_final_range": scale_range,
                 "optcuts_internal_scale_factor_final_hard_feasible": hard_feasible,
                 "optcuts_scale_objective_diagnostics": diag,
@@ -273,9 +280,9 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
     pipeline._onestring_test2_scale_aware_parameterization_installed = True
     print(
         "[OPTCUTS-TEST2-SOURCE-MODIFIED-ROUTE] installed; test2 uses a dedicated "
-        "OptCuts binary with unnormalized scale-violation SUM objective, shared "
-        "global/local center, scale-aware candidate discovery, scaffold exclusion, "
-        "and automatic contribution diagnostics"
+        "OptCuts binary with unnormalized scale-violation SUM objective, hard "
+        "runtime activation proof, shared global/local center, scale-aware candidate "
+        "discovery, scaffold exclusion, and automatic contribution diagnostics"
     )
 
 
