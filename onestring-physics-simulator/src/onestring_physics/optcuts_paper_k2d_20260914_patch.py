@@ -11,6 +11,12 @@ then the component layouts are merged back in the original face order.  No hinge
 is ever created across an OptCuts seam, and disconnected components do not enter
 one global SE(2) solve together.
 
+Crucially, component submeshes retain the original K2D vertex array and original
+face vertex IDs.  The LSCM flat-layout code infers the regular-grid row/column
+parity from those IDs to choose pairwise hinge corners; compactly renumbering a
+component would therefore change the LSCM hinge rule and is intentionally not
+done here.
+
 OptCuts-specific rigid-K2D replacement, hard-SAT K2D feasibility, all-tile SE(2)
 K2D solves, and post-K2D M2D-centroid re-alignment remain disabled for this dated
 variant.
@@ -79,26 +85,25 @@ def _edge_components(faces: Any) -> list[np.ndarray]:
 
 
 def _submesh_for_faces(mesh: Any, face_ids: np.ndarray) -> Any:
-    """Compact one connected component while preserving its world-space K2D coordinates."""
+    """Select one component without renumbering the original regular-grid vertex IDs."""
     all_faces = np.asarray(mesh.faces, dtype=int)
-    selected = all_faces[np.asarray(face_ids, dtype=int)]
-    used = np.unique(selected.reshape(-1))
-    remap = np.full(len(np.asarray(mesh.vertices)), -1, dtype=int)
-    remap[used] = np.arange(len(used), dtype=int)
-    local_faces = remap[selected]
-    local_vertices = np.asarray(mesh.vertices, dtype=float)[used].copy()
+    selected = all_faces[np.asarray(face_ids, dtype=int)].copy()
+    vertices = np.asarray(mesh.vertices, dtype=float).copy()
+    used = np.unique(selected.reshape(-1)) if len(selected) else np.asarray([], dtype=int)
     metrics = dict(getattr(mesh, "metrics", {}) or {})
     metrics.update(
         {
             "k2d_component_local_face_count": int(len(selected)),
-            "k2d_component_local_vertex_count": int(len(local_vertices)),
+            "k2d_component_used_vertex_count": int(len(used)),
+            "k2d_component_preserves_global_vertex_ids": True,
+            "k2d_component_preserves_lscm_lattice_parity_rule": True,
         }
     )
     cls = type(mesh)
     try:
         return cls(
-            local_vertices,
-            local_faces,
+            vertices,
+            selected,
             mesh.grid,
             mesh.stage,
             metrics,
@@ -106,8 +111,8 @@ def _submesh_for_faces(mesh: Any, face_ids: np.ndarray) -> Any:
         )
     except TypeError:
         return cls(
-            vertices=local_vertices,
-            faces=local_faces,
+            vertices=vertices,
+            faces=selected,
             grid=mesh.grid,
             stage=mesh.stage,
             metrics=metrics,
@@ -199,6 +204,7 @@ def _build_componentwise_flat_layout(
                     "k2d_flat_layout_componentwise_lscm": True,
                     "k2d_flat_layout_component_count": int(len(components)),
                     "k2d_flat_layout_global_cross_component_solve": False,
+                    "k2d_flat_layout_preserves_original_vertex_ids": True,
                 }
             )
         except Exception:
@@ -254,10 +260,12 @@ def _build_componentwise_flat_layout(
             "k2d_flat_layout_component_count": int(len(components)),
             "k2d_flat_layout_global_cross_component_solve": False,
             "k2d_flat_layout_cross_component_hinges": 0,
+            "k2d_flat_layout_preserves_original_vertex_ids": True,
             "k2d_flat_layout_component_face_counts": [int(len(c)) for c in components],
             "k2d_flat_layout_policy": (
                 "Apply the ordinary LSCM _make_flat_tile_layout independently to each "
-                "edge-connected K2D panel; merge results in original face order; no cross-seam hinges."
+                "edge-connected K2D panel while preserving original grid vertex IDs; "
+                "merge results in original face order; no cross-seam hinges."
             ),
         }
     )
@@ -283,7 +291,8 @@ def _build_componentwise_flat_layout(
     print(
         "[2026-09-14-K2D-COMPONENT-LAYOUT] "
         f"components={len(components)} faces={face_count} hinges={len(merged_hinge_pairs)} "
-        f"gaps={len(merged_gap_polygons)} global_cross_component_solve=False"
+        f"gaps={len(merged_gap_polygons)} global_cross_component_solve=False "
+        "original_vertex_ids=True"
     )
     return merged
 
