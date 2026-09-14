@@ -53,9 +53,6 @@ def _onestring_binary() -> Path:
     for path in candidates:
         if path.is_file():
             resolved = path.resolve()
-            # The generated shell runner is intentionally not tracked by git.
-            # If its executable bit was lost locally, restore it here rather than
-            # silently falling through to an unrelated OptCuts executable.
             if resolved.name == "OptCuts_onestring_runner" and not os.access(resolved, os.X_OK):
                 try:
                     resolved.chmod(resolved.stat().st_mode | 0o111)
@@ -232,37 +229,47 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
             active_path = _prepare_activation_proof()
             binary = _onestring_binary()
 
-            # Test2 must never pass through any older wrapper that can rewrite
-            # cfg.executable back to OptCuts_official. Pin all executable hints,
-            # verify the backend resolves the same file, then call the backend
-            # implementation directly.
             os.environ["ONESTRING_OPTCUTS_BIN"] = str(binary)
             os.environ["ONESTRING_OPTCUTS_EXECUTABLE"] = str(binary)
             cfg = replace(cfg, executable=str(binary))
-            resolved = optcuts_backend.resolve_optcuts_executable(str(binary))
-            if resolved.resolve() != binary.resolve():
+
+            # Several legacy OptCuts patches in this app can replace the backend
+            # resolver at runtime.  That is why an explicit cfg.executable could
+            # still resolve to OptCuts_official.  Test2 no longer asks that mutable
+            # resolver which binary to use.  For this one call we pin the backend's
+            # resolver itself to the already validated source-modified runner.
+            original_resolver = optcuts_backend.resolve_optcuts_executable
+            def _test2_exact_resolver(explicit=None):
+                return binary
+            optcuts_backend.resolve_optcuts_executable = _test2_exact_resolver
+            try:
+                print(
+                    "[OPTCUTS-TEST2-SOURCE-MODIFIED] "
+                    f"binary={binary} exact_backend_pin=true scale_bound={bound:g} "
+                    f"scale_weight={weight:g} "
+                    "scale_model=sum_residual_squared_no_area_normalization "
+                    f"diag={diag_path} active_proof={active_path}"
+                )
+                print(
+                    "[OPTCUTS-TEST2-DIRECT-BACKEND] resolver_bypassed=true "
+                    f"executable={binary}"
+                )
+                result = optcuts_backend.run_official_optcuts(
+                    surface_vertices, surface_faces, cfg
+                )
+            finally:
+                optcuts_backend.resolve_optcuts_executable = original_resolver
+
+            actual = Path(str(result.metrics.get("optcuts_executable", ""))).expanduser()
+            if not actual.is_absolute():
+                actual = actual.resolve()
+            if actual.resolve() != binary.resolve():
                 raise OptCutsError(
-                    "OneString Test2 executable routing mismatch before launch: "
-                    f"requested={binary.resolve()} resolved={resolved.resolve()}"
+                    "OneString Test2 backend executed the wrong binary despite exact pin: "
+                    f"expected={binary.resolve()} actual={actual.resolve()}"
                 )
 
-            print(
-                "[OPTCUTS-TEST2-SOURCE-MODIFIED] "
-                f"binary={binary} resolved={resolved} scale_bound={bound:g} "
-                f"scale_weight={weight:g} "
-                "scale_model=sum_residual_squared_no_area_normalization "
-                f"diag={diag_path} active_proof={active_path}"
-            )
-            print(
-                "[OPTCUTS-TEST2-DIRECT-BACKEND] bypassing wrapper chain; "
-                f"executable={resolved}"
-            )
-            result = optcuts_backend.run_official_optcuts(
-                surface_vertices, surface_faces, cfg
-            )
-
             if not active_path.is_file():
-                actual = result.metrics.get("optcuts_executable", "unknown")
                 raise OptCutsError(
                     "OneString OptCuts scale objective FAILED TO ACTIVATE at runtime. "
                     f"Expected activation proof file was not written: {active_path}. "
@@ -319,7 +326,7 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
     print(
         "[OPTCUTS-TEST2-SOURCE-MODIFIED-ROUTE] installed; test2 uses a dedicated "
         "OptCuts binary with unnormalized scale-violation SUM objective, hard "
-        "runtime activation proof, direct backend execution, shared global/local "
+        "runtime activation proof, exact backend binary pinning, shared global/local "
         "center, scale-aware candidate discovery, scaffold exclusion, and automatic "
         "contribution diagnostics"
     )
