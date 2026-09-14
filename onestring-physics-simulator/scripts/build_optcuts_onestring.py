@@ -33,11 +33,15 @@ HELPER = r'''
         }
     }
 
-    static double oneStringScalePenalty(const TriMesh& mesh, double* rangeOut = NULL)
+    static void oneStringScaleViolation(
+        const TriMesh& mesh,
+        std::vector<double>& violationSq,
+        double* rangeOut = NULL)
     {
+        violationSq.assign(mesh.F.rows(), 0.0);
         if(mesh.F.rows() == 0) {
             if(rangeOut) { *rangeOut = 1.0; }
-            return 0.0;
+            return;
         }
 
         const double bound = std::max(
@@ -76,44 +80,82 @@ HELPER = r'''
         // Remove arbitrary global UV similarity scale. The multiplicative band
         // has total width `bound`, so its log half-width is log(bound)/2.
         const double center = 0.5 * (minLog + maxLog);
-        double penalty = 0.0;
-        double weightSum = 0.0;
         for(int triI = 0; triI < mesh.F.rows(); ++triI) {
             const double violation = std::max(
                 0.0, std::abs(logLambda[triI] - center) - halfBand);
+            violationSq[triI] = violation * violation;
+        }
+    }
+
+    static double oneStringScalePenalty(const TriMesh& mesh, double* rangeOut = NULL)
+    {
+        std::vector<double> violationSq;
+        oneStringScaleViolation(mesh, violationSq, rangeOut);
+        if(violationSq.empty()) { return 0.0; }
+
+        double penalty = 0.0;
+        double weightSum = 0.0;
+        for(int triI = 0; triI < mesh.F.rows(); ++triI) {
             const double w = (triI < mesh.triArea.size())
                 ? std::max(mesh.triArea[triI], 1.0e-16) : 1.0;
-            penalty += w * violation * violation;
+            penalty += w * violationSq[triI];
             weightSum += w;
         }
         return penalty / std::max(weightSum, 1.0e-16);
     }
 
-    static double oneStringRelaxedScalePenalty(const TriMesh& candidate, double* rangeOut = NULL)
+    static double oneStringBoundaryStressExposure(const TriMesh& mesh)
     {
-        // A seam/topology edit does not by itself change per-triangle UV metrics.
-        // Therefore evaluate the candidate *after* a few genuine OptCuts
-        // Symmetric-Dirichlet geometry iterations. This exposes the freedom that
-        // the proposed seam creates instead of returning an identically-zero
-        // scale reward for every candidate.
-        const int relaxIters = std::max(
-            1, static_cast<int>(std::round(
-                oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_RELAX_ITERS", 4.0))));
+        // A topology-only cut leaves the current per-triangle UV deformation
+        // unchanged, so comparing scale penalty before/after the cut is nearly
+        // identically zero. Instead, score how much *current* scale violation is
+        // released onto chart boundaries by the candidate seam. A split creates
+        // boundary edges next to stressed triangles and increases this value;
+        // a merge removes such freedom and decreases it. This is a cheap proxy
+        // for the scale improvement available after subsequent OptCuts UV solves.
+        std::vector<double> violationSq;
+        oneStringScaleViolation(mesh, violationSq, NULL);
+        if(violationSq.empty()) { return 0.0; }
 
-        std::vector<Energy*> energyTerms;
-        energyTerms.emplace_back(new SymDirichletEnergy());
-        std::vector<double> energyParams(1, 1.0);
-
-        Optimizer optimizer(candidate, energyTerms, energyParams, 0, true, false);
-        optimizer.precompute();
-        optimizer.setRelGL2Tol(1.0e-4);
-        optimizer.solve(relaxIters);
-
-        const double penalty = oneStringScalePenalty(optimizer.getResult(), rangeOut);
-        for(Energy* energy : energyTerms) {
-            delete energy;
+        typedef std::pair<int, int> EdgeKey;
+        std::map<EdgeKey, int> edgeCount;
+        std::map<EdgeKey, int> edgeTri;
+        for(int triI = 0; triI < mesh.F.rows(); ++triI) {
+            const Eigen::Vector3i tri = mesh.F.row(triI);
+            for(int e = 0; e < 3; ++e) {
+                int a = tri[e];
+                int b = tri[(e + 1) % 3];
+                if(a > b) { std::swap(a, b); }
+                const EdgeKey key(a, b);
+                ++edgeCount[key];
+                edgeTri[key] = triI;
+            }
         }
-        return penalty;
+
+        double exposedStress = 0.0;
+        double totalArea = 0.0;
+        for(int triI = 0; triI < mesh.F.rows(); ++triI) {
+            totalArea += (triI < mesh.triArea.size())
+                ? std::max(mesh.triArea[triI], 1.0e-16) : 1.0;
+        }
+
+        for(std::map<EdgeKey, int>::const_iterator it = edgeCount.begin();
+            it != edgeCount.end(); ++it) {
+            if(it->second != 1) { continue; }
+            const EdgeKey& edge = it->first;
+            const int triI = edgeTri[edge];
+            if(triI < 0 || triI >= mesh.F.rows()) { continue; }
+
+            const Eigen::Vector3d p0 = mesh.V_rest.row(edge.first);
+            const Eigen::Vector3d p1 = mesh.V_rest.row(edge.second);
+            const double edgeLength = std::max((p1 - p0).norm(), 1.0e-16);
+            exposedStress += edgeLength * violationSq[triI];
+        }
+
+        // Normalize by sqrt(area) so the proxy remains roughly invariant under
+        // uniform scaling of the input surface while retaining seam-length
+        // information inside a fixed mesh.
+        return exposedStress / std::sqrt(std::max(totalArea, 1.0e-16));
     }
 
     static double oneStringScaleReward(const TriMesh& before, const TriMesh& candidate)
@@ -122,9 +164,11 @@ HELPER = r'''
             0.0, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_WEIGHT", 40.0));
         if(weight == 0.0) { return 0.0; }
 
-        const double beforePenalty = oneStringScalePenalty(before);
-        const double afterPenalty = oneStringRelaxedScalePenalty(candidate);
-        return weight * (beforePenalty - afterPenalty);
+        // Positive for split candidates that expose high scale-stress regions to
+        // a new seam; negative for merge candidates that remove such a seam.
+        const double beforeExposure = oneStringBoundaryStressExposure(before);
+        const double afterExposure = oneStringBoundaryStressExposure(candidate);
+        return weight * (afterExposure - beforeExposure);
     }
 '''
 
@@ -152,7 +196,7 @@ def make_onestring_source(upstream: str) -> str:
     source = replace_once(
         source,
         "#include <fstream>\n",
-        "#include <fstream>\n#include <cmath>\n#include <cstdlib>\n#include <string>\n",
+        "#include <fstream>\n#include <cmath>\n#include <cstdlib>\n#include <map>\n#include <string>\n",
         "standard includes",
     )
     source = replace_once(
@@ -227,8 +271,8 @@ def main() -> int:
 
     required = (
         "oneStringScalePenalty",
-        "oneStringRelaxedScalePenalty",
-        "ONESTRING_OPTCUTS_SCALE_RELAX_ITERS",
+        "oneStringBoundaryStressExposure",
+        "afterExposure - beforeExposure",
         "objectiveDec += oneStringScaleReward(*this, candidate)",
         "curEwDec += oneStringScaleReward(*this, candidate)",
         "EwDec += oneStringScaleReward(*this, candidate)",
@@ -236,10 +280,10 @@ def main() -> int:
     missing = [token for token in required if token not in modified]
     if missing:
         raise SystemExit(
-            "OptCuts source verification failed; relaxed scale-aware objective is not present: "
+            "OptCuts source verification failed; scale-stress seam proxy is not present: "
             + ", ".join(missing)
         )
-    print("[OPTCUTS-ONESTRING-OBJECTIVE] verified relaxed scale-factor term in TriMesh::computeLocalLDec")
+    print("[OPTCUTS-ONESTRING-OBJECTIVE] verified scale-stress seam proxy in TriMesh::computeLocalLDec")
 
     build = optcuts / "build_onestring"
     build.mkdir(parents=True, exist_ok=True)
