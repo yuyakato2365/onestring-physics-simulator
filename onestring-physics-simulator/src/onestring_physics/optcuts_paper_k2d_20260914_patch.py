@@ -1,10 +1,18 @@
 """2026-09-14 paper-stage K2D variant for the OptCuts experimental path.
 
 Section 4.3 of One String defines K2D as a shared-vertex planar mesh optimized
-from M2D with Eq. (5): EFlat = w1 EEdge + w2 ECollision + w3 EFab.  Rigid
+from M2D with Eq. (5): EFlat = w1 EEdge + w2 ECollision + w3 EFab. Rigid
 per-tile repositioning for hinge alignment belongs to the later T2D / Section
-4.4 stage.  This patch keeps K2D shared-vertex and collision-aware; it does not
+4.4 stage. This patch keeps K2D shared-vertex and collision-aware; it does not
 insert SE(2) hinge placement into K2D.
+
+The 2026-09-14 variant also treats the Eq. (5) K2D relative panel placement as
+authoritative after Split. Older validation code recenters every disconnected
+K2D component back onto its M2D seam-gap centroid after K2D optimization. That
+silently re-injects the parameterization-dependent M2D absolute layout and makes
+LSCM/OptCuts downstream comparisons non-equivalent. For this dated variant only,
+that post-K2D centroid realignment is bypassed. Older variants retain the legacy
+behavior for comparison.
 
 The main paper states that EFab penalizes gap opening angles outside
 [theta_min, 90 deg], but delegates the exact formula to Supplement Appendix A.
@@ -83,9 +91,9 @@ def _paper_collision_refine(
     best_key = (before_collision, before_max, before_mean)
     used = 0
 
-    # Keep ECollision active at K2D even for medium/large meshes.  Each collision
+    # Keep ECollision active at K2D even for medium/large meshes. Each collision
     # step is followed by edge projection so the defining K3D edge targets remain
-    # authoritative.  This is still a lightweight approximation of the paper's
+    # authoritative. This is still a lightweight approximation of the paper's
     # projection solver, not a claim of source-identical ShapeOp numerics.
     for outer in range(outer_max):
         candidate = edge_project(xy, base_xy, edges, target_lengths, faces, mesh_2d.grid, iterations=4)
@@ -132,9 +140,96 @@ def _paper_collision_refine(
     }
 
 
+def _install_split_post_k2d_realign_bypass() -> None:
+    """Bypass legacy post-K2D M2D-centroid realignment only for 2026-09-14.
+
+    ``app_split_panels`` installs Simple Split after the OptCuts launcher has
+    already assembled the K2D wrapper stack. The legacy Simple Split installer
+    wraps ``_optimize_k2d`` and, for multiple disconnected components, translates
+    each optimized component so that its centroid matches the corresponding M2D
+    seam-gap component. That changes the relative panel placement after Eq. (5).
+
+    Capture the authoritative pre-Split K2D function before the legacy installer
+    runs. After installation, dispatch 2026-09-14 runs directly to that captured
+    function, while every older mode still uses the original Simple Split K2D
+    wrapper unchanged.
+    """
+    try:
+        from . import simple_split_panel_patch as simple_split_module
+    except Exception:
+        return
+    if getattr(simple_split_module, "_onestring_20260914_k2d_realign_bypass_installed", False):
+        return
+
+    original_installer = simple_split_module.install_simple_split_panel_patch
+
+    def install_with_20260914_bypass(pipeline_module: Any, optimization_debug_module: Any) -> None:
+        authoritative_k2d_before_split_wrapper = pipeline_module._optimize_k2d
+        original_installer(pipeline_module, optimization_debug_module)
+        legacy_split_k2d = pipeline_module._optimize_k2d
+
+        def k2d_preserve_eq5_layout(mesh_2d: Any, mesh_3d: Any, params: Any, progress_callback: Any = None):
+            if not _active(params):
+                return legacy_split_k2d(mesh_2d, mesh_3d, params, progress_callback=progress_callback)
+
+            result, report = authoritative_k2d_before_split_wrapper(
+                mesh_2d,
+                mesh_3d,
+                params,
+                progress_callback=progress_callback,
+            )
+            metrics = dict(getattr(result, "metrics", {}) or {})
+            metrics.update({
+                "version_id": VERSION_ID,
+                "k2d_split_panel_centroid_realign_disabled": True,
+                "k2d_split_panel_post_eq5_translation_applied": False,
+                "paper_k2d_relative_layout_preserved_after_split": True,
+                "paper_k2d_absolute_m2d_layout_reinjected_after_optimization": False,
+                "paper_k2d_split_layout_policy": "preserve authoritative Eq.(5) K2D coordinates; do not translate disconnected components back to M2D centroids",
+            })
+            try:
+                result.metrics.clear()
+                result.metrics.update(metrics)
+            except Exception:
+                pass
+
+            copy_attrs = getattr(simple_split_module, "_copy_attrs", None)
+            if callable(copy_attrs):
+                try:
+                    copy_attrs(mesh_2d, result)
+                except Exception:
+                    pass
+
+            print(
+                "[2026-09-14-PAPER-K2D-SPLIT] "
+                "post-Eq5 M2D-centroid realignment disabled; relative K2D panel placement preserved"
+            )
+            return result, report
+
+        pipeline_module._optimize_k2d = k2d_preserve_eq5_layout
+        original = getattr(pipeline_module, "_original", None)
+        if original is not None:
+            original._optimize_k2d = k2d_preserve_eq5_layout
+        for fn in (
+            getattr(pipeline_module, "build_onestring_design", None),
+            getattr(pipeline_module, "_ORIGINAL_BUILD_ONESTRING_DESIGN", None),
+            getattr(original, "build_onestring_design", None) if original is not None else None,
+        ):
+            glb = getattr(fn, "__globals__", None)
+            if isinstance(glb, dict):
+                glb["_optimize_k2d"] = k2d_preserve_eq5_layout
+
+    simple_split_module.install_simple_split_panel_patch = install_with_20260914_bypass
+    simple_split_module._onestring_20260914_k2d_realign_bypass_installed = True
+
+
 def install_optcuts_paper_k2d_20260914_patch(pipeline: Any) -> None:
     if getattr(pipeline, "_onestring_optcuts_paper_k2d_20260914_installed", False):
         return
+
+    # Must be installed before app_split_panels invokes Simple Split so the dated
+    # variant can preserve the Eq. (5) K2D layout after topology separation.
+    _install_split_post_k2d_realign_bypass()
 
     base = pipeline._optimize_k2d
 
@@ -179,7 +274,8 @@ def install_optcuts_paper_k2d_20260914_patch(pipeline: Any) -> None:
             "paper_k2d_fabrication_policy": "opening angle should lie in [theta_min, 90 deg]",
             "paper_k2d_efab_exact_formula_available": False,
             "paper_k2d_efab_exactness_note": "main paper delegates exact EFab to Supplement Appendix A; current implementation does not invent the unavailable exact formula",
-            "objective": "Paper-stage-separated K2D Eq.(5): shared vertices, K3D edge matching, collision active in K2D; hinge SE(2) deferred",
+            "paper_k2d_post_split_centroid_realign_expected": False,
+            "objective": "Paper-stage-separated K2D Eq.(5): shared vertices, K3D edge matching, collision active in K2D; Eq.(5) relative panel placement preserved after Split; hinge SE(2) deferred",
             "actual_backend": str(metrics.get("actual_backend", "base")) + " + paper shared-vertex collision refinement",
         })
         result.metrics.clear()
@@ -195,7 +291,7 @@ def install_optcuts_paper_k2d_20260914_patch(pipeline: Any) -> None:
             f"overlaps={extra.get('paper_k2d_collision_count_before_refinement')}"
             f"->{extra.get('paper_k2d_collision_count_after_refinement')} "
             f"max_edge={extra.get('paper_k2d_edge_error_after_refinement_max')} "
-            "hinge_layout_in_K2D=False"
+            "hinge_layout_in_K2D=False post_split_centroid_realign=False"
         )
         return result, report
 
