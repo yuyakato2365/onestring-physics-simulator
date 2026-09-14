@@ -1,10 +1,13 @@
 """Use the dedicated source-modified OptCuts binary for ``optcuts_test2``.
 
-The OneString scale-factor term lives in OptCuts' own ``TriMesh::computeLocalLDec``
-candidate objective.  This module does not rewrite C++ source and does not select
-among completed OptCuts runs.  Build the modified binary once with
-``python3 scripts/build_optcuts_onestring.py``; test2 then invokes that binary
-directly while test1 continues to use the ordinary upstream OptCuts binary.
+The dedicated build changes OptCuts' Symmetric Dirichlet energy itself to
+``E_SD + scale_weight * E_scale``.  Because OptCuts uses that same energy in
+both its ordinary UV optimization and its local topology-candidate relaxation,
+test2 makes seam selection and subsequent parameterization optimize the same
+OneString-aware objective.
+
+Build the binary with ``python3 scripts/build_optcuts_onestring.py``; test1
+continues to use the ordinary upstream OptCuts binary.
 """
 from __future__ import annotations
 
@@ -92,8 +95,8 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
             result.metrics.update({
                 "optcuts_internal_scale_factor_enabled": True,
                 "optcuts_internal_scale_factor_model": (
-                    "OptCuts TriMesh::computeLocalLDec seam/distortion objective + "
-                    "soft OneString scale-factor violation decrease"
+                    "E_geom = E_SD + weight * E_scale in both OptCuts global "
+                    "UV optimization and local topology-candidate relaxation"
                 ),
                 "optcuts_internal_scale_factor_bound": bound,
                 "optcuts_internal_scale_factor_weight": weight,
@@ -117,7 +120,8 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
     pipeline._onestring_test2_scale_aware_parameterization_installed = True
     print(
         "[OPTCUTS-TEST2-SOURCE-MODIFIED-ROUTE] installed; "
-        "test2 uses a dedicated OptCuts binary built from the tracked source modification"
+        "test2 uses a dedicated OptCuts binary with a shared SD+scale objective "
+        "for topology and parameterization"
     )
 
 
