@@ -316,6 +316,8 @@ def run_official_optcuts(
     try:
         temp_dir = Path(temp_ctx.name)
         input_obj = temp_dir / "surface.obj"
+        stdout_path = temp_dir / "optcuts_stdout.log"
+        stderr_path = temp_dir / "optcuts_stderr.log"
         _write_triangle_obj(input_obj, surface_vertices, surface_faces)
         command = [
             str(executable), "100", str(input_obj.resolve()),
@@ -329,31 +331,63 @@ def run_official_optcuts(
             f"timeout={float(cfg.timeout_seconds):g}s executable={executable}"
         )
         _log("[OPTCUTS-RUN-COMMAND] " + " ".join(command))
+
+        process: subprocess.Popen[str] | None = None
         try:
-            completed = subprocess.run(
-                command, cwd=str(root), capture_output=True, text=True,
-                timeout=float(cfg.timeout_seconds), check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            elapsed = time.time() - started
-            _log(f"[OPTCUTS-RUN-TIMEOUT] tag={tag} elapsed={elapsed:.3f}s")
-            raise OptCutsError(
-                f"Official OptCuts timed out after {cfg.timeout_seconds:g} s"
-            ) from exc
+            with stdout_path.open("w", encoding="utf-8") as stdout_file, \
+                    stderr_path.open("w", encoding="utf-8") as stderr_file:
+                process = subprocess.Popen(
+                    command,
+                    cwd=str(root),
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    text=True,
+                )
+                heartbeat_interval = 30.0
+                next_heartbeat = started + heartbeat_interval
+                while True:
+                    returncode = process.poll()
+                    now = time.time()
+                    if returncode is not None:
+                        break
+                    elapsed_now = now - started
+                    if elapsed_now >= float(cfg.timeout_seconds):
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5.0)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        _log(f"[OPTCUTS-RUN-TIMEOUT] tag={tag} elapsed={elapsed_now:.3f}s")
+                        raise OptCutsError(
+                            f"Official OptCuts timed out after {cfg.timeout_seconds:g} s"
+                        )
+                    if now >= next_heartbeat:
+                        _log(
+                            f"[OPTCUTS-RUN-HEARTBEAT] tag={tag} elapsed={elapsed_now:.1f}s "
+                            f"pid={process.pid} status=running"
+                        )
+                        while next_heartbeat <= now:
+                            next_heartbeat += heartbeat_interval
+                    time.sleep(0.25)
         except OSError as exc:
             elapsed = time.time() - started
             _log(f"[OPTCUTS-RUN-EXEC-ERROR] tag={tag} elapsed={elapsed:.3f}s error={exc}")
             raise OptCutsUnavailableError(f"Failed to execute {executable}: {exc}") from exc
 
+        if process is None:
+            raise OptCutsUnavailableError("Failed to start OptCuts process")
         elapsed = time.time() - started
+        stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
         _log(
             f"[OPTCUTS-RUN-END] tag={tag} elapsed={elapsed:.3f}s "
-            f"returncode={completed.returncode}"
+            f"returncode={process.returncode}"
         )
-        if completed.returncode != 0:
-            tail = "\n".join((completed.stdout + "\n" + completed.stderr).splitlines()[-40:])
+        if process.returncode != 0:
+            tail = "\n".join((stdout_text + "\n" + stderr_text).splitlines()[-40:])
             raise OptCutsError(
-                f"Official OptCuts exited with code {completed.returncode}.\nLast output:\n{tail}"
+                f"Official OptCuts exited with code {process.returncode}.\nLast output:\n{tail}"
             )
 
         result_obj = _find_output_obj(root, tag, started)
@@ -375,6 +409,8 @@ def run_official_optcuts(
             "optcuts_elapsed_seconds": elapsed,
             "optcuts_executable": str(executable),
             "optcuts_executable_sha256": _sha256(executable),
+            "optcuts_stdout_tail": "\n".join(stdout_text.splitlines()[-80:]),
+            "optcuts_stderr_tail": "\n".join(stderr_text.splitlines()[-80:]),
             **differential,
         }
         _log(
