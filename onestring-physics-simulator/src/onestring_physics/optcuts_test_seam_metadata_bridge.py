@@ -67,6 +67,21 @@ def install_optcuts_test_seam_metadata_bridge(pipeline: Any) -> None:
 
     base_flatten=pipeline._flatten_to_domain
     def flatten_with_test_seam(parameterization: Any, grid: Any, params: Any=None):
+        # OneString's paper criterion splits only when the conformal scale factor
+        # exceeds 2.0.  Older prototype code used a conservative 1.9 default,
+        # which created unnecessary splits for cases such as max CSF ~= 1.97.
+        # Preserve any explicitly customized non-default threshold, but upgrade
+        # the legacy 1.9 default to the paper value before split candidates are
+        # generated inside _flatten_to_domain().
+        if params is not None:
+            try:
+                if abs(float(getattr(params,"csf_split_threshold",1.9))-1.9) <= 1e-12:
+                    setattr(params,"csf_split_threshold",2.0)
+            except Exception:
+                try:
+                    object.__setattr__(params,"csf_split_threshold",2.0)
+                except Exception:
+                    pass
         domain=base_flatten(parameterization,grid,params)
         if str(getattr(parameterization,"method",""))!="optcuts_test": return domain
         payload=extract_connected_seam_payload_robust(parameterization)
