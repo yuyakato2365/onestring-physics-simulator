@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """Build the dedicated OneString-aware OptCuts binary.
 
-This source-level patch keeps OptCuts' original topology/parameterization
-algorithm, but changes the distortion model used by both the global UV solve
-and the candidate-local UV relaxation from plain Symmetric Dirichlet to
+The OneString objective is
 
-    E_geom = E_SD + scale_weight * E_scale.
+    E_geom = E_SD + scale_weight * sum_i psi_i,
+    psi_i = max(0, |log(lambda_i) - c| - 0.5 log(bound))^2.
 
-Important implementation rule: the scale band is defined by a GLOBAL reference
-center frozen for one global OptCuts iteration. Candidate-local optimizers reuse
-that same reference instead of re-centering on their local stencil. This makes
-local candidate relaxation approximate improvement of the same global
-lambda_max/lambda_min objective.
+Unlike Symmetric Dirichlet, the OneString scale term is deliberately NOT
+area-normalized. Every violating triangle contributes directly, because the
+fabrication objective is to eliminate scale-factor violations and downstream
+splits, not to minimize their area-average severity.
 
-The center is refreshed before each global Newton iteration (block-coordinate
-update), then held fixed during its gradient + line-search evaluations. The
-original SD Hessian remains an inexact-Newton SPD preconditioner.
+The global scale-band center c is frozen for one global Newton iteration and is
+reused by candidate-local optimizers. OptCuts rescales local SD candidate
+energies by global/local surface area. To keep an unnormalized scale SUM
+unchanged by that SD-specific rescaling, local scale energy/gradient are
+multiplied by A_global/A_local inside the local optimizer; the outer
+A_local/A_global factor in TriMesh then cancels exactly. This is a compensation
+for OptCuts' local-score bookkeeping, not an area normalization of E_scale.
+
+Scaffold/air-mesh SD evaluations use uniformWeight=true in OptCuts. The
+OneString scale term returns zero for uniformWeight=true, so it is applied only
+to the physical parameterized surface, never to the air mesh.
+
+The original SD Hessian is retained as an inexact-Newton SPD preconditioner;
+line search evaluates the augmented energy.
 """
 from __future__ import annotations
 
@@ -29,6 +38,7 @@ HELPER = r"""
 
     // ------------------------------------------------------------------
     // OneString scale-aware extension.
+    // E_scale = weight * SUM_i residual_i^2 (NO area normalization).
     // ------------------------------------------------------------------
     static std::atomic<double> oneStringGlobalCenter(0.0);
     static std::atomic<double> oneStringGlobalSurfaceArea(1.0);
@@ -47,22 +57,25 @@ HELPER = r"""
         catch(...) { return fallback; }
     }
 
+    // Read environment variables once. They are fixed for one OptCuts process.
     static double oneStringScaleWeight()
     {
-        return std::max(
-            0.0, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_WEIGHT", 40.0));
-    }
-
-    static double oneStringScaleHalfBand()
-    {
-        const double bound = std::max(
-            1.000001, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_BOUND", 2.0));
-        return 0.5 * std::log(bound);
+        static const double value = std::max(
+            0.0, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_WEIGHT", 1.0));
+        return value;
     }
 
     static double oneStringScaleBound()
     {
-        return std::exp(2.0 * oneStringScaleHalfBand());
+        static const double value = std::max(
+            1.000001, oneStringScaleEnv("ONESTRING_OPTCUTS_SCALE_BOUND", 2.0));
+        return value;
+    }
+
+    static double oneStringScaleHalfBand()
+    {
+        static const double value = 0.5 * std::log(oneStringScaleBound());
+        return value;
     }
 
     static double oneStringLogLambdaFromUV(
@@ -118,13 +131,13 @@ HELPER = r"""
         return 0.5 * (minLog + maxLog);
     }
 
-    // Called only by the non-muted/global Optimizer. Local candidate optimizers
-    // deliberately do NOT overwrite this value.
+    // Called only by the non-muted/global Optimizer. Candidate-local optimizers
+    // deliberately reuse this global reference.
     void oneStringSetGlobalScaleReference(const TriMesh& data)
     {
         if(data.F.rows() == 0) { return; }
-        const double center = oneStringCurrentMeshCenter(data);
-        oneStringGlobalCenter.store(center, std::memory_order_relaxed);
+        oneStringGlobalCenter.store(
+            oneStringCurrentMeshCenter(data), std::memory_order_relaxed);
         oneStringGlobalSurfaceArea.store(
             std::max(data.surfaceArea, 1.0e-16), std::memory_order_relaxed);
         oneStringGlobalReferenceValid.store(true, std::memory_order_release);
@@ -135,7 +148,9 @@ HELPER = r"""
             std::cerr
                 << "[OPTCUTS-SCALE-CPP-ACTIVE] weight=" << oneStringScaleWeight()
                 << " bound=" << oneStringScaleBound()
+                << " model=sum_residual_squared"
                 << " center_mode=global-frozen-per-iteration"
+                << " scaffold=excluded"
                 << std::endl;
         }
     }
@@ -153,13 +168,26 @@ HELPER = r"""
         return oneStringCurrentMeshCenter(data);
     }
 
-    static double oneStringReferenceArea(const TriMesh& data)
+    // OptCuts local candidate scoring does:
+    //   initE *= A_global/A_local
+    //   eDec  *= A_local/A_global
+    // for its area-normalized SD objective. E_scale is intentionally a SUM, so
+    // inside a local optimizer we multiply it by A_global/A_local; the outer
+    // factor then cancels and leaves the true unnormalized scale-energy change.
+    // For physical global solves A_data == A_global, hence factor == 1.
+    // uniformWeight=true is used by OptCuts for scaffold/air-mesh SD; return 0
+    // there so the fabrication-specific scale penalty never touches air mesh.
+    static double oneStringScaleObjectiveFactor(
+        const TriMesh& data, bool uniformWeight)
     {
-        if(oneStringGlobalReferenceValid.load(std::memory_order_acquire)) {
-            return std::max(
-                oneStringGlobalSurfaceArea.load(std::memory_order_relaxed), 1.0e-16);
+        if(uniformWeight) { return 0.0; }
+        if(!oneStringGlobalReferenceValid.load(std::memory_order_acquire)) {
+            return 1.0;
         }
-        return std::max(data.surfaceArea, 1.0e-16);
+        const double globalArea = std::max(
+            oneStringGlobalSurfaceArea.load(std::memory_order_relaxed), 1.0e-16);
+        const double dataArea = std::max(data.surfaceArea, 1.0e-16);
+        return globalArea / dataArea;
     }
 
     static double oneStringScaleResidual(
@@ -175,17 +203,16 @@ HELPER = r"""
         bool uniformWeight)
     {
         const double scaleWeight = oneStringScaleWeight();
-        if(scaleWeight <= 0.0) { return 0.0; }
+        const double objectiveFactor = oneStringScaleObjectiveFactor(data, uniformWeight);
+        if(scaleWeight <= 0.0 || objectiveFactor <= 0.0) { return 0.0; }
 
         const double q = oneStringLogLambda(data, triI);
         const double r = oneStringScaleResidual(
             q, center, oneStringScaleHalfBand());
         if(r <= 0.0) { return 0.0; }
 
-        const double w = uniformWeight
-            ? 1.0
-            : data.triArea[triI] / oneStringReferenceArea(data);
-        return scaleWeight * w * r * r;
+        // No triArea/surfaceArea factor: every violating triangle counts.
+        return scaleWeight * objectiveFactor * r * r;
     }
 
     static void oneStringTriangleScaleGradient(
@@ -197,7 +224,8 @@ HELPER = r"""
     {
         triGradient.setZero();
         const double scaleWeight = oneStringScaleWeight();
-        if(scaleWeight <= 0.0) { return; }
+        const double objectiveFactor = oneStringScaleObjectiveFactor(data, uniformWeight);
+        if(scaleWeight <= 0.0 || objectiveFactor <= 0.0) { return; }
 
         const Eigen::Vector3i tri = data.F.row(triI);
         Eigen::Matrix<double, 3, 2> uv;
@@ -211,10 +239,6 @@ HELPER = r"""
         if(r <= 0.0) { return; }
 
         const double sign = (delta >= 0.0) ? 1.0 : -1.0;
-        const double w = uniformWeight
-            ? 1.0
-            : data.triArea[triI] / oneStringReferenceArea(data);
-
         double uvScale = 0.0;
         for(int lv = 0; lv < 3; ++lv) {
             uvScale = std::max(uvScale, uv.row(lv).norm());
@@ -231,7 +255,7 @@ HELPER = r"""
                 const double qMinus = oneStringLogLambdaFromUV(data, triI, uvMinus);
                 const double dq = (qPlus - qMinus) / (2.0 * eps);
                 triGradient(lv, d) =
-                    scaleWeight * w * 2.0 * r * sign * dq;
+                    scaleWeight * objectiveFactor * 2.0 * r * sign * dq;
             }
         }
     }
@@ -242,6 +266,7 @@ HELPER = r"""
         bool uniformWeight)
     {
         if(oneStringScaleWeight() <= 0.0 || data.F.rows() == 0) { return; }
+        if(oneStringScaleObjectiveFactor(data, uniformWeight) <= 0.0) { return; }
         const double center = oneStringReferenceCenter(data);
         for(int triI = 0; triI < data.F.rows(); ++triI) {
             const Eigen::Vector3i tri = data.F.row(triI);
@@ -297,12 +322,11 @@ HELPER = r"""
 
     static void oneStringScaleStats(
         const TriMesh& data,
-        bool uniformWeight,
-        double& rawScaleEnergy,
+        double& rawScaleSum,
         int& violating,
         double& scaleRange)
     {
-        rawScaleEnergy = 0.0;
+        rawScaleSum = 0.0;
         violating = 0;
         scaleRange = 1.0;
         if(data.F.rows() == 0) { return; }
@@ -317,9 +341,7 @@ HELPER = r"""
             maxLog = std::max(maxLog, q);
             const double r = oneStringScaleResidual(q, center, halfBand);
             if(r > 0.0) { ++violating; }
-            const double w = uniformWeight
-                ? 1.0 : data.triArea[triI] / oneStringReferenceArea(data);
-            rawScaleEnergy += w * r * r;
+            rawScaleSum += r * r;
         }
         scaleRange = std::exp(maxLog - minLog);
     }
@@ -339,13 +361,14 @@ HELPER = r"""
         const long callIndex = local ? ++localCalls : ++globalCalls;
         if(local && !(callIndex <= 25 || (callIndex % 500) == 0)) { return; }
 
-        double rawScaleEnergy = 0.0;
+        double rawScaleSum = 0.0;
         double scaleRange = 1.0;
         int violating = 0;
-        oneStringScaleStats(
-            data, uniformWeight, rawScaleEnergy, violating, scaleRange);
+        oneStringScaleStats(data, rawScaleSum, violating, scaleRange);
         const double sdEnergy = oneStringSDEnergy(data, uniformWeight);
-        const double weightedScaleEnergy = oneStringScaleWeight() * rawScaleEnergy;
+        const double compensation = oneStringScaleObjectiveFactor(data, uniformWeight);
+        const double weightedScaleEnergy =
+            oneStringScaleWeight() * compensation * rawScaleSum;
         const double energyRatio = weightedScaleEnergy /
             std::max(std::abs(sdEnergy), 1.0e-30);
         const double sdGradNorm = sdGradient.norm();
@@ -371,19 +394,19 @@ HELPER = r"""
             return;
         }
         if(writeHeader) {
-            out << "scope,call,n_vertices,n_faces,sd_energy,scale_energy_raw,"
+            out << "scope,call,n_vertices,n_faces,sd_energy,scale_residual_sum,"
                    "scale_energy_weighted,scale_to_sd,sd_grad_norm,"
                    "scale_grad_norm,scale_grad_to_sd_grad,violating,"
-                   "scale_range,scale_weight,reference_center\n";
+                   "scale_range,scale_weight,reference_center,local_compensation\n";
         }
         out << (local ? "local" : "global") << ','
             << callIndex << ',' << data.V.rows() << ',' << data.F.rows() << ','
             << std::setprecision(17)
-            << sdEnergy << ',' << rawScaleEnergy << ','
+            << sdEnergy << ',' << rawScaleSum << ','
             << weightedScaleEnergy << ',' << energyRatio << ','
             << sdGradNorm << ',' << scaleGradNorm << ',' << gradRatio << ','
             << violating << ',' << scaleRange << ',' << oneStringScaleWeight() << ','
-            << oneStringReferenceCenter(data) << '\n';
+            << oneStringReferenceCenter(data) << ',' << compensation << '\n';
     }
 """
 
@@ -461,8 +484,6 @@ def make_onestring_symdirichlet_source(upstream: str) -> str:
         "single-element augmented energy",
     )
 
-    # Candidate discovery uses computeLocalGradient -> computeDivGradPerVert.
-    # Add the scale term there too, so candidate generation is not SD-only.
     local_grad_end = """            localGradients.row(startRowI + 2) = w * (dLeft3 * rightTerm + dRight3 * leftTerm);
         }
     }
@@ -516,7 +537,6 @@ def make_onestring_optimizer_source(upstream: str) -> str:
         "Optimizer OneString declarations",
     )
 
-    # Initial global energy must use a valid global reference too.
     source = replace_once(
         source,
         """        computeEnergyVal(result, scaffold, lastEnergyVal);
@@ -531,10 +551,6 @@ def make_onestring_optimizer_source(upstream: str) -> str:
         "Optimizer precompute global scale reference",
     )
 
-    # The non-muted optimizer is the real/global solve. Candidate-local
-    # Optimizers are constructed mute=true in TriMesh.cpp. Refresh the global
-    # center once per global Newton iteration and freeze it for the ensuing
-    # gradient + line-search. Local solves inherit that reference unchanged.
     source = replace_once(
         source,
         """            if(!mute) { timer.start(1); }
@@ -592,9 +608,9 @@ def main() -> int:
     upstream_optimizer = upstream("src/Optimizer.cpp")
     upstream_sd = upstream("src/Energy/SymDirichletEnergy.cpp")
 
-    # Remove the old topology-only proxy. Keep original topology operations,
-    # but make their local UV relaxation and candidate discovery use the same
-    # augmented distortion objective as the global solve.
+    # Keep original topology operations. The local SD area rescaling in
+    # TriMesh.cpp is left untouched; oneStringScaleObjectiveFactor compensates
+    # it exactly for the unnormalized scale sum.
     tri_cpp.write_text(upstream_tri, encoding="utf-8")
     modified_optimizer = make_onestring_optimizer_source(upstream_optimizer)
     modified_sd = make_onestring_symdirichlet_source(upstream_sd)
@@ -603,13 +619,14 @@ def main() -> int:
 
     required_sd = (
         "oneStringSetGlobalScaleReference",
-        "oneStringReferenceCenter",
+        "oneStringScaleObjectiveFactor",
         "oneStringAddScaleGradient",
         "oneStringAddScaleLocalGradient",
         "oneStringScalePenaltyByElem",
         "oneStringLogDiagnostics",
         "gradient += oneStringScaleGradient",
         "oneStringAddScaleLocalGradient(data, localGradients)",
+        "No triArea/surfaceArea factor",
     )
     required_optimizer = (
         "oneStringSetGlobalScaleReference(result)",
@@ -619,7 +636,7 @@ def main() -> int:
     missing += [token for token in required_optimizer if token not in modified_optimizer]
     if missing:
         raise SystemExit(
-            "OptCuts source verification failed; shared OneString objective is "
+            "OptCuts source verification failed; OneString scale-sum objective is "
             "incomplete: " + ", ".join(missing)
         )
 
@@ -628,16 +645,23 @@ def main() -> int:
         "Optimizer.cpp + SymDirichletEnergy.cpp"
     )
     print(
-        "[OPTCUTS-ONESTRING-OBJECTIVE] E_geom = E_SD + weight * E_scale; "
-        "global center frozen per global Newton iteration and reused by local candidates"
+        "[OPTCUTS-ONESTRING-OBJECTIVE] E_geom = E_SD + weight * SUM(residual^2); "
+        "NO triangle-area or total-area normalization in E_scale"
+    )
+    print(
+        "[OPTCUTS-ONESTRING-LOCAL] local scale term is compensated by "
+        "A_global/A_local so OptCuts' outer A_local/A_global rescaling cancels"
+    )
+    print(
+        "[OPTCUTS-ONESTRING-SCAFFOLD] uniformWeight air-mesh evaluations receive "
+        "zero OneString scale penalty"
     )
     print(
         "[OPTCUTS-ONESTRING-CANDIDATES] scale gradient added to "
         "computeLocalGradient candidate discovery"
     )
     print(
-        "[OPTCUTS-ONESTRING-DIAGNOSTICS] scope comes from Optimizer mute/global state, "
-        "not mesh face count"
+        "[OPTCUTS-ONESTRING-DIAGNOSTICS] scope comes from Optimizer mute/global state"
     )
 
     build = optcuts / "build_onestring"
