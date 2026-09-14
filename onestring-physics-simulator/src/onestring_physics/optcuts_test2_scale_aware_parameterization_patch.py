@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from .optcuts_backend import OptCutsConfig, OptCutsUnavailableError, OptCutsError
+from . import optcuts_backend
 from . import optcuts_pipeline_patch as optcuts_pipeline
 
 
@@ -43,6 +44,7 @@ def _onestring_binary() -> Path:
             pass
     build = root / "third_party" / "OptCuts" / "build_onestring"
     candidates.extend([
+        build / "OptCuts_onestring_runner",
         build / "OptCuts_bin",
         build / "OptCuts_bin.exe",
         build / "Release" / "OptCuts_bin",
@@ -212,24 +214,43 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
             diag_path = _prepare_scale_diagnostics()
             active_path = _prepare_activation_proof()
             binary = _onestring_binary()
+
+            # Test2 must never pass through any older wrapper that can rewrite
+            # cfg.executable back to OptCuts_official. Pin all executable hints,
+            # verify the backend resolves the same file, then call the backend
+            # implementation directly.
+            os.environ["ONESTRING_OPTCUTS_BIN"] = str(binary)
+            os.environ["ONESTRING_OPTCUTS_EXECUTABLE"] = str(binary)
             cfg = replace(cfg, executable=str(binary))
+            resolved = optcuts_backend.resolve_optcuts_executable(str(binary))
+            if resolved.resolve() != binary.resolve():
+                raise OptCutsError(
+                    "OneString Test2 executable routing mismatch before launch: "
+                    f"requested={binary.resolve()} resolved={resolved.resolve()}"
+                )
+
             print(
                 "[OPTCUTS-TEST2-SOURCE-MODIFIED] "
-                f"binary={binary} scale_bound={bound:g} scale_weight={weight:g} "
+                f"binary={binary} resolved={resolved} scale_bound={bound:g} "
+                f"scale_weight={weight:g} "
                 "scale_model=sum_residual_squared_no_area_normalization "
                 f"diag={diag_path} active_proof={active_path}"
             )
-            result = original_run(surface_vertices, surface_faces, cfg)
+            print(
+                "[OPTCUTS-TEST2-DIRECT-BACKEND] bypassing wrapper chain; "
+                f"executable={resolved}"
+            )
+            result = optcuts_backend.run_official_optcuts(
+                surface_vertices, surface_faces, cfg
+            )
 
-            # Do not trust truncated stderr. The C++ physical energy path writes
-            # this file itself on first execution. Missing file means the scale
-            # objective did not execute, so fail immediately rather than silently
-            # returning the plain-SD result.
             if not active_path.is_file():
+                actual = result.metrics.get("optcuts_executable", "unknown")
                 raise OptCutsError(
                     "OneString OptCuts scale objective FAILED TO ACTIVATE at runtime. "
                     f"Expected activation proof file was not written: {active_path}. "
-                    "Re-run `python3 scripts/enable_optcuts_scale_sum.py` and restart Streamlit."
+                    f"backend_executable={actual}. Re-run "
+                    "`python3 scripts/enable_optcuts_scale_sum.py` and restart Streamlit."
                 )
             try:
                 activation_text = active_path.read_text(encoding="utf-8").strip()
@@ -281,8 +302,9 @@ def install_optcuts_test2_scale_aware_parameterization_patch(pipeline: Any) -> N
     print(
         "[OPTCUTS-TEST2-SOURCE-MODIFIED-ROUTE] installed; test2 uses a dedicated "
         "OptCuts binary with unnormalized scale-violation SUM objective, hard "
-        "runtime activation proof, shared global/local center, scale-aware candidate "
-        "discovery, scaffold exclusion, and automatic contribution diagnostics"
+        "runtime activation proof, direct backend execution, shared global/local "
+        "center, scale-aware candidate discovery, scaffold exclusion, and automatic "
+        "contribution diagnostics"
     )
 
 
