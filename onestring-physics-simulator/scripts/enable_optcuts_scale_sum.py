@@ -10,6 +10,15 @@ OneString test2 configuration ``lambda_init=0.999``, OptCuts starts with
 ``lambda_SD = 1 - lambda_init = 0.001``; putting E_scale inside the SD term
 would therefore weaken it by 1000x, which is not the intended objective.
 
+The scale term currently contributes energy + gradient, while OptCuts' SD
+Hessian is used as an inexact-Newton SPD preconditioner.  For the physical
+(non-muted) optimizer we therefore MUST NOT also shrink that preconditioner by
+lambda_SD=0.001: doing so magnifies the scale-gradient Newton direction by
+roughly 1000x and sends OptCuts into repeated line-search backtracking.  The
+physical preconditioner uses at least 1.0 * H_SD; muted candidate-local solves
+keep the original OptCuts Hessian scaling (their energy parameter is normally
+1.0 anyway).
+
 The built binary is launched through a tiny runner generated next to it.  The
 runner exports the diagnostic/activation paths itself before exec'ing the real
 binary.  This removes any dependence on Streamlit/Python environment
@@ -128,11 +137,32 @@ def main() -> int:
         "physical Optimizer gradient injection",
     )
 
+    # OptCuts multiplies its SD Hessian by energyParams.  With lambda_init=.999,
+    # that makes H ~= .001 H_SD while the newly added scale gradient is NOT
+    # multiplied by .001.  The resulting Newton direction is about 1000x too
+    # large and spends its time backtracking.  Keep H_SD as an SPD inexact-
+    # Newton preconditioner at full strength for the physical/global optimizer.
+    # Candidate-local optimizers are mute=true, so their original scaling is
+    # untouched.
+    dense_hessian_anchor = """            energyTerms[0]->computeHessian(data, Hessian);\n            Hessian *= energyParams[0];\n"""
+    dense_hessian_replacement = """            energyTerms[0]->computeHessian(data, Hessian);\n            const double oneStringHessianScale =\n                mute ? energyParams[0] : ((energyParams[0] < 1.0) ? 1.0 : energyParams[0]);\n            Hessian *= oneStringHessianScale;\n"""
+    optimizer = replace_once(
+        optimizer, dense_hessian_anchor, dense_hessian_replacement,
+        "dense physical Hessian stabilization",
+    )
+
+    sparse_hessian_anchor = """                energyTerms[eI]->computeHessian(data, &V, &I, &J);\n                V *= energyParams[eI];\n"""
+    sparse_hessian_replacement = """                energyTerms[eI]->computeHessian(data, &V, &I, &J);\n                const double oneStringHessianScale =\n                    mute ? energyParams[eI] : ((energyParams[eI] < 1.0) ? 1.0 : energyParams[eI]);\n                V *= oneStringHessianScale;\n"""
+    optimizer = replace_once(
+        optimizer, sparse_hessian_anchor, sparse_hessian_replacement,
+        "sparse physical Hessian stabilization",
+    )
+
     # This marker sits in the exact physical energy path.  The generated runner
     # below always exports ACTIVE_PATH before exec, so failure to produce the
     # file now really means this objective path did not execute.
     marker_anchor = """        const double oneStringScaleEnergy = oneStringPhysicalScaleEnergy(data);\n        energyVal = energyParams[0] * energyVal_ET[0] + oneStringScaleEnergy;\n"""
-    marker_replacement = marker_anchor + """        static std::atomic<bool> oneStringPhysicalObjectivePrinted(false);\n        bool oneStringExpected = false;\n        if(oneStringPhysicalObjectivePrinted.compare_exchange_strong(\n               oneStringExpected, true)) {\n            std::cerr\n                << \"[OPTCUTS-ONESTRING-PHYSICAL-OBJECTIVE-ACTIVE] scale_energy=\"\n                << oneStringScaleEnergy\n                << \" sd_multiplier=\" << energyParams[0]\n                << \" model=sum_residual_squared_no_area_normalization\"\n                << std::endl;\n            const char* activePath = std::getenv(\n                \"ONESTRING_OPTCUTS_ACTIVE_PATH\");\n            if(activePath && *activePath) {\n                std::ofstream active(activePath, std::ios::trunc);\n                if(active.good()) {\n                    active << \"active\\n\"\n                           << \"scale_energy=\" << oneStringScaleEnergy << \"\\n\"\n                           << \"sd_multiplier=\" << energyParams[0] << \"\\n\";\n                }\n                else {\n                    std::cerr << \"[OPTCUTS-ONESTRING-ACTIVE-FILE-ERROR] path=\"\n                              << activePath << std::endl;\n                }\n            }\n            else {\n                std::cerr << \"[OPTCUTS-ONESTRING-ACTIVE-PATH-MISSING]\" << std::endl;\n            }\n        }\n"""
+    marker_replacement = marker_anchor + """        static std::atomic<bool> oneStringPhysicalObjectivePrinted(false);\n        bool oneStringExpected = false;\n        if(oneStringPhysicalObjectivePrinted.compare_exchange_strong(\n               oneStringExpected, true)) {\n            std::cerr\n                << \"[OPTCUTS-ONESTRING-PHYSICAL-OBJECTIVE-ACTIVE] scale_energy=\"\n                << oneStringScaleEnergy\n                << \" sd_multiplier=\" << energyParams[0]\n                << \" hessian_preconditioner_scale=\"\n                << ((energyParams[0] < 1.0) ? 1.0 : energyParams[0])\n                << \" model=sum_residual_squared_no_area_normalization\"\n                << std::endl;\n            const char* activePath = std::getenv(\n                \"ONESTRING_OPTCUTS_ACTIVE_PATH\");\n            if(activePath && *activePath) {\n                std::ofstream active(activePath, std::ios::trunc);\n                if(active.good()) {\n                    active << \"active\\n\"\n                           << \"scale_energy=\" << oneStringScaleEnergy << \"\\n\"\n                           << \"sd_multiplier=\" << energyParams[0] << \"\\n\"\n                           << \"hessian_preconditioner_scale=\"\n                           << ((energyParams[0] < 1.0) ? 1.0 : energyParams[0])\n                           << \"\\n\";\n                }\n                else {\n                    std::cerr << \"[OPTCUTS-ONESTRING-ACTIVE-FILE-ERROR] path=\"\n                              << activePath << std::endl;\n                }\n            }\n            else {\n                std::cerr << \"[OPTCUTS-ONESTRING-ACTIVE-PATH-MISSING]\" << std::endl;\n            }\n        }\n"""
     optimizer = replace_once(
         optimizer, marker_anchor, marker_replacement,
         "physical objective runtime marker",
@@ -152,6 +182,8 @@ def main() -> int:
         "oneStringPhysicalScaleEnergy(data)",
         "energyVal = energyParams[0] * energyVal_ET[0] + oneStringScaleEnergy",
         "gradient = energyParams[0] * gradient_ET[0] + oneStringScaleGradient",
+        "const double oneStringHessianScale =",
+        "hessian_preconditioner_scale=",
         "[OPTCUTS-ONESTRING-PHYSICAL-OBJECTIVE-ACTIVE]",
         "ONESTRING_OPTCUTS_ACTIVE_PATH",
     )
@@ -206,7 +238,8 @@ def main() -> int:
     print(
         "[OPTCUTS-ONESTRING-FORCE-ENABLED] physical objective is now "
         "lambda_SD * E_SD + weight * SUM(residual^2); scale is NOT multiplied "
-        "by lambda_SD; scaffold remains SD-only"
+        "by lambda_SD; physical SD Hessian preconditioner is floored at 1.0; "
+        "candidate-local Hessian scaling remains original; scaffold remains SD-only"
     )
     print(f"[OPTCUTS-ONESTRING-BUILD] binary={binary.resolve()}")
     print(f"[OPTCUTS-ONESTRING-RUNNER] runner={runner.resolve()}")
