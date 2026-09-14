@@ -1,14 +1,16 @@
-"""OptCuts-test K3D hard planarity with an optional shape-preserving AL mode.
+"""OptCuts-test K3D hard planarity with a shape-preserving square-aware AL mode.
 
 The historical mode is preserved: it keeps the ordinary K3D result close by a
 vertex-position anchor while enforcing one coplanarity equality per quad.
 
-The 2026-09-15 shape-preserving version adds a metric term over each quad's four
-edges and two diagonals.  The planarity constraint remains hard, but the solver
-now explicitly penalizes changes of the local quad metric relative to the
-ordinary K3D solution.  This makes planarization prefer the closest solution that
-also preserves panel shape, rather than allowing consensus planarity projection
-to freely shear or collapse quads.
+The 2026-09-15 version now combines three requirements:
+- hard quad coplanarity;
+- preservation of the ordinary K3D reference metric (four edges + two diagonals);
+- a global square-quality term applied to every quad, so malformed / triangle-like
+  panels are actively regularized instead of merely being preserved as reference.
+
+Selecting this version also enables the existing hard non-penetration stage so
+K2D/T2D panel overlap is not silently accepted in the integrated latest version.
 """
 from __future__ import annotations
 
@@ -27,9 +29,8 @@ except Exception:  # pragma: no cover
 SHAPE_PRESERVING_VERSION_ID = "2026-09-15-shape-preserving-hard-planarity"
 SHAPE_PRESERVING_VERSION_LABEL = "2026-09-15 — Shape-preserving hard planarity"
 SHAPE_PRESERVING_VERSION_DESCRIPTION = (
-    "hard-planarity Augmented Lagrangianを維持しつつ、ordinary K3Dの各quadについて"
-    "4辺+2対角線の長さを保つmetric preservation項を追加。平面化によるshear/collapseを抑え、"
-    "元のK3D形状からの変化を小さくする。"
+    "hard-planarityを維持しつつordinary K3Dからの変形を抑え、さらに全quadへ"
+    "global square regularizationを適用する統合版。K2D/T2D hard non-penetrationも有効化する。"
 )
 
 
@@ -47,7 +48,7 @@ def _safe_float_env(name: str, default: float) -> float:
 
 
 def _install_shape_preserving_version_ui() -> None:
-    """Expose the new planarity algorithm as a separate Version entry."""
+    """Expose the integrated 09-15 algorithm as a separate Version entry."""
     try:
         import streamlit as st
     except Exception:
@@ -107,7 +108,11 @@ def _install_shape_preserving_version_ui() -> None:
         if label == "version":
             enabled = isinstance(selected, dict) and selected.get("id") == SHAPE_PRESERVING_VERSION_ID
             os.environ["ONESTRING_K3D_SHAPE_PRESERVING_PLANARITY"] = "1" if enabled else "0"
+            # The 09-15 version is an integrated latest version.  The inner
+            # 09-14 selector wrapper may clear this flag because the IDs differ,
+            # so assert it here after the actual selected option is known.
             if enabled:
+                os.environ["ONESTRING_HARD_NONPENETRATION"] = "1"
                 shape_weight = st.number_input(
                     "K3D shape-preservation weight",
                     min_value=0.0,
@@ -117,14 +122,14 @@ def _install_shape_preserving_version_ui() -> None:
                     format="%.1f",
                     key="onestring_k3d_shape_preservation_weight",
                     help=(
-                        "Weight for preserving each quad's four edge lengths and two diagonal lengths "
-                        "relative to ordinary K3D. Larger values resist shear/collapse during hard planarization."
+                        "Preserves the ordinary K3D local metric. The ordinary UI w_square / ESquare is now "
+                        "also injected directly into this hard-planarity solve for every quad."
                     ),
                 )
                 os.environ["ONESTRING_K3D_SHAPE_PRESERVATION_WEIGHT"] = str(float(shape_weight))
                 st.caption(
-                    "Shape-preserving AL: hard coplanarity + vertex anchor + normalized 4-edge/2-diagonal metric preservation. "
-                    "Start around 100; raise toward 300-1000 if planarization still changes quad shape too much."
+                    "09-15 integrated: hard coplanarity + reference preservation + global square regularization "
+                    "for every quad + hard K2D/T2D non-penetration. w_square / ESquare now acts inside this AL stage too."
                 )
         return selected
 
@@ -213,6 +218,7 @@ def _face_scales(reference: np.ndarray, faces: np.ndarray) -> np.ndarray:
 
 
 _METRIC_PAIRS = ((0, 1), (1, 2), (2, 3), (3, 0), (0, 2), (1, 3))
+_EDGE_PAIRS = ((0, 1), (1, 2), (2, 3), (3, 0))
 
 
 def _metric_reference(reference: np.ndarray, faces: np.ndarray, scales: np.ndarray) -> np.ndarray:
@@ -255,6 +261,82 @@ def _shape_metric_energy_and_gradient(
         np.add.at(grad, a_ids, contribution)
         np.add.at(grad, b_ids, -contribution)
     return 0.5 * float(weight) * energy_sum / norm_count, grad, residuals
+
+
+def _square_energy_and_gradient(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    scales: np.ndarray,
+    weight: float,
+) -> tuple[float, np.ndarray, dict[str, float]]:
+    """Apply square quality to every quad, independent of its reference shape.
+
+    We use four cyclic edge-equality residuals plus equality of both diagonals.
+    Together with the positional/reference metric terms this strongly resists a
+    quad becoming triangle-like while still allowing the global surface to move.
+    """
+    x = np.asarray(vertices, dtype=float)
+    f4 = np.asarray(faces, dtype=int)[:, :4]
+    grad = np.zeros_like(x)
+    if len(f4) == 0 or weight <= 0.0:
+        return 0.0, grad, {"rms": 0.0, "max": 0.0, "worst_edge_ratio": 1.0}
+    q = x[f4]
+    scale = np.maximum(np.asarray(scales, dtype=float), 1e-12)
+    edge_lengths = []
+    edge_deltas = []
+    for a, b in _EDGE_PAIRS:
+        d = q[:, a] - q[:, b]
+        edge_deltas.append(d)
+        edge_lengths.append(np.linalg.norm(d, axis=1))
+    edge_lengths_arr = np.stack(edge_lengths, axis=1)
+    residuals: list[np.ndarray] = []
+    norm_count = float(max(1, len(f4) * 5))
+    energy_sum = 0.0
+
+    # e0=e1=e2=e3 around the entire panel, not only on selected panels.
+    for k in range(4):
+        k2 = (k + 1) % 4
+        residual = (edge_lengths_arr[:, k] - edge_lengths_arr[:, k2]) / scale
+        residuals.append(residual)
+        energy_sum += float(np.dot(residual, residual))
+        for edge_id, sign in ((k, 1.0), (k2, -1.0)):
+            a, b = _EDGE_PAIRS[edge_id]
+            delta = edge_deltas[edge_id]
+            length = np.maximum(edge_lengths_arr[:, edge_id], 1e-12)
+            coeff = (float(weight) / norm_count) * sign * residual / (scale * length)
+            contribution = coeff[:, None] * delta
+            np.add.at(grad, f4[:, a], contribution)
+            np.add.at(grad, f4[:, b], -contribution)
+
+    d02 = q[:, 0] - q[:, 2]
+    d13 = q[:, 1] - q[:, 3]
+    l02 = np.linalg.norm(d02, axis=1)
+    l13 = np.linalg.norm(d13, axis=1)
+    diag_residual = (l02 - l13) / scale
+    residuals.append(diag_residual)
+    energy_sum += float(np.dot(diag_residual, diag_residual))
+    for ids_a, ids_b, delta, length, sign in (
+        (f4[:, 0], f4[:, 2], d02, np.maximum(l02, 1e-12), 1.0),
+        (f4[:, 1], f4[:, 3], d13, np.maximum(l13, 1e-12), -1.0),
+    ):
+        coeff = (float(weight) / norm_count) * sign * diag_residual / (scale * length)
+        contribution = coeff[:, None] * delta
+        np.add.at(grad, ids_a, contribution)
+        np.add.at(grad, ids_b, -contribution)
+
+    stacked = np.stack(residuals, axis=1)
+    shortest = np.min(edge_lengths_arr, axis=1)
+    longest = np.maximum(np.max(edge_lengths_arr, axis=1), 1e-12)
+    ratios = shortest / longest
+    return (
+        0.5 * float(weight) * energy_sum / norm_count,
+        grad,
+        {
+            "rms": float(np.sqrt(np.mean(stacked * stacked))) if stacked.size else 0.0,
+            "max": float(np.max(np.abs(stacked))) if stacked.size else 0.0,
+            "worst_edge_ratio": float(np.min(ratios)) if ratios.size else 1.0,
+        },
+    )
 
 
 def _consensus_planarity_restore(
@@ -318,6 +400,7 @@ def _augmented_lagrangian_planarize(
     faces: np.ndarray,
     *,
     anchor_weight: float = 1.0,
+    square_weight: float = 10.0,
     rho0: float = 10.0,
     outer_iterations: int = 16,
     inner_iterations: int = 70,
@@ -349,6 +432,7 @@ def _augmented_lagrangian_planarize(
 
     shape_mode = _shape_preserving_enabled()
     shape_weight = max(0.0, _safe_float_env("ONESTRING_K3D_SHAPE_PRESERVATION_WEIGHT", 100.0)) if shape_mode else 0.0
+    effective_square_weight = max(0.0, float(square_weight)) if shape_mode else 0.0
     reference_lengths = _metric_reference(ref, f4, scales)
 
     x = ref.copy()
@@ -377,6 +461,12 @@ def _augmented_lagrangian_planarize(
             )
             energy += shape_energy
             grad_total += shape_grad
+        if shape_mode and effective_square_weight > 0.0:
+            square_energy, square_grad, _ = _square_energy_and_gradient(
+                verts, f4, scales, effective_square_weight
+            )
+            energy += square_energy
+            grad_total += square_grad
         constraints, local_grad = _quad_constraint_values_and_gradient(verts, constraint_faces, scales)
         coeff = lambdas + rho * constraints
         energy += float(np.dot(lambdas, constraints) + 0.5 * rho * np.dot(constraints, constraints))
@@ -385,8 +475,6 @@ def _augmented_lagrangian_planarize(
             np.add.at(grad_total, constraint_faces[:, corner], contribution[:, corner])
         return energy, grad_total.ravel()
 
-    # In shape-preserving mode use gentler feasibility projections.  The AL
-    # objective then has repeated opportunities to restore the reference metric.
     restore_relaxation = 0.35 if shape_mode else 1.0
 
     for outer in range(max(1, int(outer_iterations))):
@@ -418,15 +506,15 @@ def _augmented_lagrangian_planarize(
         distances = _quad_plane_distances(x, constraint_faces)
         max_dist = float(np.max(distances)) if len(distances) else 0.0
         normalized_violation = float(np.max(np.abs(constraints))) if len(constraints) else 0.0
-        _, _, shape_residuals = _shape_metric_energy_and_gradient(
-            x, f4, scales, reference_lengths, 1.0
-        )
+        _, _, shape_residuals = _shape_metric_energy_and_gradient(x, f4, scales, reference_lengths, 1.0)
         shape_rms = float(np.sqrt(np.mean(shape_residuals * shape_residuals))) if shape_residuals.size else 0.0
+        _, _, square_diag = _square_energy_and_gradient(x, f4, scales, 1.0)
         print(
             "[OPTCUTS-TEST-K3D-AL] "
             f"mode={'shape-preserving' if shape_mode else 'legacy'} outer={outer_done} rho={rho:.6g} "
             f"plane_before_restore={max_before_restore:.6g} max_plane_dist={max_dist:.6g} "
-            f"shape_metric_rms={shape_rms:.6g} restore_sweeps={used} "
+            f"shape_metric_rms={shape_rms:.6g} square_rms={square_diag['rms']:.6g} "
+            f"worst_edge_ratio={square_diag['worst_edge_ratio']:.4f} restore_sweeps={used} "
             f"max_constraint={normalized_violation:.6g} inner_success={last_inner_success}"
         )
         if max_dist <= plane_tol:
@@ -458,12 +546,15 @@ def _augmented_lagrangian_planarize(
     _, _, final_shape_residuals = _shape_metric_energy_and_gradient(x, f4, scales, reference_lengths, 1.0)
     shape_rms = float(np.sqrt(np.mean(final_shape_residuals * final_shape_residuals))) if final_shape_residuals.size else 0.0
     shape_max = float(np.max(np.abs(final_shape_residuals))) if final_shape_residuals.size else 0.0
+    _, _, square_diag = _square_energy_and_gradient(x, f4, scales, 1.0)
 
     print(
         "[OPTCUTS-TEST-K3D-AL-FINAL] "
         f"mode={'shape-preserving' if shape_mode else 'legacy'} pre_polish={pre_polish_max:.6g} "
         f"max_plane_dist={max_after:.6g} tol={plane_tol:.6g} "
         f"shape_metric_rms={shape_rms:.6g} shape_metric_max={shape_max:.6g} "
+        f"square_rms={square_diag['rms']:.6g} square_max={square_diag['max']:.6g} "
+        f"worst_edge_ratio={square_diag['worst_edge_ratio']:.4f} "
         f"polish_sweeps={polish_used} converged={converged}"
     )
 
@@ -499,6 +590,13 @@ def _augmented_lagrangian_planarize(
         "k3d_shape_metric_relative_rms": float(shape_rms),
         "k3d_shape_metric_relative_max": float(shape_max),
         "k3d_shape_preserving_restore_relaxation": float(restore_relaxation),
+        "k3d_global_square_regularization_enabled": bool(shape_mode and effective_square_weight > 0.0),
+        "k3d_global_square_regularization_model": "all quads: four cyclic edge equalities + equal diagonals",
+        "k3d_global_square_weight_requested": float(square_weight),
+        "k3d_global_square_weight_effective": float(effective_square_weight),
+        "k3d_global_square_residual_rms": float(square_diag["rms"]),
+        "k3d_global_square_residual_max": float(square_diag["max"]),
+        "k3d_global_square_worst_edge_ratio": float(square_diag["worst_edge_ratio"]),
     }
 
 
@@ -513,10 +611,12 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
         if str(getattr(params, "omega_parameterization_mode", "")) != "optcuts_test":
             return result
         reference = np.asarray(k3d.vertices, dtype=float).copy()
+        requested_square_weight = float(getattr(params, "w_square", 10.0))
         solved, al_metrics = _augmented_lagrangian_planarize(
             reference,
             np.asarray(k3d.faces, dtype=int),
             anchor_weight=float(getattr(params, "k3d_al_anchor_weight", 1.0)),
+            square_weight=requested_square_weight,
             rho0=float(getattr(params, "k3d_al_rho0", 10.0)),
             outer_iterations=int(getattr(params, "k3d_al_outer_iterations", 16)),
             inner_iterations=int(getattr(params, "k3d_al_inner_iterations", 70)),
@@ -528,7 +628,7 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
         try:
             k3d.metrics.update(al_metrics)
             if bool(al_metrics.get("k3d_shape_preserving_mode", False)):
-                k3d.metrics["k3d_planarity_mode"] = "hard equality + shape-preserving metric AL"
+                k3d.metrics["k3d_planarity_mode"] = "hard equality + reference metric + global square regularization"
             else:
                 k3d.metrics["k3d_planarity_mode"] = "hard equality via robust augmented Lagrangian + feasibility restoration"
             k3d.metrics["k3d_soft_w_planar_is_authoritative"] = False
@@ -537,7 +637,7 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
             pass
         try:
             suffix = (
-                " + hard quad planarity (shape-preserving AL: 4 edges + 2 diagonals)"
+                " + hard quad planarity (shape-preserving + global square AL)"
                 if bool(al_metrics.get("k3d_shape_preserving_mode", False))
                 else " + hard quad planarity (Augmented Lagrangian + feasibility restoration)"
             )
@@ -545,6 +645,13 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
             report.constraint_violation = float(al_metrics.get("k3d_hard_planarity_max_distance_after", 0.0))
         except Exception:
             pass
+        if _shape_preserving_enabled():
+            print(
+                "[OPTCUTS-TEST-K3D-WEIGHTS] "
+                f"w_square requested/effective={requested_square_weight:.6g}/"
+                f"{float(al_metrics.get('k3d_global_square_weight_effective', 0.0)):.6g} "
+                f"shape_preservation={float(al_metrics.get('k3d_shape_preservation_weight', 0.0)):.6g}"
+            )
         return k3d, report
 
     pipeline._optimize_k3d = optimize
