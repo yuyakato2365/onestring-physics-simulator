@@ -1,0 +1,285 @@
+"""Native Grid-OptCuts V4 subprocess bridge.
+
+The native path imports raw OptCuts UV coordinates without area normalization:
+rescaling would destroy the fixed fabrication spacing h. Only rigid frame changes
+(rotation/reflection) are allowed, so Grid incidence and Symmetric Dirichlet are
+preserved exactly.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import replace
+import math
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+from typing import Iterator
+import uuid
+
+import numpy as np
+
+from .optcuts_backend import (
+    OptCutsConfig,
+    OptCutsError,
+    OptCutsOutputError,
+    OptCutsResult,
+    OptCutsUnavailableError,
+    _boundary_loops,
+    _find_output_obj,
+    _infer_optcuts_root,
+    _read_obj_with_uv,
+    _sha256,
+    _signed_area,
+    _triangle_differential_metrics,
+    _write_triangle_obj,
+    resolve_optcuts_executable,
+)
+from .optcuts_uv_overlap_guard import positive_area_uv_overlaps
+
+NATIVE_GRID_VERSION = 4
+NATIVE_GRID_MARKER = "[ONESTRING-GRID] native_candidate_search enabled version=4"
+NATIVE_GRID_BIJECTIVITY_MARKER = "[ONESTRING-GRID] global_bijectivity_scaffold=enabled"
+
+
+@contextmanager
+def _temporary_env(values: dict[str, str]) -> Iterator[None]:
+    old = {key: os.environ.get(key) for key in values}
+    try:
+        os.environ.update(values)
+        yield
+    finally:
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _to_fabrication_frame(uv: np.ndarray, angle_rad: float) -> np.ndarray:
+    pts = np.asarray(uv, dtype=float)
+    c, s = math.cos(angle_rad), math.sin(angle_rad)
+    u = np.asarray([c, s], dtype=float)
+    v = np.asarray([-s, c], dtype=float)
+    return np.column_stack([pts @ u, pts @ v])
+
+
+def run_native_grid_optcuts(
+    surface_vertices: np.ndarray,
+    surface_faces: np.ndarray,
+    config: OptCutsConfig,
+    *,
+    grid_h: float,
+    angle_degrees: float = 0.0,
+    phase_u: float = 0.0,
+    phase_v: float = 0.0,
+    max_snap_steps: float = 2.0,
+) -> OptCutsResult:
+    h = float(grid_h)
+    if not math.isfinite(h) or h <= 0.0:
+        raise ValueError(f"Grid-OptCuts requires positive finite tile_size; got {grid_h!r}")
+    angle = math.radians(float(angle_degrees))
+    max_snap = float(max_snap_steps)
+    if not math.isfinite(max_snap) or max_snap < 0.5:
+        raise ValueError("Grid-OptCuts max_snap_steps must be >= 0.5")
+    if not (4.0 < float(config.distortion_bound) < float("inf")):
+        raise ValueError("OptCuts distortion_bound must be > 4")
+    if not (0.0 < float(config.lambda_init) < 1.0):
+        raise ValueError("OptCuts lambda_init must satisfy 0 < lambda_init < 1")
+    if int(config.method_type) not in {0, 1, 2, 3}:
+        raise ValueError("OptCuts method_type must be 0, 1, 2, or 3")
+
+    # Grid-specific trial checks guarantee local validity, but do NOT guarantee
+    # global injectivity: distant UV regions can overlap without any triangle
+    # flipping. Keep OptCuts' original air/scaffold bijectivity barrier active.
+    cfg = replace(config, use_bijectivity=True, initial_cut_option=0)
+    executable = resolve_optcuts_executable(cfg.executable)
+    root = _infer_optcuts_root(executable)
+    tag = f"onestring_grid_{uuid.uuid4().hex[:12]}"
+    started = time.time()
+    env_values = {
+        "ONESTRING_OPTCUTS_GRID_NATIVE": "1",
+        "ONESTRING_OPTCUTS_GRID_H": f"{h:.17g}",
+        "ONESTRING_OPTCUTS_GRID_ANGLE_RAD": f"{angle:.17g}",
+        "ONESTRING_OPTCUTS_GRID_PHASE_U": f"{float(phase_u):.17g}",
+        "ONESTRING_OPTCUTS_GRID_PHASE_V": f"{float(phase_v):.17g}",
+        "ONESTRING_OPTCUTS_GRID_MAX_SNAP_STEPS": f"{max_snap:.17g}",
+    }
+
+    temp_ctx = tempfile.TemporaryDirectory(prefix="onestring_grid_optcuts_")
+    try:
+        temp_dir = Path(temp_ctx.name)
+        input_obj = temp_dir / "surface.obj"
+        _write_triangle_obj(input_obj, surface_vertices, surface_faces)
+        command = [
+            str(executable),
+            "100",
+            str(input_obj.resolve()),
+            f"{float(cfg.lambda_init):.17g}",
+            "1",
+            str(int(cfg.method_type)),
+            f"{float(cfg.distortion_bound):.17g}",
+            "1",  # retain original OptCuts global bijectivity scaffold
+            "0",  # two-edge genus-0 initial cut; V4 parameterizes its boundary on the Grid
+            tag,
+        ]
+        try:
+            with _temporary_env(env_values):
+                completed = subprocess.run(
+                    command,
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=float(cfg.timeout_seconds),
+                    check=False,
+                )
+        except subprocess.TimeoutExpired as exc:
+            raise OptCutsError(f"Native Grid-OptCuts timed out after {cfg.timeout_seconds:g} s") from exc
+        except OSError as exc:
+            raise OptCutsUnavailableError(f"Failed to execute {executable}: {exc}") from exc
+
+        combined = completed.stdout + "\n" + completed.stderr
+        if completed.returncode != 0:
+            tail = "\n".join(combined.splitlines()[-80:])
+            raise OptCutsError(
+                f"Native Grid-OptCuts exited with code {completed.returncode}.\nLast output:\n{tail}"
+            )
+        if NATIVE_GRID_MARKER not in combined:
+            marker_lines = [line for line in combined.splitlines() if "[ONESTRING-GRID]" in line]
+            found = marker_lines[-8:] if marker_lines else ["(no Grid-OptCuts marker found)"]
+            raise OptCutsError(
+                "OPTCUTS_GRID_NATIVE_BINARY_VERSION_MISMATCH: optcuts_grid requires native Grid-OptCuts "
+                f"V{NATIVE_GRID_VERSION}. Run `python scripts/setup_optcuts.py` to repatch and rebuild "
+                f"third_party/OptCuts. Markers seen: {found}"
+            )
+        if NATIVE_GRID_BIJECTIVITY_MARKER not in combined:
+            marker_lines = [line for line in combined.splitlines() if "[ONESTRING-GRID]" in line]
+            raise OptCutsError(
+                "OPTCUTS_GRID_NATIVE_BIJECTIVITY_PATCH_MISSING: the binary has Grid-OptCuts V4 but does "
+                "not keep OptCuts' global bijectivity scaffold active. Run `./.venv/bin/python "
+                "scripts/setup_optcuts.py` and retry. "
+                f"Markers seen: {marker_lines[-8:]}"
+            )
+
+        result_obj = _find_output_obj(root, tag, started)
+        xyz, faces, raw_uv, uv_faces = _read_obj_with_uv(result_obj)
+
+        # Express the result in the fabrication frame. This is a rigid transform;
+        # critically, there is NO UV normalization or scale adjustment here.
+        uv = _to_fabrication_frame(raw_uv, angle)
+        effective_phase_u = float(phase_u)
+        effective_phase_v = float(phase_v)
+        loops = _boundary_loops(uv_faces)
+        if not loops:
+            raise OptCutsOutputError("Native Grid-OptCuts returned no UV boundary loop")
+
+        reflected = False
+        if _signed_area(uv[loops[0]]) < 0.0:
+            uv[:, 1] *= -1.0
+            effective_phase_v *= -1.0
+            reflected = True
+
+        differential = _triangle_differential_metrics(xyz, faces, uv, uv_faces)
+        if int(differential.get("uv_triangle_flip_count", 0)) != 0:
+            raise OptCutsOutputError(
+                "OPTCUTS_GRID_NATIVE_FLIPPED_UV: patched OptCuts returned flipped triangles; "
+                f"count={differential['uv_triangle_flip_count']}"
+            )
+        if int(differential.get("uv_degenerate_triangle_count", 0)) != 0:
+            raise OptCutsOutputError(
+                "OPTCUTS_GRID_NATIVE_DEGENERATE_UV: patched OptCuts returned degenerate triangles; "
+                f"count={differential['uv_degenerate_triangle_count']}"
+            )
+
+        # Keep the independent Python audit. The scaffold should make this zero;
+        # if not, the solver is still not globally injective and must not continue.
+        overlap_count, overlap_examples = positive_area_uv_overlaps(uv, uv_faces)
+        if overlap_count:
+            raise OptCutsOutputError(
+                "OPTCUTS_GRID_NATIVE_GLOBAL_UV_OVERLAP: OptCuts' global bijectivity scaffold was enabled, "
+                f"but {overlap_count} non-adjacent triangle pairs still overlap with positive area; "
+                f"examples={overlap_examples[:10]}."
+            )
+
+        metrics: dict[str, object] = {
+            "parameterization_backend_name": "optcuts_native_grid_constrained",
+            "parameterization_backend_version": f"official_OptCuts_plus_OneString_native_grid_v{NATIVE_GRID_VERSION}",
+            "parameterization_method": "optcuts_grid",
+            "omega_parameterization_mode": "optcuts_grid",
+            "flattening_backend": "optcuts_native_grid_cpp",
+            "optcuts_executable": str(executable),
+            "optcuts_executable_sha256": _sha256(executable),
+            "optcuts_working_root": str(root),
+            "optcuts_output_obj": str(result_obj),
+            "optcuts_command_mode": 100,
+            "optcuts_lambda_init": float(cfg.lambda_init),
+            "optcuts_method_type": int(cfg.method_type),
+            "optcuts_distortion_bound": float(cfg.distortion_bound),
+            "optcuts_use_bijectivity": True,
+            "optcuts_initial_cut_option": 0,
+            "optcuts_runtime_seconds": float(time.time() - started),
+            "optcuts_stdout_tail": "\n".join(completed.stdout.splitlines()[-100:]),
+            "optcuts_stderr_tail": "\n".join(completed.stderr.splitlines()[-100:]),
+            "optcuts_grid_native_version": NATIVE_GRID_VERSION,
+            "optcuts_grid_paired_uv_seam_sides": True,
+            "optcuts_grid_zero_width_uv_seam": False,
+            "optcuts_grid_initial_boundary_on_lattice": True,
+            "optcuts_grid_junction_locking": True,
+            "optcuts_grid_trial_actual_cut_feasibility": True,
+            "optcuts_grid_global_bijectivity_scaffold": True,
+            "optcuts_grid_global_overlap_guard": True,
+            "optcuts_grid_global_overlap_count": 0,
+            "optcuts_uv_area_normalization_scale": 1.0,
+            "optcuts_uv_post_scale_applied": False,
+            "optcuts_uv_fabrication_frame_rotation_degrees": -float(angle_degrees),
+            "optcuts_uv_fabrication_v_reflected": bool(reflected),
+            "optcuts_uv_boundary_loop_count": int(len(loops)),
+            "optcuts_uv_main_boundary_vertex_count": int(len(loops[0])),
+            "surface_vertex_count_after_cut_export": int(len(xyz)),
+            "surface_triangle_count_after_cut_export": int(len(faces)),
+            "uv_vertex_count_after_cut": int(len(uv)),
+            "optcuts_grid_native": True,
+            "optcuts_grid_postprocess_used": False,
+            "optcuts_grid_candidate_search_modified": True,
+            "optcuts_grid_spacing": h,
+            "optcuts_grid_search_angle_degrees": float(angle_degrees),
+            "optcuts_grid_angle_degrees": 0.0,
+            "optcuts_grid_phase_u": effective_phase_u,
+            "optcuts_grid_phase_v": effective_phase_v,
+            "grid_phase_u": effective_phase_u,
+            "grid_phase_v": effective_phase_v,
+            "optcuts_grid_max_snap_steps": max_snap,
+            "optcuts_grid_merge_enabled": False,
+            "optcuts_grid_initial_cut_option_forced": 0,
+            "optcuts_grid_bijectivity_scaffold_enabled": True,
+            "optcuts_grid_constraint_model": (
+                "OptCuts local split proposals are admitted only when they have an exact fixed-h H/V Grid "
+                "realization that survives an actual trial cut. Accepted seam/junction vertices stay Grid-locked, "
+                "while the original OptCuts global bijectivity scaffold prevents distant UV regions from overlapping."
+            ),
+            "optcuts_grid_topology_resolution_limit": (
+                "candidate physical cuts still follow existing source triangle-mesh edges; arbitrary "
+                "grid-line/triangle intersection insertion is not implemented in native V4"
+            ),
+            **differential,
+        }
+        return OptCutsResult(
+            surface_vertices_3d=xyz,
+            surface_faces=faces,
+            uv_vertices_2d=uv,
+            uv_faces=uv_faces,
+            boundary_loops=loops,
+            output_obj=str(result_obj),
+            metrics=metrics,
+        )
+    finally:
+        temp_ctx.cleanup()
+
+
+__all__ = [
+    "NATIVE_GRID_BIJECTIVITY_MARKER",
+    "NATIVE_GRID_MARKER",
+    "NATIVE_GRID_VERSION",
+    "run_native_grid_optcuts",
+]
