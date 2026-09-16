@@ -1,4 +1,4 @@
-"""Latest Omega/K3D hybrid with an explicit paper Sec. 4.3 Eq. (5) K2D UI."""
+"""Latest Omega/K3D hybrid with explicit auxetic paper Sec. 4.3 Eq. (5) K2D."""
 from __future__ import annotations
 
 import copy
@@ -10,11 +10,11 @@ from .paper_eq5_k2d_solver import optimize_paper_eq5
 
 MODE = "lscm_latest_omega_hard_k3d"
 VERSION_ID = "2026-09-17-paper-eq5-unified-k2d"
-VERSION_LABEL = "2026-09-17 — paper Eq.5 K2D + latest Ω/K3D"
-OMEGA_LABEL = "2026-09-17 | paper Eq.5 K2D + latest Ω/K3D"
+VERSION_LABEL = "2026-09-17 — auxetic paper Eq.5 K2D + latest Ω/K3D"
+OMEGA_LABEL = "2026-09-17 | auxetic paper Eq.5 K2D + latest Ω/K3D"
 VERSION_DESCRIPTION = (
-    "M2D→K2DでSec.4.3 Eq.(5)のEEdge+ECollision+EFabを扱う実験モード。"
-    "ω1/ω2/ω3とθminをUIから設定可能。現在のEFab topology抽出は未検証なのでexperimental。"
+    "M2Dのshared-vertex quadをtileごとの独立頂点へ変換し、同じM2D頂点由来のcopyをhinge groupとして保持。"
+    "そのauxetic topology上でSec.4.3 Eq.(5)のEEdge+ECollision+EFabを処理してK2Dとして出力する。"
 )
 
 
@@ -60,15 +60,15 @@ def _render_eq5_controls(st: Any) -> None:
         "<div style='padding:14px 16px;border:1px solid rgba(70,110,160,.25);border-radius:14px;background:rgba(240,246,253,.72);margin:6px 0 12px'>"
         "<div style='display:flex;justify-content:space-between'><b>Flat objective</b><span style='opacity:.65'>Paper Sec. 4.3 · Eq. (5)</span></div>"
         "<div style='font-family:Georgia,serif;font-size:20px;margin:10px 0'>E<sub>Flat</sub>(v) = ω₁E<sub>Edge</sub> + ω₂E<sub>Collision</sub> + ω₃E<sub>Fab</sub></div>"
-        "<div style='font-size:12px;opacity:.72'>M₂D → K₂D。下の値はこのEq. (5) solverへ実際に渡される値です。</div>"
+        "<div style='font-size:12px;opacity:.72'>M₂D shared quad → independent auxetic tiles → K₂D。EFabはquad内部角ではなくtile間gap angleへ作用します。</div>"
         "</div>", unsafe_allow_html=True)
-    w1=st.number_input("ω1 / EEdge",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_EDGE",1.0)),step=0.1,format="%.4f",key="onestring_eq5_w_edge",help="K3Dの対応edge lengthへ合わせる項。")
-    w2=st.number_input("ω2 / ECollision",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_COLLISION",1.0)),step=0.1,format="%.4f",key="onestring_eq5_w_collision",help="K2D上の非隣接quad overlapを避ける項。")
-    w3=st.number_input("ω3 / EFab",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_FAB",0.001)),step=0.001,format="%.6f",key="onestring_eq5_w_fab",help="Fabrication clearance / gap-angle項。現在のtopology抽出はexperimental。")
+    w1=st.number_input("ω1 / EEdge",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_EDGE",1.0)),step=0.1,format="%.4f",key="onestring_eq5_w_edge",help="各tile edgeを対応K3D edge lengthへ合わせる項。")
+    w2=st.number_input("ω2 / ECollision",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_COLLISION",1.0)),step=0.1,format="%.4f",key="onestring_eq5_w_collision",help="独立tile同士の2D overlapを避ける項。")
+    w3=st.number_input("ω3 / EFab",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_FAB",0.001)),step=0.001,format="%.6f",key="onestring_eq5_w_fab",help="同じhinge周りで隣接する異なるtileのray間gap angleを制御する項。")
     theta=st.number_input("θmin / EFab gap angle [deg]",min_value=0.0,max_value=90.0,value=min(90.0,max(0.0,_env_float("ONESTRING_EQ5_THETA_MIN_DEG",5.0))),step=1.0,format="%.2f",key="onestring_eq5_theta_min_deg")
     iterations=st.number_input("Eq.5 K2D iterations",min_value=1,max_value=10000,value=max(1,_env_int("ONESTRING_EQ5_ITERATIONS",240)),step=20,key="onestring_eq5_iterations")
     os.environ["ONESTRING_EQ5_W_EDGE"]=str(float(w1)); os.environ["ONESTRING_EQ5_W_COLLISION"]=str(float(w2)); os.environ["ONESTRING_EQ5_W_FAB"]=str(float(w3)); os.environ["ONESTRING_EQ5_THETA_MIN_DEG"]=str(float(theta)); os.environ["ONESTRING_EQ5_ITERATIONS"]=str(int(iterations))
-    st.caption("注意: Eq. (5)の3項自体は実装済み。ただし現在のEFab linkage-gap topology抽出は原論文との対応を未検証のため、ω3を調整する前に検証対象です。")
+    st.caption("このモードではK2D自体が独立tile topologyです。同一M2D vertex由来のcorner copyをhinge groupとして一致させ、EFabからsame-tile interior angleを除外します。")
 
 
 def _install_selector_patch() -> None:
@@ -112,7 +112,7 @@ def install_lscm_latest_omega_hybrid_patch(pipeline: Any, *, lscm_build_m2d: Any
             if not _active(params): return fallback_parameterization(surface,target,grid,params)
             latest_params=_clone_params(params,omega_parameterization_mode="optcuts_test"); result=latest_parameterization(surface,target,grid,latest_params)
             try:
-                result.method=MODE; result.metrics.update({"version_id":VERSION_ID,"hybrid_stage_s_to_omega":"current latest OptCuts-test Omega","hybrid_stage_m2d":"common M2D topology","hybrid_stage_k3d":"current latest OptCuts-test2 K3D stack","hybrid_stage_k2d":"paper Sec.4.3 Eq.5 terms; EFab topology experimental"})
+                result.method=MODE; result.metrics.update({"version_id":VERSION_ID,"hybrid_stage_s_to_omega":"current latest OptCuts-test Omega","hybrid_stage_m2d":"common shared-vertex M2D","hybrid_stage_k3d":"current latest OptCuts-test2 K3D stack","hybrid_stage_k2d":"explicit independent-tile auxetic topology + Eq.5"})
             except Exception: pass
             return result
         def m2d_dispatch(grid,domain,params=None):
@@ -140,7 +140,7 @@ def install_lscm_latest_omega_hybrid_patch(pipeline: Any, *, lscm_build_m2d: Any
         if not getattr(simple_split_module,"_onestring_lscm_hybrid_rewire_installed",False):
             original_installer=simple_split_module.install_simple_split_panel_patch
             def install_then_rewire(pipeline_module,optimization_debug_module):
-                original_installer(pipeline_module,optimization_debug_module); install_routes(pipeline_module); print("[PAPER-EQ5-ROUTE] unified Eq.5 routing reinstalled after Simple Split")
+                original_installer(pipeline_module,optimization_debug_module); install_routes(pipeline_module); print("[PAPER-EQ5-ROUTE] auxetic Eq.5 routing reinstalled after Simple Split")
             simple_split_module.install_simple_split_panel_patch=install_then_rewire; simple_split_module._onestring_lscm_hybrid_rewire_installed=True
     except Exception: pass
     pipeline._onestring_lscm_latest_omega_hybrid_installed=True
@@ -153,7 +153,7 @@ def install_deferred_hybrid_hook(pipeline: Any) -> None:
     except Exception: return
     original_installer=acceleration_module.install_optcuts_test2_acceleration_patch
     def install_acceleration_then_hybrid(target_pipeline):
-        original_installer(target_pipeline); install_lscm_latest_omega_hybrid_patch(target_pipeline,lscm_build_m2d=lscm_build_m2d,lscm_optimize_k2d=lscm_optimize_k2d,lscm_make_flat_tile_layout=lscm_make_flat_tile_layout); print("[PAPER-EQ5-INSTALL] unified EEdge+ECollision+EFab K2D installed")
+        original_installer(target_pipeline); install_lscm_latest_omega_hybrid_patch(target_pipeline,lscm_build_m2d=lscm_build_m2d,lscm_optimize_k2d=lscm_optimize_k2d,lscm_make_flat_tile_layout=lscm_make_flat_tile_layout); print("[PAPER-EQ5-INSTALL] explicit auxetic Eq.5 K2D installed")
     acceleration_module.install_optcuts_test2_acceleration_patch=install_acceleration_then_hybrid; pipeline._onestring_lscm_hybrid_deferred_hook_installed=True
 
 
