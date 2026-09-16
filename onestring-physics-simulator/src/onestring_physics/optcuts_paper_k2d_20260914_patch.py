@@ -1,28 +1,30 @@
 """2026-09-14 OptCuts variant with an exact LSCM K2D/flat-layout route.
 
-This module also provides the capture-time K2D route used by the latest
-"Paper Eq.5 K2D + latest Omega + latest K3D planarity" hybrid.
+For this dated OptCuts mode, S->Omega/M2D/K3D may differ from LSCM, but the
+K2D numerical solve and the subsequent K2D -> independent flat-tile placement
+must use the exact same common functions as ordinary LSCM.
 
-Important performance rule: numerical meaning must not change with tile count.
-The latest hybrid therefore uses the same vectorized EEdge projection for every
-mesh size.  It does not call the legacy K2D implementation's expensive
-collision diagnostics/relaxation at 56%; ECollision and the real EFab gap-angle
-term are handled by the unified independent-tile Eq.5 layout stage.
+In particular, this module MUST NOT split the K2D mesh into connected components
+before calling ``_make_flat_tile_layout``.  Doing so changes the common layout
+function's own branch conditions (for example its whole-mesh large-layout
+threshold) and therefore is not LSCM-equivalent even if the same Python function
+is called per component.
+
+OptCuts seams remain represented only by the topology already present in
+``mesh.faces``.  No 2026-09-14-specific panel-placement optimization, component
+merge, parallel component solve, hard-SAT K2D replacement, all-tile SE(2) K2D
+replacement, or post-K2D M2D-centroid realignment is applied here.
 """
 from __future__ import annotations
 
 import os
-import time
 from typing import Any
-
-import numpy as np
 
 from .lscm_latest_omega_hybrid_20260914_patch import install_deferred_hybrid_hook
 
 
 VARIANT = "3"
 VERSION_ID = "2026-09-14-paper-k2d-eq5-stage-separated"
-PAPER_HYBRID_MODE = "lscm_latest_omega_hard_k3d"
 
 
 def _active(params: Any) -> bool:
@@ -37,189 +39,6 @@ def _active(params: Any) -> bool:
         (explicit or latest_ui)
         and str(getattr(params, "omega_parameterization_mode", "")) == "optcuts_test"
     )
-
-
-def _paper_hybrid_active(params: Any) -> bool:
-    return str(getattr(params, "omega_parameterization_mode", "")) == PAPER_HYBRID_MODE
-
-
-def _emit(pipeline: Any, callback: Any, stage: str, fraction: float, detail: str) -> None:
-    fn = getattr(pipeline, "_emit_progress", None)
-    if callable(fn):
-        try:
-            fn(callback, stage, fraction, detail)
-            return
-        except Exception:
-            pass
-    if callback is not None:
-        try:
-            callback(stage, fraction, detail)
-        except Exception:
-            pass
-
-
-def _paper_edge_only_k2d(
-    pipeline: Any,
-    mesh_2d: Any,
-    mesh_3d: Any,
-    params: Any,
-    progress_callback: Any = None,
-):
-    """Solve only paper EEdge with one size-independent vectorized algorithm.
-
-    Why this exists:
-    the legacy common K2D function performs collision counting/relaxation and
-    several size-dependent backend branches before/after its edge solve.  On the
-    latest high-resolution Omega, GridSize=20 can produce ~O(10^3) tiles, and
-    those legacy diagnostics can dominate immediately after the pipeline reaches
-    56%.  In the paper-faithful split used by the latest hybrid, collision and
-    fabrication are solved in the following independent-tile Eq.5 stage anyway,
-    so doing collision work here is both redundant and semantically wrong.
-
-    This routine uses exactly the same EEdge projection for every tile count.
-    Runtime scales with the number of mesh edges; there is no 100/120/150 tile
-    threshold, no all-pairs collision loop, and no alternate large-mesh model.
-    """
-    started = time.perf_counter()
-    base_xy = np.asarray(mesh_2d.vertices[:, :2], dtype=float).copy()
-    faces = np.asarray(mesh_2d.faces, dtype=int)
-    edges_list = list(pipeline._unique_mesh_edges(faces))
-
-    if edges_list:
-        edge_idx = np.asarray(edges_list, dtype=int)
-        aa = edge_idx[:, 0]
-        bb = edge_idx[:, 1]
-        target_lengths = np.linalg.norm(
-            np.asarray(mesh_3d.vertices, dtype=float)[aa]
-            - np.asarray(mesh_3d.vertices, dtype=float)[bb],
-            axis=1,
-        )
-    else:
-        edge_idx = np.zeros((0, 2), dtype=int)
-        aa = np.zeros(0, dtype=int)
-        bb = np.zeros(0, dtype=int)
-        target_lengths = np.zeros(0, dtype=float)
-
-    def errors(xy: np.ndarray) -> tuple[float, float]:
-        if len(edge_idx) == 0:
-            return 0.0, 0.0
-        lengths = np.linalg.norm(xy[bb] - xy[aa], axis=1)
-        err = np.abs(lengths - target_lengths)
-        return float(np.mean(err)), float(np.max(err))
-
-    before_mean, before_max = errors(base_xy)
-    xy = base_xy.copy()
-    degree = np.zeros((len(xy), 1), dtype=float)
-    if len(edge_idx):
-        np.add.at(degree, aa, 1.0)
-        np.add.at(degree, bb, 1.0)
-    degree = np.maximum(degree, 1.0)
-
-    # Same iteration policy for all mesh sizes.  Early exit is based only on the
-    # actual EEdge residual, never on tile count.
-    iterations = max(160, int(getattr(params, "max_2d_iterations", 40)) * 6)
-    mean_target = float(np.mean(target_lengths)) if len(target_lengths) else 1.0
-    tolerance = max(1e-7, 0.002 * mean_target)
-    base_centroid = np.mean(base_xy, axis=0, keepdims=True) if len(base_xy) else np.zeros((1, 2))
-    iterations_done = 0
-
-    _emit(pipeline, progress_callback, "Paper K2D EEdge", 0.02, f"vectorized solve: {len(faces)} tiles, {len(edge_idx)} edges")
-    for it in range(iterations):
-        if len(edge_idx):
-            delta = xy[bb] - xy[aa]
-            lengths = np.linalg.norm(delta, axis=1)
-            safe = np.maximum(lengths, 1e-12)
-            correction = ((lengths - target_lengths) / safe)[:, None] * delta * 0.5
-            accum = np.zeros_like(xy)
-            np.add.at(accum, aa, correction)
-            np.add.at(accum, bb, -correction)
-            xy += accum / degree
-        # Only remove the global translation gauge.  No M2D per-vertex anchor.
-        if len(xy):
-            xy += base_centroid - np.mean(xy, axis=0, keepdims=True)
-        iterations_done = it + 1
-        if (it + 1) % 10 == 0 or it + 1 == iterations:
-            mean_err, max_err = errors(xy)
-            _emit(
-                pipeline,
-                progress_callback,
-                "Paper K2D EEdge",
-                min(0.98, (it + 1) / max(1, iterations)),
-                f"iter {it + 1}/{iterations}, mean={mean_err:.4g}, max={max_err:.4g}",
-            )
-            if max_err <= tolerance:
-                break
-
-    after_mean, after_max = errors(xy)
-    vertices = np.column_stack([xy, np.zeros(len(xy), dtype=float)])
-    metrics = dict(getattr(mesh_2d, "metrics", {}) or {})
-    metrics.update(
-        {
-            "version_id": "2026-09-14-paper-eq5-unified-k2d",
-            "objective": "Paper Eq.5 split: EEdge only in shared metric stage; ECollision + actual EFab in independent linkage stage",
-            "paper_eq5_EEdge_stage": True,
-            "paper_eq5_edge_solver": "vectorized projective length constraints",
-            "paper_eq5_edge_solver_same_for_all_tile_counts": True,
-            "paper_eq5_no_tile_count_threshold": True,
-            "paper_eq5_no_legacy_collision_diagnostics_at_metric_stage": True,
-            "paper_eq5_old_position_anchor_disabled": True,
-            "paper_eq5_old_position_anchor_was_not_EFab": True,
-            "paper_eq5_collision_fab_deferred_to_independent_linkage": True,
-            "edge_matching_error": float(after_mean),
-            "edge_matching_error_before": float(before_mean),
-            "edge_matching_error_after": float(after_mean),
-            "mean_edge_length_error_before": float(before_mean),
-            "mean_edge_length_error_after": float(after_mean),
-            "max_edge_length_error_before": float(before_max),
-            "max_edge_length_error_after": float(after_max),
-            "k2d_edge_iterations": int(iterations_done),
-            "k2d_edge_tolerance": float(tolerance),
-            "k2d_edge_elapsed_sec": float(time.perf_counter() - started),
-            "k2d_z_abs_max": 0.0,
-            "actual_backend": "paper_vectorized_numpy",
-        }
-    )
-    out = type(mesh_2d)(
-        vertices,
-        faces.copy(),
-        mesh_2d.grid,
-        "K2D",
-        metrics,
-        list(getattr(mesh_2d, "split_lines", [])),
-    )
-    report_cls = getattr(pipeline, "StageReport", None)
-    if report_cls is None:
-        # Fallback should not normally be needed, but preserve the caller shape.
-        class _Report:
-            pass
-        report = _Report()
-        report.name = "M2D -> K2D"
-        report.objective = str(metrics["objective"])
-        report.before_error = before_mean
-        report.after_error = after_mean
-        report.constraint_violation = after_max
-        report.computation_time = time.perf_counter() - started
-        report.failed_constraints = []
-        report.counts = {}
-    else:
-        count_fn = getattr(pipeline, "_mesh_counts", None)
-        counts = count_fn(out) if callable(count_fn) else {}
-        report = report_cls(
-            name="M2D -> K2D",
-            objective=str(metrics["objective"]),
-            before_error=float(before_mean),
-            after_error=float(after_mean),
-            constraint_violation=float(after_max),
-            computation_time=float(time.perf_counter() - started),
-            counts=counts,
-        )
-    _emit(pipeline, progress_callback, "Paper K2D EEdge", 1.0, f"complete in {time.perf_counter() - started:.2f}s")
-    print(
-        "[PAPER-EQ5-K2D-EDGE] unified vectorized EEdge "
-        f"tiles={len(faces)} edges={len(edge_idx)} iter={iterations_done} "
-        f"max_err={after_max:.6g} sec={time.perf_counter() - started:.3f}"
-    )
-    return out, report
 
 
 def _tag_lscm_equivalent_result(result: Any, report: Any) -> tuple[Any, Any]:
@@ -318,7 +137,12 @@ def _wire_flat_layout(pipeline: Any, fn: Any) -> None:
 
 
 def _install_simple_split_bypass() -> None:
-    """Keep 09-14 on the captured LSCM K2D and flat-layout functions."""
+    """Keep 09-14 on the captured LSCM K2D and flat-layout functions.
+
+    Simple Split installs wrappers later in app_split_panels.  For the dated
+    active mode we bypass those outer K2D/layout wrappers and route directly to
+    the functions captured before OptCuts-only replacements are stacked.
+    """
     try:
         from . import simple_split_panel_patch as simple_split_module
     except Exception:
@@ -343,15 +167,33 @@ def _install_simple_split_bypass() -> None:
 
         def k2d_dispatch(mesh_2d: Any, mesh_3d: Any, params: Any, progress_callback: Any = None):
             if not _active(params):
-                return legacy_split_k2d(mesh_2d, mesh_3d, params, progress_callback=progress_callback)
-            result, report = dated_solver(mesh_2d, mesh_3d, params, progress_callback=progress_callback)
+                return legacy_split_k2d(
+                    mesh_2d,
+                    mesh_3d,
+                    params,
+                    progress_callback=progress_callback,
+                )
+
+            result, report = dated_solver(
+                mesh_2d,
+                mesh_3d,
+                params,
+                progress_callback=progress_callback,
+            )
             result, report = _tag_lscm_equivalent_result(result, report)
+
             copy_attrs = getattr(simple_split_module, "_copy_attrs", None)
             if callable(copy_attrs):
                 try:
                     copy_attrs(mesh_2d, result)
                 except Exception:
                     pass
+
+            print(
+                "[2026-09-14-K2D-LSCM-EQUIVALENT] "
+                "common whole-mesh LSCM K2D solver used; OptCuts rigid/hard/global K2D wrappers bypassed; "
+                "post-K2D M2D-centroid realignment disabled"
+            )
             return result, report
 
         def flat_layout_dispatch(mesh: Any, params: Any = None):
@@ -367,39 +209,16 @@ def _install_simple_split_bypass() -> None:
 
 
 def install_optcuts_paper_k2d_20260914_patch(pipeline: Any) -> None:
+    # Register the clean diagnostic hybrid while the LSCM downstream functions
+    # are still available, before app_optcuts stacks its OptCuts-specific routes.
+    install_deferred_hybrid_hook(pipeline)
+
     if getattr(pipeline, "_onestring_optcuts_paper_k2d_20260914_installed", False):
         return
 
-    # Install a capture-time wrapper BEFORE the deferred hybrid snapshots the
-    # ordinary K2D function.  For all ordinary modes this delegates unchanged;
-    # only the latest paper hybrid gets the unified vectorized EEdge solve.
-    pre_hybrid_common_k2d = pipeline._optimize_k2d
-
-    def capture_k2d(mesh_2d: Any, mesh_3d: Any, params: Any, progress_callback=None):
-        if _paper_hybrid_active(params):
-            return _paper_edge_only_k2d(
-                pipeline,
-                mesh_2d,
-                mesh_3d,
-                params,
-                progress_callback=progress_callback,
-            )
-        return pre_hybrid_common_k2d(
-            mesh_2d,
-            mesh_3d,
-            params,
-            progress_callback=progress_callback,
-        )
-
-    _wire_k2d(pipeline, capture_k2d)
-
-    # Register the latest hybrid now; it captures capture_k2d, so GridSize=20
-    # cannot fall back into the legacy 56%-stage collision diagnostics.
-    install_deferred_hybrid_hook(pipeline)
-
-    # For the older dated OptCuts variant, preserve the original common LSCM
-    # behavior rather than the hybrid-specific EEdge-only wrapper.
-    lscm_common_k2d = pre_hybrid_common_k2d
+    # Capture the exact common functions that ordinary LSCM uses before the
+    # OptCuts-only wrapper stack is installed later by app_optcuts/app_split_panels.
+    lscm_common_k2d = pipeline._optimize_k2d
     lscm_common_flat_layout = pipeline._make_flat_tile_layout
 
     def optimize(mesh_2d: Any, mesh_3d: Any, params: Any, progress_callback=None):
@@ -412,13 +231,29 @@ def install_optcuts_paper_k2d_20260914_patch(pipeline: Any) -> None:
         if not _active(params):
             return result, report
         result, report = _tag_lscm_equivalent_result(result, report)
+        print(
+            "[2026-09-14-K2D-BASE] used exact captured LSCM _optimize_k2d once on the whole mesh; "
+            "no 2026-09-14 extra K2D refinement"
+        )
         return result, report
 
     def exact_lscm_flat_layout(mesh: Any, params: Any = None):
+        # Deliberately one call on the original complete mesh.  Do not extract
+        # connected components here: doing so changes the common LSCM function's
+        # tile-count-dependent branch selection and is therefore not equivalent.
         layout = lscm_common_flat_layout(mesh, params)
         if params is None or not _active(params):
             return layout
-        return _tag_exact_lscm_flat_layout(layout, mesh, lscm_common_flat_layout)
+        layout = _tag_exact_lscm_flat_layout(layout, mesh, lscm_common_flat_layout)
+        fast_path = bool(getattr(layout, "metrics", {}).get("k2d_independent_fast_large_layout", False))
+        threshold = getattr(layout, "metrics", {}).get("k2d_independent_fast_tile_threshold", "n/a")
+        print(
+            "[2026-09-14-FLAT-LAYOUT-LSCM-EXACT] "
+            f"faces={len(getattr(mesh, 'faces', []))} whole_mesh_call=True "
+            f"componentwise_override=False parallel_override=False "
+            f"common_fast_path={fast_path} common_fast_threshold={threshold}"
+        )
+        return layout
 
     pipeline._onestring_20260914_lscm_k2d_solver = optimize
     pipeline._onestring_20260914_lscm_flat_layout = exact_lscm_flat_layout
