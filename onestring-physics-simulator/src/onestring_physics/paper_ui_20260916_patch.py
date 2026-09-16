@@ -1,12 +1,10 @@
-"""Original Figure-5 + equation-first UI for the 2026-09-16 OptCuts launcher."""
+"""Non-blocking Figure-5 + equation-first UI for the 2026-09-16 OptCuts launcher."""
 from __future__ import annotations
 
 import base64
 import html
-import importlib
 import ssl
-import subprocess
-import sys
+import threading
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -15,8 +13,7 @@ PAPER_PDF = "https://onestringtopullthemall.github.io/static/pdfs/onestringpull_
 
 
 def _card(title: str, equation: str, mapping: str) -> str:
-    return f"""<div class='os-eq-card'><div class='os-eq-title'>{html.escape(title)}</div>
-<div class='os-eq'>{equation}</div><div class='os-eq-map'>{mapping}</div></div>"""
+    return f"""<div class='os-eq-card'><div class='os-eq-title'>{html.escape(title)}</div><div class='os-eq'>{equation}</div><div class='os-eq-map'>{mapping}</div></div>"""
 
 
 SECTION_CARDS = {
@@ -41,62 +38,76 @@ CONTROL_CARDS = {
     "hinge layout anchor weight": ("T₂D · implementation-only stabilization", "E<sub>impl</sub>=E<sub>Hinge</sub>+w<sub>a</sub>E<sub>anchor</sub>", "原論文 Sec. 4.4 の3項にはない trust/anchor 項。"),
 }
 
-
-def _ensure_fitz():
-    try:
-        return importlib.import_module("fitz")
-    except Exception:
-        # app_optcuts.py should remain runnable after only `git pull`; install the
-        # one small renderer dependency on first use if the environment predates it.
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "pymupdf>=1.24"], check=True, timeout=120)
-            return importlib.import_module("fitz")
-        except Exception:
-            return None
+_FIG_LOCK = threading.Lock()
+_FIG_THREAD: threading.Thread | None = None
+_FIG_ERROR = ""
 
 
-def _download_pdf(path: Path) -> bool:
-    req = urllib.request.Request(PAPER_PDF, headers={"User-Agent": "Mozilla/5.0 OneStringSimulator/2026-09-16"})
-    for context in (ssl.create_default_context(), ssl._create_unverified_context()):
-        try:
-            with urllib.request.urlopen(req, context=context, timeout=45) as src, path.open("wb") as dst:
-                dst.write(src.read())
-            if path.stat().st_size > 100_000:
-                return True
-        except Exception:
-            path.unlink(missing_ok=True)
-    return False
-
-
-def _paper_figure5_png() -> bytes | None:
-    """Load the exact Fig.5 strip from the authors' PDF; no redrawn substitute."""
+def _paths() -> tuple[Path, Path]:
     root = Path(__file__).resolve().parents[2]
     cache = root / ".paper_cache"
     cache.mkdir(exist_ok=True)
-    pdf_path = cache / "onestringpull_authors_version_compressed.pdf"
-    png_path = cache / "figure5.png"
-    if png_path.exists() and png_path.stat().st_size > 10_000:
-        return png_path.read_bytes()
-    fitz = _ensure_fitz()
-    if fitz is None:
-        return None
-    if not pdf_path.exists() and not _download_pdf(pdf_path):
-        return None
+    return cache / "onestringpull_authors_version_compressed.pdf", cache / "figure5.png"
+
+
+def _build_figure5_cache() -> None:
+    """Background-only: download/render Fig.5. Never block the Streamlit script."""
+    global _FIG_ERROR
+    pdf_path, png_path = _paths()
     try:
+        if png_path.exists() and png_path.stat().st_size > 10_000:
+            return
+        try:
+            import fitz
+        except Exception as exc:
+            _FIG_ERROR = f"PyMuPDF が未導入です: {exc}"
+            return
+        if not pdf_path.exists() or pdf_path.stat().st_size < 100_000:
+            req = urllib.request.Request(PAPER_PDF, headers={"User-Agent": "Mozilla/5.0 OneStringSimulator/2026-09-16"})
+            last = None
+            for ctx in (ssl.create_default_context(), ssl._create_unverified_context()):
+                try:
+                    with urllib.request.urlopen(req, context=ctx, timeout=25) as src, pdf_path.open("wb") as dst:
+                        dst.write(src.read())
+                    last = None
+                    break
+                except Exception as exc:
+                    last = exc
+                    pdf_path.unlink(missing_ok=True)
+            if last is not None:
+                raise last
         doc = fitz.open(pdf_path)
         page = doc[4]
-        # Exact full-width Figure-5 artwork, excluding paper body text/caption.
         clip = fitz.Rect(45, 72, 570, 258)
         pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0), clip=clip, alpha=False)
-        data = pix.tobytes("png")
-        png_path.write_bytes(data)
-        return data
-    except Exception:
-        png_path.unlink(missing_ok=True)
-        return None
+        png_path.write_bytes(pix.tobytes("png"))
+        _FIG_ERROR = ""
+    except Exception as exc:
+        _FIG_ERROR = f"{type(exc).__name__}: {exc}"
 
 
-# percentage coordinates on the exact Figure-5 crop above.
+def _kick_figure_loader() -> None:
+    global _FIG_THREAD
+    _, png_path = _paths()
+    if png_path.exists() and png_path.stat().st_size > 10_000:
+        return
+    with _FIG_LOCK:
+        if _FIG_THREAD is None or not _FIG_THREAD.is_alive():
+            _FIG_THREAD = threading.Thread(target=_build_figure5_cache, name="onestring-figure5-loader", daemon=True)
+            _FIG_THREAD.start()
+
+
+def _paper_figure5_png() -> bytes | None:
+    _, png_path = _paths()
+    if png_path.exists() and png_path.stat().st_size > 10_000:
+        try:
+            return png_path.read_bytes()
+        except Exception:
+            pass
+    _kick_figure_loader()
+    return None
+
+
 STAGE_BOXES = {
     "S → Ω": (1.5, 4.0, 18.0, 91.0),
     "Ω → M₂D": (14.0, 47.0, 29.0, 49.0),
@@ -122,10 +133,13 @@ def _figure_html(data: bytes, active: str = "", fraction: float | None = None) -
 def _render_fig5(st, *, caption: str, active: str = "", fraction: float | None = None) -> None:
     data = _paper_figure5_png()
     if data is None:
-        st.error("Figure 5 の取得に失敗しました。自作図への fallback は行いません。ネットワーク接続を確認して再実行してください。")
-        return
-    st.markdown(_figure_html(data, active, fraction), unsafe_allow_html=True)
-    st.caption(caption)
+        # Crucially, this is a passive placeholder. No pip install and no network I/O
+        # occur on Streamlit's main script thread, so the actual pipeline continues.
+        detail = html.escape(_FIG_ERROR) if _FIG_ERROR else "Figure 5 をバックグラウンドで準備中"
+        st.markdown(f"<div class='os-fig-loading'><span></span><b>{detail}</b><small>計算処理は停止しません。Figure 5 が準備できると次の progress update で切り替わります。</small></div>", unsafe_allow_html=True)
+    else:
+        st.markdown(_figure_html(data, active, fraction), unsafe_allow_html=True)
+        st.caption(caption)
     if active:
         p = int(max(0.0, min(1.0, float(fraction or 0.0))) * 100)
         st.markdown(f"<div class='os-stage'><b>{html.escape(active)}</b><span>{p}%</span></div>", unsafe_allow_html=True)
@@ -136,12 +150,8 @@ def _stage(value: Any, text: str) -> tuple[str, float]:
         p = float(value); p = p / 100.0 if p > 1 else p
     except Exception:
         p = 0.0
-    p = max(0.0, min(1.0, p))
-    t = (text or "").lower()
-    # Text wins over global percentage. This prevents labels such as "S→Ω 11%"
-    # from being formed by an unrelated global progress value.
-    if "hinge" in t or "dual" in t: return "K₂D → T₂D → Hinge Optimization", p
-    if "t2d" in t: return "K₂D → T₂D → Hinge Optimization", p
+    p = max(0.0, min(1.0, p)); t = (text or "").lower()
+    if "hinge" in t or "dual" in t or "t2d" in t: return "K₂D → T₂D → Hinge Optimization", p
     if "k2d" in t or "edge" in t or "2d optim" in t: return "M₂D → K₂D · 2D Optimization", p
     if "t3d" in t or "extrusion" in t: return "K₃D → T₃D · Extrusion / Face Planarity", p
     if "k3d" in t or "planar" in t or "3d optim" in t: return "M₃D → K₃D · 3D Optimization", p
@@ -162,25 +172,21 @@ def install_paper_ui_20260916_patch() -> None:
         import streamlit as st
     except Exception:
         return
-    if getattr(st, "_onestring_paper_ui_20260916", False):
-        return
-
+    if getattr(st, "_onestring_paper_ui_20260916", False): return
     original_markdown, original_header = st.markdown, st.header
     original_selectbox, original_progress = st.selectbox, st.progress
     st.markdown("""<style>
 .os-eq-card{padding:14px 16px;margin:7px 0 13px;border:1px solid rgba(100,115,140,.18);border-radius:15px;background:linear-gradient(145deg,rgba(255,255,255,.82),rgba(225,233,244,.34));box-shadow:0 8px 28px rgba(20,35,60,.06)}
 .os-eq-title{font-size:12px;font-weight:750;letter-spacing:.035em;opacity:.68}.os-eq{font-family:Georgia,'Times New Roman',serif;font-size:18px;line-height:1.55;margin:6px 0}.os-eq-map{font-size:12px;line-height:1.5;opacity:.68}
-.os-fig5{position:relative;width:100%;padding:8px;border:1px solid rgba(120,130,145,.16);border-radius:18px;background:rgba(245,248,252,.72);box-sizing:border-box}.os-fig5 img{display:block;width:100%;height:auto;border-radius:12px}.os-fig-highlight{position:absolute;box-sizing:border-box;border-radius:15px;padding:3px;background:conic-gradient(from -90deg,rgba(40,145,255,.82) 0 var(--progress),rgba(145,155,170,.36) var(--progress) 360deg);box-shadow:0 0 22px rgba(50,150,255,.22);opacity:.94;pointer-events:none;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor}.os-stage{margin:7px 0 8px;padding:8px 12px;border:1px solid rgba(80,140,220,.18);border-radius:12px;background:rgba(232,241,252,.42);display:flex;justify-content:space-between;font-size:12px}
+.os-fig5{position:relative;width:100%;padding:8px;border:1px solid rgba(120,130,145,.16);border-radius:18px;background:rgba(245,248,252,.72);box-sizing:border-box}.os-fig5 img{display:block;width:100%;height:auto;border-radius:12px}.os-fig-highlight{position:absolute;box-sizing:border-box;border-radius:15px;padding:3px;background:conic-gradient(from -90deg,rgba(40,145,255,.82) 0 var(--progress),rgba(145,155,170,.36) var(--progress) 360deg);box-shadow:0 0 22px rgba(50,150,255,.22);opacity:.94;pointer-events:none;-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude}.os-stage{margin:7px 0 8px;padding:8px 12px;border:1px solid rgba(80,140,220,.18);border-radius:12px;background:rgba(232,241,252,.42);display:flex;justify-content:space-between;font-size:12px}
+.os-fig-loading{min-height:150px;border:1px solid rgba(120,130,145,.16);border-radius:18px;background:linear-gradient(120deg,rgba(238,243,249,.72),rgba(250,252,255,.94),rgba(238,243,249,.72));background-size:220% 100%;animation:osShimmer 1.6s linear infinite;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:rgba(45,55,70,.72)}.os-fig-loading span{width:26px;height:26px;border-radius:50%;border:3px solid rgba(130,145,165,.22);border-top-color:rgba(40,145,255,.8);animation:osSpin .8s linear infinite}.os-fig-loading small{opacity:.65}@keyframes osSpin{to{transform:rotate(360deg)}}@keyframes osShimmer{to{background-position:-220% 0}}
 </style>""", unsafe_allow_html=True)
 
-    current_section = {"name": ""}
     shown_sections: set[str] = set()
     def header(body, *a, **kw):
-        out = original_header(body, *a, **kw)
-        key = str(body); current_section["name"] = key
+        out = original_header(body, *a, **kw); key = str(body)
         if key in SECTION_CARDS and key not in shown_sections:
-            shown_sections.add(key)
-            original_markdown(_card(*SECTION_CARDS[key]), unsafe_allow_html=True)
+            shown_sections.add(key); original_markdown(_card(*SECTION_CARDS[key]), unsafe_allow_html=True)
         return out
     st.header = header
 
@@ -189,37 +195,29 @@ def install_paper_ui_20260916_patch() -> None:
         def wrapped(label, *a, **kw):
             key = str(label)
             if key in CONTROL_CARDS and key not in shown_controls:
-                shown_controls.add(key)
-                original_markdown(_card(*CONTROL_CARDS[key]), unsafe_allow_html=True)
+                shown_controls.add(key); original_markdown(_card(*CONTROL_CARDS[key]), unsafe_allow_html=True)
             return base(label, *a, **kw)
         return wrapped
     for name in ("number_input", "slider", "checkbox", "toggle", "text_input"):
         base = getattr(st, name, None)
-        if callable(base):
-            setattr(st, name, wrap_control(base))
+        if callable(base): setattr(st, name, wrap_control(base))
 
     def selectbox(label, options, *a, **kw):
-        if str(label) == "View stage":
-            _render_fig5(st, caption="Original paper Figure 5 · View stage が論文 pipeline のどこに対応するかを確認できます。")
+        if str(label) == "View stage": _render_fig5(st, caption="Original paper Figure 5 · View stage 対応")
         return original_selectbox(label, options, *a, **kw)
     st.selectbox = selectbox
 
     def progress(value=0, *a, **kw):
-        ph = st.empty()
-        name, local = _stage(value, str(kw.get("text", "")))
-        with ph.container():
-            _render_fig5(st, caption="Original Figure 5 · 青い glass ring が現在処理中の範囲と進捗を示します。", active=name, fraction=local)
-        bar = original_progress(value, *a, **kw)
-        base_update = bar.progress
+        ph = st.empty(); name, local = _stage(value, str(kw.get("text", "")))
+        with ph.container(): _render_fig5(st, caption="Original Figure 5 · current computation", active=name, fraction=local)
+        bar = original_progress(value, *a, **kw); base_update = bar.progress
         def update(v, *aa, **kk):
             n, lp = _stage(v, str(kk.get("text", "")))
-            with ph.container():
-                _render_fig5(st, caption="Original Figure 5 · 青い glass ring が現在処理中の範囲と進捗を示します。", active=n, fraction=lp)
+            ph.empty()
+            with ph.container(): _render_fig5(st, caption="Original Figure 5 · current computation", active=n, fraction=lp)
             return base_update(v, *aa, **kk)
-        bar.progress = update
-        return bar
+        bar.progress = update; return bar
     st.progress = progress
     st._onestring_paper_ui_20260916 = True
-
 
 __all__ = ["install_paper_ui_20260916_patch"]
