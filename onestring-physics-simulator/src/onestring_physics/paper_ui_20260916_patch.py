@@ -1,4 +1,4 @@
-"""Persistent equation-first sidebar + Figure-5 process overlay for 2026-09-16 UI."""
+"""Persistent equation-first sidebar + single Figure-5 process overlay for 2026-09-16 UI."""
 from __future__ import annotations
 import base64, html, ssl, threading, urllib.request
 from pathlib import Path
@@ -52,7 +52,8 @@ def _figure():
  with _LOCK:
   if _THREAD is None or not _THREAD.is_alive():_THREAD=threading.Thread(target=_load,daemon=True);_THREAD.start()
  return None
-BOX={"S":(1,3,11,92),"Omega":(11,46,14,50),"M2D":(24,46,13,50),"M3D":(33,3,14,46),"K3D":(45,3,14,46),"T3D":(58,3,14,46),"K2D":(45,50,14,47),"T2D Top":(58,50,14,47),"T2D Dual":(71,47,14,50),"Hinge":(83,47,16,50)}
+# Calibrated against the actual Figure 5 crop shown by the app. Boxes surround result images, not arrows/text.
+BOX={"S":(2.0,5.0,14.5,40.0),"Omega":(5.0,50.0,10.0,38.0),"M2D":(20.0,51.0,18.0,36.0),"M3D":(20.0,5.0,17.0,40.0),"K3D":(40.5,5.0,16.5,40.0),"T3D":(61.0,5.0,16.0,40.0),"K2D":(40.0,50.0,18.0,38.0),"T2D Top":(60.0,49.0,19.0,40.0),"T2D Dual":(83.0,49.0,16.0,40.0),"Hinge":(83.0,49.0,16.0,40.0)}
 VIEW={"S":"S","Omega":"Omega","M2D":"M2D","M3D":"M3D","K3D":"K3D","T3D":"T3D","K2D":"K2D","T2D Top":"T2D Top","T2D Dual":"T2D Dual","T2D":"T2D Dual","Split Map":"M2D"}
 def _stage(v,text):
  try:p=float(v);p=p/100 if p>1 else p
@@ -77,20 +78,10 @@ def _render(st,caption,a="",q=0):
  if a:st.markdown(f"<div class='os-stage'><b>{a}</b><span>{int(100*max(0,min(1,float(q or 0))))}%</span></div>",unsafe_allow_html=True)
 
 def install_paper_ui_20260916_patch():
- """Install fresh wrappers on every Streamlit script rerun.
-
- Streamlit reruns the script in the same Python process, so a persistent module flag
- must NOT suppress wrapper installation. We first unwrap our previous wrappers, then
- wrap the currently active Streamlit functions again. This keeps cards alive after
- changing a widget or pressing Run without stacking wrappers.
- """
  try:import streamlit as st
  except Exception:return
- # Recover original/current underlying functions from our previous wrappers.
- def unwrap(fn):
-  return getattr(fn,"_onestring_base",fn)
- md=unwrap(st.markdown);hdr=unwrap(st.header);sub0=getattr(st,"subheader",None);sub=unwrap(sub0) if callable(sub0) else None
- sel0=unwrap(st.selectbox);prog0=unwrap(st.progress)
+ def unwrap(fn):return getattr(fn,"_onestring_base",fn)
+ md=unwrap(st.markdown);hdr=unwrap(st.header);sub0=getattr(st,"subheader",None);sub=unwrap(sub0) if callable(sub0) else None;sel0=unwrap(st.selectbox);prog0=unwrap(st.progress)
  st.markdown=md;st.header=hdr;st.selectbox=sel0;st.progress=prog0
  if callable(sub):st.subheader=sub
  for n in ("number_input","slider","checkbox","toggle","text_input"):
@@ -120,6 +111,9 @@ def install_paper_ui_20260916_patch():
    s=VIEW.get(str(val),"");_render(st,"Original Figure 5 · blue frame = displayed stage",s,1 if s else 0)
   return val
  select._onestring_base=sel0;st.selectbox=select
+ # Only the first st.progress created by the pipeline owns the Figure-5 tracker.
+ # Auxiliary/nested progress bars remain ordinary bars, preventing duplicate Figure 5 panels.
+ owner={"taken":False}
  class P:
   def __init__(self,b,p):self.b=b;self.p=p
   def progress(self,v,*a,**k):
@@ -129,8 +123,10 @@ def install_paper_ui_20260916_patch():
   def empty(self):self.p.empty();return self.b.empty()
   def __getattr__(self,n):return getattr(self.b,n)
  def progress(v=0,*a,**k):
-  ph=st.empty();n,q=_stage(v,str(k.get("text","")))
+  bar=prog0(v,*a,**k)
+  if owner["taken"]:return bar
+  owner["taken"]=True;ph=st.empty();n,q=_stage(v,str(k.get("text","")))
   with ph.container():_render(st,"Original Figure 5 · current process",n,q)
-  return P(prog0(v,*a,**k),ph)
+  return P(bar,ph)
  progress._onestring_base=prog0;st.progress=progress
 __all__=["install_paper_ui_20260916_patch"]
