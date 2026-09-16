@@ -26,14 +26,15 @@ from .official_ceps import install_official_ceps
 from .optcuts_paper_k2d_20260914_patch import install_optcuts_paper_k2d_20260914_patch
 
 
-LATEST_OPTCUTS_VERSION_ID = "2026-09-14-paper-k2d-eq5-stage-separated"
-LATEST_OPTCUTS_VERSION_LABEL = "2026-09-14 — LSCM-equivalent K2D / hinge stage separated"
-LATEST_OPTCUTS_OMEGA_LABEL = "2026-09-14 | LSCM-equivalent K2D, hinge stage separated"
+LATEST_OPTCUTS_VERSION_ID = "2026-09-16-paper-aligned-k2d-stage-separated"
+LATEST_OPTCUTS_VERSION_LABEL = "2026-09-16 — Paper-aligned K2D / hinge stage separated"
+LATEST_OPTCUTS_OMEGA_LABEL = "2026-09-16 | Paper-aligned K2D, hinge stage separated"
 LATEST_OPTCUTS_VERSION_DESCRIPTION = (
-    "2026-09-14最新版。OptCutsで得た固定ΩからM2D/K3DまではOptCuts経路を使いますが、"
-    "K2DはLSCMと同じ共通_optimize_k2dをそのまま使用します。OptCuts専用のindependent-rigid-tile、"
-    "hard-SAT、all-tile SE(2) K2D差し替え、およびK2D後のM2D重心への再配置は無効化します。"
-    "通常のK2D後段flat-tile/T2D/hinge処理はLSCMと同じ共通pipelineを使用します。"
+    "2026-09-16最新版。OptCutsで得た固定ΩからM2D/K3DまではOptCuts経路を使い、"
+    "K2Dは元論文の責務分離に合わせて共通K2D最適化経路を使用します。"
+    "OptCuts専用のindependent-rigid-tile、hard-SAT、all-tile SE(2) K2D差し替え、"
+    "およびK2D段階でのphysical hinge coincidenceは使用しません。"
+    "hinge placement/closureは後段のT2D/hinge stageへ分離します。"
 )
 
 
@@ -188,18 +189,26 @@ def _install_streamlit_parameterization_options() -> None:
 
         selected = original_selectbox(*args, **kwargs)
 
+        if label == "version":
+            selected_id = selected.get("id") if isinstance(selected, dict) else ""
+            if selected_id == LATEST_OPTCUTS_VERSION_ID:
+                os.environ["ONESTRING_PAPER_K2D_20260914"] = "1"
+            else:
+                os.environ.pop("ONESTRING_PAPER_K2D_20260914", None)
+
         if label == "Omega parameterization mode" and latest_optcuts_visible:
             if selected == LATEST_OPTCUTS_OMEGA_LABEL:
                 os.environ["ONESTRING_PAPER_K2D_20260914"] = "1"
                 try:
                     st.caption(
-                        "2026-09-14 latest: K2D uses the same common solver as LSCM; "
+                        "2026-09-16 latest: K2D uses the common paper-aligned solver route; "
                         "OptCuts-only rigid/hard/global K2D replacement is disabled; hinge/T2D stays downstream."
                     )
                 except Exception:
                     pass
                 return "optcuts_test2"
-            os.environ.pop("ONESTRING_PAPER_K2D_20260914", None)
+            if os.environ.get("ONESTRING_PAPER_K2D_20260914") != "1":
+                os.environ.pop("ONESTRING_PAPER_K2D_20260914", None)
 
         if label == "Omega parameterization mode" and selected == "bijective_free_boundary":
             try:
@@ -320,68 +329,25 @@ install_large_steps_visualization_patch()
 install_status_visualization_patch()
 
 __all__ = [
-    "DesignParameters",
-    "DesignResult",
-    "BijectiveFreeBoundaryConfig",
-    "LargeStepsMeshConditioningConfig",
-    "ABDBackendConfig",
-    "ABDBackendError",
-    "ABDBackendUnavailableError",
-    "ABDCapabilityError",
-    "ABDRunResult",
-    "ShakeTrajectory",
-    "ComputeConfig",
-    "DeploymentParameters",
-    "DeploymentResult",
-    "FlatTileLayout",
-    "OneStringDesignState",
-    "PhysicsParameters",
-    "PhysicsResult",
-    "PhysicsWorld",
-    "PipelineParameters",
-    "ReferenceInitializationState",
-    "QuadGrid",
-    "SurfaceParameterization",
-    "ReferenceBFFError",
-    "ReferenceBFFUnavailableError",
-    "ReferenceInverseMapError",
-    "ReferenceMeshValidationError",
-    "build_onestring_design",
-    "bijective_free_boundary_parameterization",
-    "build_paper_reference_initialization",
-    "complexity_metrics",
-    "compute_backend_info",
-    "condition_mesh_with_large_steps",
-    "export_t2d_stl",
-    "export_t3d_stl",
-    "find_abd_executable",
-    "prepare_abd_job",
-    "probe_abd_capabilities",
-    "run_abd_backend",
-    "create_builtin_shape",
-    "create_quad_grid",
-    "gpu_self_test",
-    "inverse_map_uv_to_surface",
-    "load_target_shape",
-    "nvidia_smi_probe",
-    "paper_consistency_report",
-    "run_simulator_gpu_benchmark",
-    "normalize_shape",
-    "optimize_design",
-    "sample_target_surface",
-    "safe_capstan_friction",
-    "simulate_onestring_deployment",
-    "simulate_deployment",
-    "run_official_bff",
-    "triangle_jacobian_diagnostics",
-    "validate_reference_mesh",
-    "install_status_visualization_patch",
-    "install_large_steps_visualization_patch",
-    "install_large_steps_conditioning",
-    "install_abd_layout_compatibility",
-    "install_bijective_free_boundary",
-    "LATEST_OPTCUTS_VERSION_ID",
-    "LATEST_OPTCUTS_VERSION_LABEL",
-    "LATEST_OPTCUTS_OMEGA_LABEL",
+    "DesignParameters", "DesignResult", "BijectiveFreeBoundaryConfig",
+    "LargeStepsMeshConditioningConfig", "ABDBackendConfig", "ABDBackendError",
+    "ABDBackendUnavailableError", "ABDCapabilityError", "ABDRunResult",
+    "ShakeTrajectory", "ComputeConfig", "DeploymentParameters", "DeploymentResult",
+    "FlatTileLayout", "OneStringDesignState", "PhysicsParameters", "PhysicsResult",
+    "PhysicsWorld", "PipelineParameters", "ReferenceInitializationState", "QuadGrid",
+    "SurfaceParameterization", "ReferenceBFFError", "ReferenceBFFUnavailableError",
+    "ReferenceInverseMapError", "ReferenceMeshValidationError", "build_onestring_design",
+    "bijective_free_boundary_parameterization", "build_paper_reference_initialization",
+    "complexity_metrics", "compute_backend_info", "condition_mesh_with_large_steps",
+    "export_t2d_stl", "export_t3d_stl", "find_abd_executable", "prepare_abd_job",
+    "probe_abd_capabilities", "run_abd_backend", "create_builtin_shape", "create_quad_grid",
+    "gpu_self_test", "inverse_map_uv_to_surface", "load_target_shape", "nvidia_smi_probe",
+    "paper_consistency_report", "run_simulator_gpu_benchmark", "normalize_shape",
+    "optimize_design", "sample_target_surface", "safe_capstan_friction",
+    "simulate_onestring_deployment", "simulate_deployment", "run_official_bff",
+    "triangle_jacobian_diagnostics", "validate_reference_mesh", "install_status_visualization_patch",
+    "install_large_steps_visualization_patch", "install_large_steps_conditioning",
+    "install_abd_layout_compatibility", "install_bijective_free_boundary",
+    "LATEST_OPTCUTS_VERSION_ID", "LATEST_OPTCUTS_VERSION_LABEL", "LATEST_OPTCUTS_OMEGA_LABEL",
     "__version__",
 ]
