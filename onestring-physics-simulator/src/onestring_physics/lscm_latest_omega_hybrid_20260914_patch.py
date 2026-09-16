@@ -1,10 +1,8 @@
-"""2026-09-16 hybrid route: latest Omega/K3D with the captured ordinary K2D.
+"""Latest Omega/K3D hybrid with paper Sec. 4.3 Eq. (5) K2D.
 
-The previous hybrid silently replaced M2D->K2D with a vectorized EEdge-only
-projection.  That changed the numerical behaviour of the dated mode and was
-visible as a bad flat layout.  Keep the latest Omega and K3D routes, but send
-K2D through the captured ordinary whole-mesh solver exactly as the working
-pre-vectorized route did.  Hinge closure remains a later T2D concern.
+Unlike the historical captured-LSCM and vectorized-EEdge routes, this mode keeps
+EEdge, ECollision and EFab in one K2D local/global solve.  Hinge optimization
+remains a later Sec. 4.4 concern.
 """
 from __future__ import annotations
 
@@ -13,13 +11,15 @@ from dataclasses import replace
 import os
 from typing import Any
 
+from .paper_eq5_k2d_solver import optimize_paper_eq5
+
 MODE = "lscm_latest_omega_hard_k3d"
-VERSION_ID = "2026-09-14-paper-eq5-unified-k2d"
-VERSION_LABEL = "2026-09-14 — latest Ω/K3D + ordinary K2D"
-OMEGA_LABEL = "2026-09-14 | latest Ω/K3D + ordinary K2D"
+VERSION_ID = "2026-09-17-paper-eq5-unified-k2d"
+VERSION_LABEL = "2026-09-17 — paper Eq.5 K2D + latest Ω/K3D"
+OMEGA_LABEL = "2026-09-17 | paper Eq.5 K2D + latest Ω/K3D"
 VERSION_DESCRIPTION = (
-    "最新版ΩとK3Dを維持し、M2D→K2Dはvectorized EEdge置換を使わず、"
-    "capture済みの通常whole-mesh K2D solverを使う。"
+    "M2D→K2Dを原論文Sec.4.3 Eq.(5)のEEdge+ECollision+EFab統合local/global solveで計算。"
+    "EFabはSupplement Appendix Aのgap-angle projection。hingeはSec.4.4へ分離。"
 )
 
 
@@ -96,7 +96,7 @@ def _install_selector_patch() -> None:
         selected = original_selectbox(*args, **kwargs)
         if label == "Omega parameterization mode" and selected == OMEGA_LABEL:
             try:
-                st.caption("Latest Ω/K3D + captured ordinary whole-mesh K2D; no vectorized EEdge replacement.")
+                st.caption("Paper Sec.4.3 Eq.(5): EEdge + ECollision + EFab in one K2D solve; Appendix-A angle projection.")
             except Exception:
                 pass
             return MODE
@@ -130,9 +130,9 @@ def install_lscm_latest_omega_hybrid_patch(
                 result.metrics.update({
                     "version_id": VERSION_ID,
                     "hybrid_stage_s_to_omega": "current latest OptCuts-test Omega",
-                    "hybrid_stage_m2d": "captured ordinary LSCM M2D",
-                    "hybrid_stage_k3d": "current latest OptCuts-test2 K3D/hard-planarity stack",
-                    "hybrid_stage_k2d": "captured ordinary whole-mesh K2D (pre-vectorized)",
+                    "hybrid_stage_m2d": "common M2D topology",
+                    "hybrid_stage_k3d": "current latest OptCuts-test2 K3D stack",
+                    "hybrid_stage_k2d": "paper Sec.4.3 Eq.5 unified EEdge+ECollision+EFab",
                 })
             except Exception:
                 pass
@@ -160,14 +160,19 @@ def install_lscm_latest_omega_hybrid_patch(
         def k2d_dispatch(mesh_2d: Any, mesh_3d: Any, params: Any, progress_callback: Any = None):
             if not _active(params):
                 return fallback_k2d(mesh_2d, mesh_3d, params, progress_callback=progress_callback)
-            print("[2026-09-16-K2D-FIX] using captured ordinary whole-mesh K2D; vectorized EEdge disabled")
-            return lscm_optimize_k2d(mesh_2d, mesh_3d, params, progress_callback=progress_callback)
+            return optimize_paper_eq5(
+                mesh_2d,
+                mesh_3d,
+                params,
+                progress_callback=progress_callback,
+                pipeline=pipeline,
+            )
 
         def flat_layout_dispatch(mesh: Any, params: Any = None):
-            if params is None or not _active(params):
-                return fallback_flat_layout(mesh, params)
-            print(f"[2026-09-16-FLAT-FIX] using captured ordinary flat layout faces={len(getattr(mesh, 'faces', []))}")
-            return lscm_make_flat_tile_layout(mesh, params)
+            # This function belongs to the following K2D->T2D construction.  Eq.5
+            # has already finished here; do not use it to claim collision/EFab
+            # satisfaction in K2D.
+            return fallback_flat_layout(mesh, params)
 
         return {
             "_build_surface_parameterization": parameterization_dispatch,
@@ -198,7 +203,7 @@ def install_lscm_latest_omega_hybrid_patch(
             def install_then_rewire(pipeline_module: Any, optimization_debug_module: Any) -> None:
                 original_installer(pipeline_module, optimization_debug_module)
                 install_routes(pipeline_module)
-                print("[2026-09-16-K2D-FIX] hybrid routing reinstalled after Simple Split")
+                print("[PAPER-EQ5-ROUTE] unified Eq.5 routing reinstalled after Simple Split")
 
             simple_split_module.install_simple_split_panel_patch = install_then_rewire
             simple_split_module._onestring_lscm_hybrid_rewire_installed = True
@@ -229,7 +234,7 @@ def install_deferred_hybrid_hook(pipeline: Any) -> None:
             lscm_optimize_k2d=lscm_optimize_k2d,
             lscm_make_flat_tile_layout=lscm_make_flat_tile_layout,
         )
-        print("[2026-09-16-K2D-FIX] ordinary captured K2D installed; vectorized EEdge route disabled")
+        print("[PAPER-EQ5-INSTALL] unified EEdge+ECollision+EFab K2D installed")
 
     acceleration_module.install_optcuts_test2_acceleration_patch = install_acceleration_then_hybrid
     pipeline._onestring_lscm_hybrid_deferred_hook_installed = True
