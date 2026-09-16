@@ -1,138 +1,148 @@
-"""Paper-grounded UI layer for the 2026-09-16 OneString/OptCuts view.
+"""Paper Figure-5 + equation-first UI for the 2026-09-16 OptCuts launcher.
 
-This is intentionally presentation-only: it does not alter numerical solvers.
-It annotates controls with the paper equations, adds a Figure-5-derived pipeline
-map above View stage, and augments Streamlit progress bars with a live glass
-pipeline indicator while preserving the ordinary percentage bar below it.
+This layer changes presentation only.  It deliberately uses the ORIGINAL paper
+Figure 5 rather than a redrawn pipeline.  The figure is fetched from the authors'
+PDF once and cached locally, then the Figure-5 strip is cropped from page 5.
 """
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from typing import Any
 
-
-def _formula_card(title: str, equation: str, note: str) -> str:
-    return f"""
-<div class='os-eq-card'><div class='os-eq-kicker'>{html.escape(title)}</div>
-<div class='os-eq'>{equation}</div><div class='os-eq-note'>{html.escape(note)}</div></div>
-"""
+PAPER_PDF = "https://onestringtopullthemall.github.io/static/pdfs/onestringpull_authors_version_compressed.pdf"
 
 
-def _pipeline_html(active: str = "", fraction: float | None = None, detail: str = "") -> str:
-    nodes = [
-        ("S", "Target"), ("Omega", "Ω"), ("M2D", "M2D"), ("M3D", "M3D"),
-        ("K3D", "K3D"), ("T3D", "T3D"), ("K2D", "K2D"),
-        ("T2D_TOP", "T2D Top"), ("T2D_DUAL", "T2D Dual"), ("HINGE", "Hinge Opt."),
-    ]
-    p = 0.0 if fraction is None else max(0.0, min(1.0, float(fraction)))
-    cards = []
-    for key, label in nodes:
-        is_active = key == active
-        cls = "os-node active" if is_active else "os-node"
-        style = f"--p:{p*360:.1f}deg" if is_active else "--p:0deg"
-        cards.append(f"<div class='{cls}' style='{style}'><div class='os-ring'><div class='os-inner'>{label}</div></div></div>")
-    top = "".join(cards[:6])
-    bottom = "".join(cards[6:])
-    detail_html = f"<div class='os-live-detail'>{html.escape(detail)}</div>" if detail else ""
-    return f"""
-<div class='os-pipeline-wrap'>
-  <div class='os-pipeline-title'>Paper Fig. 5 · Surface rationalization pipeline</div>
-  <div class='os-pipeline-row'>{top}</div>
-  <div class='os-branch'>↳ flat branch: M2D → K2D → extrusion → hinge placement / optimization</div>
-  <div class='os-pipeline-row'>{bottom}</div>{detail_html}
-</div>
-"""
+def _card(title: str, equation: str, mapping: str) -> str:
+    return f"""<div class='os-eq-card'><div class='os-eq-title'>{html.escape(title)}</div>
+<div class='os-eq'>{equation}</div><div class='os-eq-map'>{mapping}</div></div>"""
 
 
-def _stage_from_progress(value: Any, text: str) -> tuple[str, float, str]:
+SECTION_CARDS = {
+    "Target Input": ("Paper Fig. 5 · S → Ω → M₂D", "S \u2192<sup>c</sup> Ω \u2192 M<sub>2D</sub>", "入力曲面 S を parameterize して Ω を得て、規則 quad grid を重ね M₂D を構成します。以下の値はこの入力・離散化段階のパラメータです。"),
+    "Pipeline Optimization": ("Paper Sec. 4.2 / 4.3 · K₃D and K₂D", "E<sub>Assembled</sub>(v)=ω₁E<sub>Planar</sub>+ω₂E<sub>Square</sub>+ω₃E<sub>Surface</sub><br>E<sub>Flat</sub>(v)=ω₁E<sub>Edge</sub>+ω₂E<sub>Collision</sub>+ω₃E<sub>Fab</sub>", "3D controls は M₃D→K₃D、2D controls は M₂D→K₂D に対応します。iteration/time budget は数値解法側の設定であり、論文の ω ではありません。"),
+    "Hinge Layout Optimization": ("Paper Sec. 4.4 · Hinge Optimization", "E<sub>Hinge</sub>(v)=ω₁E<sub>Rigid</sub>+ω₂E<sub>Collision</sub>+ω₃E<sub>Conn</sub>", "T₂D (Top Hinge) → T₂D (Dual Hinge) の後段です。connection/collision weights はこの目的関数に対応し、anchor・time budget・candidate cap は実装上の安定化/計算量制御です。"),
+    "Compute Backend": ("Implementation-only numerical settings", "paper energy unchanged", "CPU/CUDA・dtype は論文の目的関数を変更せず、実装上の計算 backend/精度だけを変更します。"),
+    "Actuation Simulation": ("Deployment simulation · downstream of Fig. 5", "x<sup>k+1</sup> = Solver(x<sup>k</sup>, constraints)", "Figure 5 の surface rationalization 後の deployment simulation 用設定です。論文 Sec. 4.2/4.3 の ω とは別物です。"),
+    "High-Fidelity Physical Mode": ("Implementation-only physical extensions", "E = E<sub>base</sub> + E<sub>gravity</sub> + E<sub>friction</sub> + E<sub>hinge</sub>", "研究用の追加近似です。One String 論文 Figure 5 の surface-rationalization objective そのものではありません。"),
+}
+
+CONTROL_CARDS = {
+    "K3D AL anchor weight (w_a)": ("K₃D · implementation stabilization", "E<sub>AL</sub>=E<sub>Assembled</sub> + w<sub>a</sub> E<sub>anchor</sub> + AL(planarity)", "wₐ は原論文 Eq.(1) の ω₁,ω₂,ω₃ ではありません。現在の Augmented-Lagrangian 実装で K₃D を初期形状近傍に保つ追加項です。"),
+    "w_planar / EPlanar": ("K₃D · Paper Eq. (1),(2)", "ω₁ E<sub>Planar</sub>", "この値が K₃D の planarity 項の重みです。"),
+    "w_square / ESquare": ("K₃D · Paper Eq. (1)", "ω₂ E<sub>Square</sub>", "この値が square/similarity 項の重みです。"),
+    "w_surface / ESurface": ("K₃D · Paper Eq. (1)", "ω₃ E<sub>Surface</sub>", "この値が target surface closeness 項の重みです。"),
+    "2D optimization iterations": ("K₂D · Paper Sec. 4.3 Eq. (5)", "E<sub>Flat</sub>=ω₁E<sub>Edge</sub>+ω₂E<sub>Collision</sub>+ω₃E<sub>Fab</sub>", "K₂D solve の反復上限。係数そのものではなく solver budget です。"),
+    "K2D strict solver time budget": ("K₂D · implementation budget", "min E<sub>Flat</sub>(v)  subject to time ≤ T", "T は実装上の時間上限で、論文パラメータではありません。"),
+    "hinge connection weight": ("T₂D · Paper Sec. 4.4", "ω₃ E<sub>Conn</sub>", "対応 hinge vertices を一致させる項の重みです。"),
+    "hinge collision weight": ("T₂D · Paper Sec. 4.4", "ω₂ E<sub>Collision</sub>", "厚み付き tile の overlap を避ける項の重みです。"),
+    "hinge layout anchor weight": ("T₂D · implementation stabilization", "E<sub>Hinge,impl</sub>=E<sub>Hinge</sub>+w<sub>a</sub>E<sub>anchor</sub>", "原論文の3項にはない、初期 flat layout への追加 trust/anchor 項です。"),
+}
+
+
+def _paper_figure5_png() -> bytes | None:
+    """Return the original Figure 5 strip from the authors' PDF, cached locally."""
     try:
-        p = float(value)
-        if p > 1.0:
-            p /= 100.0
+        import urllib.request
+        import fitz
+        root = Path(__file__).resolve().parents[2]
+        cache = root / ".paper_cache"
+        cache.mkdir(exist_ok=True)
+        pdf_path = cache / "onestringpull_authors_version_compressed.pdf"
+        png_path = cache / "figure5.png"
+        if png_path.exists():
+            return png_path.read_bytes()
+        if not pdf_path.exists():
+            urllib.request.urlretrieve(PAPER_PDF, pdf_path)
+        doc = fitz.open(pdf_path)
+        page = doc[4]  # printed page containing Fig. 5
+        # Figure 5 occupies the full-width strip at the top of page 5.
+        r = page.rect
+        clip = fitz.Rect(r.x0, r.y0, r.x1, r.y0 + r.height * 0.285)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), clip=clip, alpha=False)
+        data = pix.tobytes("png")
+        png_path.write_bytes(data)
+        return data
     except Exception:
-        p = 0.0
+        return None
+
+
+def _render_fig5(st, *, caption: str, active: str = "", fraction: float | None = None) -> None:
+    data = _paper_figure5_png()
+    if data:
+        st.image(data, use_container_width=True, caption=caption)
+    else:
+        st.warning("Original Figure 5 could not be loaded. Run `pip install -r requirements.txt` and retry.")
+    if active:
+        p = 0 if fraction is None else int(max(0.0, min(1.0, float(fraction))) * 100)
+        st.markdown(f"<div class='os-stage'><b>{html.escape(active)}</b><span>{p}%</span><div class='os-track'><i style='width:{p}%'></i></div></div>", unsafe_allow_html=True)
+
+
+def _stage(value: Any, text: str) -> tuple[str, float]:
+    try:
+        p = float(value); p = p / 100.0 if p > 1 else p
+    except Exception: p = 0.0
     t = (text or "").lower()
-    if "omega" in t or "parameter" in t or p < .18: return "Omega", p/.18 if p < .18 else .5, text
-    if "m2d" in t or p < .30: return "M2D", (p-.18)/.12, text
-    if "m3d" in t or p < .40: return "M3D", (p-.30)/.10, text
-    if "k3d" in t or "planar" in t or p < .52: return "K3D", (p-.40)/.12, text
-    if "t3d" in t or "extrusion" in t or p < .62: return "T3D", (p-.52)/.10, text
-    if "k2d" in t or "edge" in t or p < .76: return "K2D", (p-.62)/.14, text
-    if "hinge" in t or "t2d" in t or p < .90: return "HINGE", (p-.76)/.14, text
-    return "T2D_DUAL", (p-.90)/.10, text
+    if "omega" in t or p < .18: return "S → Ω", max(0,p/.18)
+    if "m2d" in t or p < .30: return "Ω → M₂D", max(0,(p-.18)/.12)
+    if "m3d" in t or p < .40: return "M₂D → M₃D", max(0,(p-.30)/.10)
+    if "k3d" in t or "planar" in t or p < .54: return "M₃D → K₃D · 3D Optimization", max(0,(p-.40)/.14)
+    if "t3d" in t or "extrusion" in t or p < .64: return "K₃D → T₃D · Extrusion / Face Planarity", max(0,(p-.54)/.10)
+    if "k2d" in t or "edge" in t or p < .78: return "M₂D → K₂D · 2D Optimization", max(0,(p-.64)/.14)
+    if "hinge" in t or "t2d" in t or p < .94: return "K₂D → T₂D → Hinge Optimization", max(0,(p-.78)/.16)
+    return "T₂D (Dual Hinge)", max(0,(p-.94)/.06)
 
 
 def install_paper_ui_20260916_patch() -> None:
-    try:
-        import streamlit as st
-    except Exception:
-        return
-    if getattr(st, "_onestring_paper_ui_20260916", False):
-        return
+    try: import streamlit as st
+    except Exception: return
+    if getattr(st, "_onestring_paper_ui_20260916", False): return
 
-    st.markdown("""
-<style>
-.os-eq-card{padding:12px 14px;margin:8px 0 12px;border:1px solid rgba(120,130,150,.20);border-radius:14px;background:linear-gradient(135deg,rgba(255,255,255,.68),rgba(220,228,240,.26));backdrop-filter:blur(16px);box-shadow:0 8px 26px rgba(30,45,70,.06)}
-.os-eq-kicker{font-size:11px;letter-spacing:.08em;text-transform:uppercase;opacity:.58;font-weight:700}.os-eq{font-family:Georgia,serif;font-size:17px;margin:5px 0}.os-eq-note{font-size:12px;opacity:.68}
-.os-pipeline-wrap{padding:15px;margin:8px 0 14px;border:1px solid rgba(120,130,150,.18);border-radius:18px;background:linear-gradient(145deg,rgba(255,255,255,.74),rgba(222,230,242,.28));backdrop-filter:blur(18px);box-shadow:0 12px 32px rgba(25,40,70,.07)}
-.os-pipeline-title{font-size:12px;font-weight:700;letter-spacing:.04em;opacity:.68;margin-bottom:10px}.os-pipeline-row{display:flex;gap:8px;flex-wrap:wrap}.os-node{min-width:78px}.os-ring{padding:2px;border-radius:12px;background:rgba(130,140,155,.25)}.os-node.active .os-ring{background:conic-gradient(from -90deg,rgba(37,143,255,.78) 0 var(--p),rgba(130,140,155,.24) var(--p) 360deg);box-shadow:0 0 18px rgba(60,155,255,.16)}.os-inner{padding:9px 10px;border-radius:10px;background:rgba(248,250,253,.86);text-align:center;font-size:12px;font-weight:650}.os-branch{font-size:11px;opacity:.55;margin:8px 0}.os-live-detail{font-size:11px;opacity:.65;margin-top:9px}
+    original_markdown, original_header = st.markdown, st.header
+    original_selectbox, original_progress = st.selectbox, st.progress
+    st.markdown("""<style>
+.os-eq-card{padding:14px 16px;margin:7px 0 13px;border:1px solid rgba(100,115,140,.18);border-radius:15px;background:linear-gradient(145deg,rgba(255,255,255,.82),rgba(225,233,244,.34));box-shadow:0 8px 28px rgba(20,35,60,.06)}
+.os-eq-title{font-size:12px;font-weight:750;letter-spacing:.035em;opacity:.68}.os-eq{font-family:Georgia,'Times New Roman',serif;font-size:18px;line-height:1.55;margin:6px 0}.os-eq-map{font-size:12px;line-height:1.5;opacity:.68}
+.os-stage{margin:7px 0 8px;padding:10px 13px;border:1px solid rgba(80,140,220,.18);border-radius:13px;background:rgba(232,241,252,.42);display:grid;grid-template-columns:1fr auto;gap:6px 12px;font-size:12px}.os-stage span{font-variant-numeric:tabular-nums}.os-track{grid-column:1/3;height:5px;border-radius:99px;background:rgba(120,130,145,.18);overflow:hidden}.os-track i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,rgba(80,165,255,.55),rgba(30,125,245,.9));transition:width .25s ease}
 </style>""", unsafe_allow_html=True)
 
-    original_markdown = st.markdown
-    original_selectbox = st.selectbox
-    original_progress = st.progress
+    shown_sections: set[str] = set()
+    def header(body, *a, **kw):
+        out = original_header(body, *a, **kw)
+        key = str(body)
+        if key in SECTION_CARDS and key not in shown_sections:
+            shown_sections.add(key); original_markdown(_card(*SECTION_CARDS[key]), unsafe_allow_html=True)
+        return out
+    st.header = header
 
-    # Equation group cards are inserted immediately before the first control in
-    # each relevant group.  They distinguish paper terms from implementation knobs.
-    shown: set[str] = set()
-    def _show_once(key: str, title: str, equation: str, note: str) -> None:
-        if key in shown: return
-        shown.add(key)
-        original_markdown(_formula_card(title, equation, note), unsafe_allow_html=True)
+    shown_controls: set[str] = set()
+    def wrap_control(base):
+        def wrapped(label, *a, **kw):
+            key = str(label)
+            if key in CONTROL_CARDS and key not in shown_controls:
+                shown_controls.add(key); original_markdown(_card(*CONTROL_CARDS[key]), unsafe_allow_html=True)
+            return base(label, *a, **kw)
+        return wrapped
+    for name in ("number_input","slider","checkbox","toggle","text_input"):
+        base = getattr(st, name, None)
+        if callable(base): setattr(st, name, wrap_control(base))
 
-    control_fns = {}
-    annotations = {
-        "K3D AL anchor weight (w_a)": ("k3d", "Paper Sec. 4.2 · Eq. (1)", "E<sub>Assembled</sub>(v)=ω₁E<sub>Planar</sub>+ω₂E<sub>Square</sub>+ω₃E<sub>Surface</sub>", "w_a is an implementation-side augmented-Lagrangian stabilization knob; it is not one of the paper's ω₁,ω₂,ω₃."),
-        "max 3D iterations": ("k3d", "Paper Sec. 4.2 · Eq. (1)", "E<sub>Assembled</sub>(v)=ω₁E<sub>Planar</sub>+ω₂E<sub>Square</sub>+ω₃E<sub>Surface</sub>", "Iteration count controls the numerical solve; it is not a paper energy coefficient."),
-        "max 2D iterations": ("k2d", "Paper Sec. 4.3 · Eq. (5)", "E<sub>Flat</sub>(v)=ω₁E<sub>Edge</sub>+ω₂E<sub>Collision</sub>+ω₃E<sub>Fab</sub>", "K2D matches K3D edge lengths while avoiding overlap and respecting fabrication gap-angle bounds."),
-        "hinge layout iterations": ("hinge", "Paper Sec. 4.4 · Hinge placement / optimization", "T2D Top → T2D Dual → hinge optimization", "This is downstream of K2D. Hinge coincidence is not a K2D objective in the paper."),
-    }
-
-    for fn_name in ("number_input", "slider", "checkbox", "text_input"):
-        base = getattr(st, fn_name, None)
-        if not callable(base): continue
-        control_fns[fn_name] = base
-        def make_wrapper(base_fn):
-            def wrapped(label, *args, **kwargs):
-                info = annotations.get(str(label))
-                if info: _show_once(*info)
-                return base_fn(label, *args, **kwargs)
-            return wrapped
-        setattr(st, fn_name, make_wrapper(base))
-
-    def selectbox(label, options, *args, **kwargs):
-        if label == "View stage":
-            original_markdown(_pipeline_html(), unsafe_allow_html=True)
-            original_markdown("<div style='font-size:11px;opacity:.62;margin-top:-8px'>Fig. 5をUI用に再構成した工程図。S→Ω→M2D、3D branch: M3D→K3D→T3D、flat branch: K2D→T2D→hinge optimization の対応を表示します。</div>", unsafe_allow_html=True)
-        return original_selectbox(label, options, *args, **kwargs)
+    def selectbox(label, options, *a, **kw):
+        if str(label) == "View stage":
+            _render_fig5(st, caption="Original paper Figure 5 · selected View stage corresponds to a node/process in this pipeline.")
+        return original_selectbox(label, options, *a, **kw)
     st.selectbox = selectbox
 
-    def progress(value=0, *args, **kwargs):
-        text = str(kwargs.get("text", ""))
-        placeholder = st.empty()
-        stage, local, detail = _stage_from_progress(value, text)
-        placeholder.markdown(_pipeline_html(stage, local, detail), unsafe_allow_html=True)
-        bar = original_progress(value, *args, **kwargs)
-        original_bar_progress = bar.progress
-        def update(v, *a, **kw):
-            tx = str(kw.get("text", ""))
-            s, lp, d = _stage_from_progress(v, tx)
-            placeholder.markdown(_pipeline_html(s, lp, d), unsafe_allow_html=True)
-            return original_bar_progress(v, *a, **kw)
-        bar.progress = update
-        return bar
+    def progress(value=0, *a, **kw):
+        ph = st.empty(); name, local = _stage(value, str(kw.get("text", "")))
+        with ph.container(): _render_fig5(st, caption="Original Figure 5 · current computation stage", active=name, fraction=local)
+        bar = original_progress(value, *a, **kw); base_update = bar.progress
+        def update(v, *aa, **kk):
+            n, lp = _stage(v, str(kk.get("text", "")))
+            with ph.container(): _render_fig5(st, caption="Original Figure 5 · current computation stage", active=n, fraction=lp)
+            return base_update(v, *aa, **kk)
+        bar.progress = update; return bar
     st.progress = progress
     st._onestring_paper_ui_20260916 = True
-
 
 __all__ = ["install_paper_ui_20260916_patch"]
