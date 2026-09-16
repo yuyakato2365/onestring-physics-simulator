@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Core source patch for OneString native Grid-OptCuts V4.
+
+This module owns the actual OptCuts source modifications. In Grid mode, global
+bijectivity is decided at Optimizer construction and the exact runtime contract
+markers are emitted as full string literals so source, binary and runtime checks
+all validate the same thing.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from patch_optcuts_native_grid import MAIN_HELPERS
+from patch_optcuts_native_grid_v4 import (
+    _backup_once,
+    _patch_header,
+    _patch_trimesh,
+    _replace_once,
+    _restore_if_patched,
+)
+
+
+def _patch_main(root: Path) -> None:
+    path = root / "src" / "main.cpp"
+    _restore_if_patched(path)
+    _backup_once(path)
+    text = path.read_text(encoding="utf-8")
+
+    text = _replace_once(
+        text,
+        """#include <fstream>\n#include <string>\n#include <ctime>\n\n\nEigen::MatrixXd V, UV, N;""",
+        """#include <fstream>\n#include <string>\n#include <ctime>\n#include <cstdlib>\n#include <cmath>\n#include <stdexcept>\n\n""" + MAIN_HELPERS + "\nEigen::MatrixXd V, UV, N;",
+        "main.cpp Grid helper insertion",
+    )
+
+    text = _replace_once(
+        text,
+        """            Eigen::MatrixXd bnd_uv;\n            igl::map_vertices_to_circle(temp.V_rest,\n                                        bnd_stacked.tail(bnd_all[longest_bnd_id].size()),\n                                        bnd_uv);\n            double xOffset = componentI % UVGridDim * 2.1, yOffset = componentI / UVGridDim * 2.1;\n            for(int bnd_uvI = 0; bnd_uvI < bnd_uv.rows(); bnd_uvI++) {\n                bnd_uv(bnd_uvI, 0) += xOffset;\n                bnd_uv(bnd_uvI, 1) += yOffset;\n            }\n""",
+        """            Eigen::MatrixXd bnd_uv;\n            if(oneStringMainGridEnabled() && temp.initSeams.rows() > 0) {\n                if(n_components != 1) {\n                    throw std::runtime_error(\"ONESTRING_GRID_INITIAL_MULTICOMP_UNSUPPORTED\");\n                }\n                bnd_uv = oneStringMainInitialGridBoundary(temp, bnd_all[longest_bnd_id]);\n            }\n            else {\n                igl::map_vertices_to_circle(temp.V_rest,\n                                            bnd_stacked.tail(bnd_all[longest_bnd_id].size()),\n                                            bnd_uv);\n                double xOffset = componentI % UVGridDim * 2.1, yOffset = componentI / UVGridDim * 2.1;\n                for(int bnd_uvI = 0; bnd_uvI < bnd_uv.rows(); bnd_uvI++) {\n                    bnd_uv(bnd_uvI, 0) += xOffset;\n                    bnd_uv(bnd_uvI, 1) += yOffset;\n                }\n            }\n""",
+        "main.cpp initial Grid boundary",
+    )
+
+    text = _replace_once(
+        text,
+        """        triSoup.emplace_back(new OptCuts::TriMesh(V, F, UV_Tutte, temp.F, false));\n        outputFolderPath += meshName + \"_Tutte_\" + OptCuts::IglUtils::rtos(lambda_init) + \"_\" + OptCuts::IglUtils::rtos(testID) +\n""",
+        """        if(oneStringMainGridEnabled() && temp.initSeams.rows() > 0) {\n            OptCuts::TriMesh probe(V, F, UV_Tutte, temp.F, false);\n            if(!probe.checkInversion(true)) {\n                oneStringMainReflectFabricationV(UV_Tutte);\n                OptCuts::TriMesh reflectedProbe(V, F, UV_Tutte, temp.F, false);\n                if(!reflectedProbe.checkInversion(true)) {\n                    throw std::runtime_error(\"ONESTRING_GRID_INITIAL_HARMONIC_INVERTED\");\n                }\n            }\n        }\n        OptCuts::TriMesh* oneStringInitialMesh = new OptCuts::TriMesh(V, F, UV_Tutte, temp.F, false);\n        if(oneStringMainGridEnabled() && temp.initSeams.rows() > 0) {\n            // ONESTRING_GRID_NATIVE_V4_LOCK_ACTUAL_INITIAL_COHESIVE_VERTS\n            // `bnd_stacked` belongs to the temporary cut mesh.  Reconstructing\n            // TriMesh from (V,F,UV_Tutte,temp.F) can renumber duplicated UV\n            // vertices, so locking those old IDs may leave the real cohesive\n            // seam free to drift.  Always derive locks from the reconstructed\n            // mesh's authoritative cohE topology instead.\n            if(oneStringInitialMesh->boundaryEdge.size() != oneStringInitialMesh->cohE.rows()) {\n                throw std::runtime_error(\"ONESTRING_GRID_INITIAL_COHESIVE_METADATA_MISMATCH\");\n            }\n            std::set<int> fixed = oneStringInitialMesh->fixedVert;\n            std::set<int> actualInitialSeamVerts;\n            for(int cohI = 0; cohI < oneStringInitialMesh->cohE.rows(); ++cohI) {\n                if(oneStringInitialMesh->boundaryEdge[cohI]) continue;\n                const Eigen::RowVector4i e = oneStringInitialMesh->cohE.row(cohI);\n                if(e.minCoeff() < 0 || e.maxCoeff() >= oneStringInitialMesh->V.rows()) {\n                    throw std::runtime_error(\"ONESTRING_GRID_INITIAL_COHESIVE_INDEX_INVALID\");\n                }\n                for(int k = 0; k < 4; ++k) actualInitialSeamVerts.insert(e[k]);\n            }\n            if(actualInitialSeamVerts.empty()) {\n                throw std::runtime_error(\"ONESTRING_GRID_INITIAL_COHESIVE_SEAM_MISSING\");\n            }\n\n            const double gridH = oneStringMainGridH();\n            const double gridAngle = oneStringMainGridEnvDouble(\"ONESTRING_OPTCUTS_GRID_ANGLE_RAD\", 0.0);\n            const double gridPhaseU = oneStringMainGridEnvDouble(\"ONESTRING_OPTCUTS_GRID_PHASE_U\", 0.0);\n            const double gridPhaseV = oneStringMainGridEnvDouble(\"ONESTRING_OPTCUTS_GRID_PHASE_V\", 0.0);\n            const double gc = std::cos(gridAngle), gs = std::sin(gridAngle);\n            const double gridTol = 1.0e-7;\n            auto initialGridUnits = [&](const Eigen::RowVector2d& p) {\n                return Eigen::Vector2d(\n                    (p[0] * gc + p[1] * gs - gridPhaseU) / gridH,\n                    (-p[0] * gs + p[1] * gc - gridPhaseV) / gridH\n                );\n            };\n            auto initialGridPoint = [&](const Eigen::RowVector2d& p) {\n                const Eigen::Vector2d g = initialGridUnits(p);\n                return std::abs(g[0] - std::round(g[0])) <= gridTol &&\n                       std::abs(g[1] - std::round(g[1])) <= gridTol;\n            };\n            auto initialGridEdge = [&](const Eigen::RowVector2d& a, const Eigen::RowVector2d& b) {\n                if(!initialGridPoint(a) || !initialGridPoint(b) ||\n                   (a - b).norm() <= gridH * gridTol) return false;\n                const Eigen::Vector2d ga = initialGridUnits(a);\n                const Eigen::Vector2d gb = initialGridUnits(b);\n                return std::abs(std::round(ga[0]) - std::round(gb[0])) <= gridTol ||\n                       std::abs(std::round(ga[1]) - std::round(gb[1])) <= gridTol;\n            };\n\n            for(int cohI = 0; cohI < oneStringInitialMesh->cohE.rows(); ++cohI) {\n                if(oneStringInitialMesh->boundaryEdge[cohI]) continue;\n                const Eigen::RowVector4i e = oneStringInitialMesh->cohE.row(cohI);\n                for(int side = 0; side < 2; ++side) {\n                    const int k = side * 2;\n                    const Eigen::RowVector2d a = oneStringInitialMesh->V.row(e[k]);\n                    const Eigen::RowVector2d b = oneStringInitialMesh->V.row(e[k + 1]);\n                    if(!initialGridEdge(a, b)) {\n                        std::cerr << \"[ONESTRING-GRID] initial_off_lattice_cohesive_side coh=\"\n                                  << cohI << \" side=\" << side\n                                  << \" a=\" << a << \" b=\" << b << std::endl;\n                        throw std::runtime_error(\"ONESTRING_GRID_INITIAL_COHESIVE_SEAM_OFF_LATTICE\");\n                    }\n                }\n            }\n\n            for(const int vI : actualInitialSeamVerts) {\n                oneStringInitialMesh->oneStringGridLockedVert.insert(vI);\n                fixed.insert(vI);\n            }\n            oneStringInitialMesh->resetFixedVert(fixed);\n            std::cout << \"[ONESTRING-GRID] initial_seam_lock_vertices=\"\n                      << actualInitialSeamVerts.size() << std::endl;\n        }\n        triSoup.emplace_back(oneStringInitialMesh);\n        outputFolderPath += meshName + \"_Tutte_\" + OptCuts::IglUtils::rtos(lambda_init) + \"_\" + OptCuts::IglUtils::rtos(testID) +\n""",
+        "main.cpp lock actual reconstructed initial Grid seam",
+    )
+
+    # Authoritative bijectivity decision.  Use complete literal strings for the
+    # enabled/disabled markers: setup verifies the built binary, while the Python
+    # bridge verifies runtime stdout.  Both must therefore use the exact same
+    # marker bytes rather than a prefix concatenated with a ternary string.
+    text = _replace_once(
+        text,
+        """    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, bijectiveParam && !rand1PInitCut); // for random one point initial cut, don't need air meshes in the beginning since it's impossible for a quad to intersect itself\n    \n    optimizer->precompute();\n""",
+        """    // ONESTRING_GRID_NATIVE_V4_BIJECTIVITY_SCAFFOLD\n    const bool oneStringUseBijectivityScaffold = oneStringMainGridEnabled()\n        ? bijectiveParam\n        : (bijectiveParam && !rand1PInitCut);\n    if(oneStringMainGridEnabled()) {\n        std::cout << \"[ONESTRING-GRID] native_candidate_search enabled version=4 h=\"\n                  << oneStringMainGridH() << std::endl;\n        if(oneStringUseBijectivityScaffold) {\n            std::cout << \"[ONESTRING-GRID] global_bijectivity_scaffold=enabled\" << std::endl;\n        }\n        else {\n            std::cout << \"[ONESTRING-GRID] global_bijectivity_scaffold=disabled\" << std::endl;\n            throw std::runtime_error(\"ONESTRING_GRID_BIJECTIVITY_SCAFFOLD_DISABLED\");\n        }\n    }\n    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, oneStringUseBijectivityScaffold);\n    \n    optimizer->precompute();\n""",
+        "main.cpp Grid runtime and bijectivity contract",
+    )
+
+    text = _replace_once(
+        text,
+        """    double measure_bound = E_SD;\n    const double eps_lambda = std::min(1.0e-3, std::abs(updateLambda(measure_bound) - energyParams[0]));\n    \n    //TODO?: stop when first violates bounds from feasible, don't go to best feasible. check after each merge whether distortion is violated\n""",
+        """    double measure_bound = E_SD;\n    const double eps_lambda = std::min(1.0e-3, std::abs(updateLambda(measure_bound) - energyParams[0]));\n\n    if(oneStringMainGridEnabled()) {\n        if(measure_bound <= upperBound) {\n            optimizer->updateEnergyData(true, false, false);\n            return false;\n        }\n        energyParams[0] = updateLambda(measure_bound);\n        energyParams[0] = std::max(eps_lambda, std::min(1.0 - eps_lambda, energyParams[0]));\n        if(checkConvergence) {\n            int bestB = -1, bestI = -1;\n            double changeB = __DBL_MAX__, changeI = __DBL_MAX__;\n            for(int attempt = 0; attempt < 64; ++attempt) {\n                bestB = energyChanges_bSplit.empty() ? -1 : computeBestCand(energyChanges_bSplit, 1.0 - energyParams[0], changeB);\n                bestI = energyChanges_iSplit.empty() ? -1 : computeBestCand(energyChanges_iSplit, 1.0 - energyParams[0], changeI);\n                if((bestB >= 0 && changeB <= 0.0) || (bestI >= 0 && changeI <= 0.0)) break;\n                const double next = updateLambda(measure_bound, energyParams[0]);\n                if(std::abs(next - energyParams[0]) <= 1.0e-12) break;\n                energyParams[0] = std::max(eps_lambda, std::min(1.0 - eps_lambda, next));\n            }\n            const bool useB = bestB >= 0 && changeB <= 0.0 &&\n                (bestI < 0 || changeI > 0.0 || changeB <= changeI);\n            const bool useI = bestI >= 0 && changeI <= 0.0 && !useB;\n            if(useB) {\n                opType_queried = 0;\n                path_queried = paths_bSplit[bestB];\n                newVertPos_queried = newVertPoses_bSplit[bestB];\n            }\n            else if(useI) {\n                opType_queried = 1;\n                path_queried = paths_iSplit[bestI];\n                newVertPos_queried = newVertPoses_iSplit[bestI];\n            }\n            else {\n                std::cout << \"[ONESTRING-GRID] no feasible Grid split remains before requested distortion bound\" << std::endl;\n                optimizer->updateEnergyData(true, false, false);\n                return false;\n            }\n        }\n        optimizer->updateEnergyData(true, false, false);\n        return true;\n    }\n    \n    //TODO?: stop when first violates bounds from feasible, don't go to best feasible. check after each merge whether distortion is violated\n""",
+        "main.cpp Grid split-only dual update",
+    )
+
+    path.write_text(text, encoding="utf-8")
+    print(f"Applied integrated Grid-OptCuts V4 main patch: {path}")
+
+
+def apply_native_grid_patch(root: Path) -> bool:
+    root = root.expanduser().resolve()
+    _patch_header(root)
+    _patch_trimesh(root)
+    _patch_main(root)
+    return True
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("root", type=Path)
+    args = parser.parse_args()
+    apply_native_grid_patch(args.root)

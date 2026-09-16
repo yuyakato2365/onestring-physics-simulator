@@ -5,6 +5,10 @@ nearly gray.  This patch keeps the original geometry and diagnostics, but uses
 flat unlit status colors and adds one legend entry per status actually present.
 The emergency prism remains gray and is additionally marked with a dashed red
 outline so that it cannot be confused with a clipped manufacturing solid.
+
+The same install hook also adds an explicit ON/OFF control to K2D flat-layout
+figures for the orange ``gap centers`` markers. This is visualization-only and
+does not change any K2D/T2D numerical result.
 """
 
 from __future__ import annotations
@@ -72,13 +76,59 @@ def _edge_lines(vertices: np.ndarray, faces: list[list[int]]) -> tuple[list[floa
 
 
 def install_status_visualization_patch() -> None:
-    """Patch ``visualization.add_tile_assembly`` once per interpreter."""
+    """Patch T3D status colors and K2D gap-center visibility controls once."""
     from . import visualization
 
     if getattr(visualization, "_status_visualization_patch_installed", False):
         return
 
     original_add_tile_assembly = visualization.add_tile_assembly
+    original_figure_flat_tile_layout = visualization.figure_flat_tile_layout
+
+    def figure_flat_tile_layout_with_gap_toggle(*args, **kwargs):
+        fig = original_figure_flat_tile_layout(*args, **kwargs)
+        gap_trace_ids = [
+            index
+            for index, trace in enumerate(fig.data)
+            if str(getattr(trace, "name", "")) == "gap centers"
+        ]
+        if not gap_trace_ids:
+            return fig
+
+        for index in gap_trace_ids:
+            fig.data[index].legendgroup = "k2d_gap_centers"
+            fig.data[index].showlegend = True
+
+        fig.update_layout(
+            updatemenus=list(fig.layout.updatemenus or ())
+            + [
+                dict(
+                    type="buttons",
+                    direction="right",
+                    x=0.0,
+                    xanchor="left",
+                    y=1.10,
+                    yanchor="top",
+                    showactive=True,
+                    active=0,
+                    pad=dict(r=8, t=0),
+                    buttons=[
+                        dict(
+                            label="Orange points: ON",
+                            method="restyle",
+                            args=[{"visible": True}, gap_trace_ids],
+                        ),
+                        dict(
+                            label="Orange points: OFF",
+                            method="restyle",
+                            args=[{"visible": False}, gap_trace_ids],
+                        ),
+                    ],
+                )
+            ],
+            margin=dict(t=max(75, int(getattr(fig.layout.margin, "t", 0) or 0))),
+        )
+        return fig
 
     def add_tile_assembly_status_safe(
         fig: go.Figure,
@@ -209,5 +259,6 @@ def install_status_visualization_patch() -> None:
             )
         )
 
+    visualization.figure_flat_tile_layout = figure_flat_tile_layout_with_gap_toggle
     visualization.add_tile_assembly = add_tile_assembly_status_safe
     visualization._status_visualization_patch_installed = True
