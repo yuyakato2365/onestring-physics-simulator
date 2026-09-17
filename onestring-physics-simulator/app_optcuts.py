@@ -12,8 +12,10 @@ if str(SRC) not in sys.path:
 
 from onestring_physics.paper_ui_20260916_patch import install_paper_ui_20260916_patch
 from onestring_physics.eq5_iteration_history_view import render_eq5_iteration_history
+from onestring_physics.eq5_flat_layout_bridge import install_eq5_flat_layout_bridge
 
 install_paper_ui_20260916_patch()
+install_eq5_flat_layout_bridge()
 runpy.run_path(str(ROOT / "app_optcuts_core_20260916.py"), run_name="__main__")
 
 # Diagnostic requested for the experimental Eq.(5) route: after the ordinary
