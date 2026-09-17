@@ -17,6 +17,46 @@ def _is_auxetic_k2d(mesh: Any) -> bool:
     return bool(metrics.get("paper_eq5_auxetic_topology", False))
 
 
+def _polygon_area(poly: np.ndarray) -> float:
+    p = np.asarray(poly, dtype=float)
+    if len(p) < 3:
+        return 0.0
+    return 0.5 * abs(float(np.dot(p[:, 0], np.roll(p[:, 1], -1)) - np.dot(p[:, 1], np.roll(p[:, 0], -1))))
+
+
+def _layout_overlap_metrics(xy: np.ndarray) -> tuple[int, float]:
+    """Compute compatibility metrics consumed by legacy build_onestring_design."""
+    def overlap(a: np.ndarray, b: np.ndarray) -> bool:
+        for poly in (a, b):
+            for i in range(len(poly)):
+                edge = poly[(i + 1) % len(poly)] - poly[i]
+                axis = np.array([-edge[1], edge[0]], dtype=float)
+                n = float(np.linalg.norm(axis))
+                if n <= 1e-12:
+                    continue
+                axis /= n
+                pa = a @ axis
+                pb = b @ axis
+                if min(float(np.max(pa)), float(np.max(pb))) - max(float(np.min(pa)), float(np.min(pb))) <= 1e-10:
+                    return False
+        return True
+
+    count = 0
+    area_proxy = 0.0
+    bounds_lo = np.min(xy, axis=1)
+    bounds_hi = np.max(xy, axis=1)
+    for i in range(len(xy)):
+        for j in range(i + 1, len(xy)):
+            if np.any(bounds_hi[i] <= bounds_lo[j] + 1e-10) or np.any(bounds_hi[j] <= bounds_lo[i] + 1e-10):
+                continue
+            if overlap(xy[i], xy[j]):
+                count += 1
+                lo = np.maximum(bounds_lo[i], bounds_lo[j])
+                hi = np.minimum(bounds_hi[i], bounds_hi[j])
+                area_proxy += max(0.0, float(hi[0] - lo[0])) * max(0.0, float(hi[1] - lo[1]))
+    return int(count), float(area_proxy)
+
+
 def _direct_layout(pipeline: Any, mesh: Any) -> Any:
     vertices = np.asarray(mesh.vertices, dtype=float)
     faces = np.asarray(mesh.faces, dtype=int)
@@ -38,8 +78,6 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
             f"got {len(source_ids)} for {len(vertices)} vertices"
         )
 
-    # FlatTileLayout hinge_pairs use flattened tile-corner ids. Eq.(5)'s q index
-    # is already exactly that id because face f is [4f,4f+1,4f+2,4f+3].
     groups: dict[int, list[int]] = {}
     for q, source in enumerate(source_ids.tolist()):
         groups.setdefault(int(source), []).append(int(q))
@@ -57,19 +95,25 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
         raise RuntimeError("Eq.5 direct flat layout could not resolve FlatTileLayout")
 
     xy = vertices[faces, :2].copy()
+    overlap_count, overlap_area = _layout_overlap_metrics(xy)
+    total_tile_area = float(sum(_polygon_area(tile) for tile in xy))
     metrics = {
         "source": "paper_eq5_already_independent_k2d",
         "direct_from_k2d": True,
         "legacy_second_independentization_bypassed": True,
         "tile_count": int(len(faces)),
         "hinge_pair_count": int(len(hinge_pairs)),
+        "tile_overlap_count": int(overlap_count),
+        "tile_overlap_area": float(overlap_area),
+        "tile_total_area": float(total_tile_area),
+        "tile_overlap_area_ratio": float(overlap_area / max(total_tile_area, 1e-12)),
         "input_extent_x": float(np.ptp(vertices[:, 0])) if len(vertices) else 0.0,
         "input_extent_y": float(np.ptp(vertices[:, 1])) if len(vertices) else 0.0,
     }
     print(
         f"[PAPER-EQ5-FLAT-BRIDGE] direct=True tiles={len(faces)} "
         f"vertices={len(vertices)} hinge_pairs={len(hinge_pairs)} "
-        f"extent={metrics['input_extent_x']:.6g}x{metrics['input_extent_y']:.6g}"
+        f"overlaps={overlap_count} extent={metrics['input_extent_x']:.6g}x{metrics['input_extent_y']:.6g}"
     )
     return layout_type(
         tile_top_vertices_2d=xy,
