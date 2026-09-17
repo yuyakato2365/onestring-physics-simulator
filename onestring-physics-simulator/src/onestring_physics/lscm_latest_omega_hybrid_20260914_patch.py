@@ -13,8 +13,8 @@ VERSION_ID = "2026-09-17-paper-eq5-unified-k2d"
 VERSION_LABEL = "2026-09-17 — auxetic paper Eq.5 K2D + latest Ω/K3D"
 OMEGA_LABEL = "2026-09-17 | auxetic paper Eq.5 K2D + latest Ω/K3D"
 VERSION_DESCRIPTION = (
-    "M2Dのshared-vertex quadをtileごとの独立頂点へ変換し、同じM2D頂点由来のcopyをhinge groupとして保持。"
-    "そのauxetic topology上でSec.4.3 Eq.(5)のEEdge+ECollision+EFabを処理してK2Dとして出力する。"
+    "M2Dに隣接タイルごとのcorner jointをencodeし、切れ目を保持してK2Dを最適化。"
+    "EEdge・EFabの射影距離とSAT衝突項を解析勾配で最小化。論文の数値解法と衝突離散化には相違あり。"
 )
 
 
@@ -60,7 +60,7 @@ def _render_eq5_controls(st: Any) -> None:
         "<div style='padding:14px 16px;border:1px solid rgba(70,110,160,.25);border-radius:14px;background:rgba(240,246,253,.72);margin:6px 0 12px'>"
         "<div style='display:flex;justify-content:space-between'><b>Flat objective</b><span style='opacity:.65'>Paper Sec. 4.3 · Eq. (5)</span></div>"
         "<div style='font-family:Georgia,serif;font-size:20px;margin:10px 0'>E<sub>Flat</sub>(v) = ω₁E<sub>Edge</sub> + ω₂E<sub>Collision</sub> + ω₃E<sub>Fab</sub></div>"
-        "<div style='font-size:12px;opacity:.72'>M₂D shared quad → independent auxetic tiles → K₂D。EFabはquad内部角ではなくtile間gap angleへ作用します。</div>"
+        "<div style='font-size:12px;opacity:.72'>M₂D → pairwise corner linkage → K₂D。EFabはタイル間の開口角。衝突はSAT近似、数値解法はL-BFGS。</div>"
         "</div>", unsafe_allow_html=True)
     w1=st.number_input("ω1 / EEdge",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_EDGE",1.0)),step=0.1,format="%.4f",key="onestring_eq5_w_edge",help="各tile edgeを対応K3D edge lengthへ合わせる項。")
     w2=st.number_input("ω2 / ECollision",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_COLLISION",1.0)),step=0.1,format="%.4f",key="onestring_eq5_w_collision",help="独立tile同士の2D overlapを避ける項。")
@@ -68,7 +68,7 @@ def _render_eq5_controls(st: Any) -> None:
     theta=st.number_input("θmin / EFab gap angle [deg]",min_value=0.0,max_value=90.0,value=min(90.0,max(0.0,_env_float("ONESTRING_EQ5_THETA_MIN_DEG",5.0))),step=1.0,format="%.2f",key="onestring_eq5_theta_min_deg")
     iterations=st.number_input("Eq.5 K2D iterations",min_value=1,max_value=10000,value=max(1,_env_int("ONESTRING_EQ5_ITERATIONS",240)),step=20,key="onestring_eq5_iterations")
     os.environ["ONESTRING_EQ5_W_EDGE"]=str(float(w1)); os.environ["ONESTRING_EQ5_W_COLLISION"]=str(float(w2)); os.environ["ONESTRING_EQ5_W_FAB"]=str(float(w3)); os.environ["ONESTRING_EQ5_THETA_MIN_DEG"]=str(float(theta)); os.environ["ONESTRING_EQ5_ITERATIONS"]=str(int(iterations))
-    st.caption("このモードではK2D自体が独立tile topologyです。同一M2D vertex由来のcorner copyをhinge groupとして一致させ、EFabからsame-tile interior angleを除外します。")
+    st.caption("各ヒンジは2枚のタイルだけで共有します。全反復の目的関数を評価し、制約が残る場合は未充足と表示します。")
 
 
 def _install_selector_patch() -> None:
@@ -112,7 +112,7 @@ def install_lscm_latest_omega_hybrid_patch(pipeline: Any, *, lscm_build_m2d: Any
             if not _active(params): return fallback_parameterization(surface,target,grid,params)
             latest_params=_clone_params(params,omega_parameterization_mode="optcuts_test"); result=latest_parameterization(surface,target,grid,latest_params)
             try:
-                result.method=MODE; result.metrics.update({"version_id":VERSION_ID,"hybrid_stage_s_to_omega":"current latest OptCuts-test Omega","hybrid_stage_m2d":"common shared-vertex M2D","hybrid_stage_k3d":"current latest OptCuts-test2 K3D stack","hybrid_stage_k2d":"explicit independent-tile auxetic topology + Eq.5"})
+                result.method=MODE; result.metrics.update({"version_id":VERSION_ID,"hybrid_stage_s_to_omega":"current latest OptCuts-test Omega","hybrid_stage_m2d":"common shared-vertex M2D","hybrid_stage_k3d":"current latest OptCuts-test2 K3D stack","hybrid_stage_k2d":"pairwise corner linkage + directly minimized Eq.5 terms"})
             except Exception: pass
             return result
         def m2d_dispatch(grid,domain,params=None):
@@ -128,7 +128,10 @@ def install_lscm_latest_omega_hybrid_patch(pipeline: Any, *, lscm_build_m2d: Any
                 else: os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"]=previous
         def k2d_dispatch(mesh_2d,mesh_3d,params,progress_callback=None):
             if not _active(params): return fallback_k2d(mesh_2d,mesh_3d,params,progress_callback=progress_callback)
-            return optimize_paper_eq5(mesh_2d,mesh_3d,params,progress_callback=progress_callback,pipeline=pipeline)
+            result, report = optimize_paper_eq5(mesh_2d,mesh_3d,params,progress_callback=progress_callback,pipeline=pipeline)
+            from .eq5_iteration_history_view import render_completed_k2d
+            render_completed_k2d(result.eq5_history)
+            return result, report
         def flat_layout_dispatch(mesh,params=None): return fallback_flat_layout(mesh,params)
         return {"_build_surface_parameterization":parameterization_dispatch,"_build_m2d":m2d_dispatch,"_optimize_k3d":k3d_dispatch,"_optimize_k2d":k2d_dispatch,"_make_flat_tile_layout":flat_layout_dispatch}
     def install_routes(target_pipeline):

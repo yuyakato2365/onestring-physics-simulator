@@ -24,15 +24,39 @@ def _figure(xy,faces,snapshot,xrange,yrange):
     fig.update_layout(title=f'{label} · col {c} · fab {f} · step {step:.2e}<br><sup>extent {extent[0]:.3g} × {extent[1]:.3g}</sup>',height=330,margin=dict(l=5,r=5,t=58,b=5),showlegend=False,xaxis=dict(visible=False,range=list(xrange),scaleanchor='y',scaleratio=1),yaxis=dict(visible=False,range=list(yrange),constrain='domain'))
     return fig
 
-def render_eq5_iteration_history(st):
+def render_completed_k2d(history):
+    """Publish before T2D/Eq.6, scoped to this Streamlit session."""
     try:
-        from .paper_eq5_k2d_solver import get_last_eq5_history
-        history=get_last_eq5_history()
-    except Exception:return
+        import streamlit as st
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        if get_script_run_ctx(suppress_warning=True) is None:
+            return
+        st.session_state["eq5_history"] = history
+        st.subheader("K2D result — before T2D / Dual Hinge")
+        render_eq5_iteration_history(st, history)
+        st.session_state["eq5_rendered_this_run"] = True
+    except ImportError:
+        return
+
+
+def render_eq5_iteration_history(st, history=None):
+    if history is None:
+        history=st.session_state.get("eq5_history")
     if not history or not history.get('snapshots'):return
     faces=np.asarray(history['faces'],int);snaps=history['snapshots'];xrange,yrange=_bounds(snaps)
     st.markdown('### Raw K2D solver trajectory — Initial / every 10 iterations / Final')
     st.caption('FlatTileLayoutへ変換する前のsolver内部 xy を直接描画しています。全パネルで座標範囲を完全に固定しているため、縮小・膨張・飛び出しが起きたiterationをそのまま比較できます。')
+    import pandas as pd
+    records=pd.DataFrame(history.get('records', []))
+    if not records.empty:
+        last=records.iloc[-1]
+        if last['collisions'] or last['fab_violations']:
+            st.warning(f"K2D 制約未充足: collisions={int(last['collisions'])}, fabrication violations={int(last['fab_violations'])}。反復停止を製造可能な収束とは扱いません。")
+        st.caption(str(history.get('solver_message','')))
+        st.line_chart(records.set_index('iteration')[['EFlat','EEdge','ECollision','EFab']])
+        st.dataframe(records, hide_index=True)
+        st.download_button('Download K2D diagnostics CSV', records.to_csv(index=False),
+                           'k2d_diagnostics.csv', 'text/csv', key='eq5_diagnostics_csv')
     for start in range(0,len(snaps),3):
         cols=st.columns(3,gap='small')
         for j,snapshot in enumerate(snaps[start:start+3]):
@@ -40,4 +64,4 @@ def render_eq5_iteration_history(st):
             with cols[j]:st.plotly_chart(_figure(xy,faces,snapshot,xrange,yrange),width='stretch',key=f"eq5_raw_hist_{snapshot['iteration']}_{start+j}")
     st.caption(f'共通表示範囲: x=[{xrange[0]:.4g}, {xrange[1]:.4g}], y=[{yrange[0]:.4g}, {yrange[1]:.4g}]。各タイトルの extent はそのiteration自身の幅×高さです。')
 
-__all__=['render_eq5_iteration_history']
+__all__=['render_eq5_iteration_history','render_completed_k2d']

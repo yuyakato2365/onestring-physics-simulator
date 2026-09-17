@@ -94,6 +94,8 @@ class QuadMesh:
     stage: str
     metrics: dict[str, float | int | str] = field(default_factory=dict)
     split_lines: list[tuple[str, float]] = field(default_factory=list)
+    linkage_topology: object | None = None
+    eq5_history: dict | None = None
 
     @property
     def tile_count(self) -> int:
@@ -384,7 +386,7 @@ def build_onestring_design(
         progress_callback=_subprogress(progress_callback, 0.56, 0.70, "M2D -> K2D: "),
     )
     k2d_flat_layout = _make_flat_tile_layout(mesh_2d_optimized, params)
-    _emit_progress(progress_callback, "K2D independent tile layout", 0.73, "Abstract K2D mesh converted to independent tiles")
+    _emit_progress(progress_callback, "K2D independent tile layout", 0.73, "K2D tile geometry ready for extrusion")
     mesh_2d_optimized.metrics.update(
         {
             "k2d_tile_overlap_count": int(k2d_flat_layout.metrics["tile_overlap_count"]),
@@ -402,17 +404,18 @@ def build_onestring_design(
         "T2D top hinge",
     )
     _emit_progress(progress_callback, "K2D -> T2D Top Hinge", 0.78, "Top-hinge T2D built from K2D and T3D transforms")
-    hinge_graph = _build_hinge_graph(active_grid, mesh_2d_optimized.faces, tiles_2d_top, tiles_3d, dual=False)
+    source_faces = mesh_3d_optimized.faces  # metric/side adjacency; K2D may use joint vertex IDs
+    hinge_graph = _build_hinge_graph(active_grid, source_faces, tiles_2d_top, tiles_3d, dual=False)
     _emit_progress(progress_callback, "Build hinge graph", 0.81, f"{len(hinge_graph.hinges)} pairwise hinges")
     tiles_2d_dual, hinge_graph, reports["T2D top hinge -> T2D dual hinge"] = _optimize_dual_hinges(
         active_grid,
-        mesh_2d_optimized.faces,
+        source_faces,
         tiles_2d_top,
         tiles_3d,
         params,
         progress_callback=_subprogress(progress_callback, 0.81, 0.94, "Dual Hinge: "),
     )
-    gap_graph = _build_gap_graph(mesh_2d_optimized.faces, tiles_2d_dual, tiles_3d)
+    gap_graph = _build_gap_graph(source_faces, tiles_2d_dual, tiles_3d)
     _emit_progress(progress_callback, "Build gap graph", 0.96, f"{len(gap_graph.gaps)} gaps")
     lift_points = _select_lift_points(gap_graph, params.lift_tau)
     string_path = _build_string_path(gap_graph, lift_points, params.channel_friction)

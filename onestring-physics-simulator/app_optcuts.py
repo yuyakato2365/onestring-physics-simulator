@@ -12,10 +12,10 @@ if str(SRC) not in sys.path:
 
 from onestring_physics.paper_ui_20260916_patch import install_paper_ui_20260916_patch
 from onestring_physics.eq5_iteration_history_view import render_eq5_iteration_history
-from onestring_physics.eq5_flat_layout_bridge import install_eq5_flat_layout_bridge
 
+import streamlit as st
+st.session_state["eq5_rendered_this_run"] = False
 install_paper_ui_20260916_patch()
-install_eq5_flat_layout_bridge()
 runpy.run_path(str(ROOT / "app_optcuts_core_20260916.py"), run_name="__main__")
 
 # Diagnostic requested for the experimental Eq.(5) route: after the ordinary
@@ -23,6 +23,7 @@ runpy.run_path(str(ROOT / "app_optcuts_core_20260916.py"), run_name="__main__")
 # This does not alter optimization state or the normal K2D visualization.
 try:
     import streamlit as st
-    render_eq5_iteration_history(st)
+    if not st.session_state.get("eq5_rendered_this_run", False):
+        render_eq5_iteration_history(st)
 except Exception as exc:
     print(f"[PAPER-EQ5-HISTORY-UI] skipped: {exc}")
