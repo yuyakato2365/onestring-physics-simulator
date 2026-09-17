@@ -13,15 +13,21 @@ def _bounds(snaps):
     allxy=np.vstack(finite);lo=np.min(allxy,axis=0);hi=np.max(allxy,axis=0);cx,cy=.5*(lo+hi);span=max(float(hi[0]-lo[0]),float(hi[1]-lo[1]),1e-9)*1.08
     return (cx-span/2,cx+span/2),(cy-span/2,cy+span/2)
 
-def _figure(xy,faces,snapshot,xrange,yrange):
+def _figure(xy,faces,snapshot,xrange,yrange,*,diagnostic=True):
     xs=[];ys=[]
     for face in faces:
         ids=np.r_[face,face[0]];p=xy[ids];xs.extend(p[:,0].tolist()+[None]);ys.extend(p[:,1].tolist()+[None])
     fig=go.Figure(go.Scattergl(x=xs,y=ys,mode='lines',line=dict(width=1),hoverinfo='skip'))
-    it=snapshot['iteration'];c=snapshot.get('collisions',0);f=snapshot.get('fab_violations',0);step=snapshot.get('step',0.)
-    label='Initial raw xy' if snapshot.get('initial') else ('Final raw xy' if snapshot.get('final') else f'iter {it}')
-    finite=np.all(np.isfinite(xy),axis=1);extent=np.ptp(xy[finite],axis=0) if np.any(finite) else np.array([np.nan,np.nan])
-    fig.update_layout(title=f'{label} · col {c} · fab {f} · step {step:.2e}<br><sup>extent {extent[0]:.3g} × {extent[1]:.3g}</sup>',height=330,margin=dict(l=5,r=5,t=58,b=5),showlegend=False,xaxis=dict(visible=False,range=list(xrange),scaleanchor='y',scaleratio=1),yaxis=dict(visible=False,range=list(yrange),constrain='domain'))
+    if diagnostic:
+        it=snapshot['iteration'];c=snapshot.get('collisions',0);f=snapshot.get('fab_violations',0);step=snapshot.get('step',0.)
+        label='Initial raw xy' if snapshot.get('initial') else ('Final raw xy' if snapshot.get('final') else f'iter {it}')
+        finite=np.all(np.isfinite(xy),axis=1);extent=np.ptp(xy[finite],axis=0) if np.any(finite) else np.array([np.nan,np.nan])
+        title=f'{label} · col {c} · fab {f} · step {step:.2e}<br><sup>extent {extent[0]:.3g} × {extent[1]:.3g}</sup>'
+        top=58
+    else:
+        title=None
+        top=5
+    fig.update_layout(title=title,height=700,margin=dict(l=5,r=5,t=top,b=5),showlegend=False,xaxis=dict(visible=False,range=list(xrange),scaleanchor='y',scaleratio=1),yaxis=dict(visible=False,range=list(yrange),constrain='domain'))
     return fig
 
 
@@ -38,11 +44,15 @@ def render_final_k2d_result(st, history=None):
     if not np.any(finite):
         return False
     lo=np.min(xy[finite],axis=0);hi=np.max(xy[finite],axis=0);center=.5*(lo+hi)
-    span=max(float(hi[0]-lo[0]),float(hi[1]-lo[1]),1e-9)*1.08
+    span=max(float(hi[0]-lo[0]),float(hi[1]-lo[1]),1e-9)*1.04
     xrange=(center[0]-span/2,center[0]+span/2);yrange=(center[1]-span/2,center[1]+span/2)
-    st.subheader("K2D final result")
-    st.caption("Eq.(5) solver の最終K2Dをそのまま表示しています。旧 independent-tile renderer は使用していません。")
-    st.plotly_chart(_figure(xy,faces,snapshot,xrange,yrange),width='stretch',key="eq5_main_final_k2d")
+    st.subheader("K2D")
+    st.plotly_chart(
+        _figure(xy,faces,snapshot,xrange,yrange,diagnostic=False),
+        width='stretch',
+        key="eq5_main_final_k2d",
+        config={"displaylogo": False, "responsive": True},
+    )
     return True
 
 
