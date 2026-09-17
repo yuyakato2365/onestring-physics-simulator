@@ -24,6 +24,28 @@ def _figure(xy,faces,snapshot,xrange,yrange):
     fig.update_layout(title=f'{label} · col {c} · fab {f} · step {step:.2e}<br><sup>extent {extent[0]:.3g} × {extent[1]:.3g}</sup>',height=330,margin=dict(l=5,r=5,t=58,b=5),showlegend=False,xaxis=dict(visible=False,range=list(xrange),scaleanchor='y',scaleratio=1),yaxis=dict(visible=False,range=list(yrange),constrain='domain'))
     return fig
 
+
+def render_final_k2d_result(st, history=None):
+    """Render only the solved Eq.(5) K2D, for the ordinary/main result area."""
+    if history is None:
+        history=st.session_state.get("eq5_history")
+    if not history or not history.get('snapshots'):
+        return False
+    faces=np.asarray(history['faces'],int)
+    snapshot=history['snapshots'][-1]
+    xy=np.asarray(snapshot['xy'],float)
+    finite=np.all(np.isfinite(xy),axis=1)
+    if not np.any(finite):
+        return False
+    lo=np.min(xy[finite],axis=0);hi=np.max(xy[finite],axis=0);center=.5*(lo+hi)
+    span=max(float(hi[0]-lo[0]),float(hi[1]-lo[1]),1e-9)*1.08
+    xrange=(center[0]-span/2,center[0]+span/2);yrange=(center[1]-span/2,center[1]+span/2)
+    st.subheader("K2D final result")
+    st.caption("Eq.(5) solver の最終K2Dをそのまま表示しています。旧 independent-tile renderer は使用していません。")
+    st.plotly_chart(_figure(xy,faces,snapshot,xrange,yrange),width='stretch',key="eq5_main_final_k2d")
+    return True
+
+
 def render_completed_k2d(history):
     """Publish before T2D/Eq.6, scoped to this Streamlit session."""
     try:
@@ -64,4 +86,4 @@ def render_eq5_iteration_history(st, history=None):
             with cols[j]:st.plotly_chart(_figure(xy,faces,snapshot,xrange,yrange),width='stretch',key=f"eq5_raw_hist_{snapshot['iteration']}_{start+j}")
     st.caption(f'共通表示範囲: x=[{xrange[0]:.4g}, {xrange[1]:.4g}], y=[{yrange[0]:.4g}, {yrange[1]:.4g}]。各タイトルの extent はそのiteration自身の幅×高さです。')
 
-__all__=['render_eq5_iteration_history','render_completed_k2d']
+__all__=['render_eq5_iteration_history','render_completed_k2d','render_final_k2d_result']
