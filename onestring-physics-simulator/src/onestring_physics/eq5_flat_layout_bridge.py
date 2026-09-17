@@ -2,11 +2,7 @@
 
 Eq.(5) already returns one 4-corner block per tile, so this bridge preserves
 those coordinates instead of running the legacy independent-tile placement a
-second time.  FlatTileLayout.hinge_pairs, however, is a TILE-pair API.  The
-first bridge accidentally stored copied-vertex indices there; downstream Dual
-Hinge then received ids up to 2623 for a 656-tile layout.  This version rebuilds
-that compatibility field as deduplicated tile-id pairs while leaving K2D xy
-unchanged.
+second time. FlatTileLayout.hinge_pairs is a TILE-pair API.
 """
 from __future__ import annotations
 
@@ -58,19 +54,14 @@ def _layout_overlap_metrics(xy: np.ndarray) -> tuple[int, float]:
 
 
 def _tile_hinge_pairs_from_source_ids(source_ids: np.ndarray, tile_count: int) -> list[tuple[int, int]]:
-    """Return FlatTileLayout-compatible TILE pairs, never copied-vertex ids."""
     incident: dict[int, set[int]] = {}
     for q, source in enumerate(source_ids.tolist()):
         tile_id = int(q // 4)
         if 0 <= tile_id < tile_count:
             incident.setdefault(int(source), set()).add(tile_id)
-
     pairs: set[tuple[int, int]] = set()
     for tiles in incident.values():
         ordered = sorted(tiles)
-        # FlatTileLayout only carries pair connectivity, not local-corner ids.
-        # Connect all tiles sharing the same original M2D vertex; downstream
-        # hinge construction resolves local corners from the actual tile data.
         for i in range(len(ordered)):
             for j in range(i + 1, len(ordered)):
                 a, b = ordered[i], ordered[j]
@@ -79,16 +70,27 @@ def _tile_hinge_pairs_from_source_ids(source_ids: np.ndarray, tile_count: int) -
     return sorted(pairs)
 
 
+def _render_k2d_now() -> None:
+    """Render solver raw K2D immediately, before legacy T2D/Dual-Hinge work starts."""
+    try:
+        import streamlit as st
+        from .eq5_iteration_history_view import render_eq5_iteration_history
+        st.divider()
+        st.subheader("K2D result — shown before Dual Hinge")
+        st.caption("ここから下流のT2D / Dual Hingeが重くても、Eq.(5) solverが完了した時点のraw K2Dを先に表示しています。")
+        render_eq5_iteration_history(st)
+        st.info("K2Dはここまでで計算済みです。下流のDual Hinge処理はこの表示の後に続きます。")
+    except Exception as exc:
+        print(f"[PAPER-EQ5-EARLY-K2D-UI] skipped: {exc}")
+
+
 def _direct_layout(pipeline: Any, mesh: Any) -> Any:
     vertices = np.asarray(mesh.vertices, dtype=float)
     faces = np.asarray(mesh.faces, dtype=int)
     if faces.ndim != 2 or faces.shape[1] != 4:
         raise RuntimeError(f"Eq.5 direct flat layout expected quad faces, got {faces.shape}")
     if len(vertices) != 4 * len(faces):
-        raise RuntimeError(
-            "Eq.5 direct flat layout expected exactly four independent vertices "
-            f"per tile, got vertices={len(vertices)} faces={len(faces)}"
-        )
+        raise RuntimeError(f"Eq.5 direct flat layout expected exactly four independent vertices per tile, got vertices={len(vertices)} faces={len(faces)}")
     expected = np.arange(4 * len(faces), dtype=int).reshape(-1, 4)
     if not np.array_equal(faces, expected):
         raise RuntimeError("Eq.5 direct flat layout expected sequential independent face indices")
@@ -96,10 +98,7 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
     mesh_metrics = getattr(mesh, "metrics", {}) or {}
     source_ids = np.asarray(mesh_metrics.get("auxetic_source_vertex_ids", []), dtype=int)
     if len(source_ids) != len(vertices):
-        raise RuntimeError(
-            "Eq.5 direct flat layout is missing auxetic_source_vertex_ids; "
-            f"got {len(source_ids)} for {len(vertices)} vertices"
-        )
+        raise RuntimeError(f"Eq.5 direct flat layout is missing auxetic_source_vertex_ids; got {len(source_ids)} for {len(vertices)} vertices")
 
     hinge_pairs = _tile_hinge_pairs_from_source_ids(source_ids, len(faces))
     invalid_pairs = [(a, b) for a, b in hinge_pairs if a < 0 or b < 0 or a >= len(faces) or b >= len(faces)]
@@ -134,19 +133,13 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
         "input_extent_x": float(np.ptp(vertices[:, 0])) if len(vertices) else 0.0,
         "input_extent_y": float(np.ptp(vertices[:, 1])) if len(vertices) else 0.0,
     }
-    print(
-        f"[PAPER-EQ5-FLAT-BRIDGE] direct=True tiles={len(faces)} vertices={len(vertices)} "
-        f"hinge_pairs={len(hinge_pairs)} hinge_pair_max_id={metrics['hinge_pair_max_id']} "
-        f"gaps={gap_count} overlaps={overlap_count} min_clearance=0 "
-        f"extent={metrics['input_extent_x']:.6g}x{metrics['input_extent_y']:.6g}"
-    )
-    return layout_type(
-        tile_top_vertices_2d=xy,
-        tile_ids=list(range(len(faces))),
-        hinge_pairs=hinge_pairs,
-        gap_polygons=[],
-        metrics=metrics,
-    )
+    print(f"[PAPER-EQ5-FLAT-BRIDGE] direct=True tiles={len(faces)} vertices={len(vertices)} hinge_pairs={len(hinge_pairs)} hinge_pair_max_id={metrics['hinge_pair_max_id']} gaps={gap_count} overlaps={overlap_count} min_clearance=0 extent={metrics['input_extent_x']:.6g}x{metrics['input_extent_y']:.6g}")
+
+    # Crucially this runs while build_onestring_design is still inside the K2D
+    # stage, before _make_t2d_from_transforms / _optimize_dual_hinges can block.
+    _render_k2d_now()
+
+    return layout_type(tile_top_vertices_2d=xy, tile_ids=list(range(len(faces))), hinge_pairs=hinge_pairs, gap_polygons=[], metrics=metrics)
 
 
 def install_eq5_flat_layout_bridge() -> None:
