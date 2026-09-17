@@ -1,34 +1,43 @@
-"""Render Eq.(5) K2D snapshots every 10 solver iterations."""
+"""Render the raw Eq.(5) K2D solver trajectory on one fixed coordinate scale."""
 from __future__ import annotations
 import numpy as np
 import plotly.graph_objects as go
 
 
-def _figure(xy,faces,snapshot):
+def _bounds(snaps):
+    finite=[]
+    for s in snaps:
+        xy=np.asarray(s['xy'],float);ok=np.all(np.isfinite(xy),axis=1)
+        if np.any(ok):finite.append(xy[ok])
+    if not finite:return (-1.,1.),(-1.,1.)
+    allxy=np.vstack(finite);lo=np.min(allxy,axis=0);hi=np.max(allxy,axis=0);cx,cy=.5*(lo+hi);span=max(float(hi[0]-lo[0]),float(hi[1]-lo[1]),1e-9)*1.08
+    return (cx-span/2,cx+span/2),(cy-span/2,cy+span/2)
+
+def _figure(xy,faces,snapshot,xrange,yrange):
     xs=[];ys=[]
     for face in faces:
         ids=np.r_[face,face[0]];p=xy[ids];xs.extend(p[:,0].tolist()+[None]);ys.extend(p[:,1].tolist()+[None])
     fig=go.Figure(go.Scattergl(x=xs,y=ys,mode='lines',line=dict(width=1),hoverinfo='skip'))
     it=snapshot['iteration'];c=snapshot.get('collisions',0);f=snapshot.get('fab_violations',0);step=snapshot.get('step',0.)
-    fig.update_layout(title=f'iter {it} · collision {c} · fab {f} · step {step:.2e}',height=330,margin=dict(l=5,r=5,t=42,b=5),showlegend=False,xaxis=dict(visible=False,scaleanchor='y',scaleratio=1),yaxis=dict(visible=False,constrain='domain'))
+    label='Initial raw xy' if snapshot.get('initial') else ('Final raw xy' if snapshot.get('final') else f'iter {it}')
+    finite=np.all(np.isfinite(xy),axis=1);extent=np.ptp(xy[finite],axis=0) if np.any(finite) else np.array([np.nan,np.nan])
+    fig.update_layout(title=f'{label} · col {c} · fab {f} · step {step:.2e}<br><sup>extent {extent[0]:.3g} × {extent[1]:.3g}</sup>',height=330,margin=dict(l=5,r=5,t=58,b=5),showlegend=False,xaxis=dict(visible=False,range=list(xrange),scaleanchor='y',scaleratio=1),yaxis=dict(visible=False,range=list(yrange),constrain='domain'))
     return fig
-
 
 def render_eq5_iteration_history(st):
     try:
         from .paper_eq5_k2d_solver import get_last_eq5_history
         history=get_last_eq5_history()
-    except Exception:
-        return
+    except Exception:return
     if not history or not history.get('snapshots'):return
-    faces=np.asarray(history['faces'],int);snaps=history['snapshots']
-    st.markdown('### K2D optimization history — every 10 iterations')
-    st.caption('同じ表示範囲・同じtopologyで、10 iterationごとのK2Dを左上から時系列に3列表示します。崩れ始めるiterationを特定するためのdiagnosticです。')
+    faces=np.asarray(history['faces'],int);snaps=history['snapshots'];xrange,yrange=_bounds(snaps)
+    st.markdown('### Raw K2D solver trajectory — Initial / every 10 iterations / Final')
+    st.caption('FlatTileLayoutへ変換する前のsolver内部 xy を直接描画しています。全パネルで座標範囲を完全に固定しているため、縮小・膨張・飛び出しが起きたiterationをそのまま比較できます。')
     for start in range(0,len(snaps),3):
         cols=st.columns(3,gap='small')
         for j,snapshot in enumerate(snaps[start:start+3]):
-            with cols[j]:
-                st.plotly_chart(_figure(np.asarray(snapshot['xy'],float),faces,snapshot),width='stretch',key=f"eq5_hist_{snapshot['iteration']}_{start+j}")
-    st.caption('各タイトル: iteration / collision pair数 / EFab violation数 / 直前iterationからの最大vertex移動量(step)。')
+            xy=np.asarray(snapshot['xy'],float)
+            with cols[j]:st.plotly_chart(_figure(xy,faces,snapshot,xrange,yrange),width='stretch',key=f"eq5_raw_hist_{snapshot['iteration']}_{start+j}")
+    st.caption(f'共通表示範囲: x=[{xrange[0]:.4g}, {xrange[1]:.4g}], y=[{yrange[0]:.4g}, {yrange[1]:.4g}]。各タイトルの extent はそのiteration自身の幅×高さです。')
 
 __all__=['render_eq5_iteration_history']
