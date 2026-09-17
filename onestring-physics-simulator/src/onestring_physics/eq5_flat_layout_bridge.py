@@ -1,10 +1,12 @@
-"""Prevent the experimental Eq.(5) K2D from being independentized a second time.
+"""Bridge already-independent Eq.(5) K2D into the legacy FlatTileLayout API.
 
-The Eq.(5) solver already returns one independent 4-corner vertex block per tile.
-The legacy _make_flat_tile_layout expects a shared-vertex K2D mesh and performs
-another independent-tile placement solve. Feeding the Eq.(5) output into that
-legacy path destroys the solver result. This bridge converts the already-
-independent K2D to FlatTileLayout without moving it.
+Eq.(5) already returns one 4-corner block per tile, so this bridge preserves
+those coordinates instead of running the legacy independent-tile placement a
+second time.  FlatTileLayout.hinge_pairs, however, is a TILE-pair API.  The
+first bridge accidentally stored copied-vertex indices there; downstream Dual
+Hinge then received ids up to 2623 for a 656-tile layout.  This version rebuilds
+that compatibility field as deduplicated tile-id pairs while leaving K2D xy
+unchanged.
 """
 from __future__ import annotations
 
@@ -13,8 +15,7 @@ import numpy as np
 
 
 def _is_auxetic_k2d(mesh: Any) -> bool:
-    metrics = getattr(mesh, "metrics", {}) or {}
-    return bool(metrics.get("paper_eq5_auxetic_topology", False))
+    return bool((getattr(mesh, "metrics", {}) or {}).get("paper_eq5_auxetic_topology", False))
 
 
 def _polygon_area(poly: np.ndarray) -> float:
@@ -25,7 +26,6 @@ def _polygon_area(poly: np.ndarray) -> float:
 
 
 def _layout_overlap_metrics(xy: np.ndarray) -> tuple[int, float]:
-    """Compute compatibility metrics consumed by legacy build_onestring_design."""
     def overlap(a: np.ndarray, b: np.ndarray) -> bool:
         for poly in (a, b):
             for i in range(len(poly)):
@@ -57,6 +57,28 @@ def _layout_overlap_metrics(xy: np.ndarray) -> tuple[int, float]:
     return int(count), float(area_proxy)
 
 
+def _tile_hinge_pairs_from_source_ids(source_ids: np.ndarray, tile_count: int) -> list[tuple[int, int]]:
+    """Return FlatTileLayout-compatible TILE pairs, never copied-vertex ids."""
+    incident: dict[int, set[int]] = {}
+    for q, source in enumerate(source_ids.tolist()):
+        tile_id = int(q // 4)
+        if 0 <= tile_id < tile_count:
+            incident.setdefault(int(source), set()).add(tile_id)
+
+    pairs: set[tuple[int, int]] = set()
+    for tiles in incident.values():
+        ordered = sorted(tiles)
+        # FlatTileLayout only carries pair connectivity, not local-corner ids.
+        # Connect all tiles sharing the same original M2D vertex; downstream
+        # hinge construction resolves local corners from the actual tile data.
+        for i in range(len(ordered)):
+            for j in range(i + 1, len(ordered)):
+                a, b = ordered[i], ordered[j]
+                if a != b:
+                    pairs.add((a, b))
+    return sorted(pairs)
+
+
 def _direct_layout(pipeline: Any, mesh: Any) -> Any:
     vertices = np.asarray(mesh.vertices, dtype=float)
     faces = np.asarray(mesh.faces, dtype=int)
@@ -79,15 +101,10 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
             f"got {len(source_ids)} for {len(vertices)} vertices"
         )
 
-    groups: dict[int, list[int]] = {}
-    for q, source in enumerate(source_ids.tolist()):
-        groups.setdefault(int(source), []).append(int(q))
-    hinge_pairs: list[tuple[int, int]] = []
-    for copies in groups.values():
-        if len(copies) < 2:
-            continue
-        anchor = copies[0]
-        hinge_pairs.extend((anchor, q) for q in copies[1:])
+    hinge_pairs = _tile_hinge_pairs_from_source_ids(source_ids, len(faces))
+    invalid_pairs = [(a, b) for a, b in hinge_pairs if a < 0 or b < 0 or a >= len(faces) or b >= len(faces)]
+    if invalid_pairs:
+        raise RuntimeError(f"Eq.5 bridge generated invalid tile hinge pairs: {invalid_pairs[:5]}")
 
     layout_type = getattr(pipeline, "FlatTileLayout", None)
     if layout_type is None:
@@ -98,11 +115,6 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
     xy = vertices[faces, :2].copy()
     overlap_count, overlap_area = _layout_overlap_metrics(xy)
     total_tile_area = float(sum(_polygon_area(tile) for tile in xy))
-    # The legacy pipeline unconditionally indexes exactly these four keys after
-    # _make_flat_tile_layout().  In this direct bridge, hinged tiles meet at a
-    # point by construction, so the physical minimum clearance is 0.  The gap
-    # count comes from the Eq.(5) topology builder rather than fabricated gap
-    # polygons, because this bridge deliberately does not run the old layout solve.
     gap_count = int(mesh_metrics.get("paper_eq5_physical_gap_count", mesh_metrics.get("physical_gap_count", 0)))
     metrics = {
         "source": "paper_eq5_already_independent_k2d",
@@ -110,6 +122,8 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
         "legacy_second_independentization_bypassed": True,
         "tile_count": int(len(faces)),
         "hinge_pair_count": int(len(hinge_pairs)),
+        "hinge_pair_index_space": "tile_ids",
+        "hinge_pair_max_id": int(max((max(p) for p in hinge_pairs), default=-1)),
         "tile_overlap_count": int(overlap_count),
         "min_clearance": 0.0,
         "k2d_gap_count": int(gap_count),
@@ -121,9 +135,9 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
         "input_extent_y": float(np.ptp(vertices[:, 1])) if len(vertices) else 0.0,
     }
     print(
-        f"[PAPER-EQ5-FLAT-BRIDGE] direct=True tiles={len(faces)} "
-        f"vertices={len(vertices)} hinge_pairs={len(hinge_pairs)} gaps={gap_count} "
-        f"overlaps={overlap_count} min_clearance=0 "
+        f"[PAPER-EQ5-FLAT-BRIDGE] direct=True tiles={len(faces)} vertices={len(vertices)} "
+        f"hinge_pairs={len(hinge_pairs)} hinge_pair_max_id={metrics['hinge_pair_max_id']} "
+        f"gaps={gap_count} overlaps={overlap_count} min_clearance=0 "
         f"extent={metrics['input_extent_x']:.6g}x{metrics['input_extent_y']:.6g}"
     )
     return layout_type(
@@ -136,7 +150,6 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
 
 
 def install_eq5_flat_layout_bridge() -> None:
-    """Wrap the hybrid patch's wiring so every rewire gets the direct bridge."""
     from . import lscm_latest_omega_hybrid_20260914_patch as hybrid
     if getattr(hybrid, "_eq5_flat_layout_bridge_installed", False):
         return
