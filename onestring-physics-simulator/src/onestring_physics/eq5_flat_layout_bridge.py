@@ -71,7 +71,8 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
     if not np.array_equal(faces, expected):
         raise RuntimeError("Eq.5 direct flat layout expected sequential independent face indices")
 
-    source_ids = np.asarray((getattr(mesh, "metrics", {}) or {}).get("auxetic_source_vertex_ids", []), dtype=int)
+    mesh_metrics = getattr(mesh, "metrics", {}) or {}
+    source_ids = np.asarray(mesh_metrics.get("auxetic_source_vertex_ids", []), dtype=int)
     if len(source_ids) != len(vertices):
         raise RuntimeError(
             "Eq.5 direct flat layout is missing auxetic_source_vertex_ids; "
@@ -97,6 +98,12 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
     xy = vertices[faces, :2].copy()
     overlap_count, overlap_area = _layout_overlap_metrics(xy)
     total_tile_area = float(sum(_polygon_area(tile) for tile in xy))
+    # The legacy pipeline unconditionally indexes exactly these four keys after
+    # _make_flat_tile_layout().  In this direct bridge, hinged tiles meet at a
+    # point by construction, so the physical minimum clearance is 0.  The gap
+    # count comes from the Eq.(5) topology builder rather than fabricated gap
+    # polygons, because this bridge deliberately does not run the old layout solve.
+    gap_count = int(mesh_metrics.get("paper_eq5_physical_gap_count", mesh_metrics.get("physical_gap_count", 0)))
     metrics = {
         "source": "paper_eq5_already_independent_k2d",
         "direct_from_k2d": True,
@@ -104,6 +111,9 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
         "tile_count": int(len(faces)),
         "hinge_pair_count": int(len(hinge_pairs)),
         "tile_overlap_count": int(overlap_count),
+        "min_clearance": 0.0,
+        "k2d_gap_count": int(gap_count),
+        "layout_type": "paper_eq5_direct_independent_tiles",
         "tile_overlap_area": float(overlap_area),
         "tile_total_area": float(total_tile_area),
         "tile_overlap_area_ratio": float(overlap_area / max(total_tile_area, 1e-12)),
@@ -112,8 +122,9 @@ def _direct_layout(pipeline: Any, mesh: Any) -> Any:
     }
     print(
         f"[PAPER-EQ5-FLAT-BRIDGE] direct=True tiles={len(faces)} "
-        f"vertices={len(vertices)} hinge_pairs={len(hinge_pairs)} "
-        f"overlaps={overlap_count} extent={metrics['input_extent_x']:.6g}x{metrics['input_extent_y']:.6g}"
+        f"vertices={len(vertices)} hinge_pairs={len(hinge_pairs)} gaps={gap_count} "
+        f"overlaps={overlap_count} min_clearance=0 "
+        f"extent={metrics['input_extent_x']:.6g}x{metrics['input_extent_y']:.6g}"
     )
     return layout_type(
         tile_top_vertices_2d=xy,
