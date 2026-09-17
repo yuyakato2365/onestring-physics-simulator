@@ -6,8 +6,7 @@ import numpy as np
 
 _LAST_EQ5_HISTORY=None
 
-def get_last_eq5_history():
-    return _LAST_EQ5_HISTORY
+def get_last_eq5_history(): return _LAST_EQ5_HISTORY
 
 def _angle(a,b):
     na,nb=float(np.linalg.norm(a)),float(np.linalg.norm(b))
@@ -100,23 +99,28 @@ def _project_collisions(xy,faces):
             for v in faces[j]:accum[int(v)]+=.5*mtv;counts[int(v)]+=1
     active=counts[:,0]>0;out[active]+=accum[active]/counts[active];return out,energy,collisions
 
+def _snapshot(iteration,xy,collisions=0,fab_violations=0,amin=0.,amax=0.,step=0.,**extra):
+    rec={'iteration':int(iteration),'xy':np.asarray(xy,float).copy(),'collisions':int(collisions),'fab_violations':int(fab_violations),'gap_min_deg':float(math.degrees(amin)),'gap_max_deg':float(math.degrees(amax)),'step':float(step)};rec.update(extra);return rec
+
 def optimize_paper_eq5(mesh_2d,mesh_3d,params,*,progress_callback=None,pipeline=None):
     global _LAST_EQ5_HISTORY
     start=time.perf_counter();xy0,faces,source_ids,hinge_groups,gap_pairs=_build_auxetic_topology(mesh_2d);xy=xy0.copy();centroid0=np.mean(xy0,0,keepdims=True)
     w_edge=_env_float('ONESTRING_EQ5_W_EDGE',getattr(params,'w_edge',1.));w_collision=_env_float('ONESTRING_EQ5_W_COLLISION',getattr(params,'w_collision',1.));w_fab=_env_float('ONESTRING_EQ5_W_FAB',getattr(params,'w_fab',.001));theta_deg=_env_float('ONESTRING_EQ5_THETA_MIN_DEG',5.);theta_min=float(np.clip(math.radians(theta_deg),0,.5*math.pi));iterations=max(1,_env_int('ONESTRING_EQ5_ITERATIONS',max(80,int(getattr(params,'max_2d_iterations',40))*6)))
-    history=[];_LAST_EQ5_HISTORY={'faces':faces.copy(),'snapshots':history}
+    history=[_snapshot(0,xy,initial=True)];_LAST_EQ5_HISTORY={'faces':faces.copy(),'snapshots':history,'initial_xy':xy0.copy()}
     print(f'[PAPER-EQ5-SETTINGS] w_edge={w_edge:g} w_collision={w_collision:g} w_fab={w_fab:g} theta_min_deg={theta_deg:g} iterations={iterations}')
     print(f'[PAPER-EQ5-AUXETIC] source_vertices={len(mesh_2d.vertices)} independent_vertices={len(xy)} tiles={len(faces)} hinge_groups={len(hinge_groups)} physical_gaps={len(gap_pairs)}')
     final_collisions=final_fab_violations=0;amin=amax=0.
     for it in range(iterations):
         old=xy.copy();xy=_project_hinges(xy,hinge_groups);edge_candidate,_=_project_edges(xy,faces,source_ids,mesh_3d);collision_candidate,_,final_collisions=_project_collisions(xy,faces);fab_candidate,_,final_fab_violations,amin,amax=_project_fab(xy,gap_pairs,theta_min);total=max(w_edge+w_collision+w_fab,1e-12);xy=(w_edge*edge_candidate+w_collision*collision_candidate+w_fab*fab_candidate)/total;xy=_project_hinges(xy,hinge_groups);xy+=centroid0-np.mean(xy,0,keepdims=True);step=float(np.max(np.linalg.norm(xy-old,axis=1))) if len(xy) else 0.
-        if (it+1)%10==0:history.append({'iteration':it+1,'xy':xy.copy(),'collisions':int(final_collisions),'fab_violations':int(final_fab_violations),'gap_min_deg':float(math.degrees(amin)),'gap_max_deg':float(math.degrees(amax)),'step':step})
+        if (it+1)%10==0:history.append(_snapshot(it+1,xy,final_collisions,final_fab_violations,amin,amax,step))
         if it==0 or (it+1)%max(1,iterations//8)==0 or it+1==iterations:print(f'[PAPER-EQ5-K2D-ITER] iter={it+1} collisions={final_collisions} fab_violations={final_fab_violations} gap_min_deg={math.degrees(amin):.4g} gap_max_deg={math.degrees(amax):.4g} step={step:.6g}')
         if progress_callback is not None and (it%max(1,iterations//30)==0 or it+1==iterations):
             try:progress_callback('Paper Eq.5 auxetic K2D',(it+1)/iterations,f'iter {it+1}/{iterations}; physical_gaps={len(gap_pairs)}; fab={final_fab_violations}')
             except Exception:pass
         if step<1e-9:break
-    if not history or history[-1]['iteration']!=it+1:history.append({'iteration':it+1,'xy':xy.copy(),'collisions':int(final_collisions),'fab_violations':int(final_fab_violations),'gap_min_deg':float(math.degrees(amin)),'gap_max_deg':float(math.degrees(amax)),'step':step,'final':True})
+    if history[-1]['iteration']!=it+1:history.append(_snapshot(it+1,xy,final_collisions,final_fab_violations,amin,amax,step,final=True))
+    else:history[-1]['final']=True
+    _LAST_EQ5_HISTORY['final_xy']=xy.copy()
     _,edge_energy=_project_edges(xy,faces,source_ids,mesh_3d);_,collision_energy,final_collisions=_project_collisions(xy,faces);_,fab_energy,final_fab_violations,amin,amax=_project_fab(xy,gap_pairs,theta_min);edge_mean=math.sqrt(max(0.,edge_energy)/max(1,4*len(faces)));vertices=np.column_stack([xy,np.zeros(len(xy))]);metrics=dict(getattr(mesh_2d,'metrics',{}) or {});metrics.update({'objective':'E_Flat = w1*EEdge + w2*ECollision + w3*EFab on adjacency-derived auxetic gaps','paper_eq5_unified':True,'paper_eq5_auxetic_topology':True,'paper_eq5_fab_topology_verified':False,'paper_weight_w1_edge':w_edge,'paper_weight_w2_collision':w_collision,'paper_weight_w3_fab':w_fab,'paper_fab_theta_min_rad':theta_min,'paper_fab_theta_max_rad':.5*math.pi,'paper_fab_gap_constraint_count':len(gap_pairs),'paper_fab_violation_count':final_fab_violations,'paper_fab_gap_min_deg':math.degrees(amin),'paper_fab_gap_max_deg':math.degrees(amax),'paper_fab_projection_energy':fab_energy,'paper_collision_projection_energy':collision_energy,'collision_count_after':final_collisions,'2d_collision_count':final_collisions,'edge_matching_error':edge_mean,'optimizer_iterations':it+1,'actual_backend':'numpy_auxetic_adjacency_projective_eq5','auxetic_source_vertex_ids':source_ids.tolist(),'auxetic_source_face_count':len(mesh_2d.faces),'eq5_history_snapshot_count':len(history)})
     out=type(mesh_2d)(vertices,faces.copy(),mesh_2d.grid,'K2D',metrics,list(getattr(mesh_2d,'split_lines',[])));report_type=getattr(pipeline,'StageReport',None) if pipeline is not None else None
     if report_type is None and pipeline is not None:report_type=getattr(getattr(pipeline,'_original',None),'StageReport',None)
