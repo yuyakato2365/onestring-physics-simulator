@@ -12,16 +12,16 @@ if str(SRC) not in sys.path:
 
 from onestring_physics.paper_ui_20260916_patch import install_paper_ui_20260916_patch
 from onestring_physics.eq5_iteration_history_view import render_eq5_iteration_history, render_final_k2d_result
+from onestring_physics.final_k2d_view_stage_patch import install_final_k2d_view_stage_patch
 
 import streamlit as st
 st.session_state["eq5_rendered_this_run"] = False
 install_paper_ui_20260916_patch()
+install_final_k2d_view_stage_patch()
 runpy.run_path(str(ROOT / "app_optcuts_core_20260916.py"), run_name="__main__")
 
-# The legacy main K2D renderer expects the old independent-tile FlatTileLayout
-# and can be empty for the reconstructed Eq.(5) topology.  Keep numerics and all
-# downstream stages untouched; only add a final-result view backed directly by
-# the solved Eq.(5) xy stored in this Streamlit session.
+# Keep a final-result fallback for fresh runs where the View-stage selector was
+# evaluated before the current Eq.(5) history became available.
 try:
     if st.session_state.get("eq5_history"):
         render_final_k2d_result(st)
