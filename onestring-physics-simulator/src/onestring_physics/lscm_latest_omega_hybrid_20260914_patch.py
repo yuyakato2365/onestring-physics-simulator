@@ -7,8 +7,22 @@ import os
 from typing import Any
 
 from .paper_eq5_k2d_solver import optimize_paper_eq5
+from .paper_local_global_solvers import (
+    optimize_paper_local_global_k3d,
+    optimize_paper_local_global_k2d,
+)
 
 MODE = "lscm_latest_omega_hard_k3d"
+PAPER_LG_MODE = "optcuts_paper_local_global_k3d_k2d"
+PAPER_LG_VERSION_ID = "2026-09-18-paper-local-global-k3d-k2d"
+PAPER_LG_VERSION_LABEL = "2026-09-18 — Paper-aligned local/global K3D + K2D"
+PAPER_LG_OMEGA_LABEL = "2026-09-18 | OptCuts Ω + paper-aligned local/global K3D/K2D"
+PAPER_LG_DESCRIPTION = (
+    "Ω/M2Dまでは現在のOptCuts系を維持し、M3D→K3DをEq.(1)のprojection local/global、"
+    "M2D→K2DをEq.(5)のprojection local/globalで解く比較用実装。"
+    "collisionはSAT侵入深さpenaltyではなくminimum separating translationをlocal projectionとして使用。"
+    "Konakovic et al.のreference実装そのものとは主張しない。"
+)
 VERSION_ID = "2026-09-17-paper-eq5-unified-k2d"
 VERSION_LABEL = "2026-09-17 — auxetic paper Eq.5 K2D + latest Ω/K3D"
 OMEGA_LABEL = "2026-09-17 | auxetic paper Eq.5 K2D + latest Ω/K3D"
@@ -20,6 +34,14 @@ VERSION_DESCRIPTION = (
 
 def _active(params: Any) -> bool:
     return str(getattr(params, "omega_parameterization_mode", "")) == MODE
+
+
+def _paper_lg_active(params: Any) -> bool:
+    return str(getattr(params, "omega_parameterization_mode", "")) == PAPER_LG_MODE
+
+
+def _hybrid_active(params: Any) -> bool:
+    return _active(params) or _paper_lg_active(params)
 
 
 def _clone_params(params: Any, **updates: Any) -> Any:
@@ -82,24 +104,32 @@ def _install_selector_patch() -> None:
             if len(args)>=2:
                 options=list(args[1])
                 if not any(isinstance(v,dict) and v.get("id")==VERSION_ID for v in options): options.append({"id":VERSION_ID,"label":VERSION_LABEL,"description":VERSION_DESCRIPTION})
+                if not any(isinstance(v,dict) and v.get("id")==PAPER_LG_VERSION_ID for v in options): options.append({"id":PAPER_LG_VERSION_ID,"label":PAPER_LG_VERSION_LABEL,"description":PAPER_LG_DESCRIPTION})
                 kwargs={**kwargs,"index":len(options)-1}; args=(args[0],options,*args[2:])
             elif "options" in kwargs:
                 options=list(kwargs["options"])
                 if not any(isinstance(v,dict) and v.get("id")==VERSION_ID for v in options): options.append({"id":VERSION_ID,"label":VERSION_LABEL,"description":VERSION_DESCRIPTION})
+                if not any(isinstance(v,dict) and v.get("id")==PAPER_LG_VERSION_ID for v in options): options.append({"id":PAPER_LG_VERSION_ID,"label":PAPER_LG_VERSION_LABEL,"description":PAPER_LG_DESCRIPTION})
                 kwargs={**kwargs,"options":options,"index":len(options)-1}
         if label=="Omega parameterization mode":
             if len(args)>=2:
                 options=list(args[1])
                 if OMEGA_LABEL not in options: options.append(OMEGA_LABEL)
-                kwargs={**kwargs,"index":options.index(OMEGA_LABEL)}; args=(args[0],options,*args[2:])
+                if PAPER_LG_OMEGA_LABEL not in options: options.append(PAPER_LG_OMEGA_LABEL)
+                kwargs={**kwargs,"index":options.index(PAPER_LG_OMEGA_LABEL)}; args=(args[0],options,*args[2:])
             elif "options" in kwargs:
                 options=list(kwargs["options"])
                 if OMEGA_LABEL not in options: options.append(OMEGA_LABEL)
-                kwargs={**kwargs,"options":options,"index":options.index(OMEGA_LABEL)}
+                if PAPER_LG_OMEGA_LABEL not in options: options.append(PAPER_LG_OMEGA_LABEL)
+                kwargs={**kwargs,"options":options,"index":options.index(PAPER_LG_OMEGA_LABEL)}
         selected=original_selectbox(*args,**kwargs)
         if label=="Omega parameterization mode" and selected==OMEGA_LABEL:
             _render_eq5_controls(st)
             return MODE
+        if label=="Omega parameterization mode" and selected==PAPER_LG_OMEGA_LABEL:
+            _render_eq5_controls(st)
+            st.caption("Paper-aligned mode: K3D/K2Dとも Local projection（局所射影）→ Global least-squares（大域最小二乗）を反復します。")
+            return PAPER_LG_MODE
         return selected
     st.selectbox=selectbox_with_hybrid; st._onestring_lscm_latest_omega_hybrid_selector_installed=True
 
@@ -109,17 +139,20 @@ def install_lscm_latest_omega_hybrid_patch(pipeline: Any, *, lscm_build_m2d: Any
     latest_parameterization=pipeline._build_surface_parameterization; latest_k3d=pipeline._optimize_k3d
     def make_dispatches(*,fallback_parameterization:Any,fallback_m2d:Any,fallback_k3d:Any,fallback_k2d:Any,fallback_flat_layout:Any):
         def parameterization_dispatch(surface,target,grid,params):
-            if not _active(params): return fallback_parameterization(surface,target,grid,params)
+            if not _hybrid_active(params): return fallback_parameterization(surface,target,grid,params)
             latest_params=_clone_params(params,omega_parameterization_mode="optcuts_test"); result=latest_parameterization(surface,target,grid,latest_params)
             try:
-                result.method=MODE; result.metrics.update({"version_id":VERSION_ID,"hybrid_stage_s_to_omega":"current latest OptCuts-test Omega","hybrid_stage_m2d":"common shared-vertex M2D","hybrid_stage_k3d":"current latest OptCuts-test2 K3D stack","hybrid_stage_k2d":"pairwise corner linkage + directly minimized Eq.5 terms"})
+                result.method=(PAPER_LG_MODE if _paper_lg_active(params) else MODE)
+                result.metrics.update({"version_id":(PAPER_LG_VERSION_ID if _paper_lg_active(params) else VERSION_ID),"hybrid_stage_s_to_omega":"current latest OptCuts-test Omega","hybrid_stage_m2d":"common shared-vertex M2D","hybrid_stage_k3d":("paper-aligned Eq.1 projection local/global" if _paper_lg_active(params) else "current latest OptCuts-test2 K3D stack"),"hybrid_stage_k2d":("paper-aligned Eq.5 projection local/global" if _paper_lg_active(params) else "pairwise corner linkage + directly minimized Eq.5 terms")})
             except Exception: pass
             return result
         def m2d_dispatch(grid,domain,params=None):
-            if params is None or not _active(params): return fallback_m2d(grid,domain,params)
+            if params is None or not _hybrid_active(params): return fallback_m2d(grid,domain,params)
             return lscm_build_m2d(grid,domain,params)
         def k3d_dispatch(target,mesh,parameterization,params):
-            if not _active(params): return fallback_k3d(target,mesh,parameterization,params)
+            if not _hybrid_active(params): return fallback_k3d(target,mesh,parameterization,params)
+            if _paper_lg_active(params):
+                return optimize_paper_local_global_k3d(target,mesh,parameterization,params,pipeline=pipeline)
             previous=os.environ.get("ONESTRING_OPTCUTS_TEST_VARIANT")
             try:
                 os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"]="2"; return latest_k3d(target,mesh,parameterization,_clone_params(params,omega_parameterization_mode="optcuts_test"))
@@ -127,7 +160,12 @@ def install_lscm_latest_omega_hybrid_patch(pipeline: Any, *, lscm_build_m2d: Any
                 if previous is None: os.environ.pop("ONESTRING_OPTCUTS_TEST_VARIANT",None)
                 else: os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"]=previous
         def k2d_dispatch(mesh_2d,mesh_3d,params,progress_callback=None):
-            if not _active(params): return fallback_k2d(mesh_2d,mesh_3d,params,progress_callback=progress_callback)
+            if not _hybrid_active(params): return fallback_k2d(mesh_2d,mesh_3d,params,progress_callback=progress_callback)
+            if _paper_lg_active(params):
+                result, report = optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,progress_callback=progress_callback,pipeline=pipeline)
+                from .eq5_iteration_history_view import render_completed_k2d
+                render_completed_k2d(result.eq5_history)
+                return result, report
             result, report = optimize_paper_eq5(mesh_2d,mesh_3d,params,progress_callback=progress_callback,pipeline=pipeline)
             from .eq5_iteration_history_view import render_completed_k2d
             render_completed_k2d(result.eq5_history)
@@ -160,4 +198,4 @@ def install_deferred_hybrid_hook(pipeline: Any) -> None:
     acceleration_module.install_optcuts_test2_acceleration_patch=install_acceleration_then_hybrid; pipeline._onestring_lscm_hybrid_deferred_hook_installed=True
 
 
-__all__=["MODE","OMEGA_LABEL","VERSION_ID","VERSION_LABEL","install_deferred_hybrid_hook","install_lscm_latest_omega_hybrid_patch"]
+__all__=["MODE","OMEGA_LABEL","VERSION_ID","VERSION_LABEL","PAPER_LG_MODE","PAPER_LG_OMEGA_LABEL","PAPER_LG_VERSION_ID","PAPER_LG_VERSION_LABEL","install_deferred_hybrid_hook","install_lscm_latest_omega_hybrid_patch"]
