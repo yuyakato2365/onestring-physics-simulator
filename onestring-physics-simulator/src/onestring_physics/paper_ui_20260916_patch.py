@@ -34,7 +34,10 @@ def _figure():
  with _LOCK:
   if _THREAD is None or not _THREAD.is_alive():_THREAD=threading.Thread(target=_load,daemon=True);_THREAD.start()
  return None
-BOX={"S":(2.0,5.0,14.5,40.0),"Omega":(5.0,50.0,10.0,38.0),"M2D":(20.0,51.0,18.0,36.0),"M3D":(20.0,5.0,17.0,40.0),"K3D":(40.5,5.0,16.5,40.0),"T3D":(61.0,5.0,16.0,40.0),"K2D":(40.0,50.0,18.0,38.0),"T2D Top":(60.0,49.0,19.0,40.0),"T2D Dual":(83.0,49.0,16.0,40.0),"Hinge":(83.0,49.0,16.0,40.0)}
+# Percentages of the rendered Figure-5 crop (left, top, width, height).
+# Calibrated against the panel bounding boxes measured on the cropped figure so
+# each frame is centered on its stage instead of sitting right of it.
+BOX={"S":(0.6,1.5,14.8,36.5),"Omega":(4.3,48.0,8.0,41.0),"M2D":(19.5,48.0,14.7,41.0),"M3D":(18.3,1.5,13.6,36.5),"K3D":(39.1,1.5,13.6,36.5),"T3D":(60.0,1.5,13.3,36.5),"K2D":(37.7,48.0,15.8,41.0),"T2D Top":(58.5,48.0,17.4,41.0),"T2D Dual":(81.3,48.0,17.4,41.0),"Hinge":(81.3,48.0,17.4,41.0)}
 VIEW={"S":"S","Omega":"Omega","M2D":"M2D","M3D":"M3D","K3D":"K3D","T3D":"T3D","K2D":"K2D","T2D Top":"T2D Top","T2D Dual":"T2D Dual","T2D":"T2D Dual","Split Map":"M2D"}
 def _stage(v,text):
  try:p=float(v);p=p/100 if p>1 else p
@@ -52,7 +55,10 @@ def _fig(data,a,q):
  if a in BOX:
   x,y,w,h=BOX[a];deg=max(0,min(1,float(q or 0)))*360
   ov=f"<div class='os-hi' style='left:{x}%;top:{y}%;width:{w}%;height:{h}%;--p:{deg}deg'><i></i></div>"
- return f"<div class='os-f5'><img src='{uri}'>{ov}</div>"
+ # The overlay must be positioned against the image box itself.  When it is a
+ # child of the padded card, percentage offsets resolve against the padding box
+ # and the frame drifts sideways relative to the figure.
+ return f"<div class='os-f5'><div class='os-f5-img'><img src='{uri}'>{ov}</div></div>"
 def _render(st,caption,a="",q=0):
  d=_figure()
  if d is None:st.markdown("<div class='os-loading'>Figure 5 preparing… <small>calculation continues</small></div>",unsafe_allow_html=True)
@@ -62,15 +68,22 @@ def install_paper_ui_20260916_patch():
  try:import streamlit as st
  except Exception:return
  def unwrap(fn):return getattr(fn,"_onestring_base",fn)
- md=unwrap(st.markdown);hdr=unwrap(st.header);sub0=getattr(st,"subheader",None);sub=unwrap(sub0) if callable(sub0) else None;sel0=unwrap(st.selectbox);prog0=unwrap(st.progress)
- st.markdown=md;st.header=hdr;st.selectbox=sel0;st.progress=prog0
+ md=unwrap(st.markdown);hdr=unwrap(st.header);sub0=getattr(st,"subheader",None);sub=unwrap(sub0) if callable(sub0) else None;prog0=unwrap(st.progress)
+ # Streamlit reruns this installer in the same process.  The other launchers wrap
+ # st.selectbox without a _onestring_base marker, so unwrap() cannot see past
+ # them: re-wrapping here stacked a second Figure-5 overlay on every rerun and
+ # flipped the wrapper order.  Capture the real selectbox once, wrap once, and
+ # stay innermost so the emitted element order is identical on every rerun.
+ if getattr(st,"_onestring_paper_ui_selectbox_base",None) is None:st._onestring_paper_ui_selectbox_base=unwrap(st.selectbox)
+ sel0=st._onestring_paper_ui_selectbox_base
+ st.markdown=md;st.header=hdr;st.progress=prog0
  if callable(sub):st.subheader=sub
  for n in ("number_input","slider","checkbox","toggle","text_input"):
   b=getattr(st,n,None)
   if callable(b):setattr(st,n,unwrap(b))
  md("""<style>
 section[data-testid=stSidebar] .os-eq-card{padding:12px 13px;margin:6px 0 14px;border:1px solid rgba(70,110,160,.22);border-radius:14px;background:rgba(240,246,253,.68)}.os-eq-top{display:flex;justify-content:space-between;font-size:11px}.os-eq-top em{font-style:normal;font-size:9px;opacity:.65}.os-eq{font-family:Georgia,serif;font-size:16px;line-height:1.5;margin:8px 0}.os-eq b{color:#1672d4}.os-eq-map{font-size:11px;opacity:.7}
-.os-f5{position:relative;width:100%;padding:8px;border:1px solid rgba(120,130,145,.18);border-radius:18px;background:rgba(245,248,252,.75);box-sizing:border-box}.os-f5 img{width:100%;display:block;border-radius:11px}
+.os-f5{width:100%;padding:8px;border:1px solid rgba(120,130,145,.18);border-radius:18px;background:rgba(245,248,252,.75);box-sizing:border-box}.os-f5-img{position:relative;display:block;width:100%;line-height:0}.os-f5 img{width:100%;display:block;border-radius:11px}
 /* Base ring is static gray. Only the completed arc in i is blue and animated. */
 .os-hi{position:absolute;box-sizing:border-box;border:4px solid rgba(151,164,181,.30);border-radius:14px;pointer-events:none;transition:left .45s ease,top .45s ease,width .45s ease,height .45s ease}
 .os-hi i{position:absolute;inset:-4px;box-sizing:border-box;border-radius:14px;padding:4px;background:linear-gradient(105deg,rgba(35,133,235,.98),rgba(135,207,255,.96),rgba(48,151,255,.98),rgba(205,236,255,.98),rgba(35,133,235,.98));background-size:320% 100%;animation:os-wave 2.6s ease-in-out infinite;filter:drop-shadow(0 0 5px rgba(35,145,255,.35));-webkit-mask:conic-gradient(from -90deg,#000 0 var(--p),transparent var(--p) 360deg),linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:source-in,xor;mask:conic-gradient(from -90deg,#000 0 var(--p),transparent var(--p) 360deg),linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:intersect,exclude;transition:-webkit-mask .65s cubic-bezier(.22,.61,.36,1),mask .65s cubic-bezier(.22,.61,.36,1)}
@@ -103,7 +116,8 @@ section[data-testid=stSidebar] .os-eq-card{padding:12px 13px;margin:6px 0 14px;b
   if str(label)=="View stage":
    s=VIEW.get(str(val),"");_render(st,"Original Figure 5 · blue frame = displayed stage",s,1 if s else 0)
   return val
- select._onestring_base=sel0;st.selectbox=select
+ select._onestring_base=sel0
+ if not getattr(st,"_onestring_paper_ui_selectbox_wrapped",False):st.selectbox=select;st._onestring_paper_ui_selectbox_wrapped=True
  owner={"taken":False}
  class P:
   def __init__(self,b,p):self.b=b;self.p=p
