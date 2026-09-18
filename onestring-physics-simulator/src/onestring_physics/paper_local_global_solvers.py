@@ -219,6 +219,21 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         k3d_surface_residual=records[-1]["ESurface"] if records else 0.,
         paper_alignment_note="Explicit PP/PQ/PS local projections and sparse global least-squares. Surface projection uses closest triangle among KD-tree candidates."
     )
+    if not np.all(np.isfinite(x)):
+        raise RuntimeError("Paper local/global K3D produced non-finite vertices")
+    # Guard against the unconstrained global least-squares null mode collapsing
+    # or exploding the whole K3D. Translation is fixed by recentering to M3D;
+    # scale is not altered because edge/square constraints determine it.
+    source_center=np.asarray(mesh.vertices,float).mean(axis=0)
+    solved_center=x.mean(axis=0)
+    x=x+(source_center-solved_center)
+    span=np.ptp(x,axis=0)
+    source_span=np.ptp(np.asarray(mesh.vertices,float),axis=0)
+    if float(np.linalg.norm(span)) < 1e-10*max(float(np.linalg.norm(source_span)),1.0):
+        raise RuntimeError("Paper local/global K3D collapsed to a near-point configuration")
+    metrics["k3d_bbox_span"]=[float(v) for v in span]
+    metrics["k3d_vertex_min"]=[float(v) for v in np.min(x,axis=0)]
+    metrics["k3d_vertex_max"]=[float(v) for v in np.max(x,axis=0)]
     out=type(mesh)(x,faces.copy(),mesh.grid,"K3D",metrics,list(getattr(mesh,"split_lines",[])))
     report_type=getattr(pipeline,"StageReport",None)
     if report_type is None: raise RuntimeError("paper K3D requires StageReport")
