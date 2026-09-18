@@ -5565,6 +5565,16 @@ def _extrude_tiles_variable_topology(mesh, thickness: float, stage: str):
 
 
 def _extrude_tiles(mesh, thickness: float, stage: str):
+    """Extrude K3D tiles using either the paper route or legacy miter route.
+
+    The paper-aligned K3D/K2D experimental mode must also use the paper's
+    K3D->T3D construction: offset the shared K3D mesh along vertex normals,
+    then apply Eq.(2) face-planarity optimization to top/bottom/contact faces.
+    """
+    if str(getattr(mesh, "metrics", {}).get("k3d_solver_model", "")) == "paper_aligned_projection_local_global":
+        from .paper_extrusion import extrude_paper_face_planarity
+        return extrude_paper_face_planarity(mesh, thickness, stage, _original)
+
     """Extrude K3D tiles using shared-edge miter/contact planes.
 
     Previous behavior:
