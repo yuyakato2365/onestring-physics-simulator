@@ -294,8 +294,29 @@ def optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,*,progress_callback=N
             ang=math.degrees(math.atan2(abs(_cross2(u,v)),np.dot(u,v)))
             amin=min(amin,ang);amax=max(amax,ang)
             fab+=int(ang<math.degrees(theta)-1e-5 or ang>90.+1e-5)
-        row=dict(iteration=it+1,step=step,collisions=len(collision_pairs),fab_violations=fab,
-                 gap_min_deg=amin if len(topology.gaps) else 0.,gap_max_deg=amax)
+        edge_sq=0.0; edge_abs=[]
+        for a,b in edges:
+            err=float(np.linalg.norm(x[b]-x[a])-target_len[(int(a),int(b))])
+            edge_sq+=err*err; edge_abs.append(abs(err))
+        fab_energy=0.0
+        if len(topology.gaps):
+            cc=topology.gaps[:,0]; aa=topology.gaps[:,1]; bb=topology.gaps[:,2]
+            va=x[aa]-x[cc]; vb=x[bb]-x[cc]
+            pa,pb,_=project_angle_vectors(va,vb,theta)
+            fab_energy=float(np.sum((va-pa)**2)+np.sum((vb-pb)**2))
+        # ECollision is reported as the squared local projection displacement.
+        collision_projection_energy=0.0
+        for a,b in collision_pairs:
+            shift=_sat_projection(x[faces[a]],x[faces[b]])
+            if shift is not None:
+                collision_projection_energy += 8.0*float(np.dot(shift,shift))
+        eflat=w_edge*edge_sq+w_col*collision_projection_energy+w_fab*fab_energy
+        row=dict(iteration=it+1,step=step,EFlat=eflat,EEdge=edge_sq,
+                 ECollision=collision_projection_energy,EFab=fab_energy,
+                 collisions=len(collision_pairs),fab_violations=fab,
+                 gap_min_deg=amin if len(topology.gaps) else 0.,gap_max_deg=amax,
+                 edge_rms=math.sqrt(edge_sq/max(len(edges),1)),
+                 edge_mean=float(np.mean(edge_abs)) if edge_abs else 0.)
         records.append(row)
         if it==0 or (it+1)%10==0: snapshots.append(dict(row,xy=x.copy()))
         if progress_callback:
@@ -313,6 +334,8 @@ def optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,*,progress_callback=N
     final=dict(final,collisions=final_collisions)
     snapshots.append(dict(final,xy=x.copy(),final=True))
     history=dict(faces=faces.copy(),snapshots=snapshots,records=records,initial_xy=np.asarray(mesh_2d.vertices,float)[topology.source_vertex_ids,:2].copy(),final_xy=x.copy(),solver_message="paper-aligned local/global")
+    if snapshots:
+        snapshots[0]["initial"]=True
     metrics=dict(getattr(mesh_2d,"metrics",{}))
     metrics.update(final,
         objective="EFlat = w1*EEdge + w2*ECollision + w3*EFab (projection local/global)",
