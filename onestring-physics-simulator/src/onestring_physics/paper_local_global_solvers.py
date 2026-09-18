@@ -94,9 +94,24 @@ def _closest_point_triangle(p,a,b,c):
     return a+ab*v+ac*w
 
 
-def _surface_project(points,target):
-    tv=np.asarray(target.vertices,float)
-    tf=np.asarray(target.faces,int)
+def _surface_project(points,target,parameterization=None):
+    """Closest-point projection onto the actual input surface mesh.
+
+    The pipeline's target is normally a HeightField (it has no vertices/faces).
+    SurfaceParameterization, however, carries the exact source surface mesh used
+    by the pipeline. Prefer it, and only accept target.vertices/faces for callers
+    that explicitly provide a mesh target.
+    """
+    if parameterization is not None:
+        tv=np.asarray(parameterization.surface_vertices_3d,float)
+        tf=np.asarray(parameterization.surface_faces,int)
+    elif hasattr(target,"vertices") and hasattr(target,"faces"):
+        tv=np.asarray(target.vertices,float)
+        tf=np.asarray(target.faces,int)
+    else:
+        raise TypeError("Surface projection requires SurfaceParameterization.surface_vertices_3d/surface_faces")
+    if tf.ndim != 2 or tf.shape[1] < 3 or len(tf)==0:
+        raise ValueError("Target surface mesh must contain triangles")
     tris=tv[tf[:,:3]]
     centers=tris.mean(axis=1)
     try:
@@ -183,14 +198,14 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
             t=edge_target[(int(a),int(b))]*d/ln
             constraints.append(([int(a),int(b)],[-1.,1.],t,w_square))
         # P_S: closest point on target surface.
-        ps=_surface_project(x,target)
+        ps=_surface_project(x,target,parameterization)
         for i,p in enumerate(ps):
             constraints.append(([i],[1.],p,w_surface))
         new=_solve_constraints(len(x),3,constraints,anchor=x,anchor_weight=1e-9)
         step=float(np.linalg.norm(new-x)/max(math.sqrt(len(x)),1.))
         x=new
         planar=float(np.mean([np.linalg.norm(x[f]-_best_fit_plane_projection(x[f]))**2 for f in faces]))
-        surface=float(np.mean(np.sum((x-_surface_project(x,target))**2,axis=1)))
+        surface=float(np.mean(np.sum((x-_surface_project(x,target,parameterization))**2,axis=1)))
         records.append(dict(iteration=it+1,step=step,EPlanar=planar,ESurface=surface))
         if step<1e-8: break
 
