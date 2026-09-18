@@ -1568,7 +1568,10 @@ elif view_stage == "Mode Comparison":
                 }
             )
 elif view_stage in {"M2D", "K3D"}:
-    mesh = {"M2D": state.mesh_2d_initial, "M3D": state.mesh_3d_initial, "K3D": state.mesh_3d_optimized}[view_stage]
+    mesh = {"M2D": state.mesh_2d_initial, "K3D": state.mesh_3d_optimized}[view_stage]
+    if view_stage == "K3D":
+        st.subheader("K3D")
+        st.caption("M3D → K3D optimization の最終結果を表示しています。")
     st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")
     st.write(mesh.metrics)
 elif view_stage == "M3D":
