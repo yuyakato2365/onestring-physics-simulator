@@ -459,8 +459,22 @@ def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
 
 def figure_quad_mesh(mesh: QuadMesh, title: str | None = None, show_csf: bool = False) -> go.Figure:
     fig = go.Figure()
-    color = "#3b82f6" if mesh.vertices.shape[1] == 3 and np.ptp(mesh.vertices[:, 2]) > 1e-8 else "#14b8a6"
-    _add_quad_mesh_surface(fig, mesh.vertices, mesh.faces, color=color, opacity=0.72, name=mesh.stage)
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    faces = np.asarray(mesh.faces, dtype=int)
+    if vertices.ndim != 2 or vertices.shape[1] < 3 or len(vertices) == 0:
+        raise ValueError(f"{mesh.stage} visualization requires nonempty Nx3 vertices, got {vertices.shape}")
+    if not np.all(np.isfinite(vertices)):
+        bad = int(np.size(vertices) - np.count_nonzero(np.isfinite(vertices)))
+        raise ValueError(f"{mesh.stage} contains {bad} non-finite coordinate values")
+    if faces.ndim != 2 or faces.shape[1] != 4 or len(faces) == 0:
+        raise ValueError(f"{mesh.stage} visualization requires nonempty quad faces, got {faces.shape}")
+    if np.min(faces) < 0 or np.max(faces) >= len(vertices):
+        raise ValueError(f"{mesh.stage} face indices are outside the vertex array")
+    span = np.ptp(vertices[:, :3], axis=0)
+    if float(np.linalg.norm(span)) <= 1e-12:
+        raise ValueError(f"{mesh.stage} geometry is collapsed; bbox span={span.tolist()}")
+    color = "#3b82f6" if np.ptp(vertices[:, 2]) > 1e-8 else "#14b8a6"
+    _add_quad_mesh_surface(fig, vertices, faces, color=color, opacity=0.72, name=mesh.stage)
     if show_csf:
         fig.add_trace(
             go.Scatter3d(
