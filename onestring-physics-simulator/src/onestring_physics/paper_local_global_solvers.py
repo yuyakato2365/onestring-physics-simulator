@@ -1,0 +1,335 @@
+"""Paper-aligned local/global solvers for OneString Sec. 4.2 and 4.3.
+
+This module intentionally keeps the OptCuts/M2D front-end unchanged and replaces
+only M3D->K3D and M2D->K2D.
+
+Important fidelity note:
+- K3D uses explicit local projections for planarity, square/edge length, and
+  closest-point-to-target-surface, followed by a sparse global least-squares step.
+- K2D uses explicit edge/fabrication/non-penetration projections followed by a
+  sparse global least-squares step.
+- The paper cites Konakovic et al. for non-penetration. Their implementation
+  details are not fully specified in OneString; here the closest separating
+  translation of convex quads is computed with SAT and used AS A PROJECTION.
+  This is materially different from the older SAT-depth penalty: collision is
+  not differentiated as an energy; it produces projected collision-free targets.
+"""
+from __future__ import annotations
+
+import math
+import os
+import time
+from dataclasses import dataclass
+import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import lsqr
+
+from .paper_eq5_k2d_solver import build_linkage_topology, project_angle_vectors
+
+
+def _env_float(name, default):
+    try:
+        x=float(os.environ.get(name, default))
+        return x if np.isfinite(x) else float(default)
+    except Exception:
+        return float(default)
+
+
+def _env_int(name, default):
+    try: return max(1, int(float(os.environ.get(name, default))))
+    except Exception: return int(default)
+
+
+def _edges(faces):
+    f=np.asarray(faces,int)
+    e=np.vstack((f[:,[0,1]],f[:,[1,2]],f[:,[2,3]],f[:,[3,0]]))
+    return np.unique(np.sort(e,axis=1),axis=0)
+
+
+def _best_fit_plane_projection(q):
+    c=q.mean(axis=0)
+    _,_,vt=np.linalg.svd(q-c,full_matrices=False)
+    n=vt[-1]
+    return q-np.outer((q-c)@n,n)
+
+
+def _closest_square_projection(q):
+    """Similarity-fit a square in the quad best-fit plane, preserving winding."""
+    planar=_best_fit_plane_projection(q)
+    c=planar.mean(axis=0)
+    _,_,vt=np.linalg.svd(planar-c,full_matrices=False)
+    basis=vt[:2].T
+    p=(planar-c)@basis
+    template=np.array([[-1.,-1.],[1.,-1.],[1.,1.],[-1.,1.]])
+    # Orthogonal Procrustes + uniform scale.
+    h=template.T@p
+    u,_,v=np.linalg.svd(h)
+    r=u@v
+    if np.linalg.det(r)<0:
+        u[:,-1]*=-1; r=u@v
+    tr=template@r
+    scale=float(np.sum(tr*p)/max(np.sum(tr*tr),1e-30))
+    return c+(scale*tr)@basis.T
+
+
+def _closest_point_triangle(p,a,b,c):
+    # Ericson region tests.
+    ab=b-a; ac=c-a; ap=p-a
+    d1=np.dot(ab,ap); d2=np.dot(ac,ap)
+    if d1<=0 and d2<=0: return a
+    bp=p-b; d3=np.dot(ab,bp); d4=np.dot(ac,bp)
+    if d3>=0 and d4<=d3: return b
+    vc=d1*d4-d3*d2
+    if vc<=0 and d1>=0 and d3<=0:
+        v=d1/(d1-d3); return a+v*ab
+    cp=p-c; d5=np.dot(ab,cp); d6=np.dot(ac,cp)
+    if d6>=0 and d5<=d6: return c
+    vb=d5*d2-d1*d6
+    if vb<=0 and d2>=0 and d6<=0:
+        w=d2/(d2-d6); return a+w*ac
+    va=d3*d6-d5*d4
+    if va<=0 and (d4-d3)>=0 and (d5-d6)>=0:
+        w=(d4-d3)/((d4-d3)+(d5-d6)); return b+w*(c-b)
+    denom=1.0/max(va+vb+vc,1e-30); v=vb*denom; w=vc*denom
+    return a+ab*v+ac*w
+
+
+def _surface_project(points,target):
+    tv=np.asarray(target.vertices,float)
+    tf=np.asarray(target.faces,int)
+    tris=tv[tf[:,:3]]
+    centers=tris.mean(axis=1)
+    try:
+        from scipy.spatial import cKDTree
+        tree=cKDTree(centers)
+        k=min(32,len(tris))
+        _,idx=tree.query(points,k=k)
+        idx=np.asarray(idx,int)
+        if idx.ndim==1: idx=idx[:,None]
+    except Exception:
+        idx=np.tile(np.arange(len(tris)),(len(points),1))
+    out=np.empty_like(points)
+    for i,p in enumerate(points):
+        best=None; bd=np.inf
+        for tid in np.atleast_1d(idx[i]):
+            a,b,c=tris[int(tid)]
+            q=_closest_point_triangle(p,a,b,c)
+            d=float(np.dot(q-p,q-p))
+            if d<bd: bd=d; best=q
+        out[i]=best
+    return out
+
+
+def _solve_constraints(n,dim,constraints,anchor=None,anchor_weight=1e-8):
+    """Solve sum w ||A x-b||^2. Constraint=(ids, coeffs, target, weight)."""
+    rows=[]; cols=[]; data=[]; rhs=[]; row=0
+    for ids,coeff,target,weight in constraints:
+        sw=math.sqrt(max(float(weight),0.0))
+        if sw==0: continue
+        target=np.asarray(target,float).reshape(dim)
+        for d in range(dim):
+            for vid,coef in zip(ids,coeff):
+                rows.append(row); cols.append(int(vid)*dim+d); data.append(sw*float(coef))
+            rhs.append(sw*target[d]); row+=1
+    if anchor is not None and anchor_weight>0:
+        sw=math.sqrt(anchor_weight)
+        for i,p in enumerate(np.asarray(anchor,float)):
+            for d in range(dim):
+                rows.append(row);cols.append(i*dim+d);data.append(sw);rhs.append(sw*p[d]);row+=1
+    A=sparse.coo_matrix((data,(rows,cols)),shape=(row,n*dim)).tocsr()
+    x=lsqr(A,np.asarray(rhs),atol=1e-10,btol=1e-10,iter_lim=max(500,4*n))[0]
+    return x.reshape(n,dim)
+
+
+def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeline=None):
+    """Paper-aligned Eq.(1) local/global K3D."""
+    start=time.perf_counter()
+    x=np.asarray(mesh.vertices,float).copy()
+    faces=np.asarray(mesh.faces,int)
+    edges=_edges(faces)
+    w_planar=_env_float("ONESTRING_PAPER_K3D_W_PLANAR",1.0)
+    w_square=_env_float("ONESTRING_PAPER_K3D_W_SQUARE",1.0)
+    w_surface=_env_float("ONESTRING_PAPER_K3D_W_SURFACE",0.01)
+    iterations=_env_int("ONESTRING_PAPER_K3D_ITERATIONS",40)
+
+    # Paper edge target: mean of the mean edge lengths of incident quads.
+    face_mean=np.zeros(len(faces))
+    for fi,f in enumerate(faces):
+        q=x[f]; face_mean[fi]=np.mean(np.linalg.norm(np.roll(q,-1,axis=0)-q,axis=1))
+    owners={}
+    for fi,f in enumerate(faces):
+        for k in range(4):
+            key=tuple(sorted((int(f[k]),int(f[(k+1)%4])))); owners.setdefault(key,[]).append(fi)
+    edge_target={}
+    for a,b in edges:
+        fs=owners.get((int(a),int(b)),[])
+        edge_target[(int(a),int(b))]=float(np.mean(face_mean[fs])) if fs else float(np.linalg.norm(x[b]-x[a]))
+
+    records=[]
+    for it in range(iterations):
+        constraints=[]
+        # Local P_P and P_Q.
+        for f in faces:
+            q=x[f]
+            pp=_best_fit_plane_projection(q)
+            pq=_closest_square_projection(q)
+            for local,vid in enumerate(f):
+                constraints.append(([int(vid)],[1.],pp[local],w_planar))
+                constraints.append(([int(vid)],[1.],pq[local],w_square))
+        # E_Length projection of each edge vector to target K3D tile scale.
+        for a,b in edges:
+            d=x[b]-x[a]; ln=float(np.linalg.norm(d))
+            if ln<1e-12: continue
+            t=edge_target[(int(a),int(b))]*d/ln
+            constraints.append(([int(a),int(b)],[-1.,1.],t,w_square))
+        # P_S: closest point on target surface.
+        ps=_surface_project(x,target)
+        for i,p in enumerate(ps):
+            constraints.append(([i],[1.],p,w_surface))
+        new=_solve_constraints(len(x),3,constraints,anchor=x,anchor_weight=1e-9)
+        step=float(np.linalg.norm(new-x)/max(math.sqrt(len(x)),1.))
+        x=new
+        planar=float(np.mean([np.linalg.norm(x[f]-_best_fit_plane_projection(x[f]))**2 for f in faces]))
+        surface=float(np.mean(np.sum((x-_surface_project(x,target))**2,axis=1)))
+        records.append(dict(iteration=it+1,step=step,EPlanar=planar,ESurface=surface))
+        if step<1e-8: break
+
+    metrics=dict(getattr(mesh,"metrics",{}))
+    metrics.update(
+        k3d_solver_model="paper_aligned_projection_local_global",
+        k3d_objective_terms="EAssembled = w1*EPlanar + w2*(ELength+EShape) + w3*ESurface",
+        k3d_exactness_label="paper_aligned_not_reference_exact",
+        k3d_local_global_iterations=len(records),
+        k3d_planarity_residual=records[-1]["EPlanar"] if records else 0.,
+        k3d_surface_residual=records[-1]["ESurface"] if records else 0.,
+        paper_alignment_note="Explicit PP/PQ/PS local projections and sparse global least-squares. Surface projection uses closest triangle among KD-tree candidates."
+    )
+    out=type(mesh)(x,faces.copy(),mesh.grid,"K3D",metrics,list(getattr(mesh,"split_lines",[])))
+    report_type=getattr(pipeline,"StageReport",None)
+    if report_type is None: raise RuntimeError("paper K3D requires StageReport")
+    report=report_type(name="M3D -> K3D",objective=metrics["k3d_objective_terms"],
+        before_error=0.,after_error=float(metrics["k3d_planarity_residual"]+metrics["k3d_surface_residual"]),
+        constraint_violation=float(metrics["k3d_planarity_residual"]),computation_time=time.perf_counter()-start,
+        counts={"vertices":len(x),"quads":len(faces)})
+    print(f"[PAPER-LG-K3D] iterations={len(records)} seconds={report.computation_time:.3f}",flush=True)
+    return out,report
+
+
+def _cross2(a,b): return a[0]*b[1]-a[1]*b[0]
+
+
+def _sat_projection(poly_a,poly_b,tol=1e-10):
+    """Return minimum separating translation for A and -translation for B."""
+    best_depth=np.inf; best_axis=None
+    for poly in (poly_a,poly_b):
+        for i in range(4):
+            e=poly[(i+1)%4]-poly[i]
+            axis=np.array([-e[1],e[0]],float); n=np.linalg.norm(axis)
+            if n<tol: continue
+            axis/=n
+            pa=poly_a@axis; pb=poly_b@axis
+            overlap=min(pa.max(),pb.max())-max(pa.min(),pb.min())
+            if overlap<=tol: return None
+            if overlap<best_depth:
+                ca=poly_a.mean(axis=0); cb=poly_b.mean(axis=0)
+                if np.dot(cb-ca,axis)<0: axis=-axis
+                best_depth=float(overlap); best_axis=axis
+    return None if best_axis is None else (0.5*(best_depth+tol)*best_axis)
+
+
+def optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,*,progress_callback=None,pipeline=None):
+    """Paper-aligned Eq.(5): local projections + global sparse least squares."""
+    start=time.perf_counter()
+    topology,x=build_linkage_topology(mesh_2d)
+    faces=topology.faces
+    source3=np.asarray(mesh_3d.vertices,float)[topology.source_vertex_ids]
+    edges=_edges(faces)
+    target_len={(int(a),int(b)):float(np.linalg.norm(source3[b]-source3[a])) for a,b in edges}
+    w_edge=_env_float("ONESTRING_EQ5_W_EDGE",1.)
+    w_col=_env_float("ONESTRING_EQ5_W_COLLISION",1.)
+    w_fab=_env_float("ONESTRING_EQ5_W_FAB",.001)
+    theta=math.radians(_env_float("ONESTRING_EQ5_THETA_MIN_DEG",5.))
+    iterations=_env_int("ONESTRING_EQ5_ITERATIONS",240)
+    records=[]; snapshots=[]
+
+    for it in range(iterations):
+        constraints=[]
+        # P_E: project edge vector to K3D target length.
+        for a,b in edges:
+            d=x[b]-x[a]; ln=float(np.linalg.norm(d))
+            if ln<1e-12: continue
+            target=target_len[(int(a),int(b))]*d/ln
+            constraints.append(([int(a),int(b)],[-1.,1.],target,w_edge))
+        # P_F: exact angle-cone projection already used by current Eq.5 implementation.
+        if len(topology.gaps):
+            c=topology.gaps[:,0]; ia=topology.gaps[:,1]; ib=topology.gaps[:,2]
+            va=x[ia]-x[c]; vb=x[ib]-x[c]
+            pa,pb,_=project_angle_vectors(va,vb,theta)
+            for j in range(len(c)):
+                constraints.append(([int(c[j]),int(ia[j])],[-1.,1.],pa[j],w_fab))
+                constraints.append(([int(c[j]),int(ib[j])],[-1.,1.],pb[j],w_fab))
+        # P_C: non-penetration projection. SAT supplies the minimum separating
+        # translation, but unlike the old solver this is a LOCAL PROJECTION,
+        # not a SAT-depth penalty differentiated inside the objective.
+        collision_pairs=[]
+        polys=x[faces]
+        lo=polys.min(axis=1); hi=polys.max(axis=1)
+        for a in range(len(faces)):
+            for b in range(a+1,len(faces)):
+                if hi[a,0]<=lo[b,0] or hi[b,0]<=lo[a,0] or hi[a,1]<=lo[b,1] or hi[b,1]<=lo[a,1]: continue
+                shift=_sat_projection(polys[a],polys[b])
+                if shift is None: continue
+                collision_pairs.append((a,b))
+                for vid in faces[a]:
+                    constraints.append(([int(vid)],[1.],x[int(vid)]-shift,w_col))
+                for vid in faces[b]:
+                    constraints.append(([int(vid)],[1.],x[int(vid)]+shift,w_col))
+        new=_solve_constraints(len(x),2,constraints,anchor=x,anchor_weight=1e-8)
+        step=float(np.linalg.norm(new-x))
+        x=new
+        # diagnostics
+        fab=0; amin=180.;amax=0.
+        for c,a,b in topology.gaps:
+            u=x[a]-x[c];v=x[b]-x[c]
+            ang=math.degrees(math.atan2(abs(_cross2(u,v)),np.dot(u,v)))
+            amin=min(amin,ang);amax=max(amax,ang)
+            fab+=int(ang<math.degrees(theta)-1e-5 or ang>90.+1e-5)
+        row=dict(iteration=it+1,step=step,collisions=len(collision_pairs),fab_violations=fab,
+                 gap_min_deg=amin if len(topology.gaps) else 0.,gap_max_deg=amax)
+        records.append(row)
+        if it==0 or (it+1)%10==0: snapshots.append(dict(row,xy=x.copy()))
+        if progress_callback:
+            progress_callback("Paper local/global K2D",(it+1)/iterations,f"iter {it+1}/{iterations}; collisions={len(collision_pairs)}; fab={fab}")
+        if step<1e-9 and not collision_pairs and fab==0: break
+
+    # Recount final collisions rather than using the pre-global local set.
+    final_collisions=0
+    polys=x[faces]; lo=polys.min(axis=1); hi=polys.max(axis=1)
+    for a in range(len(faces)):
+        for b in range(a+1,len(faces)):
+            if hi[a,0]<=lo[b,0] or hi[b,0]<=lo[a,0] or hi[a,1]<=lo[b,1] or hi[b,1]<=lo[a,1]: continue
+            final_collisions+=int(_sat_projection(polys[a],polys[b]) is not None)
+    final=records[-1] if records else dict(iteration=0,step=0.,fab_violations=0,gap_min_deg=0.,gap_max_deg=0.)
+    final=dict(final,collisions=final_collisions)
+    snapshots.append(dict(final,xy=x.copy(),final=True))
+    history=dict(faces=faces.copy(),snapshots=snapshots,records=records,initial_xy=np.asarray(mesh_2d.vertices,float)[topology.source_vertex_ids,:2].copy(),final_xy=x.copy(),solver_message="paper-aligned local/global")
+    metrics=dict(getattr(mesh_2d,"metrics",{}))
+    metrics.update(final,
+        objective="EFlat = w1*EEdge + w2*ECollision + w3*EFab (projection local/global)",
+        actual_backend="paper_aligned_projection_local_global",
+        paper_collision_discretization="SAT minimum-separating-translation used as local non-penetration projection; not claimed identical to Konakovic reference implementation",
+        paper_eq5_pairwise_linkage=True,paper_eq5_auxetic_topology=False,
+        fabrication_feasible=(final_collisions==0 and final["fab_violations"]==0),
+        optimizer_iterations=len(records))
+    out=type(mesh_2d)(np.column_stack((x,np.zeros(len(x)))),faces.copy(),mesh_2d.grid,"K2D",metrics,list(getattr(mesh_2d,"split_lines",[])))
+    out.linkage_topology=topology; out.eq5_history=history
+    report_type=getattr(pipeline,"StageReport",None)
+    if report_type is None: raise RuntimeError("paper K2D requires StageReport")
+    report=report_type(name="M2D -> K2D",objective=metrics["objective"],before_error=0.,after_error=0.,
+        constraint_violation=float(final_collisions+final["fab_violations"]),computation_time=time.perf_counter()-start,
+        counts={"vertices":len(x),"quads":len(faces),"hinges":len(topology.hinges)})
+    print(f"[PAPER-LG-K2D] iterations={len(records)} collisions={final_collisions} fab={final['fab_violations']} seconds={report.computation_time:.3f}",flush=True)
+    return out,report
+
+
+__all__=["optimize_paper_local_global_k3d","optimize_paper_local_global_k2d"]
