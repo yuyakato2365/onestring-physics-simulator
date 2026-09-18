@@ -242,6 +242,37 @@ def install_unified_view_stage_selector() -> None:
             kwargs = {**kwargs, "options": options}
 
         selected = previous(*args, **kwargs)
+        # K3D needs an explicit renderer here.  The legacy app's static K3D
+        # branch is not reliable in this stacked selector/wrapper route: the
+        # selector can be wrapped by the experimental launchers before control
+        # returns to the legacy branch.  Render the stored final solver mesh
+        # immediately at the selector site, exactly like synthetic views.
+        if str(selected).strip().upper() == "K3D":
+            state = _resolve_state()
+            if state is None:
+                st.info("Run the design calculation once to generate K3D.")
+                return LEGACY_STAGE_SENTINEL
+            try:
+                from .visualization import figure_quad_mesh
+                mesh = state.mesh_3d_optimized
+                vertices = np.asarray(mesh.vertices, dtype=float)
+                faces = np.asarray(mesh.faces, dtype=int)
+                st.markdown("### K3D")
+                st.caption(
+                    f"Final M3D → K3D solver result · vertices={len(vertices)} · quads={len(faces)}"
+                )
+                st.plotly_chart(
+                    figure_quad_mesh(mesh, title="K3D"),
+                    config={"responsive": True},
+                    key="unified_final_k3d",
+                )
+                st.session_state[_SESSION_SELECTED] = None
+                st.session_state[_SESSION_RENDERED] = True
+            except Exception as exc:
+                st.session_state[_SESSION_RENDERED] = False
+                st.exception(exc)
+            return LEGACY_STAGE_SENTINEL
+
         if selected in ALL_SYNTHETIC_VIEWS:
             st.session_state[_SESSION_SELECTED] = selected
             # Render NOW, immediately beneath the selector.  Waiting until the
