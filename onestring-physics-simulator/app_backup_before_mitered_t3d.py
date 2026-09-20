@@ -90,6 +90,17 @@ MODEL_VERSIONS = [
 if os.environ.get("ONESTRING_PAPER_T3D_20260920", "0") == "1":
     MODEL_VERSIONS.append(
         {
+            "id": "2026-09-18-optcuts-paper-local-global",
+            "label": "2026-09-18 | OptCuts Ω + paper-aligned local/global K3D/K2D",
+            "description": "Official OptCuts Ω with the paper-aligned local/global K3D/K2D route.",
+            "t3d_extrusion_side": "negative_normal_from_k3d",
+            "t3d_variable_topology_enabled": False,
+            "allow_legacy_normal_prism_emergency_fallback": False,
+            "t3d_intersection_trim_enabled": False,
+        }
+    )
+    MODEL_VERSIONS.append(
+        {
             "id": "2026-09-20-paper-t3d",
             "label": "2026-09-20 — Paper-aligned T3D",
             "description": (
