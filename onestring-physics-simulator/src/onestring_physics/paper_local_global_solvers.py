@@ -407,6 +407,12 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     # local/global iteration.
     iteration_history["polish"] = dict(polish)
     metrics["k3d_planarity_residual"]=float(polish["planarity_rms"]**2)
+    # The final history row must describe the geometry actually returned to
+    # downstream K2D/T3D, not the pre-polish local/global iterate.
+    if records:
+        last=records[-1]
+        records[-1]=_checkpoint(x,last["iteration"],last["step"])
+        metrics["k3d_surface_residual"]=records[-1]["ESurface"]
     span=np.ptp(x,axis=0)
     metrics["k3d_bbox_span"]=[float(v) for v in span]
     metrics["k3d_vertex_min"]=[float(v) for v in np.min(x,axis=0)]
