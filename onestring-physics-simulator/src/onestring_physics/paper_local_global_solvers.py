@@ -191,9 +191,46 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
         a=q[:,1]-q[:,0]; b=q[:,2]-q[:,0]; c=q[:,3]-q[:,0]
         return np.einsum("ij,ij->i",a,np.cross(b,c))
 
+    def coplanarity_jac(flat):
+        """Analytic Jacobian of det(v1-v0, v2-v0, v3-v0).
+
+        Supplying this avoids SLSQP finite-differencing every one of the 3N
+        vertex variables for every iteration, which made realistic meshes look
+        stalled at the M3D progress checkpoint.
+        """
+        y=flat.reshape((-1,3))
+        q=y[faces]
+        a=q[:,1]-q[:,0]; b=q[:,2]-q[:,0]; c=q[:,3]-q[:,0]
+        g1=np.cross(b,c)
+        g2=np.cross(c,a)
+        g3=np.cross(a,b)
+        g0=-(g1+g2+g3)
+        rows=np.repeat(np.arange(len(faces)),12)
+        cols=np.empty(len(faces)*12,dtype=int)
+        vals=np.empty(len(faces)*12,dtype=float)
+        k=0
+        for local,g in enumerate((g0,g1,g2,g3)):
+            ids=faces[:,local]
+            for d in range(3):
+                sl=slice(k,k+len(faces))
+                rows[sl]=np.arange(len(faces))
+                cols[sl]=3*ids+d
+                vals[sl]=g[:,d]
+                k+=len(faces)
+        # SLSQP currently expects a dense constraint Jacobian. Building it once
+        # analytically is still far cheaper than O(3N) constraint evaluations.
+        jac=np.zeros((len(faces),y.size),dtype=float)
+        jac[rows,cols]=vals
+        return jac
+
+    print(
+        f"[K3D-PLANARITY-POLISH] start vertices={len(x0)} quads={len(faces)} "
+        f"tol={tolerance:g} maxiter={max_iterations}",
+        flush=True,
+    )
     result=minimize(
         objective,y0.ravel(),jac=jac_objective,method="SLSQP",
-        constraints=[{"type":"eq","fun":coplanarity}],
+        constraints=[{"type":"eq","fun":coplanarity,"jac":coplanarity_jac}],
         options={"ftol":max(float(tolerance)/scale,1e-12),"maxiter":int(max_iterations),"disp":False},
     )
     polished=result.x.reshape((-1,3))*scale+center
@@ -208,6 +245,13 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
     disp=np.linalg.norm(polished-x0,axis=1)
     max_plan=float(np.max(dev)) if dev.size else 0.0
     success=bool(result.success and max_plan<=max(float(tolerance),1e-10))
+    print(
+        f"[K3D-PLANARITY-POLISH] done success={success} solver_success={result.success} "
+        f"iterations={getattr(result,'nit',0)} planarity_max={max_plan:.6g} "
+        f"disp_rms={float(np.sqrt(np.mean(disp*disp))) if disp.size else 0.0:.6g} "
+        f"message={getattr(result,'message','')}",
+        flush=True,
+    )
     return polished,{
         "success":success,
         "solver_success":bool(result.success),
