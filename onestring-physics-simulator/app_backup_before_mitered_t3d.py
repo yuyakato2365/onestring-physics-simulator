@@ -83,6 +83,22 @@ MODEL_VERSIONS = [
         "t3d_intersection_trim_enabled": False,
     },
 ]
+if os.environ.get("ONESTRING_PAPER_T3D_20260920", "0") == "1":
+    MODEL_VERSIONS.append(
+        {
+            "id": "2026-09-20-paper-t3d",
+            "label": "2026-09-20 — Paper-aligned T3D",
+            "description": (
+                "K3D→T3Dを元論文Sec.4.2方式へ変更: shared K3D mesh vertex normalで"
+                "厚み分offsetし、固定8頂点/6 quad frustumのtop・bottom・contact facesを"
+                "Eq.(2) face-planarity optimizationで平面化。"
+            ),
+            "t3d_extrusion_side": "negative_normal_from_k3d",
+            "t3d_variable_topology_enabled": False,
+            "allow_legacy_normal_prism_emergency_fallback": False,
+            "t3d_intersection_trim_enabled": False,
+        }
+    )
 # Future version additions: append a new entry to MODEL_VERSIONS when the user
 # asks to preserve another implementation version, then branch behavior from
 # selected_model_version["id"] where version-specific behavior is needed.
