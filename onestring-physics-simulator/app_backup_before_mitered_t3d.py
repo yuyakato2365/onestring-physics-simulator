@@ -18,7 +18,11 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import onestring_physics.onestring_pipeline as _onestring_pipeline
 
-_onestring_pipeline = importlib.reload(_onestring_pipeline)
+# Do NOT reload the pipeline here.  Dedicated launchers install numerical
+# patches (notably the paper-aligned T3D implementation) before this legacy UI
+# is executed via runpy.  Reloading here silently discarded those patches.
+# Keep the already-imported module object so the UI and launcher share exactly
+# the same authoritative pipeline implementation.
 
 from onestring_physics.animation import assembly_progress_animation, assembly_progress_frame_figure, tile_assembly_animation
 from onestring_physics.input_shape import CLOSED_SHAPE_WARNING, create_builtin_shape, load_target_shape
