@@ -327,11 +327,10 @@ with st.sidebar:
     )
     st.caption(selected_model_version["description"])
 
-    # The dated 2026-09-18 OptCuts + paper local/global implementation owns
-    # the official OptCuts distortion setting.  Keep it with the version
-    # selector rather than attaching it to the experimental optcuts_test mode.
+    # Expose the official OptCuts distortion setting on the current
+    # 2026-09-20 Paper-aligned T3D version selected by the user.
     optcuts_distortion_bound = 4.1
-    if str(selected_model_version.get("label", "")).startswith("2026-09-18"):
+    if str(selected_model_version.get("id", "")) == "2026-09-20-paper-t3d":
         optcuts_distortion_bound = float(st.number_input(
             "OptCuts distortion bound (Symmetric Dirichlet > 4)",
             min_value=4.0001,
@@ -339,8 +338,8 @@ with st.sidebar:
             value=max(4.0001, float(os.environ.get("ONESTRING_OPTCUTS_DISTORTION_BOUND", "4.1"))),
             step=0.05,
             format="%.4f",
-            help="2026-09-18 OptCuts Ω に渡す distortion_bound。小さいほど歪みに厳しい。",
-            key="onestring_0918_optcuts_distortion_bound",
+            help="このバージョンの公式OptCuts Ωへ渡す distortion_bound。小さいほど歪みに厳しい。",
+            key="onestring_0920_optcuts_distortion_bound",
         ))
         os.environ["ONESTRING_OPTCUTS_DISTORTION_BOUND"] = str(optcuts_distortion_bound)
 
