@@ -1592,13 +1592,16 @@ elif view_stage in {"M2D", "K3D"}:
             f" · vertices={len(mesh.vertices)} · quads={len(mesh.faces)}"
         )
     st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")
-    st.write(mesh.metrics)
     if view_stage == "K3D":
+        # Geometry first, then the authoritative solver's optimization trajectory.
         try:
             from onestring_physics.k3d_iteration_history_view import render_k3d_iteration_history
             render_k3d_iteration_history(st, state)
         except Exception as exc:
             st.warning(f"K3D history plot skipped: {exc}")
+        st.write({k: v for k, v in mesh.metrics.items() if k != "k3d_iteration_history"})
+    else:
+        st.write(mesh.metrics)
 elif view_stage == "M3D":
     st.plotly_chart(figure_m3d_overlay(state), width="stretch", key="mesh_M3D")
     if state.mesh_3d_initial.metrics.get("m3d_used_height_field_shortcut", False):

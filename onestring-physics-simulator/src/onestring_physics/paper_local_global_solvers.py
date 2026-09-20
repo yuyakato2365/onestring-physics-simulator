@@ -180,7 +180,62 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         fs=owners.get((int(a),int(b)),[])
         edge_target[(int(a),int(b))]=float(np.mean(face_mean[fs])) if fs else float(np.linalg.norm(x[b]-x[a]))
 
-    records=[]
+    # ---- read-only instrumentation -------------------------------------------
+    # These helpers only measure the state this solver produces.  They never feed
+    # back into the constraints, so the K3D result is bit-for-bit what it was
+    # before the history was recorded.  No second/shadow solve is performed.
+    def _planarity_stats(v):
+        """Sum of squared best-fit-plane residuals, its per-face mean, and the
+        per-vertex distances to each quad's best-fit plane (geometric units)."""
+        squared_sum=0.0; per_face=[]; deviations=[]
+        for f in faces:
+            q=v[f]
+            diff=q-_best_fit_plane_projection(q)
+            face_sq=float(np.sum(diff*diff))
+            squared_sum+=face_sq; per_face.append(face_sq)
+            deviations.append(np.linalg.norm(diff,axis=1))
+        dev=np.concatenate(deviations) if deviations else np.zeros(0)
+        return squared_sum,(float(np.mean(per_face)) if per_face else 0.0),dev
+
+    def _square_energy(v):
+        """E_Square = E_Shape (closest-square projection) + E_Length (Eq. 3)."""
+        total=0.0
+        for f in faces:
+            q=v[f]; diff=q-_closest_square_projection(q)
+            total+=float(np.sum(diff*diff))
+        for a,b in edges:
+            d=v[int(b)]-v[int(a)]; ln=float(np.linalg.norm(d))
+            if ln<1e-12: continue
+            diff=d-edge_target[(int(a),int(b))]*d/ln
+            total+=float(np.dot(diff,diff))
+        return total
+
+    def _checkpoint(v,iteration,step,surface_points=None):
+        planar_sum,planar_mean,dev=_planarity_stats(v)
+        square_sum=_square_energy(v)
+        proj=_surface_project(v,target,parameterization) if surface_points is None else surface_points
+        offsets=v-proj
+        surface_sum=float(np.sum(offsets*offsets))
+        return dict(
+            iteration=int(iteration),
+            step=float(step),
+            EAssembled=w_planar*planar_sum+w_square*square_sum+w_surface*surface_sum,
+            w1EPlanar=w_planar*planar_sum,
+            w2ESquare=w_square*square_sum,
+            w3ESurface=w_surface*surface_sum,
+            EPlanarSum=planar_sum,
+            ESquareSum=square_sum,
+            ESurfaceSum=surface_sum,
+            planarity_max=float(np.max(dev)) if dev.size else 0.0,
+            planarity_rms=float(np.sqrt(np.mean(dev*dev))) if dev.size else 0.0,
+            planarity_mean=float(np.mean(dev)) if dev.size else 0.0,
+            # Legacy per-face means kept for k3d_planarity_residual / k3d_surface_residual.
+            EPlanar=planar_mean,
+            ESurface=float(np.mean(np.sum(offsets*offsets,axis=1))),
+        )
+    # --------------------------------------------------------------------------
+
+    records=[_checkpoint(x,0,0.0)]
     for it in range(iterations):
         constraints=[]
         # Local P_P and P_Q.
@@ -204,19 +259,28 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         new=_solve_constraints(len(x),3,constraints,anchor=x,anchor_weight=1e-9)
         step=float(np.linalg.norm(new-x)/max(math.sqrt(len(x)),1.))
         x=new
-        planar=float(np.mean([np.linalg.norm(x[f]-_best_fit_plane_projection(x[f]))**2 for f in faces]))
-        surface=float(np.mean(np.sum((x-_surface_project(x,target,parameterization))**2,axis=1)))
-        records.append(dict(iteration=it+1,step=step,EPlanar=planar,ESurface=surface))
+        records.append(_checkpoint(x,it+1,step))
         if step<1e-8: break
+    iteration_history={
+        "records":records,
+        "solver":"optimize_paper_local_global_k3d",
+        "backend":"paper-aligned Eq.(1) local projection + global least squares (authoritative K3D solver)",
+        "weights":{"w1_planar":w_planar,"w2_square":w_square,"w3_surface":w_surface},
+        "units":"mesh coordinate units (same units as the K3D vertex coordinates)",
+        "planarity_definition":"distance from each quad vertex to that quad's best-fit plane (paper Sec. 6 definition)",
+        "shadow_solve":False,
+    }
 
     metrics=dict(getattr(mesh,"metrics",{}))
     metrics.update(
         k3d_solver_model="paper_aligned_projection_local_global",
         k3d_objective_terms="EAssembled = w1*EPlanar + w2*(ELength+EShape) + w3*ESurface",
         k3d_exactness_label="paper_aligned_not_reference_exact",
-        k3d_local_global_iterations=len(records),
+        k3d_local_global_iterations=max(0,len(records)-1),
         k3d_planarity_residual=records[-1]["EPlanar"] if records else 0.,
         k3d_surface_residual=records[-1]["ESurface"] if records else 0.,
+        k3d_iteration_history=iteration_history,
+        k3d_iteration_history_available=True,
         paper_alignment_note="Explicit PP/PQ/PS local projections and sparse global least-squares. Surface projection uses closest triangle among KD-tree candidates."
     )
     if not np.all(np.isfinite(x)):
@@ -227,6 +291,14 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     source_center=np.asarray(mesh.vertices,float).mean(axis=0)
     solved_center=x.mean(axis=0)
     x=x+(source_center-solved_center)
+    # Recentering is a rigid translation of the solver output, so re-measure the
+    # last checkpoint: the final history row must describe exactly the K3D that
+    # this function returns.
+    if records:
+        last=records[-1]
+        records[-1]=_checkpoint(x,last["iteration"],last["step"])
+        metrics["k3d_planarity_residual"]=records[-1]["EPlanar"]
+        metrics["k3d_surface_residual"]=records[-1]["ESurface"]
     span=np.ptp(x,axis=0)
     source_span=np.ptp(np.asarray(mesh.vertices,float),axis=0)
     if float(np.linalg.norm(span)) < 1e-10*max(float(np.linalg.norm(source_span)),1.0):

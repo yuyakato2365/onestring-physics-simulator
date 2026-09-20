@@ -364,6 +364,43 @@ def _install_plotly_view_patch() -> None:
                 pass
             return False
 
+    # st.plotly_chart's signature changed several times (config/width became real
+    # parameters only in recent Streamlit).  Passing an argument the installed
+    # version does not declare either raises TypeError or lands in **kwargs,
+    # where it is dropped after a "keyword arguments have been deprecated" warning
+    # - which is how sizing and config silently stopped applying here.  Inspect
+    # the real function once and send only what it accepts.
+    import inspect as _inspect
+
+    try:
+        _params = _inspect.signature(original_plotly_chart).parameters
+        _accepted = set(_params)
+        _has_var_kw = any(p.kind is _inspect.Parameter.VAR_KEYWORD for p in _params.values())
+    except (TypeError, ValueError):
+        _accepted, _has_var_kw = {"use_container_width"}, True
+
+    def _normalize_chart_kwargs(kwargs):
+        """Map the app's call style onto whatever this Streamlit actually supports."""
+        sized = "width" in kwargs or "use_container_width" in kwargs
+        width = kwargs.pop("width", None)
+        container = kwargs.pop("use_container_width", None)
+        if sized:
+            if isinstance(width, int) and "width" in _accepted:
+                kwargs["width"] = width
+            else:
+                stretch = width == "stretch" or bool(container)
+                if "width" in _accepted:
+                    kwargs["width"] = "stretch" if stretch else "content"
+                elif "use_container_width" in _accepted:
+                    kwargs["use_container_width"] = stretch
+        for name in list(kwargs):
+            if name not in _accepted and not _has_var_kw:
+                kwargs.pop(name)
+        if "config" in kwargs and "config" not in _accepted:
+            # Older Streamlit only warns about unknown kwargs and then drops them.
+            kwargs.pop("config")
+        return kwargs
+
     def patched_plotly_chart(fig, *args, **kwargs):
         _patch_3d_figure(fig)
         config = dict(kwargs.pop("config", {}) or {})
@@ -384,16 +421,7 @@ def _install_plotly_view_patch() -> None:
             if rendered:
                 return None
 
-        # Streamlit >= recent releases deprecates legacy width/stretch keyword
-        # arguments and, in this setup, forwarding them through the wrapper can
-        # leave a blank Plotly WebGL canvas.  Normalize to the current API before
-        # calling the real renderer.
-        legacy_width = kwargs.pop("width", None)
-        kwargs.pop("use_container_width", None)
-        # Do not forward legacy sizing kwargs.  The chart naturally fills the
-        # app's wide column, and this avoids the deprecated-kwargs rendering path
-        # that produced the blank static WebGL canvas.
-        return original_plotly_chart(fig, *args, **kwargs)
+        return original_plotly_chart(fig, *args, **_normalize_chart_kwargs(kwargs))
 
     st.plotly_chart = patched_plotly_chart
     st._onestring_stable_camera_patch_installed = True
