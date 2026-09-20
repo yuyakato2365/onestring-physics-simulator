@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import lsqr
-from scipy.optimize import minimize, least_squares
+from scipy.optimize import minimize, least_squares, NonlinearConstraint
 
 from .paper_eq5_k2d_solver import build_linkage_topology, project_angle_vectors
 
@@ -159,129 +159,85 @@ def _solve_constraints(n,dim,constraints,anchor=None,anchor_weight=1e-8):
 
 
 def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_iterations=300):
-    """Sparse minimum-displacement quad planarization.
-
-    Uses an augmented-residual continuation solve instead of dense SLSQP.
-    Each quad coplanarity residual depends on only four vertices (12 scalar
-    variables), so the finite-difference sparsity pattern keeps the trust-region
-    subproblems sparse even for thousands of K3D vertices.
-    """
-    x0=np.asarray(vertices,float).copy()
-    faces=np.asarray(faces,int)
+    """Minimum-displacement planarization with coplanarity as a hard constraint."""
+    x0=np.asarray(vertices,float).copy(); faces=np.asarray(faces,int)
     if len(faces)==0:
-        return x0,{"success":True,"iterations":0,"planarity_max":0.0,
-                   "planarity_rms":0.0,"displacement_rms":0.0,
-                   "displacement_max":0.0,"message":"empty mesh","tolerance":float(tolerance)}
-
-    n=len(x0)
-    center=x0.mean(axis=0)
+        return x0,{"success":True,"iterations":0,"planarity_max":0.0,"planarity_rms":0.0,
+                   "displacement_rms":0.0,"displacement_max":0.0,"message":"empty mesh",
+                   "tolerance":float(tolerance)}
+    n=len(x0); center=x0.mean(axis=0)
     scale=max(float(np.linalg.norm(np.ptp(x0,axis=0))),1e-12)
-    y0=(x0-center)/scale
-    flat0=y0.ravel()
-
-    # Normalize the scalar triple product by a characteristic local edge scale^3
-    # so rho has a stable meaning across mesh resolutions.
+    y0=(x0-center)/scale; flat0=y0.ravel()
     q0=y0[faces]
     edge0=np.linalg.norm(np.roll(q0,-1,axis=1)-q0,axis=2)
-    local_scale=np.maximum(np.mean(edge0,axis=1),1e-8)
-    volume_scale=local_scale**3
+    volume_scale=np.maximum(np.mean(edge0,axis=1),1e-8)**3
 
-    # Residual = [minimum displacement, progressively strengthened coplanarity].
-    # Deliberately planarity-only: square/surface terms belong to the preceding K3D solve.
-    w_ref=_env_float("ONESTRING_K3D_POLISH_REFERENCE_WEIGHT",1.0)
+    def objective(flat):
+        d=flat-flat0
+        return 0.5*float(np.dot(d,d))
+    def objective_jac(flat):
+        return flat-flat0
+    def objective_hess(flat):
+        return sparse.eye(flat.size,format="csr")
 
     def coplanarity(flat):
-        y=flat.reshape((-1,3))
-        q=y[faces]
+        y=flat.reshape((-1,3)); q=y[faces]
         a=q[:,1]-q[:,0]; b=q[:,2]-q[:,0]; c=q[:,3]-q[:,0]
         return np.einsum("ij,ij->i",a,np.cross(b,c))/volume_scale
 
-    # Sparse dependency pattern: reference rows are diagonal; each
-    # coplanarity row touches only the four vertices of its quad.
-    rows=list(range(3*n)); cols=list(range(3*n))
-    for fi,f in enumerate(faces):
-        row=3*n+fi
-        for vid in f:
+    def coplanarity_jac(flat):
+        y=flat.reshape((-1,3)); q=y[faces]
+        a=q[:,1]-q[:,0]; b=q[:,2]-q[:,0]; c=q[:,3]-q[:,0]
+        g1=np.cross(b,c)/volume_scale[:,None]
+        g2=np.cross(c,a)/volume_scale[:,None]
+        g3=np.cross(a,b)/volume_scale[:,None]
+        g0=-(g1+g2+g3)
+        rr=[]; cc=[]; vv=[]
+        for local,g in enumerate((g0,g1,g2,g3)):
+            vids=faces[:,local]
             for d in range(3):
-                rows.append(row); cols.append(3*int(vid)+d)
-    jac_pattern=sparse.coo_matrix(
-        (np.ones(len(rows),dtype=float),(rows,cols)),
-        shape=(3*n+len(faces),3*n),
-    ).tocsr()
+                rr.extend(range(len(faces)))
+                cc.extend((3*vids+d).tolist())
+                vv.extend(g[:,d].tolist())
+        return sparse.coo_matrix((vv,(rr,cc)),shape=(len(faces),3*n)).tocsr()
 
-    current=flat0.copy()
-    total_nfev=0
-    stages=0
-    message=""
-    # Continuation: enforce planarity progressively instead of making the first
-    # trust-region system ill-conditioned with an enormous penalty.
-    rhos=(1e1,1e2,1e3,1e4,1e5,1e6)
-    per_stage=max(20,int(max_iterations)//len(rhos))
-    print(
-        f"[K3D-PLANARITY-POLISH] start sparse vertices={n} quads={len(faces)} "
-        f"tol={tolerance:g} stages={len(rhos)}",
-        flush=True,
+    constraint=NonlinearConstraint(
+        coplanarity,lb=np.zeros(len(faces)),ub=np.zeros(len(faces)),
+        jac=coplanarity_jac,
     )
-    for rho in rhos:
-        sr=math.sqrt(max(w_ref,1e-16)); sp=math.sqrt(rho)
-        def residual(flat):
-            return np.concatenate((sr*(flat-flat0),sp*coplanarity(flat)))
-
-        result=least_squares(
-            residual,current,jac_sparsity=jac_pattern,method="trf",
-            tr_solver="lsmr",x_scale="jac",
-            ftol=1e-9,xtol=1e-9,gtol=1e-9,
-            max_nfev=per_stage,verbose=0,
-        )
-        current=result.x
-        total_nfev+=int(getattr(result,"nfev",0)); stages+=1
-        candidate=current.reshape((-1,3))*scale+center
-        dev=[]
-        for f in faces:
-            q=candidate[f]
-            dev.extend(np.linalg.norm(q-_best_fit_plane_projection(q),axis=1))
-        max_plan=float(np.max(dev)) if dev else 0.0
-        print(
-            f"[K3D-PLANARITY-POLISH] rho={rho:g} nfev={getattr(result,'nfev',0)} "
-            f"planarity_max={max_plan:.6g}",
-            flush=True,
-        )
-        message=str(getattr(result,"message",""))
-        if max_plan<=max(float(tolerance),1e-10):
-            break
-
-    polished=current.reshape((-1,3))*scale+center
+    print(f"[K3D-PLANARITY-POLISH] start hard-constraint vertices={n} quads={len(faces)} "
+          f"tol={tolerance:g} maxiter={max_iterations}",flush=True)
+    result=minimize(
+        objective,flat0,jac=objective_jac,hess=objective_hess,
+        constraints=[constraint],method="trust-constr",
+        options={"maxiter":int(max_iterations),"gtol":1e-10,"xtol":1e-10,
+                 "barrier_tol":1e-10,"sparse_jacobian":True,"verbose":0},
+    )
+    polished=np.asarray(result.x).reshape((-1,3))*scale+center
     deviations=[]
     for f in faces:
         q=polished[f]
         deviations.extend(np.linalg.norm(q-_best_fit_plane_projection(q),axis=1))
-    dev=np.asarray(deviations,float)
-    disp=np.linalg.norm(polished-x0,axis=1)
+    dev=np.asarray(deviations,float); disp=np.linalg.norm(polished-x0,axis=1)
     max_plan=float(np.max(dev)) if dev.size else 0.0
-    # Penalized continuation may stop just above an extremely strict tolerance;
-    # downstream geometry is still accepted only when it reaches a practical
-    # geometric threshold in mesh units.
     practical_tol=max(float(tolerance),1e-7*scale)
+    # trust-constr may report max-iteration termination after already satisfying
+    # the geometric constraint. Acceptance is therefore based on actual geometry.
     success=bool(np.all(np.isfinite(polished)) and max_plan<=practical_tol)
-    print(
-        f"[K3D-PLANARITY-POLISH] done success={success} stages={stages} "
-        f"nfev={total_nfev} planarity_max={max_plan:.6g} "
-        f"disp_rms={float(np.sqrt(np.mean(disp*disp))) if disp.size else 0.0:.6g}",
-        flush=True,
-    )
+    print(f"[K3D-PLANARITY-POLISH] done success={success} solver_success={result.success} "
+          f"nit={getattr(result,'nit',0)} planarity_max={max_plan:.6g} "
+          f"constraint_max={float(np.max(np.abs(coplanarity(result.x)))):.3g} "
+          f"disp_rms={float(np.sqrt(np.mean(disp*disp))) if disp.size else 0.0:.6g} "
+          f"message={result.message}",flush=True)
     return polished,{
-        "success":success,
-        "solver_success":success,
-        "iterations":int(total_nfev),
-        "stages":int(stages),
-        "planarity_max":max_plan,
+        "success":success,"solver_success":bool(result.success),
+        "iterations":int(getattr(result,"nit",0)),"planarity_max":max_plan,
         "planarity_rms":float(np.sqrt(np.mean(dev*dev))) if dev.size else 0.0,
         "displacement_rms":float(np.sqrt(np.mean(disp*disp))) if disp.size else 0.0,
         "displacement_max":float(np.max(disp)) if disp.size else 0.0,
-        "message":message,
-        "tolerance":float(tolerance),
+        "message":str(result.message),"tolerance":float(tolerance),
         "practical_tolerance":float(practical_tol),
-        "reference_weight":float(w_ref),
+        "constraint_max":float(np.max(np.abs(coplanarity(result.x)))),
     }
 
 
@@ -462,7 +418,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         print("[K3D-PLANARITY-POLISH] disabled by UI/environment",flush=True)
     metrics.update({
         "k3d_planarity_polish_applied":bool(polish_enabled),
-        "k3d_planarity_polish_solver":"sparse trust-region continuation: minimum displacement + quad coplanarity penalty",
+        "k3d_planarity_polish_solver":"sparse trust-constr: minimum displacement with hard quad coplanarity equalities",
         "k3d_planarity_polish_reference":"pre-polish paper local/global K3D",
         "k3d_planarity_polish_success":bool(polish["success"]),
         "k3d_planarity_polish_iterations":int(polish["iterations"]),
