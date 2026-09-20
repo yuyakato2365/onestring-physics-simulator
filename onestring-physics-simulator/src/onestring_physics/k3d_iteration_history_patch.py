@@ -93,8 +93,10 @@ def install_k3d_iteration_history_patch(pipeline):
         history=None
         # The authoritative CPU path uses this exact least-squares objective.
         backend=str(getattr(out,"metrics",{}).get("actual_backend",""))
-        if backend=="cpu" or backend=="scipy" or not backend:
-            history=_shadow_history(pipeline,target,mesh,parameterization,params)
+        # Always record the diagnostic trajectory. The previous backend gate
+        # disabled history for labels such as scipy+... and CUDA/projective runs.
+        # The shadow solve is diagnostic only and never replaces the K3D result.
+        history=_shadow_history(pipeline,target,mesh,parameterization,params)
         if history and history.get("records"):
             out.metrics["k3d_iteration_history"]=history
             out.metrics["k3d_iteration_history_available"]=True
