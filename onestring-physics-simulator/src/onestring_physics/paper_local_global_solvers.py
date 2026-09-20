@@ -186,13 +186,9 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
     local_scale=np.maximum(np.mean(edge0,axis=1),1e-8)
     volume_scale=local_scale**3
 
-    # Residual = [minimum displacement, square-shape preservation,
-    #             progressively strengthened coplanarity].
-    # The square target for each face is frozen from the pre-polish K3D, so the
-    # polish does not invent a new scale/orientation while making quads planar.
+    # Residual = [minimum displacement, progressively strengthened coplanarity].
+    # Deliberately planarity-only: square/surface terms belong to the preceding K3D solve.
     w_ref=_env_float("ONESTRING_K3D_POLISH_REFERENCE_WEIGHT",1.0)
-    w_square=_env_float("ONESTRING_K3D_POLISH_SQUARE_WEIGHT",10.0)
-    square_targets=np.asarray([_closest_square_projection(y0[f]) for f in faces],float)
 
     def coplanarity(flat):
         y=flat.reshape((-1,3))
@@ -200,26 +196,17 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
         a=q[:,1]-q[:,0]; b=q[:,2]-q[:,0]; c=q[:,3]-q[:,0]
         return np.einsum("ij,ij->i",a,np.cross(b,c))/volume_scale
 
-    # Sparse dependency pattern for scipy least_squares finite differences.
-    # Reference rows are diagonal. Square rows and each coplanarity row touch
-    # only the four vertices of their own quad.
-    square_rows=12*len(faces)
+    # Sparse dependency pattern: reference rows are diagonal; each
+    # coplanarity row touches only the four vertices of its quad.
     rows=list(range(3*n)); cols=list(range(3*n))
-    row0=3*n
     for fi,f in enumerate(faces):
-        for local,vid in enumerate(f):
-            for d in range(3):
-                rows.append(row0+12*fi+3*local+d)
-                cols.append(3*int(vid)+d)
-    cop_row0=row0+square_rows
-    for fi,f in enumerate(faces):
-        row=cop_row0+fi
+        row=3*n+fi
         for vid in f:
             for d in range(3):
                 rows.append(row); cols.append(3*int(vid)+d)
     jac_pattern=sparse.coo_matrix(
         (np.ones(len(rows),dtype=float),(rows,cols)),
-        shape=(3*n+square_rows+len(faces),3*n),
+        shape=(3*n+len(faces),3*n),
     ).tocsr()
 
     current=flat0.copy()
@@ -236,13 +223,10 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
         flush=True,
     )
     for rho in rhos:
-        sr=math.sqrt(max(w_ref,1e-16))
-        ss=math.sqrt(max(w_square,0.0))
-        sp=math.sqrt(rho)
+        sr=math.sqrt(max(w_ref,1e-16)); sp=math.sqrt(rho)
         def residual(flat):
-            y=flat.reshape((-1,3))
-            square=(y[faces]-square_targets).reshape(-1)
-            return np.concatenate((sr*(flat-flat0),ss*square,sp*coplanarity(flat)))
+            return np.concatenate((sr*(flat-flat0),sp*coplanarity(flat)))
+
         result=least_squares(
             residual,current,jac_sparsity=jac_pattern,method="trf",
             tr_solver="lsmr",x_scale="jac",
@@ -298,8 +282,6 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
         "tolerance":float(tolerance),
         "practical_tolerance":float(practical_tol),
         "reference_weight":float(w_ref),
-        "square_weight":float(w_square),
-        "square_preservation":"closest-square targets frozen from pre-polish K3D",
     }
 
 
