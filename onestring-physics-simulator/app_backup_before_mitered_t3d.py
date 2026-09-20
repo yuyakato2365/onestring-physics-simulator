@@ -360,6 +360,20 @@ with st.sidebar:
             help="bff is a deprecated alias of rectangular_harmonic_legacy. paper_reference_bff requires the official CLI.",
         ),
     )
+    optcuts_distortion_bound = 4.1
+    if omega_parameterization_mode in {"optcuts", "optcuts_test"}:
+        optcuts_distortion_bound = float(_param_row(
+            "Official OptCuts の distortion bound。4 より大きい値を指定する。小さいほど歪みに厳しい。",
+            lambda: st.number_input(
+                "OptCuts distortion bound",
+                min_value=4.0001,
+                max_value=100.0,
+                value=4.1,
+                step=0.1,
+                format="%.4f",
+                help="Passed directly to the official OptCuts solver as distortion_bound (> 4).",
+            ),
+        ))
     if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
         st.warning("This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.")
     with st.expander("Paper-reference BFF settings", expanded=omega_parameterization_mode == "paper_reference_bff"):
@@ -1131,6 +1145,7 @@ pipeline_params = PipelineParameters(
     omega_boundary_mode=omega_boundary_mode,
     omega_parameterization_mode=omega_parameterization_mode,
     bff_executable=bff_executable or None,
+    optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
     reference_grid_spacing=reference_grid_spacing_value if reference_grid_spacing_value > 0.0 else None,
     reference_grid_rotation_degrees=reference_grid_rotation_degrees,
