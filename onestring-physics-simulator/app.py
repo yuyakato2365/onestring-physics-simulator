@@ -384,6 +384,14 @@ def _install_plotly_view_patch() -> None:
             if rendered:
                 return None
 
+        # Streamlit >= recent releases deprecates legacy width/stretch keyword
+        # arguments and, in this setup, forwarding them through the wrapper can
+        # leave a blank Plotly WebGL canvas.  Normalize to the current API before
+        # calling the real renderer.
+        legacy_width = kwargs.pop("width", None)
+        kwargs.pop("use_container_width", None)
+        if legacy_width == "stretch":
+            kwargs.setdefault("width", "stretch")
         return original_plotly_chart(fig, *args, **kwargs)
 
     st.plotly_chart = patched_plotly_chart
