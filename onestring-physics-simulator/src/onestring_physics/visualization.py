@@ -459,22 +459,8 @@ def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
 
 def figure_quad_mesh(mesh: QuadMesh, title: str | None = None, show_csf: bool = False) -> go.Figure:
     fig = go.Figure()
-    vertices = np.asarray(mesh.vertices, dtype=float)
-    faces = np.asarray(mesh.faces, dtype=int)
-    if vertices.ndim != 2 or vertices.shape[1] < 3 or len(vertices) == 0:
-        raise ValueError(f"{mesh.stage} visualization requires nonempty Nx3 vertices, got {vertices.shape}")
-    if not np.all(np.isfinite(vertices)):
-        bad = int(np.size(vertices) - np.count_nonzero(np.isfinite(vertices)))
-        raise ValueError(f"{mesh.stage} contains {bad} non-finite coordinate values")
-    if faces.ndim != 2 or faces.shape[1] != 4 or len(faces) == 0:
-        raise ValueError(f"{mesh.stage} visualization requires nonempty quad faces, got {faces.shape}")
-    if np.min(faces) < 0 or np.max(faces) >= len(vertices):
-        raise ValueError(f"{mesh.stage} face indices are outside the vertex array")
-    span = np.ptp(vertices[:, :3], axis=0)
-    if float(np.linalg.norm(span)) <= 1e-12:
-        raise ValueError(f"{mesh.stage} geometry is collapsed; bbox span={span.tolist()}")
-    color = "#3b82f6" if np.ptp(vertices[:, 2]) > 1e-8 else "#14b8a6"
-    _add_quad_mesh_surface(fig, vertices, faces, color=color, opacity=0.72, name=mesh.stage)
+    color = "#3b82f6" if mesh.vertices.shape[1] == 3 and np.ptp(mesh.vertices[:, 2]) > 1e-8 else "#14b8a6"
+    _add_quad_mesh_surface(fig, mesh.vertices, mesh.faces, color=color, opacity=0.72, name=mesh.stage)
     if show_csf:
         fig.add_trace(
             go.Scatter3d(
@@ -1195,14 +1181,9 @@ def _add_quad_mesh_surface(
     col: int | None = None,
 ) -> None:
     lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
-    # Keep one copy of each mesh vertex and index triangles directly into it.
-    # Duplicating four vertices per quad made the WebGL payload unnecessarily
-    # large and caused the browser renderer to fail while the legend survived.
-    vertices = np.asarray(vertices, dtype=float)
-    faces = np.asarray(faces, dtype=int)
-    x = vertices[:, 0].tolist()
-    y = vertices[:, 1].tolist()
-    z = vertices[:, 2].tolist()
+    x: list[float] = []
+    y: list[float] = []
+    z: list[float] = []
     i_idx: list[int] = []
     j_idx: list[int] = []
     k_idx: list[int] = []
@@ -1210,11 +1191,14 @@ def _add_quad_mesh_surface(
     edge_y: list[float | None] = []
     edge_z: list[float | None] = []
     for face in faces:
-        a, b, cc, d = [int(v) for v in face]
-        i_idx.extend([a, a])
-        j_idx.extend([b, cc])
-        k_idx.extend([cc, d])
-        pts = vertices[[a, b, cc, d]]
+        pts = vertices[list(face)]
+        base = len(x)
+        x.extend(pts[:, 0].tolist())
+        y.extend(pts[:, 1].tolist())
+        z.extend(pts[:, 2].tolist())
+        i_idx.extend([base, base])
+        j_idx.extend([base + 1, base + 2])
+        k_idx.extend([base + 2, base + 3])
         closed = np.vstack([pts, pts[0]])
         edge_x.extend([*closed[:, 0].tolist(), None])
         edge_y.extend([*closed[:, 1].tolist(), None])
