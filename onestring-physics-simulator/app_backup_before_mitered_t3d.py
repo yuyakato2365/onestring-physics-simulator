@@ -1597,50 +1597,6 @@ elif view_stage in {"M2D", "K3D"}:
         )
     st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")
     if view_stage == "K3D":
-        _k3d_vertices = np.asarray(mesh.vertices, dtype=float)
-        _k3d_faces = np.asarray(mesh.faces, dtype=int)
-        _finite = bool(
-            _k3d_vertices.ndim == 2
-            and _k3d_vertices.shape[1] >= 3
-            and len(_k3d_vertices) > 0
-            and np.all(np.isfinite(_k3d_vertices[:, :3]))
-            and _k3d_faces.ndim == 2
-            and _k3d_faces.shape[1] == 4
-            and len(_k3d_faces) > 0
-            and np.min(_k3d_faces) >= 0
-            and np.max(_k3d_faces) < len(_k3d_vertices)
-        )
-        if not _finite:
-            st.error("K3D pipeline output is not renderable: invalid/non-finite vertices or quad indices.")
-            st.write({"vertices_shape": _k3d_vertices.shape, "faces_shape": _k3d_faces.shape})
-            st.stop()
-        st.caption(
-            "K3D pipeline check: finite geometry received by the UI · "
-            f"bbox={np.ptp(_k3d_vertices[:, :3], axis=0).tolist()}"
-        )
-        try:
-            import pandas as pd
-            _cloud = pd.DataFrame(
-                _k3d_vertices[:, :3],
-                columns=["x", "y", "z"],
-            )
-            st.scatter_chart(
-                _cloud,
-                x="x",
-                y="y",
-                size=20,
-                height=620,
-            )
-            st.caption(
-                "Native K3D vertex projection (XY). This deliberately bypasses Plotly/WebGL; "
-                "if this is visible, the pipeline and UI state are valid and the remaining "
-                "failure is specifically the browser's Plotly 3D renderer."
-            )
-        except Exception as exc:
-            st.warning(f"Native K3D diagnostic viewer unavailable: {exc}")
-    else:
-        st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")
-    if view_stage == "K3D":
         # Geometry first, then the authoritative solver's optimization trajectory.
         try:
             from onestring_physics.k3d_iteration_history_view import render_k3d_iteration_history
