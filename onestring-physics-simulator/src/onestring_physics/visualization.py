@@ -1195,9 +1195,14 @@ def _add_quad_mesh_surface(
     col: int | None = None,
 ) -> None:
     lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
-    x: list[float] = []
-    y: list[float] = []
-    z: list[float] = []
+    # Keep one copy of each mesh vertex and index triangles directly into it.
+    # Duplicating four vertices per quad made the WebGL payload unnecessarily
+    # large and caused the browser renderer to fail while the legend survived.
+    vertices = np.asarray(vertices, dtype=float)
+    faces = np.asarray(faces, dtype=int)
+    x = vertices[:, 0].tolist()
+    y = vertices[:, 1].tolist()
+    z = vertices[:, 2].tolist()
     i_idx: list[int] = []
     j_idx: list[int] = []
     k_idx: list[int] = []
@@ -1205,14 +1210,11 @@ def _add_quad_mesh_surface(
     edge_y: list[float | None] = []
     edge_z: list[float | None] = []
     for face in faces:
-        pts = vertices[list(face)]
-        base = len(x)
-        x.extend(pts[:, 0].tolist())
-        y.extend(pts[:, 1].tolist())
-        z.extend(pts[:, 2].tolist())
-        i_idx.extend([base, base])
-        j_idx.extend([base + 1, base + 2])
-        k_idx.extend([base + 2, base + 3])
+        a, b, cc, d = [int(v) for v in face]
+        i_idx.extend([a, a])
+        j_idx.extend([b, cc])
+        k_idx.extend([cc, d])
+        pts = vertices[[a, b, cc, d]]
         closed = np.vstack([pts, pts[0]])
         edge_x.extend([*closed[:, 0].tolist(), None])
         edge_y.extend([*closed[:, 1].tolist(), None])
