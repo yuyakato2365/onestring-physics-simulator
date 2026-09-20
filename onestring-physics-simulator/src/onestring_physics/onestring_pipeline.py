@@ -951,6 +951,7 @@ class PipelineParameters(_original.PipelineParameters):
         "paper_like_unimplemented",
     ] = "bff"
     bff_executable: str | None = None
+    optcuts_distortion_bound: float = 4.1
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
