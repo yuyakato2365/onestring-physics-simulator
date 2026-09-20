@@ -162,9 +162,13 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     x=np.asarray(mesh.vertices,float).copy()
     faces=np.asarray(mesh.faces,int)
     edges=_edges(faces)
-    w_planar=_env_float("ONESTRING_PAPER_K3D_W_PLANAR",1.0)
-    w_square=_env_float("ONESTRING_PAPER_K3D_W_SQUARE",1.0)
-    w_surface=_env_float("ONESTRING_PAPER_K3D_W_SURFACE",0.01)
+    # Use the weights selected in the Streamlit UI / PipelineParams.  The
+    # previous paper-aligned route ignored these values and silently fell back
+    # to environment defaults (1, 1, 0.01), so changing the UI had no effect on
+    # the authoritative K3D solve.
+    w_planar=float(getattr(params,"w_planar",_env_float("ONESTRING_PAPER_K3D_W_PLANAR",1.0)))
+    w_square=float(getattr(params,"w_square",_env_float("ONESTRING_PAPER_K3D_W_SQUARE",1.0)))
+    w_surface=float(getattr(params,"w_surface",_env_float("ONESTRING_PAPER_K3D_W_SURFACE",0.01)))
     iterations=_env_int("ONESTRING_PAPER_K3D_ITERATIONS",40)
 
     # Paper edge target: mean of the mean edge lengths of incident quads.
