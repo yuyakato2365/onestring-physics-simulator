@@ -115,7 +115,7 @@ def render_k3d_iteration_history(st, state) -> bool:
             y_title="energy [mesh units²]",
             log_y=True,
         ),
-        width="stretch",
+        use_container_width=True,
         key="k3d_history_energy",
     )
 
@@ -135,7 +135,7 @@ def render_k3d_iteration_history(st, state) -> bool:
             y_title="planar deviation [mesh units]",
             log_y=True,
         ),
-        width="stretch",
+        use_container_width=True,
         key="k3d_history_planarity",
     )
 

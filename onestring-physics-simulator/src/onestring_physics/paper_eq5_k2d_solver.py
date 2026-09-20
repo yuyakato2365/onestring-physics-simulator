@@ -406,7 +406,7 @@ def optimize_paper_eq5(mesh_2d,mesh_3d,params,*,progress_callback=None,pipeline=
                    paper_fab_gap_min_deg=final['gap_min_deg'],paper_fab_gap_max_deg=final['gap_max_deg'],
                    collision_count_after=final['collisions'],edge_matching_error=final['edge_mean'],
                    optimizer_iterations=int(result.nit),optimizer_success=bool(result.success),
-                   optimizer_message=str(result.message),fabrication_feasible=feasible,
+                   optimizer_message=str(result.message),fabrication_feasible=feasible,theta_min_deg=theta,
                    convergence_status=('feasible_stationary' if feasible and result.success else 'feasible_iteration_limit' if feasible else 'residual_constraints'),
                    actual_backend='sparse_preconditioned_lbfgs_analytic_gradient',
                    paper_collision_discretization='all-pair convex SAT squared penetration depth; differs from cited local half-plane projection',

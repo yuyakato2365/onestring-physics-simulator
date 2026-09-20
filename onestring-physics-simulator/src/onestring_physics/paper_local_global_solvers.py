@@ -330,11 +330,12 @@ def _sat_projection(poly_a,poly_b,tol=1e-10):
             if n<tol: continue
             axis/=n
             pa=poly_a@axis; pb=poly_b@axis
-            overlap=min(pa.max(),pb.max())-max(pa.min(),pb.min())
-            if overlap<=tol: return None
+            negative=pa.max()-pb.min()
+            positive=pb.max()-pa.min()
+            if min(negative,positive)<=tol: return None
+            overlap=min(negative,positive)  # also separates contained polygons
             if overlap<best_depth:
-                ca=poly_a.mean(axis=0); cb=poly_b.mean(axis=0)
-                if np.dot(cb-ca,axis)<0: axis=-axis
+                if positive<negative: axis=-axis
                 best_depth=float(overlap); best_axis=axis
     return None if best_axis is None else (0.5*(best_depth+tol)*best_axis)
 
@@ -352,7 +353,7 @@ def optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,*,progress_callback=N
     w_fab=_env_float("ONESTRING_EQ5_W_FAB",.001)
     theta=math.radians(_env_float("ONESTRING_EQ5_THETA_MIN_DEG",5.))
     iterations=_env_int("ONESTRING_EQ5_ITERATIONS",240)
-    records=[]; snapshots=[]
+    records=[]; snapshots=[dict(iteration=0,xy=x.copy(),initial=True)]
 
     for it in range(iterations):
         constraints=[]
@@ -408,10 +409,15 @@ def optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,*,progress_callback=N
             fab_energy=float(np.sum((va-pa)**2)+np.sum((vb-pb)**2))
         # ECollision is reported as the squared local projection displacement.
         collision_projection_energy=0.0
-        for a,b in collision_pairs:
-            shift=_sat_projection(x[faces[a]],x[faces[b]])
-            if shift is not None:
-                collision_projection_energy += 8.0*float(np.dot(shift,shift))
+        collision_pairs=[]
+        polys=x[faces]; lo=polys.min(axis=1); hi=polys.max(axis=1)
+        for a in range(len(faces)):
+            for b in range(a+1,len(faces)):
+                if hi[a,0]<=lo[b,0] or hi[b,0]<=lo[a,0] or hi[a,1]<=lo[b,1] or hi[b,1]<=lo[a,1]: continue
+                shift=_sat_projection(polys[a],polys[b])
+                if shift is not None:
+                    collision_pairs.append((a,b))
+                    collision_projection_energy += 8.0*float(np.dot(shift,shift))
         eflat=w_edge*edge_sq+w_col*collision_projection_energy+w_fab*fab_energy
         row=dict(iteration=it+1,step=step,EFlat=eflat,EEdge=edge_sq,
                  ECollision=collision_projection_energy,EFab=fab_energy,
@@ -436,8 +442,6 @@ def optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,*,progress_callback=N
     final=dict(final,collisions=final_collisions)
     snapshots.append(dict(final,xy=x.copy(),final=True))
     history=dict(faces=faces.copy(),snapshots=snapshots,records=records,initial_xy=np.asarray(mesh_2d.vertices,float)[topology.source_vertex_ids,:2].copy(),final_xy=x.copy(),solver_message="paper-aligned local/global")
-    if snapshots:
-        snapshots[0]["initial"]=True
     metrics=dict(getattr(mesh_2d,"metrics",{}))
     metrics.update(final,
         objective="EFlat = w1*EEdge + w2*ECollision + w3*EFab (projection local/global)",
@@ -445,6 +449,7 @@ def optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,*,progress_callback=N
         paper_collision_discretization="SAT minimum-separating-translation used as local non-penetration projection; not claimed identical to Konakovic reference implementation",
         paper_eq5_pairwise_linkage=True,paper_eq5_auxetic_topology=False,
         fabrication_feasible=(final_collisions==0 and final["fab_violations"]==0),
+        theta_min_deg=math.degrees(theta),
         optimizer_iterations=len(records))
     out=type(mesh_2d)(np.column_stack((x,np.zeros(len(x)))),faces.copy(),mesh_2d.grid,"K2D",metrics,list(getattr(mesh_2d,"split_lines",[])))
     out.linkage_topology=topology; out.eq5_history=history

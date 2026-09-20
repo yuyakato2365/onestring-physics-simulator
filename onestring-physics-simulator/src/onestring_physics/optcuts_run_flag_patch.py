@@ -377,7 +377,10 @@ def _wire_dual_hard_wrapper(pipeline: Any) -> None:
 
     def dual_with_final_hard_collision(*args: Any, **kwargs: Any):
         out, hinge_graph, report = base(*args, **kwargs)
-        if _enabled():
+        if _enabled() and not hasattr(out, "linkage_topology"):
+            # Independent translations break the explicit K2D corner joints.
+            # The linkage route validates the joint/collision result of Eq.6;
+            # it must not be relabelled feasible after a packing-style cleanup.
             _project_dual_hinge_hard_nonpenetration(out, hinge_graph)
         return out, hinge_graph, report
 

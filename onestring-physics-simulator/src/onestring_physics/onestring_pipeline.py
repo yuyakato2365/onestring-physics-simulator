@@ -5867,6 +5867,7 @@ _ORIGINAL_OPTIMIZE_T2D_FOOTPRINT_LAYOUT = _original._optimize_t2d_footprint_layo
 _ORIGINAL_OPTIMIZE_RIGID_ASSEMBLY_HINGE_LAYOUT_2D = _original._optimize_rigid_assembly_hinge_layout_2d
 _ORIGINAL_OPTIMIZE_DUAL_HINGES = _original._optimize_dual_hinges
 _ORIGINAL_BUILD_GAP_GRAPH = _original._build_gap_graph
+_ORIGINAL_BUILD_HINGE_GRAPH = _original._build_hinge_graph
 
 
 def _grid_with_layout_gap(grid, minimum_gap: float):
@@ -6261,47 +6262,8 @@ def _make_t2d_from_transforms(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage: st
     global _T2D_THICK_FOOTPRINT_TILES
     start = time.perf_counter()
     if getattr(mesh_2d, "linkage_topology", None) is not None:
-        tops = flat_layout.tile_top_vertices_3d
-        if len(tops) != len(tiles_3d.vertices):
-            raise ValueError("K2D/T3D tile correspondence mismatch")
-        placements = []
-        for tile, top in zip(tiles_3d.vertices, tops):
-            # Correspondence-preserving proper Kabsch rotation. The old frame
-            # builder forces the source normal to +z, which reflects local
-            # corner order when the inverse parameterization reverses winding.
-            src_center, dst_center = tile[:4].mean(axis=0), top.mean(axis=0)
-            u, _, vt = np.linalg.svd((tile[:4]-src_center).T @ (top-dst_center))
-            correction = np.diag([1.,1.,np.linalg.det(vt.T @ u.T)])
-            rotation = vt.T @ correction @ u.T
-            transform = np.eye(4)
-            transform[:3,:3] = rotation
-            transform[:3,3] = dst_center-rotation @ src_center
-            placements.append(((tile-src_center) @ rotation.T+dst_center, transform))
-        vertices = np.asarray([item[0] for item in placements])
-        transforms = np.asarray([item[1] for item in placements])
-        error = np.linalg.norm(vertices[:,:4]-tops,axis=2)
-        metrics = {
-            "objective": "Rigid placement of T3D solids at solved K2D poses; Eq.6 follows",
-            "tile_shape_rms_error_to_T3D": _original._tile_shape_distance_error(vertices, tiles_3d.vertices),
-            "tile_shape_max_error_to_T3D": _original._tile_shape_distance_error(vertices, tiles_3d.vertices, use_max=True),
-            "top_vertices_match_k2d_rms_error": float(np.sqrt(np.mean(error**2))),
-            "top_vertices_match_k2d_max_error": float(error.max()),
-            "face_planarity_error": _original._tile_face_planarity(vertices),
-            "t2d_t3d_congruent_tile_geometry": True,
-            "section_4_3_linkage": True,
-            "t2d_layout_optimization_deferred_to_eq6": True,
-        }
-        assembly = _original.TileAssembly(
-            vertices, np.tile([0,1,2,3],(len(tops),1)),
-            np.tile([4,7,6,5],(len(tops),1)),
-            np.asarray([[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]]),
-            stage, metrics, transforms)
-        report = _original.StageReport(
-            name="K2D -> T2D top hinge", objective=metrics["objective"],
-            before_error=0., after_error=metrics["top_vertices_match_k2d_rms_error"],
-            constraint_violation=metrics["top_vertices_match_k2d_max_error"],
-            computation_time=time.perf_counter()-start, counts=_original._assembly_counts(assembly))
-        return assembly, report
+        from .paper_t2d import make_t2d
+        return make_t2d(mesh_2d, flat_layout, mesh_3d, tiles_3d, stage, _original)
     original_mesh_2d = mesh_2d
     try:
         max_face_vertex = int(np.max(np.asarray(mesh_2d.faces, dtype=int))) if len(mesh_2d.faces) else -1
@@ -6742,7 +6704,17 @@ def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_call
     return out, hinge_graph, report
 
 
+def _build_hinge_graph(grid, mesh_faces, t2d, t3d, dual):
+    if hasattr(t2d, "linkage_topology"):
+        from .paper_t2d import build_hinge_graph
+        return build_hinge_graph(t2d, t3d, _original, dual=dual)
+    return _ORIGINAL_BUILD_HINGE_GRAPH(grid, mesh_faces, t2d, t3d, dual)
+
+
 def _build_gap_graph(mesh_faces, t2d, t3d):
+    if hasattr(t2d, "linkage_topology"):
+        from .paper_t2d import build_gap_graph
+        return build_gap_graph(t2d, t3d, _original)
     gap_faces, gap_weld_metrics = _canonicalize_faces_by_coincident_tile_tops(
         np.asarray(t3d.vertices, dtype=float)[:, :4, :],
         np.asarray(mesh_faces, dtype=int),
@@ -8493,6 +8465,7 @@ _original._optimize_t2d_footprint_layout = _ORIGINAL_OPTIMIZE_T2D_FOOTPRINT_LAYO
 _original._optimize_rigid_assembly_hinge_layout_2d = _ORIGINAL_OPTIMIZE_RIGID_ASSEMBLY_HINGE_LAYOUT_2D
 _original._make_t2d_from_transforms = _make_t2d_from_transforms
 _original._optimize_dual_hinges = _optimize_dual_hinges
+_original._build_hinge_graph = _build_hinge_graph
 _original._build_gap_graph = _build_gap_graph
 _original._select_lift_points = _select_lift_points
 _original._build_string_path = _build_string_path

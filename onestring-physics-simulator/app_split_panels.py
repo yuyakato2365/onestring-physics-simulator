@@ -6,14 +6,11 @@ Numerical Split semantics stay intentionally simple and unchanged:
 - preserve the original M2D arrangement and open only a symmetric seam gap;
 - never bin-pack or reorder panels.
 
-UI/debug behavior is deliberately separated from those numerics.  A fresh run
-shows exactly one diagnostic sequence (Omega -> Split -> K2D), and the same
-Omega/K2D animations can later be selected from View stage without substituting
-T3D or another legacy static stage.
+UI/debug behavior is deliberately separated from those numerics.  Process animations are selected explicitly from View stage, without
+substituting T3D or another static stage.
 """
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import runpy
@@ -46,8 +43,6 @@ from onestring_physics.process_animation_view_fix import (  # noqa: E402
 from onestring_physics.unified_animation_ui import (  # noqa: E402
     cache_omega_payload,
     install_unified_animation_ui,
-    render_postrun_process_sequence,
-    render_selected_synthetic_view,
 )
 
 LOG_PATH = ROOT / "logs" / "split_debug.jsonl"
@@ -186,63 +181,8 @@ else:
     opt_debug.render_k2d_correspondence_morph = lambda *a, **k: None
 
 
-# The backed-up legacy app immediately executes importlib.reload(pipeline).
-# In this dedicated launcher that would erase Split/K2D/Omega instrumentation.
-if not getattr(importlib, "_onestring_simple_split_freeze_installed", False):
-    _real_reload = importlib.reload
-
-    def _reload_except_active_pipeline(module: Any) -> Any:
-        if module is pipeline or getattr(module, "__name__", "") == "onestring_physics.onestring_pipeline":
-            _append_route_log("pipeline_reload_skipped_for_simple_split")
-            print("[SPLIT-ROUTE] skipped legacy pipeline reload; unified animation stack preserved")
-            return pipeline
-        return _real_reload(module)
-
-    importlib.reload = _reload_except_active_pipeline
-    importlib._onestring_simple_split_freeze_installed = True
-
-
-# One selector wrapper owns every synthetic animation choice.  It returns a
-# private sentinel, never T3D, so the legacy View-stage branch draws no impostor.
+# The legacy UI retains the launcher's pipeline module. View stage owns all
+# rendering, including explicitly selected animations; do not append a second
+# renderer after the legacy UI has finished.
 install_unified_animation_ui()
-
-# Capture the legacy script globals so we know whether this rerun performed an
-# actual fresh pipeline build or was only a display/View-stage rerun.
-legacy_globals = runpy.run_path(str(ROOT / "app.py"), run_name="__main__")
-
-state = legacy_globals.get("state")
-if state is None:
-    state = st.session_state.get("onestring_state")
-
-fresh_run = bool(legacy_globals.get("run_pipeline", False))
-split_renderer = getattr(
-    simple_split_module,
-    "_onestring_original_split_renderer_for_unified_view",
-    None,
-)
-
-# Static legacy result stages have already rendered inside app.py.  They must
-# remain the final output of this rerun; appending the synthetic animation UI
-# after them makes K3D/T3D flash briefly and then appear to disappear.
-selected_legacy_view = str(legacy_globals.get("view_stage", ""))
-static_result_views = {
-    "Pipeline View", "S", "Split Map", "M2D", "M3D", "K3D", "T3D", "K2D",
-    "T2D Top Hinge", "T2D Dual Hinge", "Lift Points", "String Path",
-    "Comparison", "Metrics", "Paper Consistency Audit", "Setting Meters",
-    "Complexity / Backend", "Performance", "Approximations",
-}
-
-if (
-    fresh_run
-    and state is not None
-    and split_renderer is not None
-    and not (selected_legacy_view in static_result_views)
-):
-    # Exactly one fresh-run sequence: Omega -> Split -> K2D.
-    render_postrun_process_sequence(state, opt_debug, split_renderer)
-else:
-    # Static legacy stages (K3D/T3D/etc.) were already rendered by app.py.
-    # Never append a synthetic Omega/Split/K2D view after them: on Streamlit
-    # reruns that made the selected static result appear to disappear.
-    if not (selected_legacy_view in static_result_views):
-        render_selected_synthetic_view(opt_debug, state=state)
+runpy.run_path(str(ROOT / "app.py"), run_name="__main__")

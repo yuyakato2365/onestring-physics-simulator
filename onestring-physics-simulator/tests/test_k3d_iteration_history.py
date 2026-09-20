@@ -98,7 +98,7 @@ def test_k3d_history_has_multiple_checkpoints(solved_k3d):
     assert records[-1]["EAssembled"] < records[0]["EAssembled"]
 
 
-def test_k3d_history_final_matches_output(solved_k3d):
+def test_k3d_history_final_matches_authoritative_output(solved_k3d):
     out = solved_k3d["out"]
     mesh = solved_k3d["mesh"]
     history = out.metrics["k3d_iteration_history"]
@@ -155,7 +155,7 @@ def test_k3d_history_final_matches_output(solved_k3d):
         assert record[name] == pytest.approx(value, rel=1e-9, abs=1e-15), name
 
 
-def test_k3d_figure_has_finite_3d_geometry(solved_k3d):
+def test_k3d_figure_contains_finite_3d_geometry(solved_k3d):
     from onestring_physics.visualization import figure_quad_mesh
 
     figure = figure_quad_mesh(solved_k3d["out"], title="K3D")
@@ -186,3 +186,17 @@ def test_k3d_history_view_reports_missing_history_without_solving():
         )
 
     assert get_k3d_history(_State()) is None
+
+
+def test_k3d_history_is_not_shadow_solve(solved_k3d, monkeypatch):
+    from types import SimpleNamespace
+    import onestring_physics.paper_local_global_solvers as solvers
+    from onestring_physics.k3d_iteration_history_view import get_k3d_history
+    def forbidden(*args, **kwargs):
+        raise AssertionError("display must not run the optimizer")
+    monkeypatch.setattr(solvers, "optimize_paper_local_global_k3d", forbidden)
+    mesh = solved_k3d["out"]
+    state = SimpleNamespace(mesh_3d_optimized=mesh)
+    history = get_k3d_history(state)
+    assert history is mesh.metrics["k3d_iteration_history"]
+    assert history["shadow_solve"] is False

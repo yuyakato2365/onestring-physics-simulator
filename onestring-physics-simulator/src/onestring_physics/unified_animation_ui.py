@@ -4,13 +4,11 @@ Synthetic animation choices are rendered immediately underneath the legacy
 ``View stage`` selector.  The legacy app receives a private sentinel that matches
 no static stage, so it never substitutes T3D or another unrelated view.
 
-The same renderer functions are reused for the fresh-run diagnostic sequence:
-actual Omega accepted states -> one Split panel view -> actual K2D checkpoints.
 No numerical Split/K2D/Omega behavior is changed here.
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -242,12 +240,8 @@ def install_unified_view_stage_selector() -> None:
             kwargs = {**kwargs, "options": options}
 
         selected = previous(*args, **kwargs)
-        # K3D is a static legacy stage, not a synthetic animation.  It must be
-        # returned unchanged so the legacy ``view_stage`` branch renders it the
-        # same way as every other static stage (M2D/M3D/T3D/K2D).  Rendering it
-        # here instead emitted the chart at a selector-dependent position with a
-        # different st.plotly_chart signature, which is what left the WebGL view
-        # blank while the legend/modebar still drew.
+        # Static stages pass through unchanged to their single legacy renderer.
+        # Only an explicitly selected animation is rendered at the selector.
         if selected in ALL_SYNTHETIC_VIEWS:
             st.session_state[_SESSION_SELECTED] = selected
             # Render NOW, immediately beneath the selector.  Waiting until the
@@ -275,60 +269,6 @@ def install_unified_animation_ui() -> None:
     install_unified_view_stage_selector()
 
 
-def render_selected_synthetic_view(
-    optimization_debug_module: Any,
-    *,
-    state: Any | None = None,
-) -> bool:
-    """Fallback renderer for callers that do not go through the patched selector."""
-    try:
-        import streamlit as st
-    except Exception:
-        return False
-    if bool(st.session_state.get(_SESSION_RENDERED, False)):
-        return True
-    selected = st.session_state.get(_SESSION_SELECTED)
-    if selected not in ALL_SYNTHETIC_VIEWS:
-        return False
-    rendered = _render_selected_value(selected, optimization_debug_module, state)
-    st.session_state[_SESSION_RENDERED] = bool(rendered)
-    return bool(rendered)
-
-
-def render_postrun_process_sequence(
-    state: Any,
-    optimization_debug_module: Any,
-    split_renderer: Callable[[Any, Any, Any | None], None],
-) -> None:
-    """Show Omega -> Split -> K2D exactly once after a fresh calculation."""
-    try:
-        import streamlit as st
-    except Exception:
-        return
-    if state is None:
-        return
-
-    st.divider()
-    st.markdown("## Optimization process animations")
-    st.caption(
-        "Fresh-run diagnostics: actual accepted Omega states, one Split panel "
-        "view, then actual K2D optimization checkpoints."
-    )
-
-    _render_exact_omega(optimization_debug_module)
-
-    try:
-        split_renderer(
-            state.mesh_2d_initial,
-            state.mesh_2d_optimized,
-            state.mesh_3d_optimized,
-        )
-    except Exception as exc:
-        st.warning(f"Split diagnostic rendering failed: {exc}")
-
-    _render_k2d_process()
-
-
 __all__ = [
     "ALL_SYNTHETIC_VIEWS",
     "ASSEMBLY_ANIMATION_VIEWS",
@@ -340,6 +280,4 @@ __all__ = [
     "install_unified_animation_ui",
     "install_unified_view_stage_selector",
     "install_exact_omega_figure_capture",
-    "render_selected_synthetic_view",
-    "render_postrun_process_sequence",
 ]

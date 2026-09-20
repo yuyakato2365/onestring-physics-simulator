@@ -30,6 +30,5 @@ print(
 
 # UI flags consumed by the legacy app / split-panel launcher.
 os.environ["ONESTRING_PAPER_T3D_20260920"] = "1"
-os.environ["ONESTRING_PAPER_T3D_PERSIST_STATIC_VIEW"] = "1"
 
 runpy.run_path(str(ROOT / "app_optcuts_20260916.py"), run_name="__main__")

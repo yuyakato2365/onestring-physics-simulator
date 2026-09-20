@@ -21,7 +21,8 @@ class _Deadline(Exception):
 
 def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_callback=None):
     started=time.perf_counter()
-    graph=pipeline._build_hinge_graph(grid,mesh_faces,t2d,t3d,dual=True)
+    from .paper_t2d import build_hinge_graph, validate_flat_linkage
+    graph=build_hinge_graph(t2d,t3d,pipeline,dual=True)
     rest=np.asarray(t2d.vertices,float)
     centers=rest[:,:4,:2].mean(axis=1)
     local=rest[:,:,:2]-centers[:,None,:]
@@ -100,6 +101,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         transform=np.eye(4);transform[:2,:2]=r
         transform[:2,3]=centers[i]+scale*np.array([tx,ty])-r@centers[i]
         out.transform_matrices[i]=transform@t2d.transform_matrices[i]
+        out.top_to_bottom_transforms[i]=transform@t2d.top_to_bottom_transforms[i]@np.linalg.inv(transform)
     _,_,final=evaluate(last)
     out.metrics.update(graph.metrics)
     out.metrics.update(final)
@@ -112,6 +114,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_connection_model='2 * sum squared paired 3D corner distances',
                        tile_shape_max_error_to_T3D=pipeline._tile_shape_distance_error(out.vertices,t3d.vertices,use_max=True),
                        fabrication_feasible=final['collisions']==0 and final['hinge_rms']<scale*1e-4)
+    out.metrics.update(validate_flat_linkage(out,t3d,pipeline,graph))
+    out.metrics["paper_classification"]["optional_anchor_energy"] = "Project-specific extension"
     graph.metrics=dict(out.metrics)
     for hinge in graph.hinges:
         hinge.rest_position_2d=.5*(out.vertices[hinge.tile_a,hinge.local_vertex_a]+out.vertices[hinge.tile_b,hinge.local_vertex_b])

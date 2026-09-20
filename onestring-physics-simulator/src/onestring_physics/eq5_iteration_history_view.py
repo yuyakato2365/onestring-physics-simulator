@@ -17,7 +17,9 @@ def _figure(xy,faces,snapshot,xrange,yrange,*,diagnostic=True):
     xs=[];ys=[]
     for face in faces:
         ids=np.r_[face,face[0]];p=xy[ids];xs.extend(p[:,0].tolist()+[None]);ys.extend(p[:,1].tolist()+[None])
-    fig=go.Figure(go.Scattergl(x=xs,y=ys,mode='lines',line=dict(width=1),hoverinfo='skip'))
+    # A full trajectory must not allocate a WebGL context per snapshot: doing
+    # so evicts the earlier K3D/T3D canvas after it has briefly rendered.
+    fig=go.Figure(go.Scatter(x=xs,y=ys,mode='lines',line=dict(width=1),hoverinfo='skip'))
     if diagnostic:
         it=snapshot['iteration'];c=snapshot.get('collisions',0);f=snapshot.get('fab_violations',0);step=snapshot.get('step',0.)
         label='Initial raw xy' if snapshot.get('initial') else ('Final raw xy' if snapshot.get('final') else f'iter {it}')
@@ -49,7 +51,7 @@ def render_final_k2d_result(st, history=None):
     st.subheader("K2D")
     st.plotly_chart(
         _figure(xy,faces,snapshot,xrange,yrange,diagnostic=False),
-        width='stretch',
+        use_container_width=True,
         key="eq5_main_final_k2d",
         config={"displaylogo": False, "responsive": True},
     )
@@ -64,9 +66,6 @@ def render_completed_k2d(history):
         if get_script_run_ctx(suppress_warning=True) is None:
             return
         st.session_state["eq5_history"] = history
-        st.subheader("K2D result — before T2D / Dual Hinge")
-        render_eq5_iteration_history(st, history)
-        st.session_state["eq5_rendered_this_run"] = True
     except ImportError:
         return
 
@@ -93,7 +92,7 @@ def render_eq5_iteration_history(st, history=None):
         cols=st.columns(3,gap='small')
         for j,snapshot in enumerate(snaps[start:start+3]):
             xy=np.asarray(snapshot['xy'],float)
-            with cols[j]:st.plotly_chart(_figure(xy,faces,snapshot,xrange,yrange),width='stretch',key=f"eq5_raw_hist_{snapshot['iteration']}_{start+j}")
+            with cols[j]:st.plotly_chart(_figure(xy,faces,snapshot,xrange,yrange),use_container_width=True,key=f"eq5_raw_hist_{snapshot['iteration']}_{start+j}")
     st.caption(f'共通表示範囲: x=[{xrange[0]:.4g}, {xrange[1]:.4g}], y=[{yrange[0]:.4g}, {yrange[1]:.4g}]。各タイトルの extent はそのiteration自身の幅×高さです。')
 
 __all__=['render_eq5_iteration_history','render_completed_k2d','render_final_k2d_result']
