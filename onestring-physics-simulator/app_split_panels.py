@@ -221,7 +221,9 @@ split_renderer = getattr(
     None,
 )
 
-persist_static_view = os.environ.get("ONESTRING_PAPER_T3D_PERSIST_STATIC_VIEW", "0") == "1"
+# Static legacy result stages have already rendered inside app.py.  They must
+# remain the final output of this rerun; appending the synthetic animation UI
+# after them makes K3D/T3D flash briefly and then appear to disappear.
 selected_legacy_view = str(legacy_globals.get("view_stage", ""))
 static_result_views = {
     "Pipeline View", "S", "Split Map", "M2D", "M3D", "K3D", "T3D", "K2D",
@@ -234,7 +236,7 @@ if (
     fresh_run
     and state is not None
     and split_renderer is not None
-    and not (persist_static_view and selected_legacy_view in static_result_views)
+    and not (selected_legacy_view in static_result_views)
 ):
     # Exactly one fresh-run sequence: Omega -> Split -> K2D.
     render_postrun_process_sequence(state, opt_debug, split_renderer)
@@ -242,5 +244,5 @@ else:
     # Static legacy stages (K3D/T3D/etc.) were already rendered by app.py.
     # Never append a synthetic Omega/Split/K2D view after them: on Streamlit
     # reruns that made the selected static result appear to disappear.
-    if not (persist_static_view and selected_legacy_view in static_result_views):
+    if not (selected_legacy_view in static_result_views):
         render_selected_synthetic_view(opt_debug, state=state)
