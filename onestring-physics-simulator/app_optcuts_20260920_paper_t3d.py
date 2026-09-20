@@ -35,3 +35,47 @@ os.environ["ONESTRING_PAPER_T3D_20260920"] = "1"
 os.environ["ONESTRING_PAPER_T3D_PERSIST_STATIC_VIEW"] = "1"
 
 runpy.run_path(str(ROOT / "app_optcuts_20260916.py"), run_name="__main__")
+
+
+# Dedicated paper-T3D fallback renderer.  app.py owns the View-stage selector,
+# but the nested runpy launchers can make later diagnostic renderers obscure
+# that section.  Re-render the selected static stage at the very end so K3D and
+# T3D are always visible, and put K3D history directly beside the K3D result.
+try:
+    import streamlit as st
+    from onestring_physics.k3d_iteration_history_view import render_k3d_iteration_history
+
+    _state = st.session_state.get("onestring_state")
+    if _state is not None:
+        st.markdown("---")
+        st.markdown("## Paper-T3D results")
+        _tabs = st.tabs(["K3D", "T3D", "K3D objective history"])
+        with _tabs[0]:
+            try:
+                from onestring_physics.visualization import figure_quad_mesh
+                st.plotly_chart(
+                    figure_quad_mesh(_state.mesh_3d_optimized, title="K3D"),
+                    width="stretch",
+                    key="paper_t3d_fallback_k3d",
+                )
+            except Exception as _exc:
+                st.warning(f"K3D fallback view skipped: {_exc}")
+        with _tabs[1]:
+            try:
+                from onestring_physics.visualization import figure_tile_assembly
+                st.plotly_chart(
+                    figure_tile_assembly(_state.tiles_3d),
+                    width="stretch",
+                    key="paper_t3d_fallback_t3d",
+                )
+                st.write(_state.tiles_3d.metrics)
+            except Exception as _exc:
+                st.warning(f"T3D fallback view skipped: {_exc}")
+        with _tabs[2]:
+            if not render_k3d_iteration_history(st, _state):
+                st.warning(
+                    "K3D objective history was not recorded for this run. "
+                    "Run the pipeline once after pulling this revision; the CPU/SciPy route records it."
+                )
+except Exception as _exc:
+    print(f"[2026-09-20-PAPER-T3D-RESULTS] skipped: {_exc}")
