@@ -441,20 +441,27 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     # polished K3D object, so K2D edge targets and T3D extrusion both derive
     # from exactly the same planarized geometry.
     x_pre_polish=x.copy()
+    polish_enabled=str(os.getenv("ONESTRING_K3D_PLANARITY_POLISH","1")).strip().lower() not in {"0","false","no","off"}
     polish_tol=_env_float("ONESTRING_K3D_POLISH_TOLERANCE",1e-8)
     polish_iters=_env_int("ONESTRING_K3D_POLISH_MAX_ITERATIONS",300)
-    polished,polish=minimum_displacement_planarity_polish(
-        x_pre_polish,faces,tolerance=polish_tol,max_iterations=polish_iters
-    )
-    if polish["success"]:
-        x=polished
-    else:
-        raise RuntimeError(
-            "K3D minimum-displacement planarity polish failed: "
-            f"{polish['message']} (planarity_max={polish['planarity_max']:.6g})"
+    if polish_enabled:
+        polished,polish=minimum_displacement_planarity_polish(
+            x_pre_polish,faces,tolerance=polish_tol,max_iterations=polish_iters
         )
+        if polish["success"]:
+            x=polished
+        else:
+            raise RuntimeError(
+                "K3D minimum-displacement planarity polish failed: "
+                f"{polish['message']} (planarity_max={polish['planarity_max']:.6g})"
+            )
+    else:
+        polish={"success":True,"iterations":0,"planarity_max":0.0,"planarity_rms":0.0,
+                "displacement_rms":0.0,"displacement_max":0.0,"message":"disabled",
+                "tolerance":float(polish_tol)}
+        print("[K3D-PLANARITY-POLISH] disabled by UI/environment",flush=True)
     metrics.update({
-        "k3d_planarity_polish_applied":True,
+        "k3d_planarity_polish_applied":bool(polish_enabled),
         "k3d_planarity_polish_solver":"sparse trust-region continuation: minimum displacement + quad coplanarity penalty",
         "k3d_planarity_polish_reference":"pre-polish paper local/global K3D",
         "k3d_planarity_polish_success":bool(polish["success"]),
@@ -464,7 +471,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         "k3d_planarity_polish_rms":float(polish["planarity_rms"]),
         "k3d_planarity_polish_displacement_rms":float(polish["displacement_rms"]),
         "k3d_planarity_polish_displacement_max":float(polish["displacement_max"]),
-        "k3d_downstream_geometry":"minimum-displacement planarized K3D",
+        "k3d_downstream_geometry":("minimum-displacement planarized K3D" if polish_enabled else "paper local/global K3D"),
     })
     # Preserve the local/global history as the history of that solver; add an
     # explicit terminal polish record instead of pretending SLSQP was another
