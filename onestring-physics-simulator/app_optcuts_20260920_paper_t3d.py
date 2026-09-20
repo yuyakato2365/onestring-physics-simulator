@@ -2,15 +2,9 @@
 
 Version: 2026-09-20-paper-t3d
 
-Compared with the k2d-recovery baseline, this version changes only K3D -> T3D:
-1. offset shared K3D vertices along mesh vertex normals by the requested thickness;
-2. build fixed 8-vertex / 6-quad frustum tiles;
-3. optimize top, bottom, and four contact faces with the paper's Eq.(2)
-   best-fit-plane projection energy;
-4. retain a per-tile rigid top->bottom transform for the later K2D -> T2D step.
-
-Variable-topology half-space clipping, wedge/pyramid recovery, local-thickness
-recovery, junction caps, and global T3D clipping are deliberately not used.
+K3D -> T3D follows the paper route: mesh-normal offset, fixed eight-vertex
+quadrilateral frustums, then Eq.(2) planarity optimization of top, bottom and
+contact faces. Variable-topology recovery is not used in this version.
 """
 from __future__ import annotations
 from pathlib import Path
@@ -24,9 +18,15 @@ if str(SRC) not in sys.path:
 
 import onestring_physics as package
 from onestring_physics import onestring_pipeline as pipeline
-from onestring_physics.paper_t3d_20260920_patch import install_paper_t3d_20260920_patch
+from onestring_physics.paper_t3d_20260920_patch import (
+    install_paper_t3d_20260920_patch,
+    install_paper_t3d_20260920_version_ui,
+)
 
+# Install the numerical route and the visible version-selector entry before the
+# dated launcher builds the rest of the UI/patch stack.
 install_paper_t3d_20260920_patch(pipeline)
+install_paper_t3d_20260920_version_ui()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 
