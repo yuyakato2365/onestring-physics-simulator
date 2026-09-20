@@ -343,6 +343,15 @@ with st.sidebar:
         ))
         os.environ["ONESTRING_OPTCUTS_DISTORTION_BOUND"] = str(optcuts_distortion_bound)
 
+        k3d_planarity_polish = bool(st.checkbox(
+            "K3D: minimum-displacement planarity polish",
+            value=str(os.environ.get("ONESTRING_K3D_PLANARITY_POLISH", "1")).strip().lower()
+                  not in {"0", "false", "no", "off"},
+            help="K3Dの通常最適化後に、元のK3Dからの移動量を抑えながらquadの共平面性だけを追加最適化します。OFFでは通常のK3DをそのままK2D/T3Dへ渡します。",
+            key="onestring_0920_k3d_planarity_polish",
+        ))
+        os.environ["ONESTRING_K3D_PLANARITY_POLISH"] = "1" if k3d_planarity_polish else "0"
+
     st.header("Target Input")
     target_kind = _param_row(
         "目標曲面 S の種類。waveは標準で起伏を抑制。half_gourdは半割りヒョウタン状の非矩形メッシュで、Ω/M2D cropの検証用。",
