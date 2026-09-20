@@ -1595,11 +1595,7 @@ elif view_stage in {"M2D", "K3D"}:
             "M3D → K3D optimization の最終結果を表示しています。"
             f" · vertices={len(mesh.vertices)} · quads={len(mesh.faces)}"
         )
-    # Render the geometry with Streamlit-native 3D primitives first.
-    # The current browser/Plotly WebGL path can fail with a blank canvas even
-    # though the K3D state is valid (legend survives, trace does not).  This
-    # viewer is independent of Plotly and therefore also acts as an end-to-end
-    # check that the authoritative pipeline produced finite K3D geometry.
+    st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")
     if view_stage == "K3D":
         _k3d_vertices = np.asarray(mesh.vertices, dtype=float)
         _k3d_faces = np.asarray(mesh.faces, dtype=int)
