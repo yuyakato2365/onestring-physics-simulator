@@ -390,8 +390,9 @@ def _install_plotly_view_patch() -> None:
         # calling the real renderer.
         legacy_width = kwargs.pop("width", None)
         kwargs.pop("use_container_width", None)
-        if legacy_width == "stretch":
-            kwargs.setdefault("width", "stretch")
+        # Do not forward legacy sizing kwargs.  The chart naturally fills the
+        # app's wide column, and this avoids the deprecated-kwargs rendering path
+        # that produced the blank static WebGL canvas.
         return original_plotly_chart(fig, *args, **kwargs)
 
     st.plotly_chart = patched_plotly_chart
