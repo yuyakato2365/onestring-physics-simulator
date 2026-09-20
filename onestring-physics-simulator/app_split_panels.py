@@ -239,8 +239,8 @@ if (
     # Exactly one fresh-run sequence: Omega -> Split -> K2D.
     render_postrun_process_sequence(state, opt_debug, split_renderer)
 else:
-    # For the dedicated paper-T3D launcher, leave ordinary static results such
-    # as K3D/T3D exactly where the legacy app rendered them.  Do not append the
-    # post-run diagnostic sequence, which can replace/scroll away the result.
-    # Display-only reruns still render a selected synthetic animation normally.
-    render_selected_synthetic_view(opt_debug, state=state)
+    # Static legacy stages (K3D/T3D/etc.) were already rendered by app.py.
+    # Never append a synthetic Omega/Split/K2D view after them: on Streamlit
+    # reruns that made the selected static result appear to disappear.
+    if not (persist_static_view and selected_legacy_view in static_result_views):
+        render_selected_synthetic_view(opt_debug, state=state)
