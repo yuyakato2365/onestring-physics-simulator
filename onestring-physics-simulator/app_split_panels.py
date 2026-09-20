@@ -220,10 +220,26 @@ split_renderer = getattr(
     None,
 )
 
-if fresh_run and state is not None and split_renderer is not None:
+persist_static_view = os.environ.get("ONESTRING_PAPER_T3D_PERSIST_STATIC_VIEW", "0") == "1"
+selected_legacy_view = str(legacy_globals.get("view_stage", ""))
+static_result_views = {
+    "Pipeline View", "S", "Split Map", "M2D", "M3D", "K3D", "T3D", "K2D",
+    "T2D Top Hinge", "T2D Dual Hinge", "Lift Points", "String Path",
+    "Comparison", "Metrics", "Paper Consistency Audit", "Setting Meters",
+    "Complexity / Backend", "Performance", "Approximations",
+}
+
+if (
+    fresh_run
+    and state is not None
+    and split_renderer is not None
+    and not (persist_static_view and selected_legacy_view in static_result_views)
+):
     # Exactly one fresh-run sequence: Omega -> Split -> K2D.
     render_postrun_process_sequence(state, opt_debug, split_renderer)
 else:
-    # Display-only reruns (including changing View stage) draw only the selected
-    # synthetic animation.  Normal legacy stages were already rendered above.
+    # For the dedicated paper-T3D launcher, leave ordinary static results such
+    # as K3D/T3D exactly where the legacy app rendered them.  Do not append the
+    # post-run diagnostic sequence, which can replace/scroll away the result.
+    # Display-only reruns still render a selected synthetic animation normally.
     render_selected_synthetic_view(opt_debug, state=state)
