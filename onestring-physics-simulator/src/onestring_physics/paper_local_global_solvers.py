@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import lsqr
+from scipy.optimize import minimize
 
 from .paper_eq5_k2d_solver import build_linkage_topology, project_angle_vectors
 
@@ -154,6 +155,70 @@ def _solve_constraints(n,dim,constraints,anchor=None,anchor_weight=1e-8):
     A=sparse.coo_matrix((data,(rows,cols)),shape=(row,n*dim)).tocsr()
     x=lsqr(A,np.asarray(rhs),atol=1e-10,btol=1e-10,iter_lim=max(500,4*n))[0]
     return x.reshape(n,dim)
+
+
+
+def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_iterations=300):
+    """Move K3D vertices as little as possible while enforcing quad coplanarity.
+
+    Solves min 1/2 ||x-x0||^2 subject to the scalar triple product of every
+    quad being zero.  SLSQP handles the nonlinear equality constraints
+    simultaneously, so shared vertices remain shared instead of being
+    independently projected per face.
+    """
+    x0=np.asarray(vertices,float).copy()
+    faces=np.asarray(faces,int)
+    if len(faces)==0:
+        return x0,{"success":True,"iterations":0,"planarity_max":0.0,
+                   "displacement_rms":0.0,"displacement_max":0.0,"message":"empty mesh"}
+
+    scale=max(float(np.linalg.norm(np.ptp(x0,axis=0))),1e-12)
+    # Normalize coordinates for better conditioning of the cubic volume
+    # constraints.  The returned coordinates remain in the original units.
+    center=x0.mean(axis=0)
+    y0=(x0-center)/scale
+
+    def objective(flat):
+        d=flat-y0.ravel()
+        return 0.5*float(np.dot(d,d))
+
+    def jac_objective(flat):
+        return flat-y0.ravel()
+
+    def coplanarity(flat):
+        y=flat.reshape((-1,3))
+        q=y[faces]
+        a=q[:,1]-q[:,0]; b=q[:,2]-q[:,0]; c=q[:,3]-q[:,0]
+        return np.einsum("ij,ij->i",a,np.cross(b,c))
+
+    result=minimize(
+        objective,y0.ravel(),jac=jac_objective,method="SLSQP",
+        constraints=[{"type":"eq","fun":coplanarity}],
+        options={"ftol":max(float(tolerance)/scale,1e-12),"maxiter":int(max_iterations),"disp":False},
+    )
+    polished=result.x.reshape((-1,3))*scale+center
+
+    # Geometric planarity is reported as point-to-best-fit-plane distance,
+    # matching the K3D history convention rather than the cubic constraint.
+    deviations=[]
+    for f in faces:
+        q=polished[f]
+        deviations.extend(np.linalg.norm(q-_best_fit_plane_projection(q),axis=1))
+    dev=np.asarray(deviations,float)
+    disp=np.linalg.norm(polished-x0,axis=1)
+    max_plan=float(np.max(dev)) if dev.size else 0.0
+    success=bool(result.success and max_plan<=max(float(tolerance),1e-10))
+    return polished,{
+        "success":success,
+        "solver_success":bool(result.success),
+        "iterations":int(getattr(result,"nit",0)),
+        "planarity_max":max_plan,
+        "planarity_rms":float(np.sqrt(np.mean(dev*dev))) if dev.size else 0.0,
+        "displacement_rms":float(np.sqrt(np.mean(disp*disp))) if disp.size else 0.0,
+        "displacement_max":float(np.max(disp)) if disp.size else 0.0,
+        "message":str(getattr(result,"message","")),
+        "tolerance":float(tolerance),
+    }
 
 
 def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeline=None):
@@ -307,6 +372,42 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     source_span=np.ptp(np.asarray(mesh.vertices,float),axis=0)
     if float(np.linalg.norm(span)) < 1e-10*max(float(np.linalg.norm(source_span)),1.0):
         raise RuntimeError("Paper local/global K3D collapsed to a near-point configuration")
+    # Post-process the authoritative local/global K3D with a constrained
+    # minimum-displacement planarization.  Downstream code receives this
+    # polished K3D object, so K2D edge targets and T3D extrusion both derive
+    # from exactly the same planarized geometry.
+    x_pre_polish=x.copy()
+    polish_tol=_env_float("ONESTRING_K3D_POLISH_TOLERANCE",1e-8)
+    polish_iters=_env_int("ONESTRING_K3D_POLISH_MAX_ITERATIONS",300)
+    polished,polish=minimum_displacement_planarity_polish(
+        x_pre_polish,faces,tolerance=polish_tol,max_iterations=polish_iters
+    )
+    if polish["success"]:
+        x=polished
+    else:
+        raise RuntimeError(
+            "K3D minimum-displacement planarity polish failed: "
+            f"{polish['message']} (planarity_max={polish['planarity_max']:.6g})"
+        )
+    metrics.update({
+        "k3d_planarity_polish_applied":True,
+        "k3d_planarity_polish_solver":"SLSQP minimum displacement with hard quad coplanarity equalities",
+        "k3d_planarity_polish_reference":"pre-polish paper local/global K3D",
+        "k3d_planarity_polish_success":bool(polish["success"]),
+        "k3d_planarity_polish_iterations":int(polish["iterations"]),
+        "k3d_planarity_polish_tolerance":float(polish["tolerance"]),
+        "k3d_planarity_polish_max":float(polish["planarity_max"]),
+        "k3d_planarity_polish_rms":float(polish["planarity_rms"]),
+        "k3d_planarity_polish_displacement_rms":float(polish["displacement_rms"]),
+        "k3d_planarity_polish_displacement_max":float(polish["displacement_max"]),
+        "k3d_downstream_geometry":"minimum-displacement planarized K3D",
+    })
+    # Preserve the local/global history as the history of that solver; add an
+    # explicit terminal polish record instead of pretending SLSQP was another
+    # local/global iteration.
+    iteration_history["polish"] = dict(polish)
+    metrics["k3d_planarity_residual"]=float(polish["planarity_rms"]**2)
+    span=np.ptp(x,axis=0)
     metrics["k3d_bbox_span"]=[float(v) for v in span]
     metrics["k3d_vertex_min"]=[float(v) for v in np.min(x,axis=0)]
     metrics["k3d_vertex_max"]=[float(v) for v in np.max(x,axis=0)]
@@ -466,4 +567,4 @@ def optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,*,progress_callback=N
     return out,report
 
 
-__all__=["optimize_paper_local_global_k3d","optimize_paper_local_global_k2d"]
+__all__=["optimize_paper_local_global_k3d","optimize_paper_local_global_k2d","minimum_displacement_planarity_polish"]
