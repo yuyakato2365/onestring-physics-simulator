@@ -316,6 +316,23 @@ with st.sidebar:
     )
     st.caption(selected_model_version["description"])
 
+    # The dated 2026-09-18 OptCuts + paper local/global implementation owns
+    # the official OptCuts distortion setting.  Keep it with the version
+    # selector rather than attaching it to the experimental optcuts_test mode.
+    optcuts_distortion_bound = 4.1
+    if str(selected_model_version.get("label", "")).startswith("2026-09-18"):
+        optcuts_distortion_bound = float(st.number_input(
+            "OptCuts distortion bound (Symmetric Dirichlet > 4)",
+            min_value=4.0001,
+            max_value=1000.0,
+            value=max(4.0001, float(os.environ.get("ONESTRING_OPTCUTS_DISTORTION_BOUND", "4.1"))),
+            step=0.05,
+            format="%.4f",
+            help="2026-09-18 OptCuts Ω に渡す distortion_bound。小さいほど歪みに厳しい。",
+            key="onestring_0918_optcuts_distortion_bound",
+        ))
+        os.environ["ONESTRING_OPTCUTS_DISTORTION_BOUND"] = str(optcuts_distortion_bound)
+
     st.header("Target Input")
     target_kind = _param_row(
         "目標曲面 S の種類。waveは標準で起伏を抑制。half_gourdは半割りヒョウタン状の非矩形メッシュで、Ω/M2D cropの検証用。",
@@ -360,20 +377,6 @@ with st.sidebar:
             help="bff is a deprecated alias of rectangular_harmonic_legacy. paper_reference_bff requires the official CLI.",
         ),
     )
-    optcuts_distortion_bound = 4.1
-    if omega_parameterization_mode in {"optcuts", "optcuts_test"}:
-        optcuts_distortion_bound = float(_param_row(
-            "Official OptCuts の distortion bound。4 より大きい値を指定する。小さいほど歪みに厳しい。",
-            lambda: st.number_input(
-                "OptCuts distortion bound",
-                min_value=4.0001,
-                max_value=100.0,
-                value=4.1,
-                step=0.1,
-                format="%.4f",
-                help="Passed directly to the official OptCuts solver as distortion_bound (> 4).",
-            ),
-        ))
     if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
         st.warning("This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.")
     with st.expander("Paper-reference BFF settings", expanded=omega_parameterization_mode == "paper_reference_bff"):
