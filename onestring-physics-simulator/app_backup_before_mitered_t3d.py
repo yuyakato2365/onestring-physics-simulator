@@ -1634,7 +1634,6 @@ elif view_stage in {"M2D", "K3D"}:
                 y="y",
                 size=20,
                 height=620,
-                key="k3d_native_xy",
             )
             st.caption(
                 "Native K3D vertex projection (XY). This deliberately bypasses Plotly/WebGL; "
