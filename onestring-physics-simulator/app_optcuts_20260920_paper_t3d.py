@@ -1,10 +1,6 @@
 """2026-09-20 paper-aligned T3D launcher.
 
 Version: 2026-09-20-paper-t3d
-
-K3D -> T3D follows the paper route: mesh-normal offset, fixed eight-vertex
-quadrilateral frustums, then Eq.(2) planarity optimization of top, bottom and
-contact faces. Variable-topology recovery is not used in this version.
 """
 from __future__ import annotations
 from pathlib import Path
@@ -18,15 +14,10 @@ if str(SRC) not in sys.path:
 
 import onestring_physics as package
 from onestring_physics import onestring_pipeline as pipeline
-from onestring_physics.paper_t3d_20260920_patch import (
-    install_paper_t3d_20260920_patch,
-    install_paper_t3d_20260920_version_ui,
-)
+from onestring_physics.paper_t3d_20260920_patch import install_paper_t3d_20260920_patch
 
-# Install the numerical route and the visible version-selector entry before the
-# dated launcher builds the rest of the UI/patch stack.
+# Numerical switch: this launcher always uses the paper T3D implementation.
 install_paper_t3d_20260920_patch(pipeline)
-install_paper_t3d_20260920_version_ui()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 
@@ -34,5 +25,12 @@ print(
     "[2026-09-20-PAPER-T3D] enabled: K3D -> T3D uses mesh-normal offset + "
     "Eq.(2) planarity optimization on fixed 8-vertex frustums."
 )
+
+# The visible Version selector is defined by app_split_panels.py, which is
+# reached later through app_optcuts_20260916.py -> app_optcuts.py ->
+# app_optcuts_core_20260916.py.  Set an explicit environment flag consumed by
+# that app instead of trying to wrap st.selectbox (paper_ui unwraps wrappers).
+import os
+os.environ["ONESTRING_PAPER_T3D_20260920"] = "1"
 
 runpy.run_path(str(ROOT / "app_optcuts_20260916.py"), run_name="__main__")
