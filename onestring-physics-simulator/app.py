@@ -496,5 +496,8 @@ def _install_plotly_view_patch() -> None:
         return
 
 
-_install_plotly_view_patch()
+# Static K3D/T3D rendering is more important than the legacy global camera
+# monkey-patch.  The patch was intercepting every Streamlit Plotly chart and is
+# the remaining common path for the blank static WebGL canvases.  Run the
+# original app with Streamlit's native plotly_chart renderer instead.
 runpy.run_path(str(_find_original_app()), run_name="__main__")
