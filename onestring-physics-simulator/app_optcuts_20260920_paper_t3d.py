@@ -3,6 +3,8 @@
 Version: 2026-09-20-paper-t3d
 """
 from __future__ import annotations
+
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -26,11 +28,8 @@ print(
     "Eq.(2) planarity optimization on fixed 8-vertex frustums."
 )
 
-# The visible Version selector is defined by app_split_panels.py, which is
-# reached later through app_optcuts_20260916.py -> app_optcuts.py ->
-# app_optcuts_core_20260916.py.  Set an explicit environment flag consumed by
-# that app instead of trying to wrap st.selectbox (paper_ui unwraps wrappers).
-import os
-os.environ["ONESTRING_PAPER_T3D_20260920"] = "1"\n# Keep ordinary static View-stage results persistent after a fresh calculation.\n# The validation launcher normally appends its Omega->Split->K2D diagnostic\n# sequence after the legacy K3D/T3D chart; on this dedicated paper-T3D launcher\n# that sequence made the requested static result appear only transiently.\nos.environ["ONESTRING_PAPER_T3D_PERSIST_STATIC_VIEW"] = "1"
+# UI flags consumed by the legacy app / split-panel launcher.
+os.environ["ONESTRING_PAPER_T3D_20260920"] = "1"
+os.environ["ONESTRING_PAPER_T3D_PERSIST_STATIC_VIEW"] = "1"
 
 runpy.run_path(str(ROOT / "app_optcuts_20260916.py"), run_name="__main__")
