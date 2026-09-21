@@ -246,6 +246,36 @@ def install_optcuts_visualization_compat_patch() -> None:
 
     original_figure_domain = viz.figure_domain
     original_figure_m3d_overlay = viz.figure_m3d_overlay
+    original_add_tile_assembly = viz.add_tile_assembly
+
+    # Older visualization wrappers may already have captured add_tile_assembly
+    # before correspondence coloring was added.  Install an outer compatibility
+    # adapter that accepts/forwards tile_colors when supported and otherwise
+    # renders a color overlay, avoiding a keyword crash.
+    def add_tile_assembly_status_safe(*args: Any, **kwargs: Any) -> None:
+        tile_colors = kwargs.pop("tile_colors", None)
+        try:
+            original_add_tile_assembly(*args, tile_colors=tile_colors, **kwargs)
+            return
+        except TypeError as exc:
+            if "tile_colors" not in str(exc):
+                raise
+        original_add_tile_assembly(*args, **kwargs)
+        if tile_colors is None or len(args) < 2:
+            return
+        fig, assembly = args[0], args[1]
+        verts=np.asarray(assembly.vertices,dtype=float)
+        for tile_id,tile in enumerate(verts):
+            if tile_id >= len(tile_colors) or len(tile) < 4:
+                continue
+            pts=tile[:4]
+            fig.add_trace(go.Mesh3d(
+                x=pts[:,0],y=pts[:,1],z=pts[:,2],
+                i=[0,0],j=[1,2],k=[2,3],
+                color=tile_colors[tile_id],opacity=0.82,flatshading=True,
+                lighting=dict(ambient=1.0,diffuse=0.0,specular=0.0,roughness=1.0,fresnel=0.0),
+                name=f"correspondence tile {tile_id}",showlegend=False,
+            ))
 
     def figure_domain_with_optcuts_seam(state: Any) -> go.Figure:
         fig = original_figure_domain(state)
@@ -260,6 +290,7 @@ def install_optcuts_visualization_compat_patch() -> None:
     viz._high_csf_vertices = high_csf_vertices
     viz._residual_high_csf_vertices = residual_high_csf_vertices
     viz._surface_peak_markers = surface_peak_markers
+    viz.add_tile_assembly = add_tile_assembly_status_safe
     viz.figure_domain = figure_domain_with_optcuts_seam
     viz.figure_m3d_overlay = figure_m3d_overlay_with_optcuts_seam_panels
     viz._onestring_optcuts_visualization_compat_installed = True
