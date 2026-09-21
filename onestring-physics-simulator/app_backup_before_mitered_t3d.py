@@ -356,6 +356,17 @@ with st.sidebar:
         ))
         os.environ["ONESTRING_K3D_PLANARITY_POLISH"] = "1" if k3d_planarity_polish else "0"
 
+        k3d_iterations = int(st.number_input(
+            "K3D local/global iterations",
+            min_value=1,
+            max_value=1000,
+            value=max(1, int(float(os.environ.get("ONESTRING_PAPER_K3D_ITERATIONS", "40")))),
+            step=10,
+            help="M3D→K3D の paper-aligned local/global 最適化の反復回数。デフォルトは40回です。",
+            key="onestring_0920_k3d_iterations",
+        ))
+        os.environ["ONESTRING_PAPER_K3D_ITERATIONS"] = str(k3d_iterations)
+
         k3d_degeneracy_barrier = bool(st.checkbox(
             "K3D: steep anti-degeneracy barrier",
             value=str(os.environ.get("ONESTRING_K3D_DEGENERACY_BARRIER", "0")).strip().lower()
