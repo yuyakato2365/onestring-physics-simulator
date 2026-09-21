@@ -2,6 +2,7 @@
 from __future__ import annotations
 import base64, html, ssl, threading, urllib.request
 from pathlib import Path
+import os
 PAPER_PDF="https://onestringtopullthemall.github.io/static/pdfs/onestringpull_authors_version_compressed.pdf"
 def _card(t,e,m,b="Paper"):
  return f"<div class='os-eq-card'><div class='os-eq-top'><b>{html.escape(t)}</b><em>{b}</em></div><div class='os-eq'>{e}</div><div class='os-eq-map'>{m}</div></div>"
@@ -112,6 +113,14 @@ section[data-testid=stSidebar] .os-eq-card{padding:12px 13px;margin:6px 0 14px;b
   b=getattr(st,n,None)
   if callable(b):setattr(st,n,wrap(unwrap(b)))
  def select(label,options,*a,**k):
+  # This UI patch is the innermost selectbox wrapper and previously discarded
+  # the 09-20 launcher's version-selection wrapper.  Set the dated launcher
+  # default here, at the selectbox that actually reaches Streamlit.
+  if str(label)=="version" and os.environ.get("ONESTRING_PAPER_T3D_20260920","0")=="1":
+   opts=list(options)
+   wanted=next((i for i,v in enumerate(opts) if isinstance(v,dict) and v.get("id")=="2026-09-20-paper-t3d"),None)
+   if wanted is not None:
+    options=opts;k=dict(k);k["index"]=wanted
   val=sel0(label,options,*a,**k)
   if str(label)=="View stage":
    s=VIEW.get(str(val),"");_render(st,"Original Figure 5 · blue frame = displayed stage",s,1 if s else 0)
