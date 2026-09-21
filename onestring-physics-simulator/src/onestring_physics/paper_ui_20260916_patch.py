@@ -118,9 +118,23 @@ section[data-testid=stSidebar] .os-eq-card{padding:12px 13px;margin:6px 0 14px;b
   # default here, at the selectbox that actually reaches Streamlit.
   if str(label)=="version" and os.environ.get("ONESTRING_PAPER_T3D_20260920","0")=="1":
    opts=list(options)
+   # The 09-20 entry is injected by an outer wrapper, so it is not necessarily
+   # present at this innermost layer.  Inject it here as well, then select it.
    wanted=next((i for i,v in enumerate(opts) if isinstance(v,dict) and v.get("id")=="2026-09-20-paper-t3d"),None)
+   if wanted is None and opts and all(isinstance(v,dict) for v in opts):
+    opts.append({
+     "id":"2026-09-20-paper-t3d",
+     "label":"2026-09-20 — Paper-aligned T3D",
+     "description":"K3D→T3D paper-aligned route",
+     "t3d_extrusion_side":"negative_normal_from_k3d",
+     "t3d_variable_topology_enabled":False,
+     "allow_legacy_normal_prism_emergency_fallback":False,
+     "t3d_intersection_trim_enabled":False,
+    })
+    wanted=len(opts)-1
    if wanted is not None:
     options=opts;k=dict(k);k["index"]=wanted
+    print(f"[VERSION-DEFAULT] forcing 2026-09-20-paper-t3d index={wanted}",flush=True)
   val=sel0(label,options,*a,**k)
   if str(label)=="View stage":
    s=VIEW.get(str(val),"");_render(st,"Original Figure 5 · blue frame = displayed stage",s,1 if s else 0)
