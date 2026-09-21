@@ -304,6 +304,12 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     degeneracy_area_threshold=_env_float("ONESTRING_K3D_DEGENERACY_AREA_RATIO",0.45)
     degeneracy_barrier_weight=_env_float("ONESTRING_K3D_DEGENERACY_BARRIER_WEIGHT",100.0)
     degeneracy_barrier_power=_env_float("ONESTRING_K3D_DEGENERACY_BARRIER_POWER",2.0)
+    print(
+        f"[K3D-DEGENERACY] enabled={degeneracy_barrier_enabled} "
+        f"edge={degeneracy_ratio_threshold:.4g} area={degeneracy_area_threshold:.4g} "
+        f"weight={degeneracy_barrier_weight:.4g} power={degeneracy_barrier_power:.4g}",
+        flush=True,
+    )
 
     # Paper edge target: mean of the mean edge lengths of incident quads.
     face_mean=np.zeros(len(faces))
@@ -376,6 +382,10 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     records=[_checkpoint(x,0,0.0)]
     for it in range(iterations):
         constraints=[]
+        deg_active=0
+        deg_worst_edge=float("inf")
+        deg_worst_area=float("inf")
+        deg_max_weight=0.0
         # Local P_P and P_Q.
         for f in faces:
             q=x[f]
@@ -395,10 +405,12 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                 lengths=np.linalg.norm(np.roll(q,-1,axis=0)-q,axis=1)
                 mean_len=max(float(np.mean(lengths)),1e-12)
                 edge_ratio=float(np.min(lengths))/mean_len
+                deg_worst_edge=min(deg_worst_edge,edge_ratio)
                 # Area ratio uses the two triangle areas normalized by mean edge^2.
                 area=0.5*np.linalg.norm(np.cross(q[1]-q[0],q[2]-q[0]))
                 area+=0.5*np.linalg.norm(np.cross(q[2]-q[0],q[3]-q[0]))
                 area_ratio=float(area)/(mean_len*mean_len)
+                deg_worst_area=min(deg_worst_area,area_ratio)
                 edge_deficit=max((degeneracy_ratio_threshold-edge_ratio)/max(edge_ratio,1e-9),0.0)
                 area_deficit=max((degeneracy_area_threshold-area_ratio)/max(area_ratio,1e-9),0.0)
                 severity=max(edge_deficit,area_deficit)
@@ -407,6 +419,8 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                 # Non-zero immediately at activation and grows steeply toward collapse.
                 barrier_w=degeneracy_barrier_weight*((1.0+severity)**degeneracy_barrier_power)
                 barrier_w=min(barrier_w,1e10)
+                deg_active+=1
+                deg_max_weight=max(deg_max_weight,float(barrier_w))
 
                 # Push only the collapsing geometry back toward its current healthy
                 # scale; do not project the whole quad to a square.
@@ -437,6 +451,15 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         ps=_surface_project(x,target,parameterization)
         for i,p in enumerate(ps):
             constraints.append(([i],[1.],p,w_surface))
+        if degeneracy_barrier_enabled:
+            worst_edge=(deg_worst_edge if np.isfinite(deg_worst_edge) else float("nan"))
+            worst_area=(deg_worst_area if np.isfinite(deg_worst_area) else float("nan"))
+            print(
+                f"[K3D-DEGENERACY] iter={it+1}/{iterations} active={deg_active}/{len(faces)} "
+                f"worst_edge_ratio={worst_edge:.6g} worst_area_ratio={worst_area:.6g} "
+                f"max_weight={deg_max_weight:.6g}",
+                flush=True,
+            )
         new=_solve_constraints(len(x),3,constraints,anchor=x,anchor_weight=1e-9)
         step=float(np.linalg.norm(new-x)/max(math.sqrt(len(x)),1.))
         x=new
