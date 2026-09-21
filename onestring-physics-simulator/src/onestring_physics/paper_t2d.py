@@ -33,8 +33,18 @@ def make_t2d(mesh, layout, k3d, t3d, stage, pipeline):
     tops = np.asarray(mesh.vertices, float)[mesh.faces].copy()
     solids = np.asarray(t3d.vertices, float)
     n = len(tops)
-    if solids.shape != (n, 8, 3) or not np.isfinite(solids).all() or not np.isfinite(tops).all():
-        raise ValueError('T2D requires finite corresponding K2D quads and 8-vertex T3D tiles')
+    solids_shape_ok = solids.shape == (n, 8, 3)
+    solids_finite = bool(np.isfinite(solids).all())
+    tops_finite = bool(np.isfinite(tops).all())
+    if not solids_shape_ok or not solids_finite or not tops_finite:
+        bad_k2d = int(np.size(tops) - np.count_nonzero(np.isfinite(tops)))
+        bad_t3d = int(np.size(solids) - np.count_nonzero(np.isfinite(solids)))
+        raise ValueError(
+            "T2D correspondence preflight failed: "
+            f"K2D_quads={tops.shape}, T3D_tiles={solids.shape}, expected_T3D={(n, 8, 3)}, "
+            f"K2D_nonfinite_scalars={bad_k2d}, T3D_nonfinite_scalars={bad_t3d}. "
+            "This is an upstream K2D/T3D geometry failure; T2D will not hide it."
+        )
     if list(layout.tile_ids) != list(range(n)) or not np.array_equal(topology.source_faces, k3d.faces):
         raise ValueError('K2D/T3D tile identity or source-face correspondence changed')
     vertices = np.empty_like(solids)
