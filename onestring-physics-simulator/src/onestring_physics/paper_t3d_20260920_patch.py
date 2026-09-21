@@ -29,6 +29,14 @@ def install_paper_t3d_20260920_patch(pipeline):
         if len(getattr(mesh, "faces", ())) == 0:
             return previous(mesh, thickness, stage)
         assembly, report = extrude_paper_face_planarity(mesh, thickness, stage, pipeline)
+        expected = int(len(getattr(mesh, "faces", ())))
+        actual = int(len(getattr(assembly, "vertices", ())))
+        if actual != expected:
+            raise RuntimeError(
+                f"Paper T3D correspondence invariant violated immediately after extrusion: "
+                f"K3D faces={expected}, T3D tiles={actual}. "
+                "The paper T3D route must preserve one solid per K3D quad."
+            )
         assembly.metrics["paper_t3d_version"] = VERSION_ID
         assembly.metrics["paper_t3d_source"] = (
             "One String to Pull Them All, Sec. 4.2: normal-offset extrusion "
@@ -40,6 +48,19 @@ def install_paper_t3d_20260920_patch(pipeline):
 
     paper_extrude._onestring_previous = previous
     pipeline._extrude_tiles = paper_extrude
+    # build_onestring_design in the backed-up legacy module resolves
+    # _extrude_tiles from its own module globals.  Patch that owner too; otherwise
+    # a later wrapper can keep calling the variable-topology extrusion and silently
+    # change the tile count before paper_t2d sees it.
+    import sys
+    legacy_name = "onestring_physics._onestring_pipeline_original"
+    legacy = sys.modules.get(legacy_name)
+    if legacy is not None:
+        legacy._extrude_tiles = paper_extrude
+    # Also follow common wrapper links to the original module.
+    for candidate in (getattr(pipeline, "_original", None),):
+        if candidate is not None:
+            candidate._extrude_tiles = paper_extrude
     pipeline._onestring_paper_t3d_20260920_installed = True
     return pipeline
 
