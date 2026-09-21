@@ -298,6 +298,14 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     w_planar=float(getattr(params,"w_planar",_env_float("ONESTRING_PAPER_K3D_W_PLANAR",1.0)))
     w_square=float(getattr(params,"w_square",_env_float("ONESTRING_PAPER_K3D_W_SQUARE",1.0)))
     w_surface=float(getattr(params,"w_surface",_env_float("ONESTRING_PAPER_K3D_W_SURFACE",0.01)))
+    # Experimental deployability-aware hard mode.  This first implementation
+    # uses a differentiable quadratic panel-feasibility proxy: quads whose
+    # shortest-edge ratio or normalized area deteriorates are pulled toward
+    # their closest-square local target.  It is deliberately labelled a proxy;
+    # it does NOT claim to be the downstream T2D SAT collision energy itself.
+    w_deploy=max(0.0,_env_float("ONESTRING_K3D_W_DEPLOY",0.0))
+    deploy_edge_threshold=max(0.05,min(0.99,_env_float("ONESTRING_K3D_DEPLOY_EDGE_RATIO",0.70)))
+    deploy_area_threshold=max(0.05,_env_float("ONESTRING_K3D_DEPLOY_AREA_RATIO",0.55))
     iterations=_env_int("ONESTRING_PAPER_K3D_ITERATIONS",40)
     degeneracy_barrier_enabled=str(os.getenv("ONESTRING_K3D_DEGENERACY_BARRIER","0")).strip().lower() not in {"0","false","no","off"}
     degeneracy_ratio_threshold=_env_float("ONESTRING_K3D_DEGENERACY_EDGE_RATIO",0.65)
@@ -521,6 +529,35 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         ps_world=_surface_project(x_seed,target,parameterization)
         ps_targets=(ps_world-center)/bbox_diag
 
+        # E_Deployability proxy: activate only on quads that are becoming poor
+        # fabrication panels.  Severity combines short-edge and area collapse.
+        # Targets are frozen inside this trust-region model, just like P_Q/P_S.
+        deploy_targets=np.zeros_like(y0)
+        deploy_weights=np.zeros(nverts,float)
+        deploy_active_faces=0
+        for f in faces:
+            q=y0[f]
+            lengths=np.linalg.norm(np.roll(q,-1,axis=0)-q,axis=1)
+            mean_len=max(float(np.mean(lengths)),1e-12)
+            edge_ratio=float(np.min(lengths))/mean_len
+            area=0.5*np.linalg.norm(np.cross(q[1]-q[0],q[2]-q[0]))
+            area+=0.5*np.linalg.norm(np.cross(q[2]-q[0],q[3]-q[0]))
+            area_ratio=float(area)/(mean_len*mean_len)
+            edge_def=max((deploy_edge_threshold-edge_ratio)/deploy_edge_threshold,0.0)
+            area_def=max((deploy_area_threshold-area_ratio)/deploy_area_threshold,0.0)
+            severity=max(edge_def,area_def)
+            if severity<=0.0:
+                continue
+            deploy_active_faces+=1
+            target_q=_closest_square_projection(q)
+            # Quadratic severity gives a smooth, rapidly increasing response.
+            alpha=severity*severity
+            for local,vid in enumerate(f):
+                deploy_targets[int(vid)]+=alpha*target_q[local]
+                deploy_weights[int(vid)]+=alpha
+        deploy_nz=deploy_weights>0
+        deploy_targets[deploy_nz]/=deploy_weights[deploy_nz,None]
+
         # Normalization by the initial local mean-edge^3 makes every quad
         # coplanarity constraint dimensionless and comparably scaled.
         q0=y0[faces]
@@ -531,11 +568,16 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
             v=flat.reshape((-1,3))
             ds=v-pq_targets
             du=v-ps_targets
-            return float(w_square*np.sum(ds*ds)+w_surface*np.sum(du*du))
+            dd=v-deploy_targets
+            e_deploy=float(np.sum(deploy_weights[:,None]*(dd*dd))) if w_deploy>0.0 else 0.0
+            return float(w_square*np.sum(ds*ds)+w_surface*np.sum(du*du)+w_deploy*e_deploy)
 
         def _hard_jac(flat):
             v=flat.reshape((-1,3))
-            return (2.0*w_square*(v-pq_targets)+2.0*w_surface*(v-ps_targets)).ravel()
+            grad=2.0*w_square*(v-pq_targets)+2.0*w_surface*(v-ps_targets)
+            if w_deploy>0.0:
+                grad+=2.0*w_deploy*deploy_weights[:,None]*(v-deploy_targets)
+            return grad.ravel()
 
         def _coplanarity(flat):
             v=flat.reshape((-1,3))
@@ -565,9 +607,10 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
 
         nlc=NonlinearConstraint(_coplanarity,0.0,0.0,jac=_coplanarity_jac)
         print(
-            f"[K3D-HARD-SPARSE] start formulation='min w2*ESquare+w3*ESurface s.t. coplanarity=0' "
+            f"[K3D-HARD-SPARSE] start formulation='min wSquare*ESquare+wSurface*ESurface+wDeploy*EDeployability s.t. coplanarity=0' "
             f"vars={3*nverts} constraints={len(faces)} jac_nnz={12*len(faces)} "
-            f"w_square={w_square:.6g} w_surface={w_surface:.6g}",
+            f"w_square={w_square:.6g} w_surface={w_surface:.6g} w_deploy={w_deploy:.6g} "
+            f"deploy_active_faces={deploy_active_faces}/{len(faces)}",
             flush=True,
         )
         hard_result=minimize(
@@ -596,7 +639,12 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
             "planarity_max":hard_max,
             "tolerance":hard_abs_tol,
             "constraint_inf":constraint_inf,
-            "w_square":float(w_square),"w_surface":float(w_surface),"w_planar_used":False,
+            "w_square":float(w_square),"w_surface":float(w_surface),"w_deploy":float(w_deploy),
+            "deployability_proxy":"activated closest-square panel-feasibility target from edge/area deterioration",
+            "deploy_active_faces":int(deploy_active_faces),
+            "deploy_edge_ratio_threshold":float(deploy_edge_threshold),
+            "deploy_area_ratio_threshold":float(deploy_area_threshold),
+            "w_planar_used":False,
             "constraint_jacobian_nnz":int(12*len(faces)),
         }
         print(
@@ -618,7 +666,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         "records":records,
         "solver":"optimize_paper_local_global_k3d",
         "backend":"paper-aligned Eq.(1) local projection + global least squares (authoritative K3D solver)",
-        "weights":{"w1_planar":w_planar,"w2_square":w_square,"w3_surface":w_surface},
+        "weights":{"w1_planar":w_planar,"w2_square":w_square,"w3_surface":w_surface,"w_deploy":w_deploy},
         "units":"mesh coordinate units (same units as the K3D vertex coordinates)",
         "planarity_definition":"distance from each quad vertex to that quad's best-fit plane (paper Sec. 6 definition)",
         "shadow_solve":False,
