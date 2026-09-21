@@ -154,6 +154,11 @@ def install_lscm_latest_omega_hybrid_patch(pipeline: Any, *, lscm_build_m2d: Any
         def k3d_dispatch(target,mesh,parameterization,params):
             if not _hybrid_active(params): return fallback_k3d(target,mesh,parameterization,params)
             if _paper_lg_active(params):
+                print(
+                    f"[K3D-ROUTE] paper_local_global active mode={getattr(params,'omega_parameterization_mode',None)!r} "
+                    f"degeneracy_env={os.environ.get('ONESTRING_K3D_DEGENERACY_BARRIER','<unset>')}",
+                    flush=True,
+                )
                 return optimize_paper_local_global_k3d(target,mesh,parameterization,params,pipeline=pipeline)
             previous=os.environ.get("ONESTRING_OPTCUTS_TEST_VARIANT")
             try:
