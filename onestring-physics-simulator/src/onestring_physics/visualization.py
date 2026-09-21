@@ -18,6 +18,32 @@ from .onestring_pipeline import (
 )
 
 
+
+
+def correspondence_colors(uv: np.ndarray, bounds_uv: np.ndarray | None = None) -> list[str]:
+    """Stable 2-D Omega position -> RGB color used through all downstream stages."""
+    pts=np.asarray(uv,dtype=float)[:,:2]
+    if len(pts)==0:
+        return []
+    ref=pts if bounds_uv is None else np.asarray(bounds_uv,dtype=float)[:,:2]
+    lo=np.min(ref,axis=0); span=np.maximum(np.ptp(ref,axis=0),1e-12)
+    t=np.clip((pts-lo)/span,0.0,1.0)
+    # Bilinear blend of four deliberately distinct Omega-corner colors.
+    c00=np.array([40.,90.,255.]); c10=np.array([240.,60.,200.])
+    c01=np.array([30.,220.,150.]); c11=np.array([250.,210.,40.])
+    out=[]
+    for u,v in t:
+        c=(1-u)*(1-v)*c00+u*(1-v)*c10+(1-u)*v*c01+u*v*c11
+        out.append(f"rgb({int(c[0])},{int(c[1])},{int(c[2])})")
+    return out
+
+
+def correspondence_tile_colors(mesh: QuadMesh, bounds_uv: np.ndarray | None = None) -> list[str]:
+    uv=np.asarray(mesh.vertices,dtype=float)[:,:2]
+    centers=np.asarray([np.mean(uv[np.asarray(f,dtype=int)],axis=0) for f in mesh.faces],dtype=float)
+    return correspondence_colors(centers, uv if bounds_uv is None else bounds_uv)
+
+
 def figure_target(design: DesignResult) -> go.Figure:
     grid = design.target.sample_grid(design.grid.nx, design.grid.ny, design.grid.tile_size)
     fig = go.Figure()
@@ -457,10 +483,10 @@ def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
     return fig
 
 
-def figure_quad_mesh(mesh: QuadMesh, title: str | None = None, show_csf: bool = False) -> go.Figure:
+def figure_quad_mesh(mesh: QuadMesh, title: str | None = None, show_csf: bool = False, correspondence_uv: np.ndarray | None = None, correspondence_bounds: np.ndarray | None = None) -> go.Figure:
     fig = go.Figure()
     color = "#3b82f6" if mesh.vertices.shape[1] == 3 and np.ptp(mesh.vertices[:, 2]) > 1e-8 else "#14b8a6"
-    _add_quad_mesh_surface(fig, mesh.vertices, mesh.faces, color=color, opacity=0.72, name=mesh.stage)
+    _add_quad_mesh_surface(fig, mesh.vertices, mesh.faces, color=color, opacity=0.72, name=mesh.stage, vertex_colors=(correspondence_colors(correspondence_uv, correspondence_bounds) if correspondence_uv is not None and len(correspondence_uv)==len(mesh.vertices) else None))
     if show_csf:
         fig.add_trace(
             go.Scatter3d(
@@ -478,10 +504,10 @@ def figure_quad_mesh(mesh: QuadMesh, title: str | None = None, show_csf: bool = 
     return fig
 
 
-def figure_m3d_overlay(state: OneStringDesignState) -> go.Figure:
+def figure_m3d_overlay(state: OneStringDesignState, correspondence_uv: np.ndarray | None = None, correspondence_bounds: np.ndarray | None = None) -> go.Figure:
     fig = go.Figure()
     _add_quad_mesh_surface(fig, state.target_surface.vertices, state.target_surface.faces, color="#94a3b8", opacity=0.28, name="target surface S")
-    _add_quad_mesh_surface(fig, state.mesh_3d_initial.vertices, state.mesh_3d_initial.faces, color="#ef4444", opacity=0.82, name="M3D c^-1 grid")
+    _add_quad_mesh_surface(fig, state.mesh_3d_initial.vertices, state.mesh_3d_initial.faces, color="#ef4444", opacity=0.82, name="M3D c^-1 grid", vertex_colors=(correspondence_colors(correspondence_uv, correspondence_bounds) if correspondence_uv is not None and len(correspondence_uv)==len(state.mesh_3d_initial.vertices) else None))
     metrics = state.mesh_3d_initial.metrics
     failure_ids = np.asarray(metrics.get("m3d_uv_lookup_failure_vertex_ids", []), dtype=int)
     failure_ids = failure_ids[(failure_ids >= 0) & (failure_ids < len(state.mesh_3d_initial.vertices))]
@@ -543,6 +569,7 @@ def figure_flat_tile_layout(
     layout: FlatTileLayout,
     title: str = "K2D flat tile layout",
     hinge_graph: HingeGraph | None = None,
+    tile_colors: list[str] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
     tiles = layout.tile_top_vertices_3d
@@ -555,7 +582,8 @@ def figure_flat_tile_layout(
     edge_x: list[float | None] = []
     edge_y: list[float | None] = []
     edge_z: list[float | None] = []
-    for tile in tiles:
+    mesh_vertex_colors: list[str] = []
+    for tile_id, tile in enumerate(tiles):
         base = len(x)
         x.extend(tile[:, 0].tolist())
         y.extend(tile[:, 1].tolist())
@@ -563,6 +591,8 @@ def figure_flat_tile_layout(
         i_idx.extend([base, base])
         j_idx.extend([base + 1, base + 2])
         k_idx.extend([base + 2, base + 3])
+        if tile_colors is not None and tile_id < len(tile_colors):
+            mesh_vertex_colors.extend([tile_colors[tile_id]] * 4)
         closed = np.vstack([tile, tile[0]])
         edge_x.extend([*closed[:, 0].tolist(), None])
         edge_y.extend([*closed[:, 1].tolist(), None])
@@ -576,6 +606,7 @@ def figure_flat_tile_layout(
             j=j_idx,
             k=k_idx,
             color="#2dd4bf",
+            vertexcolor=mesh_vertex_colors if len(mesh_vertex_colors)==len(x) else None,
             opacity=0.78,
             flatshading=True,
             lighting=dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0),
@@ -676,6 +707,16 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
                 hoverinfo="skip",
             )
         )
+
+    # Stable Omega-position colors; the same field is reused for M2D/M3D/K3D and panels.
+    if len(uv):
+        corr=correspondence_colors(uv, uv)
+        fig.add_trace(go.Scattergl(
+            x=uv[:,0], y=uv[:,1], mode="markers",
+            marker=dict(size=5,color=corr,opacity=0.9),
+            text=[f"Omega vertex {i}" for i in range(len(uv))],
+            hoverinfo="text", name="Omega correspondence colors",
+        ))
 
     face_log_lambda = np.asarray(metrics.get("per_triangle_log_lambda", []), dtype=float)
     if len(uv_faces) and len(face_log_lambda) == len(uv_faces):
@@ -838,6 +879,7 @@ def figure_tile_assembly(
     show_recovery_status: bool = True,
     show_generated_cap_faces: bool = True,
     show_fundamental_failures_only: bool = False,
+    tile_colors: list[str] | None = None,
 ) -> go.Figure:
     fig = go.Figure()
     add_tile_assembly(
@@ -846,6 +888,7 @@ def figure_tile_assembly(
         show_recovery_status=show_recovery_status,
         show_generated_cap_faces=show_generated_cap_faces,
         show_fundamental_failures_only=show_fundamental_failures_only,
+        tile_colors=tile_colors,
     )
     if hinge_graph is not None:
         add_hinge_markers(fig, assembly, hinge_graph)
@@ -881,6 +924,7 @@ def add_tile_assembly(
     show_recovery_status: bool = True,
     show_generated_cap_faces: bool = True,
     show_fundamental_failures_only: bool = False,
+    tile_colors: list[str] | None = None,
 ) -> None:
     metrics = getattr(assembly, "metrics", {}) or {}
     authoritative_solids = getattr(assembly, "authoritative_solids", None)
@@ -921,7 +965,9 @@ def add_tile_assembly(
                 f"vertices={len(vertices)}, faces={len(solid.faces)}"
             )
             tile_color = status_colors.get(status, "#ef4444" if status.startswith("T3D_FAILED_") else color)
-            if not show_recovery_status:
+            if tile_colors is not None and tile_id < len(tile_colors):
+                tile_color = tile_colors[tile_id]
+            elif not show_recovery_status:
                 tile_color = color
             fig.add_trace(
                 go.Mesh3d(
@@ -1011,6 +1057,7 @@ def add_tile_assembly(
     edge_x: list[float | None] = []
     edge_y: list[float | None] = []
     edge_z: list[float | None] = []
+    mesh_vertex_colors: list[str] = []
     for tile_id, tile in enumerate(np.asarray(assembly.vertices, dtype=float)):
         for face_id, face in enumerate(faces):
             side_edge = side_face_edges[face_id]
@@ -1024,6 +1071,8 @@ def add_tile_assembly(
             i_idx.extend([base, base])
             j_idx.extend([base + 1, base + 2])
             k_idx.extend([base + 2, base + 3])
+            if tile_colors is not None and tile_id < len(tile_colors):
+                mesh_vertex_colors.extend([tile_colors[tile_id]] * 4)
         for edge_id, edge in enumerate([(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]):
             pts = tile[list(edge)]
             edge_x.extend([pts[0, 0], pts[1, 0], None])
@@ -1038,6 +1087,7 @@ def add_tile_assembly(
             j=j_idx,
             k=k_idx,
             color=color,
+            vertexcolor=mesh_vertex_colors if len(mesh_vertex_colors)==len(x) else None,
             opacity=opacity,
             flatshading=True,
             lighting=lighting,
@@ -1179,6 +1229,7 @@ def _add_quad_mesh_surface(
     name: str,
     row: int | None = None,
     col: int | None = None,
+    vertex_colors: list[str] | None = None,
 ) -> None:
     lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0, fresnel=0.0)
     x: list[float] = []
@@ -1190,6 +1241,7 @@ def _add_quad_mesh_surface(
     edge_x: list[float | None] = []
     edge_y: list[float | None] = []
     edge_z: list[float | None] = []
+    mesh_vertex_colors: list[str] = []
     for face in faces:
         pts = vertices[list(face)]
         base = len(x)
@@ -1199,6 +1251,8 @@ def _add_quad_mesh_surface(
         i_idx.extend([base, base])
         j_idx.extend([base + 1, base + 2])
         k_idx.extend([base + 2, base + 3])
+        if vertex_colors is not None and len(vertex_colors)==len(vertices):
+            mesh_vertex_colors.extend([vertex_colors[int(v)] for v in face])
         closed = np.vstack([pts, pts[0]])
         edge_x.extend([*closed[:, 0].tolist(), None])
         edge_y.extend([*closed[:, 1].tolist(), None])
@@ -1211,6 +1265,7 @@ def _add_quad_mesh_surface(
         j=j_idx,
         k=k_idx,
         color=color,
+        vertexcolor=mesh_vertex_colors if len(mesh_vertex_colors)==len(x) else None,
         opacity=opacity,
         flatshading=True,
         lighting=lighting,
