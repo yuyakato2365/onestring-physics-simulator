@@ -33,6 +33,8 @@ print(
 
 # UI flags consumed by the legacy app / split-panel launcher.
 os.environ["ONESTRING_PAPER_T3D_20260920"] = "1"
+# This branch exposes/selects the 2026-09-21 deployability-aware K3D experiment.
+os.environ["ONESTRING_DEPLOYABILITY_K3D_20260921"] = "1"
 # Install the version-selector wrapper before the legacy Streamlit app builds
 # its sidebar.  Previously the helper existed but this launcher never called it.
 install_paper_t3d_20260920_version_ui()
