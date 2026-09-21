@@ -488,6 +488,43 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         x=new
         records.append(_checkpoint(x,it+1,step))
         if step<1e-8: break
+    # Optional lexicographic / hard-priority planarity stage.
+    # The weighted local/global solve above determines the square/surface compromise.
+    # In hard mode we then move as little as possible from that result while driving
+    # every quad to the requested coplanarity tolerance.  The result is accepted only
+    # if the tolerance is actually met; otherwise the pipeline fails explicitly.
+    planarity_mode=str(os.getenv("ONESTRING_K3D_PLANARITY_MODE","soft")).strip().lower()
+    hard_planarity_report=None
+    if planarity_mode=="hard":
+        bbox_diag=max(float(np.linalg.norm(np.ptp(x,axis=0))),1e-12)
+        hard_rel_tol=max(_env_float("ONESTRING_K3D_HARD_PLANARITY_REL_TOL",1e-4),1e-10)
+        hard_abs_tol=hard_rel_tol*bbox_diag
+        print(
+            f"[K3D-HARD-PLANARITY] start rel_tol={hard_rel_tol:.6g} abs_tol={hard_abs_tol:.6g} "
+            f"priority=planarity>square>surface",
+            flush=True,
+        )
+        x_hard,hard_planarity_report=minimum_displacement_planarity_polish(
+            x,faces,tolerance=hard_abs_tol,max_iterations=600
+        )
+        dev=[]
+        for f in faces:
+            q=x_hard[f]
+            dev.extend(np.linalg.norm(q-_best_fit_plane_projection(q),axis=1))
+        hard_max=float(np.max(dev)) if dev else 0.0
+        print(
+            f"[K3D-HARD-PLANARITY] done max={hard_max:.6g} tol={hard_abs_tol:.6g} "
+            f"accepted={hard_max<=hard_abs_tol}",
+            flush=True,
+        )
+        if (not np.all(np.isfinite(x_hard))) or hard_max>hard_abs_tol:
+            raise RuntimeError(
+                f"K3D hard planarity constraint not satisfied: max={hard_max:.6g} > tol={hard_abs_tol:.6g}"
+            )
+        x=x_hard
+        # The authoritative history must end at the geometry actually returned.
+        records.append(_checkpoint(x,len(records),float(hard_planarity_report.get("displacement_rms",0.0))))
+
     iteration_history={
         "records":records,
         "solver":"optimize_paper_local_global_k3d",
@@ -508,6 +545,8 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         k3d_surface_residual=records[-1]["ESurface"] if records else 0.,
         k3d_iteration_history=iteration_history,
         k3d_iteration_history_available=True,
+        k3d_planarity_constraint_mode=planarity_mode,
+        k3d_hard_planarity_report=hard_planarity_report,
         paper_alignment_note="Explicit PP/PQ/PS local projections and sparse global least-squares. Surface projection uses closest triangle among KD-tree candidates.",
         k3d_degeneracy_barrier_enabled=bool(degeneracy_barrier_enabled),
         k3d_degeneracy_edge_ratio_threshold=float(degeneracy_ratio_threshold),
