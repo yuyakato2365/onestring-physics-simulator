@@ -702,7 +702,14 @@ with st.sidebar:
     )
     hinge_layout_collision_weight = _param_row(
         "厚み付きタイル footprint の非衝突重み。高すぎるとタイルが散り、低すぎると重なりが残る。",
-        lambda: st.slider("hinge collision weight", 0.0, 4.0, 4.0, 0.05, help="Weight for E_Collision: separating overlapping T2D footprints."),
+        lambda: st.number_input(
+            "hinge collision weight",
+            min_value=0.0,
+            value=4.0,
+            step=1.0,
+            format="%.2f",
+            help="Weight for E_Collision: separating overlapping T2D footprints. No UI upper bound; larger values prioritize collision separation more strongly.",
+        ),
     )
     hinge_layout_anchor_weight = _param_row(
         "初期展開配置に留める重み。高いほど散らばりにくいが、衝突から逃げにくくなる。",
