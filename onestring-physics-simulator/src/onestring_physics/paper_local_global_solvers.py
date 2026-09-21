@@ -300,10 +300,10 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     w_surface=float(getattr(params,"w_surface",_env_float("ONESTRING_PAPER_K3D_W_SURFACE",0.01)))
     iterations=_env_int("ONESTRING_PAPER_K3D_ITERATIONS",40)
     degeneracy_barrier_enabled=str(os.getenv("ONESTRING_K3D_DEGENERACY_BARRIER","0")).strip().lower() not in {"0","false","no","off"}
-    degeneracy_ratio_threshold=_env_float("ONESTRING_K3D_DEGENERACY_EDGE_RATIO",0.35)
-    degeneracy_area_threshold=_env_float("ONESTRING_K3D_DEGENERACY_AREA_RATIO",0.20)
-    degeneracy_barrier_weight=_env_float("ONESTRING_K3D_DEGENERACY_BARRIER_WEIGHT",50.0)
-    degeneracy_barrier_power=_env_float("ONESTRING_K3D_DEGENERACY_BARRIER_POWER",4.0)
+    degeneracy_ratio_threshold=_env_float("ONESTRING_K3D_DEGENERACY_EDGE_RATIO",0.65)
+    degeneracy_area_threshold=_env_float("ONESTRING_K3D_DEGENERACY_AREA_RATIO",0.45)
+    degeneracy_barrier_weight=_env_float("ONESTRING_K3D_DEGENERACY_BARRIER_WEIGHT",100.0)
+    degeneracy_barrier_power=_env_float("ONESTRING_K3D_DEGENERACY_BARRIER_POWER",2.0)
 
     # Paper edge target: mean of the mean edge lengths of incident quads.
     face_mean=np.zeros(len(faces))
@@ -399,18 +399,33 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                 area=0.5*np.linalg.norm(np.cross(q[1]-q[0],q[2]-q[0]))
                 area+=0.5*np.linalg.norm(np.cross(q[2]-q[0],q[3]-q[0]))
                 area_ratio=float(area)/(mean_len*mean_len)
-                severity=max(
-                    degeneracy_ratio_threshold/max(edge_ratio,1e-9)-1.0,
-                    degeneracy_area_threshold/max(area_ratio,1e-9)-1.0,
-                    0.0,
-                )
+                edge_deficit=max((degeneracy_ratio_threshold-edge_ratio)/max(edge_ratio,1e-9),0.0)
+                area_deficit=max((degeneracy_area_threshold-area_ratio)/max(area_ratio,1e-9),0.0)
+                severity=max(edge_deficit,area_deficit)
                 if severity<=0.0:
                     continue
-                barrier_w=degeneracy_barrier_weight*(severity**degeneracy_barrier_power)
-                barrier_w=min(barrier_w,1e8)
-                pq=_closest_square_projection(q)
-                for local,vid in enumerate(f):
-                    constraints.append(([int(vid)],[1.],pq[local],barrier_w))
+                # Non-zero immediately at activation and grows steeply toward collapse.
+                barrier_w=degeneracy_barrier_weight*((1.0+severity)**degeneracy_barrier_power)
+                barrier_w=min(barrier_w,1e10)
+
+                # Push only the collapsing geometry back toward its current healthy
+                # scale; do not project the whole quad to a square.
+                min_edge=float(np.min(lengths))
+                target_min=max(degeneracy_ratio_threshold*mean_len,min_edge)
+                for k in range(4):
+                    a=int(f[k]); b=int(f[(k+1)%4])
+                    d=x[b]-x[a]; ln=float(np.linalg.norm(d))
+                    if ln>=target_min or ln<1e-12:
+                        continue
+                    t=target_min*d/ln
+                    constraints.append(([a,b],[-1.,1.],t,barrier_w))
+                # Area collapse without a short edge is usually an angular/folding
+                # degeneration.  In that case use the closest planar quad only as
+                # an emergency anti-collapse target, not a square target.
+                if area_ratio<degeneracy_area_threshold:
+                    pp=_best_fit_plane_projection(q)
+                    for local,vid in enumerate(f):
+                        constraints.append(([int(vid)],[1.],pp[local],0.25*barrier_w))
 
         # E_Length projection of each edge vector to target K3D tile scale.
         for a,b in edges:
