@@ -69,10 +69,20 @@ def install_paper_t3d_20260920_version_ui():
             # This launcher is specifically the paper-T3D version. Select it by
             # default on first load while still leaving old versions visible.
             kwargs = dict(kwargs)
-            kwargs["index"] = next(
+            desired_index = next(
                 i for i, v in enumerate(option_list) if v.get("id") == VERSION_ID
             )
-            kwargs.setdefault("key", "onestring_model_version_20260920")
+            kwargs["index"] = desired_index
+            # The legacy app may pass a stale/default index, and Streamlit may
+            # retain widget state across reruns.  Use one canonical key and
+            # initialize that state explicitly to the 09-20 option.
+            key = "onestring_model_version_20260920"
+            kwargs["key"] = key
+            if key not in st.session_state:
+                st.session_state[key] = option_list[desired_index]
+            elif isinstance(st.session_state.get(key), dict):
+                if not any(st.session_state[key].get("id") == v.get("id") for v in option_list):
+                    st.session_state[key] = option_list[desired_index]
             return base_selectbox(label, option_list, *args, **kwargs)
 
         return base_selectbox(label, options, *args, **kwargs)
