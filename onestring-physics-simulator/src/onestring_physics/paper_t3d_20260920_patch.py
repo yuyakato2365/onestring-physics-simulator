@@ -48,19 +48,28 @@ def install_paper_t3d_20260920_patch(pipeline):
 
     paper_extrude._onestring_previous = previous
     pipeline._extrude_tiles = paper_extrude
-    # build_onestring_design in the backed-up legacy module resolves
-    # _extrude_tiles from its own module globals.  Patch that owner too; otherwise
-    # a later wrapper can keep calling the variable-topology extrusion and silently
-    # change the tile count before paper_t2d sees it.
+    # build_onestring_design actually executes in a dynamically loaded backup
+    # module.  Its exact module name varies across the historical wrappers.  Patch
+    # every loaded OneString module that owns an _extrude_tiles global; targeting
+    # one guessed module name was insufficient and allowed the OptCuts K3D
+    # preflight wrapper to keep dropping invalid panels (739 -> 736).
     import sys
-    legacy_name = "onestring_physics._onestring_pipeline_original"
-    legacy = sys.modules.get(legacy_name)
-    if legacy is not None:
-        legacy._extrude_tiles = paper_extrude
-    # Also follow common wrapper links to the original module.
-    for candidate in (getattr(pipeline, "_original", None),):
-        if candidate is not None:
-            candidate._extrude_tiles = paper_extrude
+    patched_owners = []
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith("onestring_physics"):
+            continue
+        if module is None or not hasattr(module, "_extrude_tiles"):
+            continue
+        try:
+            module._extrude_tiles = paper_extrude
+            patched_owners.append(module_name)
+        except Exception:
+            pass
+    pipeline._extrude_tiles = paper_extrude
+    print(
+        "[2026-09-20-PAPER-T3D-OWNERS] patched=" + ",".join(sorted(set(patched_owners))),
+        flush=True,
+    )
     pipeline._onestring_paper_t3d_20260920_installed = True
     return pipeline
 
