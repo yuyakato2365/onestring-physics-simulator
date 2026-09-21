@@ -540,6 +540,16 @@ with st.sidebar:
             "stop when lambda > 2 requires unspecified reparameterization",
             value=True,
         )
+    csf_split_threshold = float(
+        st.number_input(
+            "Split threshold (CSF)",
+            min_value=1.0,
+            value=1.9,
+            step=0.05,
+            format="%.3f",
+            help="CSFがこの値を超える領域をSplit候補として扱います。小さくするとSplitが増えやすく、大きくすると減りやすくなります。",
+        )
+    )
     with st.expander(
         "Bijective free-boundary settings",
         expanded=omega_parameterization_mode == "bijective_free_boundary",
@@ -1200,6 +1210,7 @@ def current_pipeline_key() -> tuple:
         reference_grid_origin_v,
         reference_csf_normalization,
         reference_stop_on_required_split,
+        csf_split_threshold,
         bijective_free_boundary_initial_boundary_shape,
         bijective_free_boundary_max_iterations,
         bijective_free_boundary_line_search_max_steps,
@@ -1319,6 +1330,7 @@ pipeline_params = PipelineParameters(
     reference_grid_origin_v=reference_grid_origin_v,
     reference_csf_normalization=reference_csf_normalization,
     reference_stop_on_required_split=reference_stop_on_required_split,
+    csf_split_threshold=csf_split_threshold,
     boundary_target_shape="rectangle",
     boundary_target_aspect_mode=boundary_target_aspect_mode,
     boundary_target_aspect_ratio=boundary_target_aspect_ratio,
