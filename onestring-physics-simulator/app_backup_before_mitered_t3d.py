@@ -364,6 +364,44 @@ with st.sidebar:
             key="onestring_0920_k3d_degeneracy_barrier",
         ))
         os.environ["ONESTRING_K3D_DEGENERACY_BARRIER"] = "1" if k3d_degeneracy_barrier else "0"
+        if k3d_degeneracy_barrier:
+            st.caption("Anti-degeneracy barrier settings")
+            k3d_deg_edge_ratio = float(st.number_input(
+                "Barrier start: min edge / mean edge",
+                min_value=0.05, max_value=0.95,
+                value=float(os.environ.get("ONESTRING_K3D_DEGENERACY_EDGE_RATIO", "0.65")),
+                step=0.05, format="%.2f",
+                help="この比率を下回ったquadでbarrierを発火。大きいほど早く三角形化を抑えます。",
+                key="onestring_0920_k3d_deg_edge_ratio",
+            ))
+            k3d_deg_area_ratio = float(st.number_input(
+                "Barrier start: area / mean edge²",
+                min_value=0.05, max_value=2.0,
+                value=float(os.environ.get("ONESTRING_K3D_DEGENERACY_AREA_RATIO", "0.45")),
+                step=0.05, format="%.2f",
+                help="面積が潰れるタイプの退化を検出する閾値です。",
+                key="onestring_0920_k3d_deg_area_ratio",
+            ))
+            k3d_deg_weight = float(st.number_input(
+                "Barrier base weight",
+                min_value=0.0, max_value=1000000.0,
+                value=float(os.environ.get("ONESTRING_K3D_DEGENERACY_BARRIER_WEIGHT", "100.0")),
+                step=25.0, format="%.1f",
+                help="発火直後から掛かる最低スケール。大きいほど退化を強く押し戻します。",
+                key="onestring_0920_k3d_deg_weight",
+            ))
+            k3d_deg_power = float(st.number_input(
+                "Barrier growth power",
+                min_value=1.0, max_value=8.0,
+                value=float(os.environ.get("ONESTRING_K3D_DEGENERACY_BARRIER_POWER", "2.0")),
+                step=0.5, format="%.1f",
+                help="退化が深くなるほど重みをどれだけ急増させるか。weight × (1 + severity)^power。",
+                key="onestring_0920_k3d_deg_power",
+            ))
+            os.environ["ONESTRING_K3D_DEGENERACY_EDGE_RATIO"] = str(k3d_deg_edge_ratio)
+            os.environ["ONESTRING_K3D_DEGENERACY_AREA_RATIO"] = str(k3d_deg_area_ratio)
+            os.environ["ONESTRING_K3D_DEGENERACY_BARRIER_WEIGHT"] = str(k3d_deg_weight)
+            os.environ["ONESTRING_K3D_DEGENERACY_BARRIER_POWER"] = str(k3d_deg_power)
 
     st.header("Target Input")
     target_kind = _param_row(
