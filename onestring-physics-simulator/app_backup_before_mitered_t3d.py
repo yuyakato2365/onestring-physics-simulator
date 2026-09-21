@@ -367,6 +367,25 @@ with st.sidebar:
         ))
         os.environ["ONESTRING_PAPER_K3D_ITERATIONS"] = str(k3d_iterations)
 
+        k3d_planarity_mode = st.selectbox(
+            "K3D planarity constraint",
+            ["Soft (weighted EPlanar)", "Hard-priority (planarity first, square second)"],
+            index=1 if str(os.environ.get("ONESTRING_K3D_PLANARITY_MODE", "soft")).strip().lower() == "hard" else 0,
+            help="Softは従来どおりEPlanar/ESquare/ESurfaceを重み付きで同時最適化。Hard-priorityは通常K3Dで正方性等を整えた後、その解からの移動を最小化しながら共平面性を許容誤差まで満たし、満たせない解は受理しません。",
+            key="onestring_0920_k3d_planarity_mode",
+        )
+        os.environ["ONESTRING_K3D_PLANARITY_MODE"] = "hard" if k3d_planarity_mode.startswith("Hard") else "soft"
+        if k3d_planarity_mode.startswith("Hard"):
+            k3d_hard_planarity_rel_tol = float(st.number_input(
+                "Hard planarity tolerance / bbox diagonal",
+                min_value=1e-7, max_value=1e-2,
+                value=float(os.environ.get("ONESTRING_K3D_HARD_PLANARITY_REL_TOL", "1e-4")),
+                step=1e-4, format="%.7f",
+                help="best-fit planeからの最大頂点距離 / K3D bbox対角長。この値以下にならない場合はK3Dを失敗扱いにします。",
+                key="onestring_0920_k3d_hard_planarity_rel_tol",
+            ))
+            os.environ["ONESTRING_K3D_HARD_PLANARITY_REL_TOL"] = str(k3d_hard_planarity_rel_tol)
+
         k3d_degeneracy_barrier = bool(st.checkbox(
             "K3D: steep anti-degeneracy barrier",
             value=str(os.environ.get("ONESTRING_K3D_DEGENERACY_BARRIER", "0")).strip().lower()
