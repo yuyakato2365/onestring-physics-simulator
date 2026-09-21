@@ -105,12 +105,14 @@ def _install_selector_patch() -> None:
                 options=list(args[1])
                 if not any(isinstance(v,dict) and v.get("id")==VERSION_ID for v in options): options.append({"id":VERSION_ID,"label":VERSION_LABEL,"description":VERSION_DESCRIPTION})
                 if not any(isinstance(v,dict) and v.get("id")==PAPER_LG_VERSION_ID for v in options): options.append({"id":PAPER_LG_VERSION_ID,"label":PAPER_LG_VERSION_LABEL,"description":PAPER_LG_DESCRIPTION})
-                kwargs={**kwargs,"index":len(options)-1}; args=(args[0],options,*args[2:])
+                default_index=next((i for i,v in enumerate(options) if isinstance(v,dict) and v.get("id")=="2026-09-20-paper-t3d"),len(options)-1) if os.environ.get("ONESTRING_PAPER_T3D_20260920","0")=="1" else len(options)-1
+                kwargs={**kwargs,"index":default_index}; args=(args[0],options,*args[2:])
             elif "options" in kwargs:
                 options=list(kwargs["options"])
                 if not any(isinstance(v,dict) and v.get("id")==VERSION_ID for v in options): options.append({"id":VERSION_ID,"label":VERSION_LABEL,"description":VERSION_DESCRIPTION})
                 if not any(isinstance(v,dict) and v.get("id")==PAPER_LG_VERSION_ID for v in options): options.append({"id":PAPER_LG_VERSION_ID,"label":PAPER_LG_VERSION_LABEL,"description":PAPER_LG_DESCRIPTION})
-                kwargs={**kwargs,"options":options,"index":len(options)-1}
+                default_index=next((i for i,v in enumerate(options) if isinstance(v,dict) and v.get("id")=="2026-09-20-paper-t3d"),len(options)-1) if os.environ.get("ONESTRING_PAPER_T3D_20260920","0")=="1" else len(options)-1
+                kwargs={**kwargs,"options":options,"index":default_index}
         if label=="Omega parameterization mode":
             if len(args)>=2:
                 options=list(args[1])
