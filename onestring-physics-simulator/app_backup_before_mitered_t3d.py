@@ -319,9 +319,13 @@ def _compute_setting_meters(
 
 with st.sidebar:
     st.header("Version")
+    _default_version_index = next(
+        (i for i,v in enumerate(MODEL_VERSIONS) if v.get("id") == "2026-09-20-paper-t3d"), 0
+    )
     selected_model_version = st.selectbox(
         "version",
         MODEL_VERSIONS,
+        index=_default_version_index,
         format_func=lambda version: version["label"],
         help="実装バージョンを選択します。今後バージョン追加指示があれば、この一覧に追記します。",
     )
@@ -352,10 +356,19 @@ with st.sidebar:
         ))
         os.environ["ONESTRING_K3D_PLANARITY_POLISH"] = "1" if k3d_planarity_polish else "0"
 
+        k3d_degeneracy_barrier = bool(st.checkbox(
+            "K3D: steep anti-degeneracy barrier",
+            value=str(os.environ.get("ONESTRING_K3D_DEGENERACY_BARRIER", "0")).strip().lower()
+                  not in {"0", "false", "no", "off"},
+            help="通常のK3D最適化中、quadの最短辺比または面積比が閾値を下回ったときだけ急激な追加ペナルティを有効化します。健康なquadには追加項を入れません。",
+            key="onestring_0920_k3d_degeneracy_barrier",
+        ))
+        os.environ["ONESTRING_K3D_DEGENERACY_BARRIER"] = "1" if k3d_degeneracy_barrier else "0"
+
     st.header("Target Input")
     target_kind = _param_row(
-        "目標曲面 S の種類。waveは標準で起伏を抑制。half_gourdは半割りヒョウタン状の非矩形メッシュで、Ω/M2D cropの検証用。",
-        lambda: st.selectbox("target shape", ["dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], help="Built-in target surface S. snowman_half isolates a single peak; snowman_full is a two-dome-with-neck stress case."),
+        "目標曲面 S。Remeshed_Bunny.stl はリポジトリ内または一般的なローカル配置から自動探索します。",
+        lambda: st.selectbox("target shape", ["Remeshed_Bunny.stl", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="Default target is Remeshed_Bunny.stl. You can still upload another OBJ/STL/PLY below."),
     )
     uploaded = _param_row(
         "OBJ/STL/PLY を読み込む。閉じた形状では Ω の切断・境界条件が難しくなるので注意。",
@@ -1015,7 +1028,27 @@ def _smooth_browser_tile_animation(
     return fig
 
 
+def _default_bunny_path():
+    candidates = [
+        Path(__file__).resolve().parent / "assets" / "Remeshed_Bunny.stl",
+        Path(__file__).resolve().parent / "Remeshed_Bunny.stl",
+        Path.home() / "Downloads" / "Remeshed_Bunny.stl",
+        Path.home() / "Documents" / "Remeshed_Bunny.stl",
+    ]
+    return next((p for p in candidates if p.exists()), None)
+
+
 def build_target():
+    if uploaded is None and target_kind == "Remeshed_Bunny.stl":
+        bunny_path = _default_bunny_path()
+        if bunny_path is None:
+            raise FileNotFoundError(
+                "Default Remeshed_Bunny.stl was not found. Put it in repository assets/, "
+                "repository root, ~/Downloads, or ~/Documents; or upload it in the sidebar."
+            )
+        st.caption(f"Default mesh: {bunny_path}")
+        st.warning(CLOSED_SHAPE_WARNING)
+        return load_target_shape(str(bunny_path))
     if uploaded is None:
         radius = max(1.5, grid_size * tile_size * 0.7)
         shape_params = {"amplitude": amplitude, "radius": radius, "sigma": radius * 0.45}
