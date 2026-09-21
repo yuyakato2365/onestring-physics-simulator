@@ -488,42 +488,97 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         x=new
         records.append(_checkpoint(x,it+1,step))
         if step<1e-8: break
-    # Optional lexicographic / hard-priority planarity stage.
-    # The weighted local/global solve above determines the square/surface compromise.
-    # In hard mode we then move as little as possible from that result while driving
-    # every quad to the requested coplanarity tolerance.  The result is accepted only
-    # if the tolerance is actually met; otherwise the pipeline fails explicitly.
+    # Optional constrained hard-planarity solve.
+    # Hard mode implements:
+    #   min w_square * E_Square + w_surface * E_Surface
+    #   s.t. max quad planarity deviation <= epsilon.
+    # w_planar is deliberately absent from this constrained stage.
     planarity_mode=str(os.getenv("ONESTRING_K3D_PLANARITY_MODE","soft")).strip().lower()
     hard_planarity_report=None
     if planarity_mode=="hard":
-        bbox_diag=max(float(np.linalg.norm(np.ptp(x,axis=0))),1e-12)
+        x_seed=x.copy()
+        center=x_seed.mean(axis=0)
+        bbox_diag=max(float(np.linalg.norm(np.ptp(x_seed,axis=0))),1e-12)
         hard_rel_tol=max(_env_float("ONESTRING_K3D_HARD_PLANARITY_REL_TOL",1e-4),1e-10)
         hard_abs_tol=hard_rel_tol*bbox_diag
+        # Scale variables to O(1) for SLSQP.
+        y0=((x_seed-center)/bbox_diag).ravel()
+        edge_target_scaled={k:v/bbox_diag for k,v in edge_target.items()}
+        eps_scaled=hard_abs_tol/bbox_diag
+
+        def _hard_objective(flat):
+            v=flat.reshape((-1,3))
+            square=0.0
+            for f in faces:
+                q=v[f]
+                diff=q-_closest_square_projection(q)
+                square+=float(np.sum(diff*diff))
+            for a,b in edges:
+                d=v[int(b)]-v[int(a)]
+                ln=float(np.linalg.norm(d))
+                if ln<1e-12:
+                    square+=1e3
+                    continue
+                diff=d-edge_target_scaled[(int(a),int(b))]*d/ln
+                square+=float(np.dot(diff,diff))
+            v_world=v*bbox_diag+center
+            ps_world=_surface_project(v_world,target,parameterization)
+            ps=(ps_world-center)/bbox_diag
+            surface=float(np.sum((v-ps)*(v-ps)))
+            return float(w_square*square+w_surface*surface)
+
+        def _hard_planarity_ineq(flat):
+            v=flat.reshape((-1,3))
+            margins=[]
+            for f in faces:
+                q=v[f]
+                dev=np.linalg.norm(q-_best_fit_plane_projection(q),axis=1)
+                margins.extend(eps_scaled-dev)
+            return np.asarray(margins,float)
+
         print(
-            f"[K3D-HARD-PLANARITY] start rel_tol={hard_rel_tol:.6g} abs_tol={hard_abs_tol:.6g} "
-            f"priority=planarity>square>surface",
+            f"[K3D-HARD-PLANARITY] start formulation='min w2*ESquare+w3*ESurface s.t. planarity<=eps' "
+            f"w_square={w_square:.6g} w_surface={w_surface:.6g} "
+            f"rel_tol={hard_rel_tol:.6g} abs_tol={hard_abs_tol:.6g}",
             flush=True,
         )
-        x_hard,hard_planarity_report=minimum_displacement_planarity_polish(
-            x,faces,tolerance=hard_abs_tol,max_iterations=600
+        hard_result=minimize(
+            _hard_objective,y0,method="SLSQP",
+            constraints=[{"type":"ineq","fun":_hard_planarity_ineq}],
+            options={"maxiter":max(100,iterations*5),"ftol":1e-9,"disp":False},
         )
+        x_hard=np.asarray(hard_result.x,float).reshape((-1,3))*bbox_diag+center
         dev=[]
         for f in faces:
             q=x_hard[f]
             dev.extend(np.linalg.norm(q-_best_fit_plane_projection(q),axis=1))
         hard_max=float(np.max(dev)) if dev else 0.0
+        accepted=bool(np.all(np.isfinite(x_hard)) and hard_max<=hard_abs_tol*(1.0+1e-6))
+        hard_planarity_report={
+            "success":accepted,
+            "solver_success":bool(getattr(hard_result,"success",False)),
+            "iterations":int(getattr(hard_result,"nit",0)),
+            "message":str(getattr(hard_result,"message","")),
+            "planarity_max":hard_max,
+            "tolerance":hard_abs_tol,
+            "objective":float(_hard_objective(np.asarray(hard_result.x,float))),
+            "w_square":float(w_square),
+            "w_surface":float(w_surface),
+            "w_planar_used":False,
+        }
         print(
-            f"[K3D-HARD-PLANARITY] done max={hard_max:.6g} tol={hard_abs_tol:.6g} "
-            f"accepted={hard_max<=hard_abs_tol}",
+            f"[K3D-HARD-PLANARITY] done solver_success={getattr(hard_result,'success',False)} "
+            f"nit={getattr(hard_result,'nit',0)} objective={hard_planarity_report['objective']:.6g} "
+            f"max={hard_max:.6g} tol={hard_abs_tol:.6g} accepted={accepted}",
             flush=True,
         )
-        if (not np.all(np.isfinite(x_hard))) or hard_max>hard_abs_tol:
+        if not accepted:
             raise RuntimeError(
-                f"K3D hard planarity constraint not satisfied: max={hard_max:.6g} > tol={hard_abs_tol:.6g}"
+                f"K3D hard planarity constraint not satisfied: max={hard_max:.6g} > tol={hard_abs_tol:.6g}; "
+                f"solver={hard_planarity_report['message']}"
             )
         x=x_hard
-        # The authoritative history must end at the geometry actually returned.
-        records.append(_checkpoint(x,len(records),float(hard_planarity_report.get("displacement_rms",0.0))))
+        records.append(_checkpoint(x,len(records),float(np.linalg.norm(x-x_seed)/max(math.sqrt(len(x)),1.0))))
 
     iteration_history={
         "records":records,
