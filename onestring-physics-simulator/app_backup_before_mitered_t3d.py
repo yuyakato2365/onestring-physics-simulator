@@ -540,16 +540,19 @@ with st.sidebar:
             "stop when lambda > 2 requires unspecified reparameterization",
             value=True,
         )
-    csf_split_threshold = float(
-        st.number_input(
-            "Split threshold (CSF)",
-            min_value=1.0,
-            value=1.9,
-            step=0.05,
-            format="%.3f",
-            help="CSFがこの値を超える領域をSplit候補として扱います。小さくするとSplitが増えやすく、大きくすると減りやすくなります。",
+    if selected_model_version["id"] == "2026-09-20-paper-t3d":
+        csf_split_threshold = float(
+            st.number_input(
+                "Split threshold (CSF)",
+                min_value=1.0,
+                value=1.9,
+                step=0.05,
+                format="%.3f",
+                help="09-20版のCSF Split閾値。小さくするとSplitが増えやすく、大きくすると減りやすくなります。",
+            )
         )
-    )
+    else:
+        csf_split_threshold = 1.9
     with st.expander(
         "Bijective free-boundary settings",
         expanded=omega_parameterization_mode == "bijective_free_boundary",
