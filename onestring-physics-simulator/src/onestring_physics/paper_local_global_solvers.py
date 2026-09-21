@@ -399,6 +399,12 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         # The target is the same closest-square local projection already used by
         # E_Square; unlike increasing w_square globally, it therefore changes the
         # solve only near the user-selected degeneration threshold.
+        active_barrier_faces=0
+        barrier_edge_faces=0
+        barrier_area_faces=0
+        barrier_max_weight=0.0
+        barrier_worst_edge_ratio=float("inf")
+        barrier_worst_area_ratio=float("inf")
         if degeneracy_barrier_enabled:
             for f in faces:
                 q=x[f]
@@ -413,12 +419,18 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                 deg_worst_area=min(deg_worst_area,area_ratio)
                 edge_deficit=max((degeneracy_ratio_threshold-edge_ratio)/max(edge_ratio,1e-9),0.0)
                 area_deficit=max((degeneracy_area_threshold-area_ratio)/max(area_ratio,1e-9),0.0)
+                barrier_worst_edge_ratio=min(barrier_worst_edge_ratio,edge_ratio)
+                barrier_worst_area_ratio=min(barrier_worst_area_ratio,area_ratio)
                 severity=max(edge_deficit,area_deficit)
                 if severity<=0.0:
                     continue
+                active_barrier_faces+=1
+                if edge_deficit>0.0: barrier_edge_faces+=1
+                if area_deficit>0.0: barrier_area_faces+=1
                 # Non-zero immediately at activation and grows steeply toward collapse.
                 barrier_w=degeneracy_barrier_weight*((1.0+severity)**degeneracy_barrier_power)
                 barrier_w=min(barrier_w,1e10)
+                barrier_max_weight=max(barrier_max_weight,float(barrier_w))
                 deg_active+=1
                 deg_max_weight=max(deg_max_weight,float(barrier_w))
 
@@ -440,6 +452,17 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                     pp=_best_fit_plane_projection(q)
                     for local,vid in enumerate(f):
                         constraints.append(([int(vid)],[1.],pp[local],0.25*barrier_w))
+
+        if degeneracy_barrier_enabled and (
+            it==0 or it==iterations-1 or (it+1)%5==0 or active_barrier_faces>0
+        ):
+            print(
+                f"[K3D-DEGENERACY] iter={it+1}/{iterations} active={active_barrier_faces}/{len(faces)} "
+                f"edge_active={barrier_edge_faces} area_active={barrier_area_faces} "
+                f"worst_edge={barrier_worst_edge_ratio:.6g} worst_area={barrier_worst_area_ratio:.6g} "
+                f"max_weight={barrier_max_weight:.6g}",
+                flush=True,
+            )
 
         # E_Length projection of each edge vector to target K3D tile scale.
         for a,b in edges:
