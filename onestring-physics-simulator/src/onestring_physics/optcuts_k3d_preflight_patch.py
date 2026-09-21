@@ -249,24 +249,40 @@ def install_optcuts_k3d_preflight_patch(pipeline: Any) -> None:
             _tag_invalid_for_visualization(mesh, invalid, "K3D->T3D preflight")
             examples = [(i["tile_id"], i["reason"]) for i in invalid[:8]]
             if _optcuts_test_mode(pipeline, mesh):
-                filtered_mesh, keep_ids = _filtered_mesh_without_invalid(mesh, invalid)
+                # The paper/deployability route requires strict one-to-one
+                # correspondence K3D quad -> T3D solid -> K2D quad.  The old
+                # optcuts_test behavior silently deleted self-intersecting K3D
+                # quads here, which changed 739 panels to 736 and made T2D
+                # correspondence impossible.  Keep every panel and let the
+                # paper T3D extrusion consume the authoritative K3D geometry.
+                # Invalid ids remain tagged/logged for visualization and for the
+                # deployability objective to improve upstream.
                 print(
-                    "[OPTCUTS-TEST-DROP-INVALID][K3D-PREFLIGHT] "
-                    f"excluded={len(invalid)} retained={len(keep_ids)} "
+                    "[OPTCUTS-TEST-KEEP-INVALID][K3D-PREFLIGHT] "
+                    f"kept={len(np.asarray(mesh.faces))} invalid={len(invalid)} "
                     f"reasons={reason_counts} examples={examples} log={log_path}; "
-                    "extruding only valid panels"
+                    "preserving K3D/T3D/K2D tile identity"
                 )
-                result = base_extrude(filtered_mesh, thickness, stage)
+                result = base_extrude(mesh, thickness, stage)
                 out_mesh = result[0] if isinstance(result, tuple) and result else result
                 if out_mesh is not None:
+                    actual = int(len(getattr(out_mesh, "vertices", ())))
+                    expected = int(len(np.asarray(mesh.faces)))
+                    if actual != expected:
+                        raise RuntimeError(
+                            "OPTCUTS_T3D_CORRESPONDENCE_FAILED: "
+                            f"K3D faces={expected}, T3D tiles={actual}; "
+                            "no panel deletion is permitted in this route"
+                        )
                     try:
                         out_mesh.metrics.update({
-                            "optcuts_test_invalid_panels_excluded": True,
-                            "optcuts_test_excluded_original_face_ids": [int(i["tile_id"]) for i in invalid],
-                            "optcuts_test_retained_original_face_ids": keep_ids,
+                            "optcuts_test_invalid_panels_excluded": False,
+                            "optcuts_test_excluded_original_face_ids": [],
+                            "optcuts_test_retained_original_face_ids": list(range(expected)),
+                            "optcuts_test_preflight_invalid_face_ids": [int(i["tile_id"]) for i in invalid],
                         })
-                        setattr(out_mesh, "_optcuts_test_retained_original_face_ids", keep_ids)
-                        setattr(out_mesh, "_optcuts_test_excluded_original_face_ids", [int(i["tile_id"]) for i in invalid])
+                        setattr(out_mesh, "_optcuts_test_retained_original_face_ids", list(range(expected)))
+                        setattr(out_mesh, "_optcuts_test_excluded_original_face_ids", [])
                     except Exception:
                         pass
                 return result
