@@ -299,6 +299,11 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     w_square=float(getattr(params,"w_square",_env_float("ONESTRING_PAPER_K3D_W_SQUARE",1.0)))
     w_surface=float(getattr(params,"w_surface",_env_float("ONESTRING_PAPER_K3D_W_SURFACE",0.01)))
     iterations=_env_int("ONESTRING_PAPER_K3D_ITERATIONS",40)
+    degeneracy_barrier_enabled=str(os.getenv("ONESTRING_K3D_DEGENERACY_BARRIER","0")).strip().lower() not in {"0","false","no","off"}
+    degeneracy_ratio_threshold=_env_float("ONESTRING_K3D_DEGENERACY_EDGE_RATIO",0.35)
+    degeneracy_area_threshold=_env_float("ONESTRING_K3D_DEGENERACY_AREA_RATIO",0.20)
+    degeneracy_barrier_weight=_env_float("ONESTRING_K3D_DEGENERACY_BARRIER_WEIGHT",50.0)
+    degeneracy_barrier_power=_env_float("ONESTRING_K3D_DEGENERACY_BARRIER_POWER",4.0)
 
     # Paper edge target: mean of the mean edge lengths of incident quads.
     face_mean=np.zeros(len(faces))
@@ -379,6 +384,34 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
             for local,vid in enumerate(f):
                 constraints.append(([int(vid)],[1.],pp[local],w_planar))
                 constraints.append(([int(vid)],[1.],pq[local],w_square))
+        # Optional anti-degeneracy barrier.  This is deliberately dormant for
+        # healthy quads and rises steeply only when a quad starts collapsing.
+        # The target is the same closest-square local projection already used by
+        # E_Square; unlike increasing w_square globally, it therefore changes the
+        # solve only near the user-selected degeneration threshold.
+        if degeneracy_barrier_enabled:
+            for f in faces:
+                q=x[f]
+                lengths=np.linalg.norm(np.roll(q,-1,axis=0)-q,axis=1)
+                mean_len=max(float(np.mean(lengths)),1e-12)
+                edge_ratio=float(np.min(lengths))/mean_len
+                # Area ratio uses the two triangle areas normalized by mean edge^2.
+                area=0.5*np.linalg.norm(np.cross(q[1]-q[0],q[2]-q[0]))
+                area+=0.5*np.linalg.norm(np.cross(q[2]-q[0],q[3]-q[0]))
+                area_ratio=float(area)/(mean_len*mean_len)
+                severity=max(
+                    degeneracy_ratio_threshold/max(edge_ratio,1e-9)-1.0,
+                    degeneracy_area_threshold/max(area_ratio,1e-9)-1.0,
+                    0.0,
+                )
+                if severity<=0.0:
+                    continue
+                barrier_w=degeneracy_barrier_weight*(severity**degeneracy_barrier_power)
+                barrier_w=min(barrier_w,1e8)
+                pq=_closest_square_projection(q)
+                for local,vid in enumerate(f):
+                    constraints.append(([int(vid)],[1.],pq[local],barrier_w))
+
         # E_Length projection of each edge vector to target K3D tile scale.
         for a,b in edges:
             d=x[b]-x[a]; ln=float(np.linalg.norm(d))
@@ -414,7 +447,12 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         k3d_surface_residual=records[-1]["ESurface"] if records else 0.,
         k3d_iteration_history=iteration_history,
         k3d_iteration_history_available=True,
-        paper_alignment_note="Explicit PP/PQ/PS local projections and sparse global least-squares. Surface projection uses closest triangle among KD-tree candidates."
+        paper_alignment_note="Explicit PP/PQ/PS local projections and sparse global least-squares. Surface projection uses closest triangle among KD-tree candidates.",
+        k3d_degeneracy_barrier_enabled=bool(degeneracy_barrier_enabled),
+        k3d_degeneracy_edge_ratio_threshold=float(degeneracy_ratio_threshold),
+        k3d_degeneracy_area_ratio_threshold=float(degeneracy_area_threshold),
+        k3d_degeneracy_barrier_weight=float(degeneracy_barrier_weight),
+        k3d_degeneracy_barrier_power=float(degeneracy_barrier_power),
     )
     if not np.all(np.isfinite(x)):
         raise RuntimeError("Paper local/global K3D produced non-finite vertices")
