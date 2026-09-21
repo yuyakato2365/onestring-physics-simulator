@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import lsqr
-from scipy.optimize import minimize, least_squares
+from scipy.optimize import minimize, least_squares, NonlinearConstraint
 
 from .paper_eq5_k2d_solver import build_linkage_topology, project_angle_vectors
 
@@ -488,101 +488,130 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         x=new
         records.append(_checkpoint(x,it+1,step))
         if step<1e-8: break
-    # Optional hard-priority planarity solve using the same sparse local/global
-    # structure as K3D.  Avoid a dense/general nonlinear constrained solve:
-    # planarity is enforced by penalty continuation, while square/surface remain
-    # the optimization objective.  A result is accepted only if the requested
-    # planarity tolerance is actually reached.
+    # Optional exact hard-planarity solve with analytic sparse constraint Jacobian.
+    # Hard mode solves the requested constrained problem directly:
+    #   min w_square*E_Square + w_surface*E_Surface
+    #   s.t. normalized scalar-triple-product coplanarity == 0 for every quad.
+    # The constraint Jacobian is analytic and has only 12 nonzeros per quad.
     planarity_mode=str(os.getenv("ONESTRING_K3D_PLANARITY_MODE","soft")).strip().lower()
     hard_planarity_report=None
     if planarity_mode=="hard":
         x_seed=x.copy()
+        center=x_seed.mean(axis=0)
         bbox_diag=max(float(np.linalg.norm(np.ptp(x_seed,axis=0))),1e-12)
         hard_rel_tol=max(_env_float("ONESTRING_K3D_HARD_PLANARITY_REL_TOL",1e-4),1e-10)
         hard_abs_tol=hard_rel_tol*bbox_diag
-        hard_max_iterations=max(20,_env_int("ONESTRING_K3D_HARD_LG_ITERATIONS",120))
-        rho0=max(_env_float("ONESTRING_K3D_HARD_PLANARITY_RHO0",1e2),1e-12)
-        rho_growth=max(_env_float("ONESTRING_K3D_HARD_PLANARITY_RHO_GROWTH",10.0),1.01)
-        rho_max=max(_env_float("ONESTRING_K3D_HARD_PLANARITY_RHO_MAX",1e9),rho0)
-        stage_iterations=max(5,_env_int("ONESTRING_K3D_HARD_STAGE_ITERATIONS",15))
-        hard_records=[]
-        rho=rho0
-        hard_it=0
-        accepted=False
+        y0=(x_seed-center)/bbox_diag
+        flat0=y0.ravel()
+        nverts=len(y0)
+
+        # Freeze local square/surface projections during each trust-region model.
+        # This keeps the objective a sparse quadratic local/global model, while
+        # coplanarity itself is an actual nonlinear equality constraint.
+        pq_targets=np.zeros_like(y0)
+        pq_counts=np.zeros(nverts,float)
+        for f in faces:
+            q=y0[f]
+            pq=_closest_square_projection(q)
+            for local,vid in enumerate(f):
+                pq_targets[int(vid)]+=pq[local]
+                pq_counts[int(vid)]+=1.0
+        nz=pq_counts>0
+        pq_targets[nz]/=pq_counts[nz,None]
+        ps_world=_surface_project(x_seed,target,parameterization)
+        ps_targets=(ps_world-center)/bbox_diag
+
+        # Normalization by the initial local mean-edge^3 makes every quad
+        # coplanarity constraint dimensionless and comparably scaled.
+        q0=y0[faces]
+        edge0=np.linalg.norm(np.roll(q0,-1,axis=1)-q0,axis=2)
+        vol_scale=np.maximum(np.mean(edge0,axis=1)**3,1e-12)
+
+        def _hard_fun(flat):
+            v=flat.reshape((-1,3))
+            ds=v-pq_targets
+            du=v-ps_targets
+            return float(w_square*np.sum(ds*ds)+w_surface*np.sum(du*du))
+
+        def _hard_jac(flat):
+            v=flat.reshape((-1,3))
+            return (2.0*w_square*(v-pq_targets)+2.0*w_surface*(v-ps_targets)).ravel()
+
+        def _coplanarity(flat):
+            v=flat.reshape((-1,3))
+            q=v[faces]
+            a=q[:,1]-q[:,0]
+            b=q[:,2]-q[:,0]
+            c=q[:,3]-q[:,0]
+            return np.einsum("ij,ij->i",a,np.cross(b,c))/vol_scale
+
+        def _coplanarity_jac(flat):
+            v=flat.reshape((-1,3))
+            rows=[]; cols=[]; data=[]
+            for fi,f in enumerate(faces):
+                p0,p1,p2,p3=v[f]
+                a=p1-p0; b=p2-p0; c=p3-p0
+                # g = a . (b x c)
+                g1=np.cross(b,c)
+                g2=np.cross(c,a)
+                g3=np.cross(a,b)
+                g0=-(g1+g2+g3)
+                inv=1.0/vol_scale[fi]
+                for vid,grad in zip(f,(g0,g1,g2,g3)):
+                    base=3*int(vid)
+                    for d in range(3):
+                        rows.append(fi); cols.append(base+d); data.append(float(grad[d]*inv))
+            return sparse.csr_matrix((data,(rows,cols)),shape=(len(faces),3*nverts))
+
+        nlc=NonlinearConstraint(_coplanarity,0.0,0.0,jac=_coplanarity_jac)
         print(
-            f"[K3D-HARD-LG] start formulation='min w2*ESquare+w3*ESurface s.t. planarity<=eps' "
-            f"w_square={w_square:.6g} w_surface={w_surface:.6g} "
-            f"rel_tol={hard_rel_tol:.6g} abs_tol={hard_abs_tol:.6g} "
-            f"rho0={rho0:.6g} rho_max={rho_max:.6g}",
+            f"[K3D-HARD-SPARSE] start formulation='min w2*ESquare+w3*ESurface s.t. coplanarity=0' "
+            f"vars={3*nverts} constraints={len(faces)} jac_nnz={12*len(faces)} "
+            f"w_square={w_square:.6g} w_surface={w_surface:.6g}",
             flush=True,
         )
-        while hard_it<hard_max_iterations and rho<=rho_max*(1.0+1e-12):
-            for _ in range(min(stage_iterations,hard_max_iterations-hard_it)):
-                constraints=[]
-                # Hard-priority local projection: rho is continued upward until
-                # the planarity tolerance is met.
-                for f in faces:
-                    q=x[f]
-                    pp=_best_fit_plane_projection(q)
-                    pq=_closest_square_projection(q)
-                    for local,vid in enumerate(f):
-                        constraints.append(([int(vid)],[1.],pp[local],rho))
-                        constraints.append(([int(vid)],[1.],pq[local],w_square))
-                # Keep the paper E_Length component of E_Square.
-                for a,b in edges:
-                    d=x[int(b)]-x[int(a)]
-                    ln=float(np.linalg.norm(d))
-                    if ln<1e-12:
-                        continue
-                    t=edge_target[(int(a),int(b))]*d/ln
-                    constraints.append(([int(a),int(b)],[-1.,1.],t,w_square))
-                # E_Surface remains a soft objective.
-                ps=_surface_project(x,target,parameterization)
-                for i,p in enumerate(ps):
-                    constraints.append(([i],[1.],p,w_surface))
-                new=_solve_constraints(len(x),3,constraints,anchor=x,anchor_weight=1e-9)
-                step=float(np.linalg.norm(new-x)/max(math.sqrt(len(x)),1.0))
-                x=new
-                hard_it+=1
-                dev=[]
-                for f in faces:
-                    q=x[f]
-                    dev.extend(np.linalg.norm(q-_best_fit_plane_projection(q),axis=1))
-                hard_max=float(np.max(dev)) if dev else 0.0
-                hard_records.append({
-                    "iteration":hard_it,"rho":float(rho),"planarity_max":hard_max,"step":step
-                })
-                if hard_max<=hard_abs_tol:
-                    accepted=True
-                    break
-                if step<1e-12:
-                    break
-            print(
-                f"[K3D-HARD-LG] iter={hard_it}/{hard_max_iterations} rho={rho:.6g} "
-                f"planarity_max={hard_max:.6g} tol={hard_abs_tol:.6g} accepted={accepted}",
-                flush=True,
-            )
-            if accepted:
-                break
-            rho*=rho_growth
-
+        hard_result=minimize(
+            _hard_fun,flat0,jac=_hard_jac,method="trust-constr",
+            constraints=[nlc],
+            options={
+                "maxiter":max(50,_env_int("ONESTRING_K3D_HARD_CONSTRAINED_ITERATIONS",150)),
+                "gtol":1e-7,"xtol":1e-9,"barrier_tol":1e-9,"verbose":0,
+                "sparse_jacobian":True,
+            },
+        )
+        x_hard=np.asarray(hard_result.x,float).reshape((-1,3))*bbox_diag+center
+        dev=[]
+        for f in faces:
+            q=x_hard[f]
+            dev.extend(np.linalg.norm(q-_best_fit_plane_projection(q),axis=1))
+        hard_max=float(np.max(dev)) if dev else 0.0
+        constraint_inf=float(np.max(np.abs(_coplanarity(np.asarray(hard_result.x,float))))) if len(faces) else 0.0
+        accepted=bool(np.all(np.isfinite(x_hard)) and hard_max<=hard_abs_tol)
         hard_planarity_report={
-            "success":bool(accepted),
-            "solver":"sparse_local_global_penalty_continuation",
-            "iterations":int(hard_it),
-            "planarity_max":float(hard_max),
-            "tolerance":float(hard_abs_tol),
-            "w_square":float(w_square),
-            "w_surface":float(w_surface),
-            "w_planar_used":False,
-            "rho_final":float(min(rho,rho_max)),
-            "records":hard_records,
+            "success":accepted,
+            "solver":"trust-constr_analytic_sparse_coplanarity_jacobian",
+            "solver_success":bool(getattr(hard_result,"success",False)),
+            "iterations":int(getattr(hard_result,"nit",0)),
+            "message":str(getattr(hard_result,"message","")),
+            "planarity_max":hard_max,
+            "tolerance":hard_abs_tol,
+            "constraint_inf":constraint_inf,
+            "w_square":float(w_square),"w_surface":float(w_surface),"w_planar_used":False,
+            "constraint_jacobian_nnz":int(12*len(faces)),
         }
+        print(
+            f"[K3D-HARD-SPARSE] done solver_success={getattr(hard_result,'success',False)} "
+            f"nit={getattr(hard_result,'nit',0)} constraint_inf={constraint_inf:.6g} "
+            f"planarity_max={hard_max:.6g} tol={hard_abs_tol:.6g} accepted={accepted}",
+            flush=True,
+        )
         if not accepted:
             raise RuntimeError(
-                f"K3D hard planarity constraint not satisfied by sparse local/global solve: "
-                f"max={hard_max:.6g} > tol={hard_abs_tol:.6g} after {hard_it} iterations"
+                f"K3D hard planarity constraint not satisfied by sparse constrained solve: "
+                f"max={hard_max:.6g} > tol={hard_abs_tol:.6g}; "
+                f"constraint_inf={constraint_inf:.6g}; solver={hard_planarity_report['message']}"
             )
+        x=x_hard
         records.append(_checkpoint(x,len(records),float(np.linalg.norm(x-x_seed)/max(math.sqrt(len(x)),1.0))))
 
     iteration_history={
