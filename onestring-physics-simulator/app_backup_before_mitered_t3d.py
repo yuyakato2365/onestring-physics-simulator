@@ -1494,6 +1494,22 @@ _corr_uv=np.asarray(state.mesh_2d_initial.vertices,dtype=float)[:,:2]
 _corr_bounds=np.asarray(state.surface_parameterization.uv_vertices_2d,dtype=float)[:,:2]
 _corr_tile_colors=correspondence_tile_colors(state.mesh_2d_initial,_corr_bounds)
 
+# Keep a compact correspondence reference visible for every downstream stage.
+# This is deliberately separate from the selected-stage renderer.
+if view_stage not in {"Pipeline View", "S", "Split Map", "Mode Comparison", "Metrics", "Paper Consistency Audit", "Setting Meters", "Complexity / Backend", "Performance", "Approximations"}:
+    with st.expander("Mapping reference: original M2D / Omega colors", expanded=True):
+        st.caption("同じ色 = Ω/M2D上の同じ場所。下の各stageでもこの色を引き継ぎます。")
+        st.plotly_chart(
+            figure_quad_mesh(
+                state.mesh_2d_initial,
+                title="Correspondence reference — original M2D in Ω",
+                correspondence_uv=_corr_uv,
+                correspondence_bounds=_corr_bounds,
+            ),
+            use_container_width=True,
+            key=f"mapping_reference_{view_stage}",
+        )
+
 if view_stage == "Pipeline View":
     st.plotly_chart(figure_pipeline_overview(state), use_container_width=True, key="pipeline_overview")
     selected_report = st.selectbox("stage report", list(state.stage_reports.keys()))
