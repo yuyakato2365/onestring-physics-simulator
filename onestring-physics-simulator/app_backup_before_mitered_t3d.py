@@ -320,8 +320,16 @@ def _compute_setting_meters(
 
 with st.sidebar:
     st.header("Version")
+    # Experimental 2026-09-21 deployability-aware K3D variant.
+    _deploy_version = {
+        "id": "2026-09-21-deployability-k3d",
+        "label": "2026-09-21 — Deployability-aware hard-planar K3D",
+        "description": "Experimental K3D: minimize wSquare*ESquare + wSurface*ESurface + wDeploy*EDeployability under hard quad-planarity tolerance.",
+    }
+    if not any(v.get("id") == _deploy_version["id"] for v in MODEL_VERSIONS):
+        MODEL_VERSIONS = list(MODEL_VERSIONS) + [_deploy_version]
     _default_version_index = next(
-        (i for i,v in enumerate(MODEL_VERSIONS) if v.get("id") == "2026-09-20-paper-t3d"), 0
+        (i for i,v in enumerate(MODEL_VERSIONS) if v.get("id") == "2026-09-21-deployability-k3d"), 0
     )
     selected_model_version = st.selectbox(
         "version",
@@ -335,7 +343,7 @@ with st.sidebar:
     # Expose the official OptCuts distortion setting on the current
     # 2026-09-20 Paper-aligned T3D version selected by the user.
     optcuts_distortion_bound = 4.1
-    if str(selected_model_version.get("id", "")) == "2026-09-20-paper-t3d":
+    if str(selected_model_version.get("id", "")) in {"2026-09-20-paper-t3d", "2026-09-21-deployability-k3d"}:
         optcuts_distortion_bound = float(st.number_input(
             "OptCuts distortion bound (Symmetric Dirichlet > 4)",
             min_value=4.0001,
@@ -376,6 +384,33 @@ with st.sidebar:
             key="onestring_0920_k3d_planarity_mode",
         )
         os.environ["ONESTRING_K3D_PLANARITY_MODE"] = "hard" if k3d_planarity_mode.startswith("Hard") else "soft"
+        if str(selected_model_version.get("id", "")) == "2026-09-21-deployability-k3d":
+            # This experimental version is defined by the constrained formulation.
+            os.environ["ONESTRING_K3D_PLANARITY_MODE"] = "hard"
+            st.info("2026-09-21 mode: K3D uses hard planarity and adds an experimental deployability proxy to Square + Surface.")
+            k3d_w_deploy = float(st.number_input(
+                "w_deploy / EDeployability",
+                min_value=0.0, value=float(os.environ.get("ONESTRING_K3D_W_DEPLOY", "100.0")),
+                step=10.0, format="%.2f",
+                help="Experimental panel-feasibility weight. Penalizes quads whose shortest-edge ratio or normalized area deteriorates.",
+                key="onestring_0921_k3d_w_deploy",
+            ))
+            k3d_deploy_edge = float(st.number_input(
+                "Deployability: min edge / mean edge threshold",
+                min_value=0.05, max_value=0.99,
+                value=float(os.environ.get("ONESTRING_K3D_DEPLOY_EDGE_RATIO", "0.70")),
+                step=0.05, format="%.2f", key="onestring_0921_deploy_edge",
+            ))
+            k3d_deploy_area = float(st.number_input(
+                "Deployability: area / mean edge² threshold",
+                min_value=0.05, max_value=2.0,
+                value=float(os.environ.get("ONESTRING_K3D_DEPLOY_AREA_RATIO", "0.55")),
+                step=0.05, format="%.2f", key="onestring_0921_deploy_area",
+            ))
+            os.environ["ONESTRING_K3D_W_DEPLOY"] = str(k3d_w_deploy)
+            os.environ["ONESTRING_K3D_DEPLOY_EDGE_RATIO"] = str(k3d_deploy_edge)
+            os.environ["ONESTRING_K3D_DEPLOY_AREA_RATIO"] = str(k3d_deploy_area)
+
         if k3d_planarity_mode.startswith("Hard"):
             k3d_hard_planarity_rel_tol = float(st.number_input(
                 "Hard planarity tolerance / bbox diagonal",
