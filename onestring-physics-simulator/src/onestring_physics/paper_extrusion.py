@@ -85,6 +85,15 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     tile_count=len(mesh_faces)
     if tile_count==0:
         return pipeline._extrude_tiles(mesh,thickness,stage)
+    if top_global.ndim != 2 or top_global.shape[1] != 3 or not np.isfinite(top_global).all():
+        raise RuntimeError(
+            f"K3D -> T3D preflight: invalid K3D vertices shape={top_global.shape}, "
+            f"nonfinite={int(np.size(top_global)-np.count_nonzero(np.isfinite(top_global)))}"
+        )
+    if mesh_faces.ndim != 2 or mesh_faces.shape[1] != 4:
+        raise RuntimeError(f"K3D -> T3D preflight: expected quad faces, got {mesh_faces.shape}")
+    if int(mesh_faces.min()) < 0 or int(mesh_faces.max()) >= len(top_global):
+        raise RuntimeError("K3D -> T3D preflight: face index outside K3D vertex range")
 
     n_mesh_vertices=len(top_global)
     normals=_vertex_normals(top_global,mesh_faces)
@@ -126,12 +135,20 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
             projected=_best_fit_plane(x[ids_arr])
             constraints.append((ids,projected,weight))
         new=_solve(len(x),constraints,x0,anchor_weight)
+        if not np.isfinite(new).all():
+            # Never let a failed T3D local/global step poison K2D/T2D with NaNs.
+            # The previous iterate is finite and already represents the paper
+            # normal-offset extrusion; stop refinement there instead.
+            print(f"[PAPER-T3D] non-finite solve at iter={it+1}; keeping previous finite iterate", flush=True)
+            break
         step=float(np.linalg.norm(new-x)/max(math.sqrt(len(x)),1.0))
         x=new
         done=it+1
         if step<1e-10:
             break
 
+    if not np.isfinite(x).all():
+        raise RuntimeError("K3D -> T3D produced non-finite shared extrusion vertices")
     after=_planarity_error(x,all_faces)
     top_solved=x[:n_mesh_vertices]
     bottom_solved=x[n_mesh_vertices:]
