@@ -6,6 +6,8 @@ than only by the launcher name.
 """
 from __future__ import annotations
 
+import os
+
 VERSION_ID = "2026-09-20-paper-t3d"
 VERSION_LABEL = "2026-09-20 — Paper-aligned T3D"
 VERSION_DESCRIPTION = (
@@ -66,12 +68,21 @@ def install_paper_t3d_20260920_version_ui():
                     "allow_legacy_normal_prism_emergency_fallback": False,
                     "t3d_intersection_trim_enabled": False,
                 })
-            # This launcher is specifically the paper-T3D version. Select it by
-            # default on first load while still leaving old versions visible.
+            deploy_id = "2026-09-21-deployability-k3d"
+            if not any(v.get("id") == deploy_id for v in option_list):
+                option_list.append({
+                    "id": deploy_id,
+                    "label": "2026-09-21 — Deployability-aware hard-planar K3D",
+                    "description": "Experimental: minimize wSquare*ESquare + wSurface*ESurface + wDeploy*EDeployability under hard quad-planarity tolerance.",
+                    "t3d_extrusion_side": "negative_normal_from_k3d",
+                    "t3d_variable_topology_enabled": False,
+                    "allow_legacy_normal_prism_emergency_fallback": False,
+                    "t3d_intersection_trim_enabled": False,
+                })
+            # Prefer the deployability experiment when this branch is launched.
             kwargs = dict(kwargs)
-            desired_index = next(
-                i for i, v in enumerate(option_list) if v.get("id") == VERSION_ID
-            )
+            desired_id = deploy_id if os.environ.get("ONESTRING_DEPLOYABILITY_K3D_20260921") == "1" else VERSION_ID
+            desired_index = next(i for i, v in enumerate(option_list) if v.get("id") == desired_id)
             kwargs["index"] = desired_index
             # The legacy app may pass a stale/default index, and Streamlit may
             # retain widget state across reruns.  Use one canonical key and
