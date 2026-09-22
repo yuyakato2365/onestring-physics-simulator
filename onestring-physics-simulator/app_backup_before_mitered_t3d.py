@@ -1633,6 +1633,8 @@ def _render_click_chart(fig,key,height=620):
         fig,click_event=True,hover_event=False,select_event=False,
         override_height=height,key=key,
     )
+    if events:
+        print(f"[PANEL-CLICK-RAW] key={key} event={events[-1]!r}",flush=True)
     return _clicked_panel(fig,events)
 
 def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key_prefix):
