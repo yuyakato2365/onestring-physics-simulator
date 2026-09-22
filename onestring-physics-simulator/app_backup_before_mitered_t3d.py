@@ -1553,47 +1553,62 @@ _corr_bounds=np.asarray(state.surface_parameterization.uv_vertices_2d,dtype=floa
 _corr_tile_colors=correspondence_tile_colors(state.mesh_2d_initial,_corr_bounds)
 
 # Cross-stage linked panel inspector.
-# IMPORTANT: keep the original gradient figures untouched.  A separate,
-# almost-transparent per-panel Mesh3d overlay is used only as the click target.
 _PANEL_HIGHLIGHT = "#ff006e"
 
-def _panel_overlay(fig, quads, label, opacity=0.012):
+def _add_picker_mesh(fig, quads, label):
+    """One visible Mesh3d containing all panels; face customdata carries panel id."""
     quads=np.asarray(quads,dtype=float)
+    x=[]; y=[]; z=[]; ii=[]; jj=[]; kk=[]; face_ids=[]
     for panel_id,q in enumerate(quads):
-        if q.shape[0] < 4: continue
-        fig.add_trace(go.Mesh3d(
-            x=q[:4,0],y=q[:4,1],z=q[:4,2],
-            i=[0,0],j=[1,2],k=[2,3],
-            color="#ffffff",opacity=opacity,flatshading=True,
-            meta={"panel_id":int(panel_id)},
-            hovertemplate=f"{label} panel {panel_id}<extra></extra>",
-            name=f"{label} picker {panel_id}",showlegend=False,
-        ))
+        if len(q)<4: continue
+        base=len(x)
+        x.extend(q[:4,0]); y.extend(q[:4,1]); z.extend(q[:4,2])
+        ii.extend([base,base]); jj.extend([base+1,base+2]); kk.extend([base+2,base+3])
+        face_ids.extend([int(panel_id),int(panel_id)])
+    fig.add_trace(go.Mesh3d(
+        x=x,y=y,z=z,i=ii,j=jj,k=kk,
+        facecolor=["rgba(255,255,255,0.035)"]*len(ii),
+        opacity=1.0,flatshading=True,
+        customdata=face_ids,
+        meta={"panel_picker":True,"label":label},
+        hovertemplate=f"{label} panel %{{customdata}}<extra></extra>",
+        name=f"{label} panel picker",showlegend=False,
+    ))
 
-def _selected_overlay(fig, q, label, panel_id):
+def _selected_overlay(fig,q,label,panel_id):
     q=np.asarray(q,dtype=float)
-    if q.shape[0] < 4: return
+    if len(q)<4: return
     fig.add_trace(go.Mesh3d(
         x=q[:4,0],y=q[:4,1],z=q[:4,2],i=[0,0],j=[1,2],k=[2,3],
         color=_PANEL_HIGHLIGHT,opacity=1.0,flatshading=True,
-        hovertemplate=f"{label} panel {panel_id}<extra></extra>",
-        name=f"selected {label} panel {panel_id}",showlegend=False,
+        name=f"SELECTED {label} panel {panel_id}",showlegend=False,
+        hovertemplate=f"SELECTED {label} panel {panel_id}<extra></extra>",
     ))
 
-def _plotly_click_component(fig, *, key, height=620):
+def _plotly_click_component(fig,*,key,height=620):
     fig.update_layout(dragmode="orbit",clickmode="event")
-    events=plotly_events(
-        fig,click_event=True,hover_event=False,select_event=False,
-        override_height=height,key=key,
-    )
+    events=plotly_events(fig,click_event=True,hover_event=False,select_event=False,
+                         override_height=height,key=key)
     if not events: return None
-    try: curve=int(events[-1].get("curveNumber",-1))
+    ev=events[-1]
+    try: curve=int(ev.get("curveNumber",-1))
     except (TypeError,ValueError): return None
     if not (0<=curve<len(fig.data)): return None
-    meta=getattr(fig.data[curve],"meta",None)
-    if isinstance(meta,dict) and "panel_id" in meta:
-        try: return int(meta["panel_id"])
-        except (TypeError,ValueError): return None
+    tr=fig.data[curve]
+    meta=getattr(tr,"meta",None)
+    if not (isinstance(meta,dict) and meta.get("panel_picker")): return None
+    # streamlit-plotly-events returns pointNumber for Mesh3d triangle clicks.
+    # Each quad is exactly two consecutive triangles.
+    try:
+        pn=int(ev.get("pointNumber",-1))
+        if pn>=0: return pn//2
+    except (TypeError,ValueError):
+        pass
+    try:
+        cd=ev.get("customdata")
+        if cd is not None: return int(cd)
+    except (TypeError,ValueError):
+        pass
     return None
 
 def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key_prefix):
@@ -1609,29 +1624,23 @@ def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key
     if len(set(counts.values()))!=1:
         st.warning(f"Panel correspondence count mismatch: {counts}. Linking is limited to 0..{common-1}.")
 
-    selected=max(0,min(int(st.session_state.get("cross_stage_panel_id",0)),common-1))
+    shared=int(st.session_state.get("cross_stage_panel_id",0))
+    shared=max(0,min(shared,common-1))
     widget_key=f"{key_prefix}_panel_id"
-    # Synchronize only when another chart changed the shared selection.
-    if widget_key not in st.session_state or int(st.session_state[widget_key])!=selected:
-        st.session_state[widget_key]=selected
+    if widget_key not in st.session_state: st.session_state[widget_key]=shared
     selected=int(st.number_input("Panel ID",min_value=0,max_value=common-1,step=1,key=widget_key))
-    st.session_state["cross_stage_panel_id"]=selected
-    st.caption("左クリック = パネル選択、ドラッグ = 3D回転。元の対応グラデーションは維持し、選択パネルだけをピンクで重ねます。")
+    if selected!=shared: st.session_state["cross_stage_panel_id"]=selected
+    selected=max(0,min(selected,common-1))
+    st.caption("左クリックで選択、ドラッグで回転。T3D/T2Dの元の対応グラデーションを維持し、選択パネルだけピンク表示します。")
 
-    # Build the original figures first, preserving all correspondence colors.
+    # Preserve the authoritative original gradient rendering exactly.
     k3d_fig=figure_quad_mesh(state.mesh_3d_optimized,title=f"K3D — selected panel {selected}",correspondence_uv=_corr_uv,correspondence_bounds=_corr_bounds)
     t3d_fig=figure_tile_assembly(state.tiles_3d,title=f"T3D — selected panel {selected}",show_recovery_status=False,tile_colors=list(_corr_tile_colors))
     t2d_fig=figure_tile_assembly(t2d_assembly,title=f"{t2d_label} — selected panel {selected}",hinge_graph=hinge_graph,tile_colors=list(_corr_tile_colors))
 
-    # Click targets are independent overlays, so they cannot overwrite the
-    # original Mesh3d vertexcolor/tile-color gradient.
-    _panel_overlay(k3d_fig,kquads[:common],"K3D")
-    _panel_overlay(t3d_fig,t3quads[:common],"T3D")
-    _panel_overlay(t2d_fig,t2quads[:common],t2d_label)
-    # Add the visible highlight last so it is unmistakable.
-    _selected_overlay(k3d_fig,kquads[selected],"K3D",selected)
-    _selected_overlay(t3d_fig,t3quads[selected],"T3D",selected)
-    _selected_overlay(t2d_fig,t2quads[selected],t2d_label,selected)
+    for fig,quads,label in ((k3d_fig,kquads,"K3D"),(t3d_fig,t3quads,"T3D"),(t2d_fig,t2quads,t2d_label)):
+        _add_picker_mesh(fig,quads[:common],label)
+        _selected_overlay(fig,quads[selected],label,selected)
 
     for label,fig,suffix in (("K3D",k3d_fig,"k3d"),("T3D",t3d_fig,"t3d"),(t2d_label,t2d_fig,"t2d")):
         st.subheader(label)
