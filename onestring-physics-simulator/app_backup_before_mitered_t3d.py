@@ -117,6 +117,15 @@ if os.environ.get("ONESTRING_PAPER_T3D_20260920", "0") == "1":
             "t3d_intersection_trim_enabled": False,
         }
     )
+MODEL_VERSIONS.append({
+    "id": "2026-09-23-extrusion-aware",
+    "label": "2026-09-23 — Extrusion-aware experiments",
+    "description": "独立した4フラグによる押し出し品質比較。Adaptive Gridは現在の格子制約により未対応。",
+    "t3d_extrusion_side": "negative_normal_from_k3d",
+    "t3d_variable_topology_enabled": False,
+    "allow_legacy_normal_prism_emergency_fallback": False,
+    "t3d_intersection_trim_enabled": False,
+})
 # Future version additions: append a new entry to MODEL_VERSIONS when the user
 # asks to preserve another implementation version, then branch behavior from
 # selected_model_version["id"] where version-specific behavior is needed.
@@ -341,11 +350,24 @@ with st.sidebar:
         help="実装バージョンを選択します。今後バージョン追加指示があれば、この一覧に追記します。",
     )
     st.caption(selected_model_version["description"])
+    experiment_options = {}
+    if selected_model_version["id"] == "2026-09-23-extrusion-aware":
+        from onestring_physics.extrusion_aware import FEATURES, ADAPTIVE_LIMITATION
+        labels = ("Principal-curvature Grid", "Extrusion-aware K3D", "Curvature-adaptive Grid Size", "Extrusion-aware Split")
+        for name, label in zip(FEATURES, labels):
+            experiment_options[name] = st.checkbox(label, value=False, key="0923_"+name)
+        experiment_options["extrusion_weight"] = st.number_input("Extrusion objective weight", min_value=0.0, value=1.0, step=0.1)
+        experiment_options["extrusion_split_weight"] = st.number_input("Extrusion split cost weight", min_value=0.0, value=1.0, step=0.1)
+        experiment_options["extrusion_max_nfev"] = st.number_input("Extrusion K3D evaluation budget", min_value=1, value=12, step=1)
+        st.caption("Mask: " + ''.join('1' if experiment_options[k] else '0' for k in FEATURES))
+        st.caption("Principal grid: confidence-weighted global UV rotation. Local varying grid fields are not remeshed.")
+        if experiment_options["use_curvature_adaptive_grid"]:
+            st.warning(ADAPTIVE_LIMITATION)
 
     # Expose the official OptCuts distortion setting on the current
     # 2026-09-20 Paper-aligned T3D version selected by the user.
     optcuts_distortion_bound = 4.1
-    if str(selected_model_version.get("id", "")) in {"2026-09-20-paper-t3d", "2026-09-21-deployability-k3d"}:
+    if str(selected_model_version.get("id", "")) in {"2026-09-20-paper-t3d", "2026-09-21-deployability-k3d", "2026-09-23-extrusion-aware"}:
         optcuts_distortion_bound = float(st.number_input(
             "OptCuts distortion bound (Symmetric Dirichlet > 4)",
             min_value=4.0001,
@@ -542,7 +564,7 @@ with st.sidebar:
             "stop when lambda > 2 requires unspecified reparameterization",
             value=True,
         )
-    if selected_model_version["id"] == "2026-09-20-paper-t3d":
+    if selected_model_version["id"] in {"2026-09-20-paper-t3d", "2026-09-23-extrusion-aware"}:
         csf_split_threshold = float(
             st.number_input(
                 "Split threshold (CSF)",
@@ -1200,6 +1222,7 @@ def build_target():
 def current_pipeline_key() -> tuple:
     return (
         selected_model_version["id"],
+        tuple(sorted(experiment_options.items())),
         target_kind,
         uploaded.name if uploaded else None,
         grid_size,
@@ -1313,6 +1336,7 @@ effective_m3d_construction_mode = "mesh_harmonic"
 effective_surface_mesh_subdivisions = surface_mesh_subdivisions
 
 pipeline_params = PipelineParameters(
+    **experiment_options,
     nx=grid_size,
     ny=grid_size,
     tile_size=tile_size,
@@ -1552,6 +1576,15 @@ view_stage = st.selectbox(
 _corr_uv=np.asarray(state.mesh_2d_initial.vertices,dtype=float)[:,:2]
 _corr_bounds=np.asarray(state.surface_parameterization.uv_vertices_2d,dtype=float)[:,:2]
 _corr_tile_colors=correspondence_tile_colors(state.mesh_2d_initial,_corr_bounds)
+if hasattr(state, "extrusion_experiment"):
+    import json
+    from onestring_physics.extrusion_aware import difficulty_colors
+    st.caption("Experiment " + state.extrusion_experiment["feature_mask"] + " · " + getattr(state, "extrusion_experiment_path", ""))
+    st.download_button("Download experiment JSON", json.dumps(state.extrusion_experiment, ensure_ascii=False, indent=2), "extrusion-experiment.json", "application/json")
+    color_mode = st.radio("Panel color", ["Correspondence gradient", "Extrusion difficulty"], horizontal=True)
+    if color_mode == "Extrusion difficulty":
+        _corr_tile_colors = difficulty_colors(state.extrusion_experiment["panel_extrusion_difficulty"])
+        st.caption("Final K3D normal-extrusion difficulty: blue=0, yellow=0.5, red≥1. Selected panel remains pink.")
 
 # Cross-stage linked panel inspector.
 # Dedicated per-panel figures: each panel is exactly one clickable Mesh3d trace.

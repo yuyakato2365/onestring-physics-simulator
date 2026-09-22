@@ -132,9 +132,14 @@ section[data-testid=stSidebar] .os-eq-card{padding:12px 13px;margin:6px 0 14px;b
      "t3d_intersection_trim_enabled":False,
     })
     wanted=len(opts)-1
+   if os.environ.get("ONESTRING_EXTRUSION_AWARE_20260923")=="1":
+    wanted=next((i for i,v in enumerate(opts) if isinstance(v,dict) and v.get("id")=="2026-09-23-extrusion-aware"),wanted)
    if wanted is not None:
     options=opts;k=dict(k);k["index"]=wanted
-    print(f"[VERSION-DEFAULT] forcing 2026-09-20-paper-t3d index={wanted}",flush=True)
+    if os.environ.get("ONESTRING_EXTRUSION_AWARE_20260923")=="1":
+     key="onestring_model_version_20260923";k["key"]=key
+     if key not in st.session_state:st.session_state[key]=opts[wanted]
+    print(f"[VERSION-DEFAULT] {opts[wanted]['id']} index={wanted}",flush=True)
   val=sel0(label,options,*a,**k)
   if str(label)=="View stage":
    s=VIEW.get(str(val),"");_render(st,"Original Figure 5 · blue frame = displayed stage",s,1 if s else 0)

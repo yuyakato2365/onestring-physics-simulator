@@ -920,6 +920,14 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
     model_version: str = "2026-07-12-one-sided-t3d"
+    use_principal_curvature_grid: bool = False
+    use_extrusion_aware_k3d: bool = False
+    use_curvature_adaptive_grid: bool = False
+    use_extrusion_aware_split: bool = False
+    extrusion_weight: float = 1.0
+    extrusion_split_weight: float = 1.0
+    extrusion_max_nfev: int = 12
+    extrusion_results_dir: str = "output/extrusion-aware"
     t3d_extrusion_side: Literal["negative_normal_from_k3d"] = "negative_normal_from_k3d"
     # Backward-compatible API default. The selectable 2026-07-12 version turns
     # this on explicitly; older callers keep the fixed-proxy legacy path.
@@ -3224,15 +3232,20 @@ def _flatten_to_domain(parameterization, grid, params=None):
     csf = _parameterization_stretch_csf(parameterization)
     peak_enabled = bool(getattr(params, "enable_peak_guided_split", True)) if params is not None else True
     overlay_metrics = _rebuild_domain_overlay_for_general_omega(domain, parameterization, grid, params)
+    from .extrusion_aware import split_cost_values
+    selection_csf = split_cost_values(parameterization, domain, grid, params, csf, sys.modules[__name__])
     if enabled:
         if peak_enabled:
-            split_lines = _csf_split_lines(parameterization, csf, threshold=threshold, max_splits=max_splits)
+            split_lines = _csf_split_lines(parameterization, selection_csf, threshold=threshold, max_splits=max_splits)
         else:
             uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
-            high = uv[np.asarray(csf, dtype=float) > float(threshold)]
+            high = uv[np.asarray(selection_csf, dtype=float) > float(threshold)]
             split_lines = _csf_split_lines_from_high_stretch(uv, high, max_splits) if len(high) else []
     else:
         split_lines = []
+    from .extrusion_aware import enabled as extrusion_enabled, select_split_candidates
+    if enabled and extrusion_enabled(params) and params.use_extrusion_aware_split:
+        split_lines = select_split_candidates(parameterization, csf, selection_csf, threshold, max_splits, sys.modules[__name__])
     if symmetry_enabled:
         split_lines = _mirror_csf_split_lines(
             split_lines,
@@ -3240,7 +3253,7 @@ def _flatten_to_domain(parameterization, grid, params=None):
             dict(symmetry.get("centers", {})),
             np.asarray(parameterization.uv_vertices_2d, dtype=float),
         )
-    localized_split_segments = _localized_csf_split_segments(parameterization, csf, threshold, split_lines, params) if split_lines else []
+    localized_split_segments = _localized_csf_split_segments(parameterization, selection_csf, threshold, split_lines, params) if split_lines else []
     peak_uvs = _surface_peak_uvs(parameterization)
     peak_uv = np.mean(peak_uvs, axis=0) if len(peak_uvs) else None
     peak_alignment = _align_domain_grid_to_uv_points(domain, peak_uvs if len(peak_uvs) else None)

@@ -368,7 +368,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         proj=_surface_project(v,target,parameterization) if surface_points is None else surface_points
         offsets=v-proj
         surface_sum=float(np.sum(offsets*offsets))
-        return dict(
+        checkpoint = dict(
             iteration=int(iteration),
             step=float(step),
             EAssembled=w_planar*planar_sum+w_square*square_sum+w_surface*surface_sum,
@@ -385,6 +385,15 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
             EPlanar=planar_mean,
             ESurface=float(np.mean(np.sum(offsets*offsets,axis=1))),
         )
+        if getattr(params, "model_version", "") == "2026-09-23-extrusion-aware" and params.use_extrusion_aware_k3d:
+            from .extrusion_quality import evaluate_extrusion
+            residual = evaluate_extrusion(v, faces, params.thickness)["residuals"]
+            value = float(np.mean(list(edge_target.values())))**2 * float(np.sum(residual**2))
+            checkpoint["EAssembledExisting"] = checkpoint["EAssembled"]
+            checkpoint["EExtrusionSum"] = value
+            checkpoint["wExtrusionEExtrusion"] = params.extrusion_weight*value
+            checkpoint["EAssembled"] += params.extrusion_weight*value
+        return checkpoint
     # --------------------------------------------------------------------------
 
     records=[_checkpoint(x,0,0.0)]
@@ -413,6 +422,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         barrier_max_weight=0.0
         barrier_worst_edge_ratio=float("inf")
         barrier_worst_area_ratio=float("inf")
+        barrier_start = len(constraints)
         if degeneracy_barrier_enabled:
             for f in faces:
                 q=x[f]
@@ -472,6 +482,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                 flush=True,
             )
 
+        barrier_constraints = constraints[barrier_start:].copy()
         # E_Length projection of each edge vector to target K3D tile scale.
         for a,b in edges:
             d=x[b]-x[a]; ln=float(np.linalg.norm(d))
@@ -496,6 +507,11 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         x=new
         records.append(_checkpoint(x,it+1,step))
         if step<1e-8: break
+    extrusion_metrics = {}
+    from .extrusion_aware import enabled as extrusion_enabled, refine_k3d
+    if extrusion_enabled(params) and params.use_extrusion_aware_k3d:
+        x, extrusion_metrics = refine_k3d(x, faces, mesh.vertices, target, parameterization, params, edge_target, barrier_constraints)
+        records.append(_checkpoint(x, len(records), 0.0))
     # Optional exact hard-planarity solve with analytic sparse constraint Jacobian.
     # Hard mode solves the requested constrained problem directly:
     #   min w_square*E_Square + w_surface*E_Surface
@@ -564,19 +580,28 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         edge0=np.linalg.norm(np.roll(q0,-1,axis=1)-q0,axis=2)
         vol_scale=np.maximum(np.mean(edge0,axis=1)**3,1e-12)
 
+        extra_hard_energy = extra_hard_gradient = None
+        if extrusion_enabled(params) and params.use_extrusion_aware_k3d and params.extrusion_weight > 0:
+            from .extrusion_aware import make_extrusion_objective
+            extra_hard_energy, extra_hard_gradient = make_extrusion_objective(
+                y0, faces, params.thickness/bbox_diag,
+                params.extrusion_weight*(float(np.mean(list(edge_target.values())))/bbox_diag)**2)
+
         def _hard_fun(flat):
             v=flat.reshape((-1,3))
             ds=v-pq_targets
             du=v-ps_targets
             dd=v-deploy_targets
             e_deploy=float(np.sum(deploy_weights[:,None]*(dd*dd))) if w_deploy>0.0 else 0.0
-            return float(w_square*np.sum(ds*ds)+w_surface*np.sum(du*du)+w_deploy*e_deploy)
+            return float(w_square*np.sum(ds*ds)+w_surface*np.sum(du*du)+w_deploy*e_deploy) + (extra_hard_energy(flat) if extra_hard_energy is not None else 0.)
 
         def _hard_jac(flat):
             v=flat.reshape((-1,3))
             grad=2.0*w_square*(v-pq_targets)+2.0*w_surface*(v-ps_targets)
             if w_deploy>0.0:
                 grad+=2.0*w_deploy*deploy_weights[:,None]*(v-deploy_targets)
+            if extra_hard_gradient is not None:
+                grad += extra_hard_gradient(flat).reshape((-1,3))
             return grad.ravel()
 
         def _coplanarity(flat):
@@ -691,6 +716,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         k3d_degeneracy_barrier_weight=float(degeneracy_barrier_weight),
         k3d_degeneracy_barrier_power=float(degeneracy_barrier_power),
     )
+    metrics.update(extrusion_metrics)
     if not np.all(np.isfinite(x)):
         raise RuntimeError("Paper local/global K3D produced non-finite vertices")
     # Guard against the unconstrained global least-squares null mode collapsing

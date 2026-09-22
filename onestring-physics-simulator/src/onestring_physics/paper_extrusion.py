@@ -79,6 +79,17 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     tiles cannot drift apart at a shared K3D edge.  Only after the shared solve
     converges do we expand the result into the downstream tile_count x 8 layout.
     """
+    mapping = getattr(mesh, "metrics", {}).get("assembled_geometry_map")
+    if mapping is not None:
+        from .extrusion_aware import geometry_view
+        mapping = np.asarray(mapping, int)
+        view = geometry_view(mesh, mapping)
+        assembly, report = extrude_paper_face_planarity(view, thickness, stage, pipeline)
+        mesh.vertices = view.vertices[mapping].copy()
+        mesh.metrics.update(view.metrics)
+        assembly.metrics["assembled_geometry_map"] = mapping.tolist()
+        # Faces and vertex IDs on the caller are untouched; only geometry moved.
+        return assembly, report
     started=time.perf_counter()
     top_global=np.asarray(mesh.vertices,float)
     mesh_faces=np.asarray(mesh.faces,int)

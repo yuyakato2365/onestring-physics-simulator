@@ -112,7 +112,9 @@ def install_paper_t3d_20260920_version_ui():
             # Prefer the deployability experiment when this branch is launched.
             kwargs = dict(kwargs)
             desired_id = deploy_id if os.environ.get("ONESTRING_DEPLOYABILITY_K3D_20260921") == "1" else VERSION_ID
-            desired_index = next(i for i, v in enumerate(option_list) if v.get("id") == desired_id)
+            if os.environ.get("ONESTRING_EXTRUSION_AWARE_20260923") == "1":
+                desired_id = "2026-09-23-extrusion-aware"
+            desired_index = next((i for i, v in enumerate(option_list) if v.get("id") == desired_id), len(option_list)-1)
             kwargs["index"] = desired_index
             # The legacy app may pass a stale/default index, and Streamlit may
             # retain widget state across reruns.  Use one canonical key and

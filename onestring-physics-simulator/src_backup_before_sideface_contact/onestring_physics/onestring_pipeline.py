@@ -352,6 +352,11 @@ def build_onestring_design(
     progress_callback: ProgressCallback | None = None,
 ) -> OneStringDesignState:
     params = params or PipelineParameters()
+    from onestring_physics import extrusion_aware as experiment
+    experimental = experiment.enabled(params)
+    if experimental:
+        experiment.validate(params)
+    runtime = {}
     _validate_compute_config(params.compute)
     if getattr(params, "strict_paper_flow", False) and params.m3d_construction_mode != "mesh_harmonic":
         raise RuntimeError(
@@ -366,19 +371,42 @@ def build_onestring_design(
 
     target_surface = _build_surface_mesh(target, grid, params.surface_mesh_subdivisions)
     _emit_progress(progress_callback, "S: target surface mesh", 0.08, f"{len(target_surface.vertices)} vertices")
+    tick = time.perf_counter()
     parameterization = _build_surface_parameterization(target_surface, target, grid, params)
+    runtime["parameterization"] = time.perf_counter()-tick
+    tick = time.perf_counter()
+    if experimental:
+        experiment.prepare_parameterization(parameterization, params)
     _emit_progress(progress_callback, "S -> Ω", 0.16, str(parameterization.metrics.get("parameterization_method", parameterization.method)))
     domain = _flatten_to_domain(parameterization, grid, params)
+    if experimental and params.use_extrusion_aware_split and "extrusion_split_status" not in parameterization.metrics:
+        raise NotImplementedError("Extrusion-aware Split currently requires the common CSF candidate-selection route")
     _emit_progress(progress_callback, "Ω domain", 0.22, "Flattened domain ready")
     mesh_2d_initial = _build_m2d(grid, domain, params)
     _emit_progress(progress_callback, "Ω -> M2D", 0.30, f"kept {len(mesh_2d_initial.faces)} quads")
+    runtime["grid"] = time.perf_counter()-tick
     active_grid = mesh_2d_initial.grid
     mesh_3d_initial, reports["M2D -> M3D"] = _lift_m2d_to_m3d(target, mesh_2d_initial, parameterization, params)
     _emit_progress(progress_callback, "M2D -> M3D", 0.38, "Inverse map / surface lift done")
-    mesh_3d_optimized, reports["M3D -> K3D"] = _optimize_k3d(target, mesh_3d_initial, parameterization, params)
+    tick = time.perf_counter()
+    if experimental:
+        import sys
+        mesh_3d_optimized, reports["M3D -> K3D"] = experiment.optimize_assembled(
+            _optimize_k3d, target, mesh_2d_initial, mesh_3d_initial, parameterization, params, sys.modules[__name__])
+    else:
+        mesh_3d_optimized, reports["M3D -> K3D"] = _optimize_k3d(target, mesh_3d_initial, parameterization, params)
+    runtime["K3D"] = time.perf_counter()-tick
+    if experimental:
+        mapping = np.asarray(mesh_3d_optimized.metrics.get("assembled_geometry_map", np.arange(len(mesh_3d_optimized.vertices))), int)
+        view = experiment.geometry_view(mesh_3d_optimized, mapping)
+        mesh_3d_optimized.metrics["extrusion_pre_t3d"] = experiment.quality_summary(
+            experiment.evaluate_extrusion(view.vertices, view.faces, params.thickness))
     _emit_progress(progress_callback, "M3D -> K3D", 0.50, str(mesh_3d_optimized.metrics.get("actual_backend", "cpu")))
+    tick = time.perf_counter()
     tiles_3d, reports["K3D -> T3D"] = _extrude_tiles(mesh_3d_optimized, params.thickness, "T3D")
+    runtime["T3D"] = time.perf_counter()-tick
     _emit_progress(progress_callback, "K3D -> T3D", 0.56, "Extruded assembled tiles")
+    tick = time.perf_counter()
     mesh_2d_optimized, reports["M2D -> K2D"] = _optimize_k2d(
         mesh_2d_initial,
         mesh_3d_optimized,
@@ -386,6 +414,7 @@ def build_onestring_design(
         progress_callback=_subprogress(progress_callback, 0.56, 0.70, "M2D -> K2D: "),
     )
     k2d_flat_layout = _make_flat_tile_layout(mesh_2d_optimized, params)
+    runtime["K2D"] = time.perf_counter()-tick
     _emit_progress(progress_callback, "K2D independent tile layout", 0.73, "K2D tile geometry ready for extrusion")
     mesh_2d_optimized.metrics.update(
         {
@@ -396,6 +425,7 @@ def build_onestring_design(
         }
     )
     _emit_progress(progress_callback, "K2D -> T2D Top Hinge", 0.731, "Starting rigid flat-tile construction")
+    tick = time.perf_counter()
     tiles_2d_top, reports["K2D -> T2D top hinge"] = _make_t2d_from_transforms(
         mesh_2d_optimized,
         k2d_flat_layout,
@@ -415,6 +445,7 @@ def build_onestring_design(
         params,
         progress_callback=_subprogress(progress_callback, 0.81, 0.94, "Dual Hinge: "),
     )
+    runtime["T2D"] = time.perf_counter()-tick
     gap_graph = _build_gap_graph(source_faces, tiles_2d_dual, tiles_3d)
     _emit_progress(progress_callback, "Build gap graph", 0.96, f"{len(gap_graph.gaps)} gaps")
     lift_points = _select_lift_points(gap_graph, params.lift_tau)
@@ -458,6 +489,9 @@ def build_onestring_design(
             "Remaining mismatch from the paper: string routing friction uses a simplified Capstan-style turn cost.",
         ],
     )
+
+    if experimental:
+        experiment.record_run(state, params, runtime)
 
     if run_simulation:
         state.simulation_result = simulate_onestring_deployment(state, deployment_params, progress_callback=_subprogress(progress_callback, 0.98, 1.0, "deployment: "))
