@@ -54,6 +54,7 @@ from onestring_physics.visualization import (
     figure_surface_mesh,
     figure_tile_assembly,
     add_tile_assembly,
+    add_hinge_markers,
     correspondence_tile_colors,
 )
 
