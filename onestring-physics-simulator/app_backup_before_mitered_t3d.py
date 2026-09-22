@@ -1556,110 +1556,85 @@ _corr_tile_colors=correspondence_tile_colors(state.mesh_2d_initial,_corr_bounds)
 _PANEL_HIGHLIGHT = "#ff006e"
 
 def _panel_click_centers_from_quads(mesh):
-    faces = np.asarray(mesh.faces, dtype=int)
-    vertices = np.asarray(mesh.vertices, dtype=float)
-    return np.mean(vertices[faces], axis=1) if len(faces) else np.zeros((0, 3), dtype=float)
+    faces=np.asarray(mesh.faces,dtype=int); vertices=np.asarray(mesh.vertices,dtype=float)
+    return np.mean(vertices[faces],axis=1) if len(faces) else np.zeros((0,3),dtype=float)
 
 def _panel_click_centers_from_assembly(assembly):
-    vertices = np.asarray(assembly.vertices, dtype=float)
-    if vertices.ndim != 3 or len(vertices) == 0:
-        return np.zeros((0, 3), dtype=float)
-    return np.mean(vertices[:, :4, :], axis=1)
+    vertices=np.asarray(assembly.vertices,dtype=float)
+    return np.mean(vertices[:,:4,:],axis=1) if vertices.ndim==3 and len(vertices) else np.zeros((0,3),dtype=float)
 
-def _add_panel_click_targets(fig, centers, stage_name, selected_id):
-    centers = np.asarray(centers, dtype=float)
-    if not len(centers):
-        return
-    ids = np.arange(len(centers), dtype=int)
-    marker_colors = [_PANEL_HIGHLIGHT if int(i) == int(selected_id) else "rgba(30,41,59,0.18)" for i in ids]
-    marker_sizes = [11 if int(i) == int(selected_id) else 5 for i in ids]
+def _add_panel_pick_layer(fig, centers, stage_name, selected_id):
+    """Large transparent hit targets: clicking the visible panel area selects its id."""
+    centers=np.asarray(centers,dtype=float)
+    if not len(centers): return
+    ids=np.arange(len(centers),dtype=int)
     fig.add_trace(go.Scatter3d(
-        x=centers[:,0], y=centers[:,1], z=centers[:,2],
-        mode="markers",
-        marker=dict(size=marker_sizes, color=marker_colors),
+        x=centers[:,0],y=centers[:,1],z=centers[:,2],mode="markers",
+        marker=dict(size=[14 if int(i)==int(selected_id) else 18 for i in ids],
+                    color=[_PANEL_HIGHLIGHT if int(i)==int(selected_id) else "rgba(255,255,255,0.01)" for i in ids],
+                    opacity=1.0),
         customdata=ids,
         text=[f"{stage_name} panel {int(i)}" for i in ids],
         hovertemplate="%{text}<extra></extra>",
-        name=f"{stage_name} selectable panels",
-        showlegend=False,
+        name=f"{stage_name} panel picker",showlegend=False,
     ))
 
-def _highlight_k3d_face(fig, mesh, panel_id):
-    faces=np.asarray(mesh.faces,dtype=int)
-    vertices=np.asarray(mesh.vertices,dtype=float)
-    if panel_id < 0 or panel_id >= len(faces):
-        return
+def _highlight_k3d_face(fig,mesh,panel_id):
+    faces=np.asarray(mesh.faces,dtype=int); vertices=np.asarray(mesh.vertices,dtype=float)
+    if panel_id<0 or panel_id>=len(faces): return
     q=vertices[faces[int(panel_id)]]
-    fig.add_trace(go.Mesh3d(
-        x=q[:,0], y=q[:,1], z=q[:,2],
-        i=[0,0], j=[1,2], k=[2,3],
-        color=_PANEL_HIGHLIGHT, opacity=0.96, flatshading=True,
-        name=f"selected K3D panel {panel_id}", showlegend=False,
-        hovertemplate=f"K3D panel {panel_id}<extra></extra>",
-    ))
+    fig.add_trace(go.Mesh3d(x=q[:,0],y=q[:,1],z=q[:,2],i=[0,0],j=[1,2],k=[2,3],
+        color=_PANEL_HIGHLIGHT,opacity=.96,flatshading=True,name=f"selected K3D panel {panel_id}",
+        showlegend=False,hovertemplate=f"K3D panel {panel_id}<extra></extra>"))
 
-def _panel_selection_callback(chart_key):
-    event=st.session_state.get(chart_key)
-    try:
-        points=event.selection.points
+def _selected_panel_from_event(event):
+    if event is None: return None
+    try: points=event.selection.points
     except Exception:
-        try:
-            points=event.get("selection",{}).get("points",[])
-        except Exception:
-            points=[]
-    if not points:
-        return
-    point=points[-1]
-    try:
-        panel_id=point.customdata
-    except Exception:
-        panel_id=point.get("customdata") if isinstance(point,dict) else None
-    try:
-        st.session_state["cross_stage_panel_id"]=int(panel_id)
-    except (TypeError,ValueError):
-        pass
+        try: points=event.get("selection",{}).get("points",[])
+        except Exception: points=[]
+    if not points: return None
+    p=points[-1]
+    try: value=p.customdata
+    except Exception: value=p.get("customdata") if isinstance(p,dict) else None
+    try: return int(value)
+    except (TypeError,ValueError): return None
 
-def _render_cross_stage_panel_inspector(t2d_assembly, *, t2d_label, hinge_graph, key_prefix):
-    counts={
-        "K3D": len(state.mesh_3d_optimized.faces),
-        "T3D": len(state.tiles_3d.vertices),
-        t2d_label: len(t2d_assembly.vertices),
-    }
+def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key_prefix):
+    counts={"K3D":len(state.mesh_3d_optimized.faces),"T3D":len(state.tiles_3d.vertices),t2d_label:len(t2d_assembly.vertices)}
     common=min(counts.values()) if counts else 0
-    if len(set(counts.values())) != 1:
-        st.warning(f"Panel correspondence count mismatch: {counts}. Interactive linking is limited to 0..{max(common-1,0)}.")
-    selected=int(st.session_state.get("cross_stage_panel_id",0))
-    if common <= 0:
-        st.error("No corresponding K3D/T3D/T2D panels are available.")
-        return
-    selected=max(0,min(selected,common-1))
+    if common<=0:
+        st.error("No corresponding K3D/T3D/T2D panels are available."); return
+    if len(set(counts.values()))!=1:
+        st.warning(f"Panel correspondence count mismatch: {counts}. Linking is limited to 0..{common-1}.")
+
+    selected=max(0,min(int(st.session_state.get("cross_stage_panel_id",0)),common-1))
+    # Reliable fallback and direct selector.  This also makes panel selection
+    # possible on Streamlit versions where Plotly point-selection is unavailable.
+    selected=int(st.number_input("Panel ID",min_value=0,max_value=common-1,value=selected,step=1,key=f"{key_prefix}_panel_id"))
     st.session_state["cross_stage_panel_id"]=selected
-    st.caption(f"連動パネル選択: panel {selected}。K3D / T3D / {t2d_label} のパネル中央をクリックすると3表示すべて同じpanel idへ切り替わります。")
+    st.caption("パネル面付近をクリック、または Panel ID を入力すると、K3D / T3D / T2D の対応パネルを同時に強調します。")
 
     k3d_fig=figure_quad_mesh(state.mesh_3d_optimized,title=f"K3D — selected panel {selected}",correspondence_uv=_corr_uv,correspondence_bounds=_corr_bounds)
-    _highlight_k3d_face(k3d_fig,state.mesh_3d_optimized,selected)
-    _add_panel_click_targets(k3d_fig,_panel_click_centers_from_quads(state.mesh_3d_optimized),"K3D",selected)
-
+    _highlight_k3d_face(k3d_fig,state.mesh_3d_optimized,selected); _add_panel_pick_layer(k3d_fig,_panel_click_centers_from_quads(state.mesh_3d_optimized),"K3D",selected)
     t3d_colors=list(_corr_tile_colors)
-    if selected < len(t3d_colors): t3d_colors[selected]=_PANEL_HIGHLIGHT
+    if selected<len(t3d_colors): t3d_colors[selected]=_PANEL_HIGHLIGHT
     t3d_fig=figure_tile_assembly(state.tiles_3d,title=f"T3D — selected panel {selected}",show_recovery_status=False,tile_colors=t3d_colors)
-    _add_panel_click_targets(t3d_fig,_panel_click_centers_from_assembly(state.tiles_3d),"T3D",selected)
-
+    _add_panel_pick_layer(t3d_fig,_panel_click_centers_from_assembly(state.tiles_3d),"T3D",selected)
     t2d_colors=list(_corr_tile_colors)
-    if selected < len(t2d_colors): t2d_colors[selected]=_PANEL_HIGHLIGHT
+    if selected<len(t2d_colors): t2d_colors[selected]=_PANEL_HIGHLIGHT
     t2d_fig=figure_tile_assembly(t2d_assembly,title=f"{t2d_label} — selected panel {selected}",hinge_graph=hinge_graph,tile_colors=t2d_colors)
-    _add_panel_click_targets(t2d_fig,_panel_click_centers_from_assembly(t2d_assembly),t2d_label,selected)
+    _add_panel_pick_layer(t2d_fig,_panel_click_centers_from_assembly(t2d_assembly),t2d_label,selected)
 
-    st.subheader("K3D")
-    kkey=f"{key_prefix}_linked_k3d"
-    st.plotly_chart(k3d_fig,use_container_width=True,key=kkey,on_select=lambda: _panel_selection_callback(kkey),selection_mode="points")
-    st.subheader("T3D")
-    tkey=f"{key_prefix}_linked_t3d"
-    st.plotly_chart(t3d_fig,use_container_width=True,key=tkey,on_select=lambda: _panel_selection_callback(tkey),selection_mode="points")
-    st.subheader(t2d_label)
-    dkey=f"{key_prefix}_linked_t2d"
-    st.plotly_chart(t2d_fig,use_container_width=True,key=dkey,on_select=lambda: _panel_selection_callback(dkey),selection_mode="points")
-
+    for label,fig,suffix in (("K3D",k3d_fig,"k3d"),("T3D",t3d_fig,"t3d"),(t2d_label,t2d_fig,"t2d")):
+        st.subheader(label)
+        key=f"{key_prefix}_linked_{suffix}"
+        event=st.plotly_chart(fig,use_container_width=True,key=key,on_select="rerun",selection_mode="points")
+        picked=_selected_panel_from_event(event)
+        if picked is not None and 0<=picked<common and picked!=selected:
+            st.session_state["cross_stage_panel_id"]=picked
+            st.session_state[f"{key_prefix}_panel_id"]=picked
+            st.rerun()
 
 # Keep a compact correspondence reference visible for every downstream stage.
 # This is deliberately separate from the selected-stage renderer.
