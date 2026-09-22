@@ -1611,7 +1611,7 @@ def _plotly_click_component(fig, *, key, height=620):
     }});
     </script>
     """
-    return components.html(js,height=height,scrolling=False,key=key)
+    return components.html(js,height=height,scrolling=False)
 
 def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key_prefix):
     counts={"K3D":len(state.mesh_3d_optimized.faces),"T3D":len(state.tiles_3d.vertices),t2d_label:len(t2d_assembly.vertices)}
