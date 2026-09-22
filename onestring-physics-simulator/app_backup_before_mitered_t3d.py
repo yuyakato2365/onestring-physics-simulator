@@ -1654,7 +1654,14 @@ def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key
 
     shared=max(0,min(int(st.session_state.get("cross_stage_panel_id",0)),common-1))
     widget_key=f"{key_prefix}_panel_id"
-    if widget_key not in st.session_state:
+    pending_key=f"{key_prefix}_pending_panel_id"
+    # Apply click-driven widget synchronization before number_input exists.
+    # This is the only legal point in the Streamlit run to mutate widget_key.
+    if pending_key in st.session_state:
+        shared=max(0,min(int(st.session_state.pop(pending_key)),common-1))
+        st.session_state["cross_stage_panel_id"]=shared
+        st.session_state[widget_key]=shared
+    elif widget_key not in st.session_state:
         st.session_state[widget_key]=shared
     manual=max(0,min(int(st.session_state[widget_key]),common-1))
     if manual!=shared:
@@ -1673,8 +1680,12 @@ def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key
         st.subheader(label)
         picked=_render_click_chart(fig,key=f"{key_prefix}_click_{suffix}",height=620)
         if picked is not None and 0<=picked<common and picked!=selected:
+            # Streamlit forbids mutating a widget's own key after that widget
+            # has been instantiated in the current run.  Store only the
+            # authoritative shared selection here; on the next rerun, sync
+            # the number-input key *before* constructing the widget.
             st.session_state["cross_stage_panel_id"]=picked
-            st.session_state[widget_key]=picked
+            st.session_state[f"{key_prefix}_pending_panel_id"]=picked
             print(f"[PANEL-CLICK] stage={label} panel={picked}",flush=True)
             st.rerun()
 
