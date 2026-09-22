@@ -1680,7 +1680,7 @@ def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key
 
     for label,fig,suffix in (("K3D",kfig,"k3d"),("T3D",t3fig,"t3d"),(t2d_label,t2fig,"t2d")):
         st.subheader(label)
-        picked=_render_click_chart(fig,key=f"{key_prefix}_click_{suffix}",height=620)
+        picked=_render_click_chart(fig,key=f"{key_prefix}_click_{suffix}_sel_{selected}",height=620)
         if picked is not None and 0<=picked<common and picked!=selected:
             # Streamlit forbids mutating a widget's own key after that widget
             # has been instantiated in the current run.  Store only the
