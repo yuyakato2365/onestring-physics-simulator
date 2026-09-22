@@ -1575,13 +1575,25 @@ def _tag_k3d_panel_traces(fig, mesh):
             name=f"K3D panel {panel_id}",showlegend=False))
 
 def _tag_tile_mesh_traces(fig, label, common):
+    """Tag only actual panel-solid traces; do not reinterpret helper/edge traces."""
     panel_id=0
     for tr in fig.data:
-        if isinstance(tr,go.Mesh3d) and panel_id<common:
-            tr.customdata=[panel_id]*len(tr.x)
-            tr.meta={"panel_id":int(panel_id)}
-            tr.hovertemplate=f"{label} panel {panel_id}<extra></extra>"
-            panel_id+=1
+        if not isinstance(tr,go.Mesh3d) or panel_id>=common:
+            continue
+        # Tile assembly emits one solid Mesh3d per panel.  Helper/highlight
+        # traces may also be Mesh3d, so only tag traces with the prism topology
+        # (8 vertices) used by T3D/T2D tiles.  This preserves the original
+        # correspondence gradient/color arrays instead of overwriting them.
+        try:
+            nverts=len(tr.x)
+        except Exception:
+            continue
+        if nverts != 8:
+            continue
+        tr.customdata=[panel_id]*nverts
+        tr.meta={"panel_id":int(panel_id)}
+        tr.hovertemplate=f"{label} panel {panel_id}<extra></extra>"
+        panel_id+=1
 
 def _plotly_click_component(fig, *, key, height=620):
     """Return panel id from an ordinary Plotly left-click; dragging still rotates."""
