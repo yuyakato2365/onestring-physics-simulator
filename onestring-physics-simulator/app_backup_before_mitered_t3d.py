@@ -13,6 +13,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_plotly_events import plotly_events
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
@@ -1583,35 +1584,29 @@ def _tag_tile_mesh_traces(fig, label, common):
             panel_id+=1
 
 def _plotly_click_component(fig, *, key, height=620):
-    """Normal left click selects a Mesh3d panel; drag remains ordinary 3D rotation."""
-    import json, html as _html
-    payload=fig.to_plotly_json()
-    div_id="plot_"+key.replace("-","_").replace(" ","_")
-    data_json=json.dumps(payload.get("data",[]),separators=(",",":"))
-    layout=dict(payload.get("layout",{}))
-    layout["dragmode"]="orbit"
-    layout_json=json.dumps(layout,separators=(",",":"))
-    js=f"""
-    <div id="{div_id}" style="width:100%;height:{height}px"></div>
-    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-    <script>
-    const gd=document.getElementById("{div_id}");
-    const data={data_json};
-    const layout={layout_json};
-    Plotly.newPlot(gd,data,layout,{{responsive:true,scrollZoom:true,displaylogo:false}}).then(() => {{
-      gd.on('plotly_click', ev => {{
-        if(!ev || !ev.points || !ev.points.length) return;
-        const p=ev.points[0];
-        let id=null;
-        if(p.data && p.data.meta && p.data.meta.panel_id !== undefined) id=p.data.meta.panel_id;
-        else if(p.customdata !== undefined && p.customdata !== null) id=Array.isArray(p.customdata)?p.customdata[0]:p.customdata;
-        if(id===null || id===undefined) return;
-        window.parent.postMessage({{isStreamlitMessage:true,type:"streamlit:setComponentValue",value:Number(id)}}, "*");
-      }});
-    }});
-    </script>
-    """
-    return components.html(js,height=height,scrolling=False)
+    """Return panel id from an ordinary Plotly left-click; dragging still rotates."""
+    # streamlit-plotly-events exposes the browser's plotly_click event, unlike
+    # st.plotly_chart(on_select=...), which only exposes Plotly selection events.
+    fig.update_layout(dragmode="orbit")
+    events=plotly_events(
+        fig,click_event=True,hover_event=False,select_event=False,
+        override_height=height,key=key,
+    )
+    if not events:
+        return None
+    event=events[-1]
+    try:
+        curve=int(event.get("curveNumber",-1))
+    except (TypeError,ValueError):
+        return None
+    if curve<0 or curve>=len(fig.data):
+        return None
+    trace=fig.data[curve]
+    meta=getattr(trace,"meta",None)
+    if isinstance(meta,dict) and "panel_id" in meta:
+        try: return int(meta["panel_id"])
+        except (TypeError,ValueError): return None
+    return None
 
 def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key_prefix):
     counts={"K3D":len(state.mesh_3d_optimized.faces),"T3D":len(state.tiles_3d.vertices),t2d_label:len(t2d_assembly.vertices)}
