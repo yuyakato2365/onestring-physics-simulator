@@ -1551,41 +1551,33 @@ _corr_uv=np.asarray(state.mesh_2d_initial.vertices,dtype=float)[:,:2]
 _corr_bounds=np.asarray(state.surface_parameterization.uv_vertices_2d,dtype=float)[:,:2]
 _corr_tile_colors=correspondence_tile_colors(state.mesh_2d_initial,_corr_bounds)
 
-# Cross-stage panel inspector used by both T2D View Stage variants.  Panel id is
-# the invariant correspondence key: K3D face i <-> T3D tile i <-> T2D tile i.
+# Cross-stage panel inspector used by both T2D View Stage variants.
+# Panel id is the invariant key: K3D face i <-> T3D tile i <-> T2D tile i.
 _PANEL_HIGHLIGHT = "#ff006e"
 
-def _panel_click_centers_from_quads(mesh):
-    faces=np.asarray(mesh.faces,dtype=int); vertices=np.asarray(mesh.vertices,dtype=float)
-    return np.mean(vertices[faces],axis=1) if len(faces) else np.zeros((0,3),dtype=float)
-
-def _panel_click_centers_from_assembly(assembly):
-    vertices=np.asarray(assembly.vertices,dtype=float)
-    return np.mean(vertices[:,:4,:],axis=1) if vertices.ndim==3 and len(vertices) else np.zeros((0,3),dtype=float)
-
-def _add_panel_pick_layer(fig, centers, stage_name, selected_id):
-    """Large transparent hit targets: clicking the visible panel area selects its id."""
-    centers=np.asarray(centers,dtype=float)
-    if not len(centers): return
-    ids=np.arange(len(centers),dtype=int)
-    fig.add_trace(go.Scatter3d(
-        x=centers[:,0],y=centers[:,1],z=centers[:,2],mode="markers",
-        marker=dict(size=[14 if int(i)==int(selected_id) else 18 for i in ids],
-                    color=[_PANEL_HIGHLIGHT if int(i)==int(selected_id) else "rgba(255,255,255,0.01)" for i in ids],
-                    opacity=1.0),
-        customdata=ids,
-        text=[f"{stage_name} panel {int(i)}" for i in ids],
-        hovertemplate="%{text}<extra></extra>",
-        name=f"{stage_name} panel picker",showlegend=False,
-    ))
-
-def _highlight_k3d_face(fig,mesh,panel_id):
+def _highlight_k3d_face(fig, mesh, panel_id):
     faces=np.asarray(mesh.faces,dtype=int); vertices=np.asarray(mesh.vertices,dtype=float)
     if panel_id<0 or panel_id>=len(faces): return
     q=vertices[faces[int(panel_id)]]
-    fig.add_trace(go.Mesh3d(x=q[:,0],y=q[:,1],z=q[:,2],i=[0,0],j=[1,2],k=[2,3],
-        color=_PANEL_HIGHLIGHT,opacity=.96,flatshading=True,name=f"selected K3D panel {panel_id}",
-        showlegend=False,hovertemplate=f"K3D panel {panel_id}<extra></extra>"))
+    fig.add_trace(go.Mesh3d(
+        x=q[:,0],y=q[:,1],z=q[:,2],i=[0,0],j=[1,2],k=[2,3],
+        color=_PANEL_HIGHLIGHT,opacity=.98,flatshading=True,
+        name=f"selected K3D panel {panel_id}",showlegend=False,
+        hovertemplate=f"K3D panel {panel_id}<extra></extra>",
+    ))
+
+def _add_k3d_click_faces(fig, mesh):
+    """Invisible per-panel Mesh3d traces make a normal mouse click return panel id."""
+    faces=np.asarray(mesh.faces,dtype=int); vertices=np.asarray(mesh.vertices,dtype=float)
+    for panel_id,face in enumerate(faces):
+        q=vertices[face]
+        fig.add_trace(go.Mesh3d(
+            x=q[:,0],y=q[:,1],z=q[:,2],i=[0,0],j=[1,2],k=[2,3],
+            color="rgba(255,255,255,0.001)",opacity=0.001,
+            customdata=[panel_id]*4,
+            hovertemplate=f"K3D panel {panel_id}<extra></extra>",
+            name=f"K3D panel {panel_id}",showlegend=False,
+        ))
 
 def _selected_panel_from_event(event):
     if event is None: return None
@@ -1597,8 +1589,25 @@ def _selected_panel_from_event(event):
     p=points[-1]
     try: value=p.customdata
     except Exception: value=p.get("customdata") if isinstance(p,dict) else None
+    if isinstance(value,(list,tuple,np.ndarray)) and len(value): value=value[0]
     try: return int(value)
     except (TypeError,ValueError): return None
+
+def _render_clickable_chart(fig,key,common,key_prefix):
+    # Plotly/Streamlit exposes click-like point selection only when selection
+    # mode is active.  Keep the mode bar in select mode by default so a normal
+    # Mac left-click selects one panel; no Shift/Cmd key is required.
+    fig.update_layout(dragmode="select",clickmode="event+select")
+    event=st.plotly_chart(
+        fig,use_container_width=True,key=key,on_select="rerun",
+        selection_mode="points",config={"scrollZoom":True,"displayModeBar":True},
+    )
+    picked=_selected_panel_from_event(event)
+    current=int(st.session_state.get("cross_stage_panel_id",0))
+    if picked is not None and 0<=picked<common and picked!=current:
+        st.session_state["cross_stage_panel_id"]=picked
+        st.session_state[f"{key_prefix}_panel_id"]=picked
+        st.rerun()
 
 def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key_prefix):
     counts={"K3D":len(state.mesh_3d_optimized.faces),"T3D":len(state.tiles_3d.vertices),t2d_label:len(t2d_assembly.vertices)}
@@ -1607,34 +1616,42 @@ def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key
         st.error("No corresponding K3D/T3D/T2D panels are available."); return
     if len(set(counts.values()))!=1:
         st.warning(f"Panel correspondence count mismatch: {counts}. Linking is limited to 0..{common-1}.")
-
     selected=max(0,min(int(st.session_state.get("cross_stage_panel_id",0)),common-1))
-    # Reliable fallback and direct selector.  This also makes panel selection
-    # possible on Streamlit versions where Plotly point-selection is unavailable.
     selected=int(st.number_input("Panel ID",min_value=0,max_value=common-1,value=selected,step=1,key=f"{key_prefix}_panel_id"))
     st.session_state["cross_stage_panel_id"]=selected
-    st.caption("パネル面付近をクリック、または Panel ID を入力すると、K3D / T3D / T2D の対応パネルを同時に強調します。")
+    st.caption("通常の左クリックでパネルを選択できます。選択した panel ID を K3D / T3D / T2D で同時にピンク表示します。")
 
     k3d_fig=figure_quad_mesh(state.mesh_3d_optimized,title=f"K3D — selected panel {selected}",correspondence_uv=_corr_uv,correspondence_bounds=_corr_bounds)
-    _highlight_k3d_face(k3d_fig,state.mesh_3d_optimized,selected); _add_panel_pick_layer(k3d_fig,_panel_click_centers_from_quads(state.mesh_3d_optimized),"K3D",selected)
+    _highlight_k3d_face(k3d_fig,state.mesh_3d_optimized,selected)
+    _add_k3d_click_faces(k3d_fig,state.mesh_3d_optimized)
+
+    # T3D/T2D already render one Mesh3d trace per tile in the paper route.
+    # Give every tile trace its panel id as customdata so the panel surface
+    # itself, not an oversized marker, is the selection target.
     t3d_colors=list(_corr_tile_colors)
     if selected<len(t3d_colors): t3d_colors[selected]=_PANEL_HIGHLIGHT
     t3d_fig=figure_tile_assembly(state.tiles_3d,title=f"T3D — selected panel {selected}",show_recovery_status=False,tile_colors=t3d_colors)
-    _add_panel_pick_layer(t3d_fig,_panel_click_centers_from_assembly(state.tiles_3d),"T3D",selected)
+    for panel_id,tr in enumerate(t3d_fig.data):
+        if isinstance(tr,go.Mesh3d):
+            tr.customdata=[panel_id]*len(tr.x)
+            tr.hovertemplate=f"T3D panel {panel_id}<extra></extra>"
+
     t2d_colors=list(_corr_tile_colors)
     if selected<len(t2d_colors): t2d_colors[selected]=_PANEL_HIGHLIGHT
     t2d_fig=figure_tile_assembly(t2d_assembly,title=f"{t2d_label} — selected panel {selected}",hinge_graph=hinge_graph,tile_colors=t2d_colors)
-    _add_panel_pick_layer(t2d_fig,_panel_click_centers_from_assembly(t2d_assembly),t2d_label,selected)
+    panel_id=0
+    for tr in t2d_fig.data:
+        if isinstance(tr,go.Mesh3d) and panel_id<common:
+            tr.customdata=[panel_id]*len(tr.x)
+            tr.hovertemplate=f"{t2d_label} panel {panel_id}<extra></extra>"
+            panel_id+=1
 
-    for label,fig,suffix in (("K3D",k3d_fig,"k3d"),("T3D",t3d_fig,"t3d"),(t2d_label,t2d_fig,"t2d")):
-        st.subheader(label)
-        key=f"{key_prefix}_linked_{suffix}"
-        event=st.plotly_chart(fig,use_container_width=True,key=key,on_select="rerun",selection_mode="points")
-        picked=_selected_panel_from_event(event)
-        if picked is not None and 0<=picked<common and picked!=selected:
-            st.session_state["cross_stage_panel_id"]=picked
-            st.session_state[f"{key_prefix}_panel_id"]=picked
-            st.rerun()
+    st.subheader("K3D")
+    _render_clickable_chart(k3d_fig,f"{key_prefix}_linked_k3d",common,key_prefix)
+    st.subheader("T3D")
+    _render_clickable_chart(t3d_fig,f"{key_prefix}_linked_t3d",common,key_prefix)
+    st.subheader(t2d_label)
+    _render_clickable_chart(t2d_fig,f"{key_prefix}_linked_t2d",common,key_prefix)
 
 # Keep a compact correspondence reference visible for every downstream stage.
 # This is deliberately separate from the selected-stage renderer.
