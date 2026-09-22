@@ -153,6 +153,23 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     top_solved=x[:n_mesh_vertices]
     bottom_solved=x[n_mesh_vertices:]
 
+    # The T3D face-planarity solve moves the shared top vertices.  Keep K3D and
+    # T3D geometrically consistent by promoting that solved top surface to the
+    # final K3D result.  This is an in-place update of the same QuadMesh object
+    # retained by the pipeline/state, so downstream K2D construction and the K3D
+    # viewer both consume exactly the top surface used by T3D.
+    k3d_before=np.asarray(mesh.vertices,float).copy()
+    k3d_update_rms=float(np.sqrt(np.mean(np.sum((top_solved-k3d_before)**2,axis=1))))
+    k3d_update_max=float(np.max(np.linalg.norm(top_solved-k3d_before,axis=1),initial=0.0))
+    mesh.vertices=np.asarray(top_solved,float).copy()
+    if hasattr(mesh,"metrics") and isinstance(mesh.metrics,dict):
+        mesh.metrics.update({
+            "paper_t3d_planarity_promoted_to_k3d":True,
+            "paper_t3d_k3d_update_rms":k3d_update_rms,
+            "paper_t3d_k3d_update_max":k3d_update_max,
+            "paper_t3d_k3d_source":"T3D shared top vertices after face-planarity solve",
+        })
+
     # Expand only after optimization.  Shared vertices are copied verbatim into
     # each tile, so every adjacent tile receives exactly the same joint geometry.
     tiles=np.zeros((tile_count,8,3),float)
@@ -216,6 +233,9 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         "paper_t3d_planarity_iterations":done,
         "paper_t3d_planarity_error_before":before,
         "paper_t3d_planarity_error_after":after,
+        "paper_t3d_planarity_promoted_to_k3d":True,
+        "paper_t3d_k3d_update_rms":k3d_update_rms,
+        "paper_t3d_k3d_update_max":k3d_update_max,
         "face_planarity_error":after,
         "top_face_planarity_error":grouped["top"],
         "bottom_face_planarity_error":grouped["bottom"],
@@ -241,6 +261,7 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         counts=pipeline._assembly_counts(assembly))
     print(
         f"[PAPER-T3D] iterations={done} planarity={before:.6g}->{after:.6g} "
+        f"k3d_promoted_rms={k3d_update_rms:.6g} k3d_promoted_max={k3d_update_max:.6g} "
         f"shared_sep={edge_copy_separation:.3g} "
         f"parallel_max_deg={metrics['paper_t3d_top_bottom_parallel_angle_max_deg']:.6g} "
         f"rigid_rms={metrics['paper_t3d_rigid_transform_rms']:.6g}",
