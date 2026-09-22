@@ -7,3 +7,4 @@ pytest>=8.0
 imageio>=2.34
 kaleido>=0.2
 PyMuPDF>=1.24
+streamlit-plotly-events>=0.0.6
