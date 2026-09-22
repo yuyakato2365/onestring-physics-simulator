@@ -1561,54 +1561,68 @@ _PANEL_HIGHLIGHT = "#ff006e"
 def _panel_quad_figure(quads, colors, selected, title, label):
     quads=np.asarray(quads,dtype=float)
     fig=go.Figure()
+    xyz=[]; ti=[]; tj=[]; tk=[]; facecolors=[]; triangle_panel_ids=[]
+    ex=[]; ey=[]; ez=[]
     for panel_id,q in enumerate(quads):
         if len(q)<4: continue
+        base=len(xyz)
+        xyz.extend(q[:4].tolist())
+        ti.extend([base,base]); tj.extend([base+1,base+2]); tk.extend([base+2,base+3])
         color=_PANEL_HIGHLIGHT if panel_id==selected else colors[panel_id]
-        fig.add_trace(go.Mesh3d(
-            x=q[:4,0],y=q[:4,1],z=q[:4,2],
-            i=[0,0],j=[1,2],k=[2,3],
-            color=color,opacity=1.0,flatshading=True,
-            meta={"panel_id":int(panel_id)},
-            name=f"{label} panel {panel_id}",showlegend=False,
-            hovertemplate=f"{label} panel {panel_id}<extra></extra>",
-        ))
+        facecolors.extend([color,color])
+        triangle_panel_ids.extend([int(panel_id),int(panel_id)])
         loop=np.vstack([q[:4],q[0]])
-        fig.add_trace(go.Scatter3d(
-            x=loop[:,0],y=loop[:,1],z=loop[:,2],mode="lines",
-            line=dict(color="#111827",width=2),hoverinfo="skip",
-            showlegend=False,name=f"{label} edge {panel_id}",
+        ex.extend(loop[:,0].tolist()+[None]); ey.extend(loop[:,1].tolist()+[None]); ez.extend(loop[:,2].tolist()+[None])
+    if xyz:
+        xyz=np.asarray(xyz,dtype=float)
+        # A single Mesh3d lets WebGL perform depth testing within one trace.
+        # Raw events from Plotly 5 confirmed Mesh3d pointNumber is the picked
+        # triangle index, so meta maps that triangle back to its panel.
+        fig.add_trace(go.Mesh3d(
+            x=xyz[:,0],y=xyz[:,1],z=xyz[:,2],i=ti,j=tj,k=tk,
+            facecolor=facecolors,opacity=1.0,flatshading=True,
+            meta={"triangle_panel_ids":triangle_panel_ids},
+            name=label,showlegend=False,hovertemplate=f"{label}<extra></extra>",
         ))
+    fig.add_trace(go.Scatter3d(
+        x=ex,y=ey,z=ez,mode="lines",line=dict(color="#111827",width=2),
+        hoverinfo="skip",showlegend=False,name=f"{label} edges",
+    ))
     fig.update_layout(title=title)
-    # Match the simulator's normal 3-D presentation.
     fig.update_scenes(aspectmode="data")
     return fig
 
 def _panel_solid_figure(assembly, colors, selected, title, label, hinge_graph=None):
     verts=np.asarray(assembly.vertices,dtype=float)
     fig=go.Figure()
-    tri_i=[0,0,4,4,0,0,1,1,2,2,3,3]
-    tri_j=[1,2,7,6,1,5,2,6,3,7,0,4]
-    tri_k=[2,3,6,5,5,4,6,5,7,6,4,7]
+    tri_i0=[0,0,4,4,0,0,1,1,2,2,3,3]
+    tri_j0=[1,2,7,6,1,5,2,6,3,7,0,4]
+    tri_k0=[2,3,6,5,5,4,6,5,7,6,4,7]
     edges=((0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7))
+    xyz=[]; ti=[]; tj=[]; tk=[]; facecolors=[]; triangle_panel_ids=[]
+    ex=[]; ey=[]; ez=[]
     for panel_id,v in enumerate(verts):
         if len(v)<8: continue
+        base=len(xyz)
+        xyz.extend(v[:8].tolist())
+        ti.extend([base+i for i in tri_i0]); tj.extend([base+j for j in tri_j0]); tk.extend([base+k for k in tri_k0])
         color=_PANEL_HIGHLIGHT if panel_id==selected else colors[panel_id]
-        # IMPORTANT: one panel == one Mesh3d trace. curveNumber therefore maps
-        # deterministically to panel_id through trace.meta on ordinary click.
-        fig.add_trace(go.Mesh3d(
-            x=v[:,0],y=v[:,1],z=v[:,2],
-            i=tri_i,j=tri_j,k=tri_k,color=color,opacity=0.90,
-            flatshading=True,meta={"panel_id":int(panel_id)},
-            name=f"{label} panel {panel_id}",showlegend=False,
-            hovertemplate=f"{label} panel {panel_id}<extra></extra>",
-        ))
-        ex=[];ey=[];ez=[]
+        facecolors.extend([color]*len(tri_i0))
+        triangle_panel_ids.extend([int(panel_id)]*len(tri_i0))
         for u,w in edges:
             ex.extend([v[u,0],v[w,0],None]); ey.extend([v[u,1],v[w,1],None]); ez.extend([v[u,2],v[w,2],None])
-        fig.add_trace(go.Scatter3d(
-            x=ex,y=ey,z=ez,mode="lines",line=dict(color="#111827",width=2),
-            hoverinfo="skip",showlegend=False,name=f"{label} edges {panel_id}",
+    if xyz:
+        xyz=np.asarray(xyz,dtype=float)
+        fig.add_trace(go.Mesh3d(
+            x=xyz[:,0],y=xyz[:,1],z=xyz[:,2],i=ti,j=tj,k=tk,
+            facecolor=facecolors,opacity=0.90,flatshading=True,
+            meta={"triangle_panel_ids":triangle_panel_ids},
+            name=label,showlegend=False,hovertemplate=f"{label}<extra></extra>",
         ))
+    fig.add_trace(go.Scatter3d(
+        x=ex,y=ey,z=ez,mode="lines",line=dict(color="#111827",width=2),
+        hoverinfo="skip",showlegend=False,name=f"{label} edges",
+    ))
     if hinge_graph is not None:
         add_hinge_markers(fig,assembly,hinge_graph)
     fig.update_layout(title=title)
@@ -1622,7 +1636,15 @@ def _clicked_panel(fig, events):
     except (TypeError,ValueError): return None
     if not (0<=curve<len(fig.data)): return None
     meta=getattr(fig.data[curve],"meta",None)
-    if isinstance(meta,dict) and "panel_id" in meta:
+    if not isinstance(meta,dict): return None
+    if "triangle_panel_ids" in meta:
+        try:
+            point=int(ev.get("pointNumber",-1))
+            ids=meta["triangle_panel_ids"]
+            return int(ids[point]) if 0<=point<len(ids) else None
+        except (TypeError,ValueError,IndexError):
+            return None
+    if "panel_id" in meta:
         try: return int(meta["panel_id"])
         except (TypeError,ValueError): return None
     return None
