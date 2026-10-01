@@ -71,10 +71,7 @@ def _install_plotly_view_patch() -> None:
     except Exception:
         return
 
-    if getattr(st, "_onestring_stable_camera_patch_installed", False):
-        return
-
-    original_plotly_chart = st.plotly_chart
+    # The paper-T3D launcher uses ordinary static Streamlit Plotly charts for\n    # K3D/T3D/K2D/T2D.  The legacy browser-side stable-camera wrapper can leave\n    # those charts as dead component iframes after a Streamlit rerun, producing\n    # the sad-face placeholder.  Keep this legacy patch out of that launcher.\n    import os\n    if os.environ.get("ONESTRING_PAPER_T3D_PERSIST_STATIC_VIEW", "0") == "1":\n        return\n\n    if getattr(st, "_onestring_stable_camera_patch_installed", False):\n        return\n\n    original_plotly_chart = st.plotly_chart
 
     def _figure_has_3d_scene(fig) -> bool:
         try:
