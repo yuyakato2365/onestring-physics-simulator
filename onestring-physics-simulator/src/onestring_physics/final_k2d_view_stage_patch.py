@@ -31,11 +31,10 @@ def install_final_k2d_view_stage_patch() -> None:
             from .eq5_iteration_history_view import render_final_k2d_result
 
             st.caption("Eq.(5) solver の最終 accepted K2D を表示しています。")
-            if render_final_k2d_result(st, history):
-                # Suppress the legacy K2D/FlatTileLayout renderer.  That renderer
-                # belongs to the old independent-tile route and can be empty for
-                # the reconstructed shared-topology Eq.(5) solver.
-                return "__ONESSTRING_FINAL_EQ5_K2D_VIEW__"
+            # Keep the selected View-stage value unchanged. The legacy renderer
+            # must still receive K2D; replacing it with a sentinel made stage
+            # routing dependent on Streamlit wrapper order across reruns.
+            render_final_k2d_result(st, history)
         except Exception as exc:
             st.warning(f"Final Eq.(5) K2D rendering failed: {exc}")
 
