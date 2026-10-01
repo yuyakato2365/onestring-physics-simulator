@@ -319,7 +319,7 @@ with st.sidebar:
     st.header("Target Input")
     target_kind = _param_row(
         "目標曲面 S の種類。waveは標準で起伏を抑制。half_gourdは半割りヒョウタン状の非矩形メッシュで、Ω/M2D cropの検証用。",
-        lambda: st.selectbox("target shape", ["dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], help="Built-in target surface S. snowman_half isolates a single peak; snowman_full is a two-dome-with-neck stress case."),
+        lambda: st.selectbox("target shape", ["dome", "flat", "bunny", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], help="Built-in target surface S. snowman_half isolates a single peak; snowman_full is a two-dome-with-neck stress case."),
     )
     uploaded = _param_row(
         "OBJ/STL/PLY を読み込む。閉じた形状では Ω の切断・境界条件が難しくなるので注意。",
@@ -980,6 +980,11 @@ def _smooth_browser_tile_animation(
 
 
 def build_target():
+    if uploaded is None and target_kind == "bunny":
+        bunny_path = Path(__file__).resolve().parent / "assets" / "Remeshed_Bunny.stl"
+        if not bunny_path.exists():
+            raise FileNotFoundError(f"Bunny preset mesh not found: {bunny_path}")
+        return load_target_shape(bunny_path)
     if uploaded is None:
         radius = max(1.5, grid_size * tile_size * 0.7)
         shape_params = {"amplitude": amplitude, "radius": radius, "sigma": radius * 0.45}
