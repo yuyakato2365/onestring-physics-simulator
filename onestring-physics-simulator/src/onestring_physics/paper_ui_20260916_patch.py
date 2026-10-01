@@ -113,8 +113,9 @@ section[data-testid=stSidebar] .os-eq-card{padding:12px 13px;margin:6px 0 14px;b
   if callable(b):setattr(st,n,wrap(unwrap(b)))
  def select(label,options,*a,**k):
   val=sel0(label,options,*a,**k)
-  if str(label)=="View stage":
-   s=VIEW.get(str(val),"");_render(st,"Original Figure 5 · blue frame = displayed stage",s,1 if s else 0)
+  # Keep View-stage selection side-effect free. Injecting Figure-5 HTML here
+  # changes Streamlit element ordering across reruns and can replace static
+  # K3D/T3D/K2D/T2D Plotly charts after they briefly render.
   return val
  select._onestring_base=sel0
  if not getattr(st,"_onestring_paper_ui_selectbox_wrapped",False):st.selectbox=select;st._onestring_paper_ui_selectbox_wrapped=True
