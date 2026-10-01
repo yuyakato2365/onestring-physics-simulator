@@ -57,16 +57,20 @@ def render_final_k2d_result(st, history=None):
 
 
 def render_completed_k2d(history):
-    """Publish before T2D/Eq.6, scoped to this Streamlit session."""
+    """Publish solver history without emitting UI from inside the pipeline.
+
+    Streamlit must render result widgets only in the stable post-pipeline view
+    tree. Emitting dozens of Plotly charts here changes the delta tree between
+    the calculation run and the following widget rerun, which can make the
+    selected K3D/T3D/K2D/T2D chart flash and then disappear.
+    """
     try:
         import streamlit as st
         from streamlit.runtime.scriptrunner import get_script_run_ctx
         if get_script_run_ctx(suppress_warning=True) is None:
             return
         st.session_state["eq5_history"] = history
-        st.subheader("K2D result — before T2D / Dual Hinge")
-        render_eq5_iteration_history(st, history)
-        st.session_state["eq5_rendered_this_run"] = True
+        st.session_state["eq5_rendered_this_run"] = False
     except ImportError:
         return
 
