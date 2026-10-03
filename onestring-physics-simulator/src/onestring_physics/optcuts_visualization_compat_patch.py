@@ -252,8 +252,8 @@ def install_optcuts_visualization_compat_patch() -> None:
         _add_seam_lines_to_domain_figure(fig, state)
         return fig
 
-    def figure_m3d_overlay_with_optcuts_seam_panels(state: Any) -> go.Figure:
-        fig = original_figure_m3d_overlay(state)
+    def figure_m3d_overlay_with_optcuts_seam_panels(state: Any, *args: Any, **kwargs: Any) -> go.Figure:
+        fig = original_figure_m3d_overlay(state, *args, **kwargs)
         _add_seam_panels_to_m3d_figure(fig, state)
         return fig
 
