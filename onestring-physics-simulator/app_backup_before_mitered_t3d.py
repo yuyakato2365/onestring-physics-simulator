@@ -57,6 +57,13 @@ from onestring_physics.visualization import (
     add_hinge_markers,
     correspondence_tile_colors,
 )
+from onestring_physics.panel_quality_visualization import (
+    add_t2d_collision_overlay,
+    figure_k3d_planarity,
+    figure_t3d_planarized_k3d,
+    planarized_k3d_from_t3d,
+    quad_planarity_residuals,
+)
 
 
 st.set_page_config(page_title="OneString Paper-Faithful Simulator", layout="wide")
@@ -1552,6 +1559,7 @@ view_stage = st.selectbox(
         "M2D",
         "M3D",
         "K3D",
+        "T3D-planarized K3D",
         "T3D",
         "K2D",
         "T2D Top Hinge",
@@ -2009,7 +2017,13 @@ elif view_stage in {"M2D", "K3D"}:
             "M3D → K3D optimization の最終結果を表示しています。"
             f" · vertices={len(mesh.vertices)} · quads={len(mesh.faces)}"
         )
-    st.plotly_chart(figure_quad_mesh(mesh, title=view_stage, correspondence_uv=_corr_uv, correspondence_bounds=_corr_bounds), use_container_width=True, key=f"mesh_{view_stage}")
+    if view_stage == "K3D":
+        residuals = quad_planarity_residuals(mesh.vertices, mesh.faces)
+        st.plotly_chart(figure_k3d_planarity(mesh), use_container_width=True, key="mesh_K3D_planarity")
+        if len(residuals):
+            st.caption(f"K3D panel planarity: max={float(np.max(residuals)):.6g}, mean={float(np.mean(residuals)):.6g}. Color = max point-to-best-fit-plane distance.")
+    else:
+        st.plotly_chart(figure_quad_mesh(mesh, title=view_stage, correspondence_uv=_corr_uv, correspondence_bounds=_corr_bounds), use_container_width=True, key=f"mesh_{view_stage}")
     if view_stage == "K3D":
         # Geometry first, then the authoritative solver's optimization trajectory.
         try:
@@ -2052,6 +2066,14 @@ elif view_stage == "K2D":
         "m2d_kept_quad_count": state.mesh_2d_initial.metrics.get("m2d_kept_quad_count"),
         "m2d_cropped_quad_count": state.mesh_2d_initial.metrics.get("m2d_cropped_quad_count"),
     })
+elif view_stage == "T3D-planarized K3D":
+    st.subheader("T3D-planarized K3D")
+    st.caption("T3D Eq.(2) planarity solve 後の上面4頂点を、K3Dと同じface IDで表示します。")
+    st.plotly_chart(figure_t3d_planarized_k3d(state.mesh_3d_optimized, state.tiles_3d), use_container_width=True, key="t3d_planarized_k3d")
+    solved_vertices = planarized_k3d_from_t3d(state.mesh_3d_optimized, state.tiles_3d)
+    before_vertices = np.asarray(state.mesh_3d_optimized.vertices, dtype=float)
+    delta = np.linalg.norm(solved_vertices - before_vertices, axis=1)
+    st.write({"vertex_correction_rms": float(np.sqrt(np.mean(delta * delta))) if len(delta) else 0.0, "vertex_correction_max": float(np.max(delta)) if len(delta) else 0.0})
 elif view_stage == "T3D":
     emergency_tile_ids = state.tiles_3d.metrics.get("t3d_emergency_normal_prism_tile_ids", [])
     if emergency_tile_ids:
@@ -2099,6 +2121,10 @@ elif view_stage == "T2D Top Hinge":
         hinge_graph=top_hinge_graph,
         key_prefix="t2d_top",
     )
+    collision_fig = figure_tile_assembly(state.tiles_2d_top_hinge, hinge_graph=top_hinge_graph, tile_colors=_corr_tile_colors)
+    collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_top_hinge)
+    st.plotly_chart(collision_fig, use_container_width=True, key="t2d_top_collision_map")
+    st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs. Red = collision participant.")
     t2d_top_stl, t2d_top_export_metrics = export_t2d_stl(state, stage="top_hinge", panel_size=0.1, solid_name="onestring_t2d_top_hinge")
     st.download_button(
         "Download T2D Top Hinge STL",
@@ -2116,6 +2142,10 @@ elif view_stage == "T2D Dual Hinge":
         hinge_graph=state.hinge_graph,
         key_prefix="t2d_dual",
     )
+    collision_fig = figure_tile_assembly(state.tiles_2d_dual_hinge, hinge_graph=state.hinge_graph, tile_colors=_corr_tile_colors)
+    collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_dual_hinge)
+    st.plotly_chart(collision_fig, use_container_width=True, key="t2d_dual_collision_map")
+    st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs. Red = collision participant.")
     t2d_dual_stl, t2d_dual_export_metrics = export_t2d_stl(state, stage="dual_hinge", panel_size=0.1, solid_name="onestring_t2d_dual_hinge")
     st.download_button(
         "Download T2D Dual Hinge STL",
