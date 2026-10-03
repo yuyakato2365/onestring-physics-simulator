@@ -62,8 +62,8 @@ def install_optcuts_invalid_visualization_patch() -> None:
         return
     base = viz.figure_m3d_overlay
 
-    def figure_m3d_overlay_with_invalid(state: Any) -> go.Figure:
-        fig = base(state)
+    def figure_m3d_overlay_with_invalid(state: Any, *args: Any, **kwargs: Any) -> go.Figure:
+        fig = base(state, *args, **kwargs)
         m3d = getattr(state, "mesh_3d_initial", None)
         if m3d is not None:
             _add_invalid_faces(fig, m3d, "M3D")
