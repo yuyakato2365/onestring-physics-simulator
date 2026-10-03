@@ -139,6 +139,7 @@ def install_status_visualization_patch() -> None:
         show_recovery_status: bool = True,
         show_generated_cap_faces: bool = True,
         show_fundamental_failures_only: bool = False,
+        tile_colors: list[str] | None = None,
     ) -> None:
         authoritative_solids = getattr(assembly, "authoritative_solids", None)
         if not authoritative_solids:
@@ -151,6 +152,7 @@ def install_status_visualization_patch() -> None:
                 show_recovery_status=show_recovery_status,
                 show_generated_cap_faces=show_generated_cap_faces,
                 show_fundamental_failures_only=show_fundamental_failures_only,
+                tile_colors=tile_colors,
             )
             return
 
@@ -185,6 +187,8 @@ def install_status_visualization_patch() -> None:
 
             if show_recovery_status:
                 tile_color = "#dc2626" if status.startswith("T3D_FAILED_") else STATUS_COLORS.get(status, color)
+            elif tile_colors is not None and tile_id < len(tile_colors):
+                tile_color = str(tile_colors[tile_id])
             else:
                 tile_color = color
 
