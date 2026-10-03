@@ -2121,7 +2121,7 @@ elif view_stage == "T2D Top Hinge":
         hinge_graph=top_hinge_graph,
         key_prefix="t2d_top",
     )
-    collision_fig = figure_tile_assembly(state.tiles_2d_top_hinge, hinge_graph=top_hinge_graph, tile_colors=_corr_tile_colors)
+    collision_fig = figure_tile_assembly(state.tiles_2d_top_hinge, hinge_graph=top_hinge_graph)
     collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_top_hinge)
     st.plotly_chart(collision_fig, use_container_width=True, key="t2d_top_collision_map")
     st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs. Red = collision participant.")
@@ -2142,7 +2142,7 @@ elif view_stage == "T2D Dual Hinge":
         hinge_graph=state.hinge_graph,
         key_prefix="t2d_dual",
     )
-    collision_fig = figure_tile_assembly(state.tiles_2d_dual_hinge, hinge_graph=state.hinge_graph, tile_colors=_corr_tile_colors)
+    collision_fig = figure_tile_assembly(state.tiles_2d_dual_hinge, hinge_graph=state.hinge_graph)
     collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_dual_hinge)
     st.plotly_chart(collision_fig, use_container_width=True, key="t2d_dual_collision_map")
     st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs. Red = collision participant.")
