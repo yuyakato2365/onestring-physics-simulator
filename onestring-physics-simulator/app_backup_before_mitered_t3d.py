@@ -58,6 +58,7 @@ from onestring_physics.panel_quality_visualization import (
     add_t2d_collision_overlay,
     figure_k3d_planarity,
     figure_t3d_planarized_k3d,
+    planarized_k3d_from_t3d,
     quad_planarity_residuals,
 )
 
@@ -1664,9 +1665,7 @@ elif view_stage == "T3D-planarized K3D":
     )
     solved_fig = figure_t3d_planarized_k3d(state.mesh_3d_optimized, state.tiles_3d)
     st.plotly_chart(solved_fig, width="stretch", key="t3d_planarized_k3d")
-    solved_vertices = __import__("onestring_physics.panel_quality_visualization", fromlist=["planarized_k3d_from_t3d"]).planarized_k3d_from_t3d(
-        state.mesh_3d_optimized, state.tiles_3d
-    )
+    solved_vertices = planarized_k3d_from_t3d(state.mesh_3d_optimized, state.tiles_3d)
     before_vertices = np.asarray(state.mesh_3d_optimized.vertices, dtype=float)
     delta = np.linalg.norm(solved_vertices - before_vertices, axis=1)
     st.write({
