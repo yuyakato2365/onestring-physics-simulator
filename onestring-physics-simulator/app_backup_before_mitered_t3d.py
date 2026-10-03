@@ -54,6 +54,12 @@ from onestring_physics.visualization import (
     figure_tile_assembly,
     add_tile_assembly,
 )
+from onestring_physics.panel_quality_visualization import (
+    add_t2d_collision_overlay,
+    figure_k3d_planarity,
+    figure_t3d_planarized_k3d,
+    quad_planarity_residuals,
+)
 
 
 st.set_page_config(page_title="OneString Paper-Faithful Simulator", layout="wide")
@@ -1335,6 +1341,7 @@ view_stage = st.selectbox(
         "M2D",
         "M3D",
         "K3D",
+        "T3D-planarized K3D",
         "T3D",
         "K2D",
         "T2D Top Hinge",
@@ -1600,7 +1607,17 @@ elif view_stage in {"M2D", "K3D"}:
             "M3D → K3D optimization の最終結果を表示しています。"
             f" · vertices={len(mesh.vertices)} · quads={len(mesh.faces)}"
         )
-    st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")
+    if view_stage == "K3D":
+        residuals = quad_planarity_residuals(mesh.vertices, mesh.faces)
+        st.plotly_chart(figure_k3d_planarity(mesh), width="stretch", key="mesh_K3D_planarity")
+        if len(residuals):
+            st.caption(
+                f"K3D panel planarity: max={float(np.max(residuals)):.6g}, "
+                f"mean={float(np.mean(residuals)):.6g}. "
+                "Color is the same max point-to-best-fit-plane distance used by the paper-planarity geometry."
+            )
+    else:
+        st.plotly_chart(figure_quad_mesh(mesh, title=view_stage), width="stretch", key=f"mesh_{view_stage}")
     if view_stage == "K3D":
         # Geometry first, then the authoritative solver's optimization trajectory.
         try:
@@ -1639,6 +1656,24 @@ elif view_stage == "K2D":
         "m2d_kept_quad_count": state.mesh_2d_initial.metrics.get("m2d_kept_quad_count"),
         "m2d_cropped_quad_count": state.mesh_2d_initial.metrics.get("m2d_cropped_quad_count"),
     })
+elif view_stage == "T3D-planarized K3D":
+    st.subheader("T3D-planarized K3D")
+    st.caption(
+        "T3D Eq.(2) planarity solve 後の上面4頂点だけを、元のK3D face IDへ戻して表示しています。"
+        "K3D最適化直後の形状と、T3Dが実際に修正した後の上面形状を分けて確認できます。"
+    )
+    solved_fig = figure_t3d_planarized_k3d(state.mesh_3d_optimized, state.tiles_3d)
+    st.plotly_chart(solved_fig, width="stretch", key="t3d_planarized_k3d")
+    solved_vertices = __import__("onestring_physics.panel_quality_visualization", fromlist=["planarized_k3d_from_t3d"]).planarized_k3d_from_t3d(
+        state.mesh_3d_optimized, state.tiles_3d
+    )
+    before_vertices = np.asarray(state.mesh_3d_optimized.vertices, dtype=float)
+    delta = np.linalg.norm(solved_vertices - before_vertices, axis=1)
+    st.write({
+        "vertex_correction_rms": float(np.sqrt(np.mean(delta * delta))) if len(delta) else 0.0,
+        "vertex_correction_max": float(np.max(delta)) if len(delta) else 0.0,
+        "meaning": "distance from K3D solver output to the top surface after T3D face-planarity solve",
+    })
 elif view_stage == "T3D":
     emergency_tile_ids = state.tiles_3d.metrics.get("t3d_emergency_normal_prism_tile_ids", [])
     if emergency_tile_ids:
@@ -1675,7 +1710,10 @@ elif view_stage == "T3D":
         )
     st.write(state.tiles_3d.metrics)
 elif view_stage == "T2D Top Hinge":
-    st.plotly_chart(figure_tile_assembly(state.tiles_2d_top_hinge, hinge_graph=state.hinge_graph), width="stretch", key="t2d_top")
+    t2d_top_fig = figure_tile_assembly(state.tiles_2d_top_hinge, hinge_graph=state.hinge_graph)
+    t2d_top_fig, t2d_top_collision_ids, t2d_top_collision_pairs = add_t2d_collision_overlay(t2d_top_fig, state.tiles_2d_top_hinge)
+    st.plotly_chart(t2d_top_fig, width="stretch", key="t2d_top")
+    st.caption(f"SAT-colliding panels: {len(t2d_top_collision_ids)} panels / {len(t2d_top_collision_pairs)} overlapping pairs. Red panels participate in at least one existing SAT collision.")
     t2d_top_stl, t2d_top_export_metrics = export_t2d_stl(state, stage="top_hinge", panel_size=0.1, solid_name="onestring_t2d_top_hinge")
     st.download_button(
         "Download T2D Top Hinge STL",
@@ -1687,7 +1725,10 @@ elif view_stage == "T2D Top Hinge":
     state.tiles_2d_top_hinge.metrics.update(t2d_top_export_metrics)
     st.write(state.tiles_2d_top_hinge.metrics)
 elif view_stage == "T2D Dual Hinge":
-    st.plotly_chart(figure_tile_assembly(state.tiles_2d_dual_hinge, hinge_graph=state.hinge_graph), width="stretch", key="t2d_dual")
+    t2d_dual_fig = figure_tile_assembly(state.tiles_2d_dual_hinge, hinge_graph=state.hinge_graph)
+    t2d_dual_fig, t2d_dual_collision_ids, t2d_dual_collision_pairs = add_t2d_collision_overlay(t2d_dual_fig, state.tiles_2d_dual_hinge)
+    st.plotly_chart(t2d_dual_fig, width="stretch", key="t2d_dual")
+    st.caption(f"SAT-colliding panels: {len(t2d_dual_collision_ids)} panels / {len(t2d_dual_collision_pairs)} overlapping pairs. Red panels participate in at least one existing SAT collision.")
     t2d_dual_stl, t2d_dual_export_metrics = export_t2d_stl(state, stage="dual_hinge", panel_size=0.1, solid_name="onestring_t2d_dual_hinge")
     st.download_button(
         "Download T2D Dual Hinge STL",
