@@ -1575,10 +1575,27 @@ def _optimize_k3d(target: HeightField, mesh: QuadMesh, parameterization: Surface
     before_variance = _edge_length_variance(base, mesh.faces)
     z_range_m3d = _z_range(base)
 
+    adaptive_planarity_enabled = str(os.environ.get("ONESTRING_K3D_ADAPTIVE_PLANARITY_PENALTY", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    adaptive_planarity_threshold = max(1e-12, float(os.environ.get("ONESTRING_K3D_ADAPTIVE_PLANARITY_THRESHOLD", "0.01")))
+    adaptive_planarity_multiplier = max(1.0, float(os.environ.get("ONESTRING_K3D_ADAPTIVE_PLANARITY_MULTIPLIER", "100.0")))
+
+    def weighted_planarity_residuals(vertices: np.ndarray) -> np.ndarray:
+        planar = _planarity_residuals(vertices, mesh.faces)
+        if not adaptive_planarity_enabled:
+            return math.sqrt(params.w_planar) * planar
+        # Below threshold: ordinary quadratic penalty scales with violation.
+        # Above threshold: sharply increase the weight for violating quads.
+        local_weight = np.where(
+            np.abs(planar) < adaptive_planarity_threshold,
+            float(params.w_planar),
+            float(params.w_planar) * adaptive_planarity_multiplier,
+        )
+        return np.sqrt(local_weight) * planar
+
     def residual(xyz_values: np.ndarray) -> np.ndarray:
         vertices = xyz_values.reshape(-1, 3)
         parts: list[np.ndarray] = []
-        parts.append(math.sqrt(params.w_planar) * _planarity_residuals(vertices, mesh.faces))
+        parts.append(weighted_planarity_residuals(vertices))
         parts.append(math.sqrt(params.w_square) * _square_residuals(vertices, mesh.faces))
         surface_closest = _closest_surface_vertices(vertices, parameterization.surface_vertices_3d)
         parts.append(math.sqrt(params.w_surface) * (vertices - surface_closest).ravel())
@@ -1625,6 +1642,9 @@ def _optimize_k3d(target: HeightField, mesh: QuadMesh, parameterization: Surface
     metrics = {
         "objective": "E_Assembled = w1*EPlanar + w2*ESquare + w3*ESurface",
         "paper_weight_w1_planar": float(params.w_planar),
+        "adaptive_planarity_penalty_enabled": bool(adaptive_planarity_enabled),
+        "adaptive_planarity_threshold": float(adaptive_planarity_threshold),
+        "adaptive_planarity_multiplier": float(adaptive_planarity_multiplier),
         "paper_weight_w2_square": float(params.w_square),
         "paper_weight_w3_surface": float(params.w_surface),
         "paper_default_weights_used": bool(abs(params.w_planar - 10000.0) < 1e-9 and abs(params.w_square - 10.0) < 1e-9 and abs(params.w_surface - 0.1) < 1e-9),
