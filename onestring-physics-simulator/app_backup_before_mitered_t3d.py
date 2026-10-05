@@ -2122,9 +2122,9 @@ elif view_stage == "T2D Top Hinge":
         key_prefix="t2d_top",
     )
     collision_fig = figure_tile_assembly(state.tiles_2d_top_hinge, hinge_graph=top_hinge_graph)
-    collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_top_hinge)
+    collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_top_hinge, hinge_graph=top_hinge_graph)
     st.plotly_chart(collision_fig, use_container_width=True, key="t2d_top_collision_map")
-    st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs. Red = collision participant.")
+    st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs (hinge-connected pairs excluded). Red = collision participant.")
     t2d_top_stl, t2d_top_export_metrics = export_t2d_stl(state, stage="top_hinge", panel_size=0.1, solid_name="onestring_t2d_top_hinge")
     st.download_button(
         "Download T2D Top Hinge STL",
@@ -2143,7 +2143,7 @@ elif view_stage == "T2D Dual Hinge":
         key_prefix="t2d_dual",
     )
     collision_fig = figure_tile_assembly(state.tiles_2d_dual_hinge, hinge_graph=state.hinge_graph)
-    collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_dual_hinge)
+    collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_dual_hinge, hinge_graph=state.hinge_graph)
     st.plotly_chart(collision_fig, use_container_width=True, key="t2d_dual_collision_map")
     st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs. Red = collision participant.")
     t2d_dual_stl, t2d_dual_export_metrics = export_t2d_stl(state, stage="dual_hinge", panel_size=0.1, solid_name="onestring_t2d_dual_hinge")
