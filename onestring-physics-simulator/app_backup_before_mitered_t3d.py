@@ -26,7 +26,7 @@ import onestring_physics.onestring_pipeline as _onestring_pipeline
 # the same authoritative pipeline implementation.
 
 from onestring_physics.animation import assembly_progress_animation, assembly_progress_frame_figure, tile_assembly_animation
-from onestring_physics.input_shape import CLOSED_SHAPE_WARNING, create_builtin_shape, load_target_shape
+from onestring_physics.input_shape import CLOSED_SHAPE_WARNING, create_builtin_shape, create_paper_bulb_neck_shape, load_target_shape
 from onestring_physics.onestring_pipeline import (
     ComputeConfig,
     DeploymentParameters,
@@ -503,7 +503,7 @@ with st.sidebar:
     st.header("Target Input")
     target_kind = _param_row(
         "目標曲面 S。Remeshed_Bunny.stl はリポジトリ内または一般的なローカル配置から自動探索します。",
-        lambda: st.selectbox("target shape", ["Remeshed_Bunny.stl", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="Default target is Remeshed_Bunny.stl. You can still upload another OBJ/STL/PLY below."),
+        lambda: st.selectbox("target shape", ["Remeshed_Bunny.stl", "paper_bulb_neck", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="Default target is Remeshed_Bunny.stl. You can still upload another OBJ/STL/PLY below."),
     )
     uploaded = _param_row(
         "OBJ/STL/PLY を読み込む。閉じた形状では Ω の切断・境界条件が難しくなるので注意。",
@@ -1194,7 +1194,7 @@ def _default_bunny_path():
 
 
 def build_target():
-    if uploaded is None and target_kind == "Remeshed_Bunny.stl":
+    if uploaded is None and target_kind == "paper_bulb_neck":\n        st.caption("Built-in closed bulb + neck target (procedural approximation of the paper reference figure).")\n        st.warning(CLOSED_SHAPE_WARNING)\n        return create_paper_bulb_neck_shape()\n    if uploaded is None and target_kind == "Remeshed_Bunny.stl":
         bunny_path = _default_bunny_path()
         if bunny_path is None:
             raise FileNotFoundError(
