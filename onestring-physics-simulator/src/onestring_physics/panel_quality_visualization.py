@@ -91,7 +91,7 @@ def figure_t3d_planarized_k3d(mesh, tiles_3d) -> go.Figure:
     return _quad_mesh_heatmap(v,mesh.faces,residuals,"T3D-planarized K3D — solved top surface","max plane distance")
 
 
-def _collision_pairs_sat(xy: np.ndarray, faces: np.ndarray, tolerance: float) -> np.ndarray:
+def _collision_pairs_sat(xy: np.ndarray, faces: np.ndarray, tolerance: float, exclude_face_pairs=None) -> np.ndarray:
     """Same SAT overlap/depth criterion as collision_energy_gradient, IDs only."""
     polygons=xy[faces]
     lo,hi=polygons.min(axis=1),polygons.max(axis=1)
@@ -104,6 +104,10 @@ def _collision_pairs_sat(xy: np.ndarray, faces: np.ndarray, tolerance: float) ->
         candidates=candidates[keep]
         pair_a.extend([i]*len(candidates));pair_b.extend(candidates)
     ii,jj=np.asarray(pair_a,int),np.asarray(pair_b,int)
+    if exclude_face_pairs and len(ii):
+        excluded={tuple(sorted((int(a),int(b)))) for a,b in exclude_face_pairs}
+        keep=np.fromiter((tuple(sorted((int(a),int(b)))) not in excluded for a,b in zip(ii,jj)),dtype=bool,count=len(ii))
+        ii,jj=ii[keep],jj[keep]
     if len(ii)==0:
         return np.zeros((0,2),dtype=int)
     a,b=polygons[ii],polygons[jj]
@@ -120,7 +124,7 @@ def _collision_pairs_sat(xy: np.ndarray, faces: np.ndarray, tolerance: float) ->
     return np.stack((ii[live],jj[live]),axis=1) if np.any(live) else np.zeros((0,2),dtype=int)
 
 
-def t2d_collision_tile_ids(assembly) -> tuple[np.ndarray,np.ndarray]:
+def t2d_collision_tile_ids(assembly, hinge_graph=None) -> tuple[np.ndarray,np.ndarray]:
     rest=np.asarray(assembly.vertices,dtype=float)
     if len(rest)==0:
         return np.zeros(0,dtype=int),np.zeros((0,2),dtype=int)
@@ -130,13 +134,16 @@ def t2d_collision_tile_ids(assembly) -> tuple[np.ndarray,np.ndarray]:
     faces=np.array([[8*i+j for j in h+[h[-1]]*(width-len(h))] for i,h in enumerate(hulls)],dtype=int)
     flat=rest[:,:,:2].reshape(-1,2)
     scale=float(np.median(np.linalg.norm(np.roll(rest[:,:4,:2],-1,axis=1)-rest[:,:4,:2],axis=2)))
-    pairs=_collision_pairs_sat(flat,faces,scale*1e-8)
+    hinge_pairs=set()
+    if hinge_graph is not None:
+        hinge_pairs={(min(int(h.tile_a),int(h.tile_b)),max(int(h.tile_a),int(h.tile_b))) for h in hinge_graph.hinges}
+    pairs=_collision_pairs_sat(flat,faces,scale*1e-8,exclude_face_pairs=hinge_pairs)
     ids=np.unique(pairs.reshape(-1)) if len(pairs) else np.zeros(0,dtype=int)
     return ids.astype(int),pairs.astype(int)
 
 
-def add_t2d_collision_overlay(fig: go.Figure, assembly) -> tuple[go.Figure,np.ndarray,np.ndarray]:
-    ids,pairs=t2d_collision_tile_ids(assembly)
+def add_t2d_collision_overlay(fig: go.Figure, assembly, hinge_graph=None) -> tuple[go.Figure,np.ndarray,np.ndarray]:
+    ids,pairs=t2d_collision_tile_ids(assembly,hinge_graph=hinge_graph)
     if len(ids)==0:
         return fig,ids,pairs
     vertices=np.asarray(assembly.vertices,dtype=float)
