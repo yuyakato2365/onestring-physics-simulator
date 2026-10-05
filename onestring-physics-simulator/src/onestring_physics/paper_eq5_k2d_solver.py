@@ -157,9 +157,10 @@ def project_angle_vectors(a, b, theta_min):
     return pa, pb, angles
 
 
-def collision_energy_gradient(xy, faces, tolerance=1e-10):
+def collision_energy_gradient(xy, faces, tolerance=1e-10, exclude_face_pairs=None):
     """Squared convex SAT translation depth; includes derivative of each axis.
 
+    `exclude_face_pairs` removes known physical hinge-neighbor tile pairs before SAT.
     This surrogate is not claimed to equal Konakovic et al.'s local half-plane
     projection. All overlapping AABBs are tested, with no candidate cap. Contact
     at a shared corner/edge has zero energy. Convexity is checked by the caller.
@@ -176,6 +177,10 @@ def collision_energy_gradient(xy, faces, tolerance=1e-10):
         candidates = candidates[keep]
         pair_a.extend([i]*len(candidates)); pair_b.extend(candidates)
     ii, jj = np.asarray(pair_a,int), np.asarray(pair_b,int)
+    if exclude_face_pairs and len(ii):
+        excluded={tuple(sorted((int(a),int(b)))) for a,b in exclude_face_pairs}
+        keep=np.fromiter((tuple(sorted((int(a),int(b)))) not in excluded for a,b in zip(ii,jj)),dtype=bool,count=len(ii))
+        ii,jj=ii[keep],jj[keep]
     grad = np.zeros_like(xy)
     if len(ii) == 0:
         return 0., grad, 0
