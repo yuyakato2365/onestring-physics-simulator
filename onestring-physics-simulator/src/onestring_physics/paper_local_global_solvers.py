@@ -55,14 +55,51 @@ def _best_fit_plane_projection(q):
 
 
 def _closest_square_projection(q):
-    """Similarity-fit a square in the quad best-fit plane, preserving winding."""
+    """Similarity-fit a square in the quad best-fit plane, preserving winding.
+
+    The in-plane basis must be oriented from the quad itself.  Using the two
+    arbitrary SVD tangent vectors directly is unsafe because their signs are
+    independent; a reflected SVD basis makes the subsequent SO(2) Procrustes
+    fit reject the exact square correspondence and can collapse a perfect
+    square to its centroid.
+    """
     planar=_best_fit_plane_projection(q)
     c=planar.mean(axis=0)
+
+    # Best-fit normal, with its otherwise arbitrary SVD sign aligned to the
+    # ordered polygon winding.
     _,_,vt=np.linalg.svd(planar-c,full_matrices=False)
-    basis=vt[:2].T
+    normal=vt[-1]
+    polygon_normal=np.zeros(3,float)
+    for i in range(len(planar)):
+        polygon_normal+=np.cross(planar[i]-c,planar[(i+1)%len(planar)]-c)
+    if np.dot(normal,polygon_normal)<0:
+        normal=-normal
+
+    # Fix the first tangent axis from the ordered first edge and derive the
+    # second by a right-handed cross product.  This removes the SVD reflection
+    # ambiguity while retaining the original vertex correspondence.
+    tangent=planar[1]-planar[0]
+    tangent_norm=float(np.linalg.norm(tangent))
+    if tangent_norm<1e-12:
+        # Degenerate input: fall back to an SVD tangent, but still construct a
+        # right-handed basis from the winding-aligned normal.
+        tangent=vt[0]
+        tangent_norm=float(np.linalg.norm(tangent))
+    tangent=tangent/max(tangent_norm,1e-30)
+    bitangent=np.cross(normal,tangent)
+    bitangent_norm=float(np.linalg.norm(bitangent))
+    if bitangent_norm<1e-12:
+        bitangent=vt[1]
+        bitangent_norm=float(np.linalg.norm(bitangent))
+    bitangent=bitangent/max(bitangent_norm,1e-30)
+    basis=np.column_stack((tangent,bitangent))
     p=(planar-c)@basis
+
     template=np.array([[-1.,-1.],[1.,-1.],[1.,1.],[-1.,1.]])
-    # Orthogonal Procrustes + uniform scale.
+    # Orthogonal Procrustes + uniform scale.  Reflection remains forbidden here:
+    # any reflection needed solely because of the plane basis has already been
+    # removed above.
     h=template.T@p
     u,_,v=np.linalg.svd(h)
     r=u@v
