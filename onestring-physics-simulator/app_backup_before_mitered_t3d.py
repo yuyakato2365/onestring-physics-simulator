@@ -1272,7 +1272,11 @@ def _default_bunny_path():
 
 
 def build_target():
-    if uploaded is None and target_kind == "paper_bulb_neck":\n        st.caption("Built-in closed bulb + neck target (procedural approximation of the paper reference figure).")\n        st.warning(CLOSED_SHAPE_WARNING)\n        return create_paper_bulb_neck_shape()\n    if uploaded is None and target_kind == "Remeshed_Bunny.stl":
+    if uploaded is None and target_kind == "paper_bulb_neck":
+        st.caption("Built-in closed bulb + neck target (procedural approximation of the paper reference figure).")
+        st.warning(CLOSED_SHAPE_WARNING)
+        return create_paper_bulb_neck_shape()
+    if uploaded is None and target_kind == "Remeshed_Bunny.stl":
         bunny_path = _default_bunny_path()
         if bunny_path is None:
             raise FileNotFoundError(
