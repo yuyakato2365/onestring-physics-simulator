@@ -34,6 +34,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     faces=np.array([[8*i+j for j in h+[h[-1]]*(width-len(h))] for i,h in enumerate(hulls)],int)
     ha=np.array([8*h.tile_a+h.local_vertex_a for h in graph.hinges],int)
     hb=np.array([8*h.tile_b+h.local_vertex_b for h in graph.hinges],int)
+    # Panels intentionally connected by a physical hinge are allowed to touch/overlap
+    # at that joint and must not contribute to the T2D collision objective.
+    hinge_face_pairs={(min(int(h.tile_a),int(h.tile_b)),max(int(h.tile_a),int(h.tile_b))) for h in graph.hinges}
     wconn=float(params.hinge_layout_connection_weight)
     wcoll=float(params.hinge_layout_collision_weight)
     wanchor=float(params.hinge_layout_anchor_weight)
@@ -51,7 +54,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     def evaluate(pose):
         xy,rotated=positions(pose)
         flat=xy.reshape(-1,2)
-        ec,g,ncoll=collision_energy_gradient(flat,faces,scale*1e-8)
+        ec,g,ncoll=collision_energy_gradient(flat,faces,scale*1e-8,exclude_face_pairs=hinge_face_pairs)
         g*=wcoll
         delta=flat[ha]-flat[hb]
         dz=rest.reshape(-1,3)[ha,2]-rest.reshape(-1,3)[hb,2]
