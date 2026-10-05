@@ -749,6 +749,31 @@ with st.sidebar:
         "K3D の各 quad を平面に近づける重み。高いほど面のねじれを嫌う。論文の EPlanar 相当。",
         lambda: st.number_input("w_planar / EPlanar", min_value=0.1, max_value=50000.0, value=10000.0, step=500.0, help="Weight for K3D quad planarity."),
     )
+    adaptive_planarity_penalty = st.checkbox(
+        "Adaptive planarity penalty",
+        value=str(os.environ.get("ONESTRING_K3D_ADAPTIVE_PLANARITY_PENALTY", "0")).strip().lower() in {"1", "true", "yes", "on"},
+        help="ON: below the threshold, the ordinary EPlanar penalty is used; at or above the threshold, w_planar is multiplied by the strong-penalty multiplier.",
+        key="onestring_k3d_adaptive_planarity_penalty",
+    )
+    os.environ["ONESTRING_K3D_ADAPTIVE_PLANARITY_PENALTY"] = "1" if adaptive_planarity_penalty else "0"
+    if adaptive_planarity_penalty:
+        adaptive_planarity_threshold = float(st.number_input(
+            "Planarity strong-penalty threshold",
+            min_value=1e-6, max_value=1.0,
+            value=float(os.environ.get("ONESTRING_K3D_ADAPTIVE_PLANARITY_THRESHOLD", "0.01")),
+            step=0.001, format="%.6f",
+            key="onestring_k3d_adaptive_planarity_threshold",
+        ))
+        adaptive_planarity_multiplier = float(st.number_input(
+            "Planarity strong-penalty multiplier",
+            min_value=1.0, max_value=100000.0,
+            value=float(os.environ.get("ONESTRING_K3D_ADAPTIVE_PLANARITY_MULTIPLIER", "100.0")),
+            step=10.0,
+            key="onestring_k3d_adaptive_planarity_multiplier",
+        ))
+        os.environ["ONESTRING_K3D_ADAPTIVE_PLANARITY_THRESHOLD"] = str(adaptive_planarity_threshold)
+        os.environ["ONESTRING_K3D_ADAPTIVE_PLANARITY_MULTIPLIER"] = str(adaptive_planarity_multiplier)
+
     w_square = _param_row(
         "K3D の quad を極端に歪ませない重み。高いほど正方形・均整なタイルを保つ。",
         lambda: st.number_input("w_square / ESquare", min_value=0.1, max_value=100.0, value=10.0, step=0.5, help="Weight for square-like quad shape."),
