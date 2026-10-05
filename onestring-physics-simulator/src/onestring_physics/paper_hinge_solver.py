@@ -44,8 +44,27 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         raise ValueError('Hinge weights must be finite and nonnegative')
     budget=float(params.hinge_layout_time_budget_sec)
     deadline=started+budget if budget>0 else float('inf')
+    # Stabilization controls are part of the actual dual-hinge solve.  Expansion
+    # is applied to tile centers before optimization; max drift is enforced with
+    # L-BFGS-B translation bounds around that expanded reference.  This makes
+    # the UI controls authoritative instead of display-only.
+    initial_expansion=float(getattr(params,'hinge_layout_initial_expansion',1.0))
+    max_center_drift_tiles=float(getattr(params,'hinge_layout_max_center_drift_tiles',2.0))
+    max_candidate_pairs=int(getattr(params,'hinge_layout_max_candidate_pairs',3000))
+    if not np.isfinite(initial_expansion) or initial_expansion<=0:
+        raise ValueError('hinge_layout_initial_expansion must be finite and positive')
+    if not np.isfinite(max_center_drift_tiles) or max_center_drift_tiles<0:
+        raise ValueError('hinge_layout_max_center_drift_tiles must be finite and nonnegative')
+    if max_candidate_pairs<=0:
+        raise ValueError('hinge_layout_max_candidate_pairs must be positive')
+    layout_center=centers.mean(axis=0)
+    expanded_centers=layout_center+initial_expansion*(centers-layout_center)
+    center_offsets=expanded_centers-centers
     records=[]
     last=np.zeros((len(rest),3),float)
+    last[:,1:]=center_offsets/max(scale,1e-30)
+    reference_pose=last.copy()
+    drift_bound=max_center_drift_tiles
     def positions(pose):
         angle=pose[:,0];c=np.cos(angle)[:,None];s=np.sin(angle)[:,None]
         rotated=np.stack((c*local[:,:,0]-s*local[:,:,1],s*local[:,:,0]+c*local[:,:,1]),axis=2)
@@ -64,8 +83,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         gradient=np.zeros_like(pose)
         gradient[:,0]=np.sum(g[:,:,0]*(-rotated[:,:,1])+g[:,:,1]*rotated[:,:,0],axis=1)
         gradient[:,1:]=scale*np.sum(g,axis=1)
-        anchor=scale**2*float(np.sum(pose[:,1:]**2))
-        gradient[:,1:]+=2*wanchor*scale**2*pose[:,1:]
+        translation_delta=pose[:,1:]-reference_pose[:,1:]
+        anchor=scale**2*float(np.sum(translation_delta**2))
+        gradient[:,1:]+=2*wanchor*scale**2*translation_delta
         energy=wconn*conn+wcoll*ec+wanchor*anchor
         stats=dict(EHinge=energy,EConn=conn,ECollision=ec,collisions=ncoll,
                    hinge_rms=float(np.sqrt(np.mean(np.sum(delta*delta,axis=1)+dz*dz))) if len(delta) else 0.)
@@ -90,7 +110,12 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                               f"iter {len(records)-1}; EHinge={stats['EHinge']:.5g}; collisions={stats['collisions']}; hinge_rms={stats['hinge_rms']:.5g}")
     timed_out=False
     try:
-        result=minimize(fun,last.ravel(),jac=True,method='L-BFGS-B',callback=callback,
+        bounds=[]
+        for i in range(len(rest)):
+            bounds.append((None,None))
+            bounds.append((reference_pose[i,1]-drift_bound,reference_pose[i,1]+drift_bound))
+            bounds.append((reference_pose[i,2]-drift_bound,reference_pose[i,2]+drift_bound))
+        result=minimize(fun,last.ravel(),jac=True,method='L-BFGS-B',bounds=bounds,callback=callback,
                         options=dict(maxiter=max(1,params.hinge_layout_iterations),maxls=30,maxcor=20,ftol=1e-13,gtol=1e-8))
         last=result.x.reshape(-1,3);message=str(result.message)
     except _Deadline:
@@ -113,6 +138,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_layout_optimizer='analytic L-BFGS on rigid SE(2) poses',
                        dual_hinge_timed_out=timed_out,dual_hinge_solver_message=message,
                        dual_hinge_iterations=len(records)-1,dual_hinge_history=records,
+                       dual_hinge_initial_expansion=initial_expansion,
+                       dual_hinge_max_center_drift_tiles=max_center_drift_tiles,
+                       dual_hinge_max_candidate_pairs=max_candidate_pairs,
                        dual_hinge_collision_model='convex 2D footprint SAT; conservative surrogate for 3D solids',
                        dual_hinge_connection_model='2 * sum squared paired 3D corner distances',
                        tile_shape_max_error_to_T3D=pipeline._tile_shape_distance_error(out.vertices,t3d.vertices,use_max=True),
