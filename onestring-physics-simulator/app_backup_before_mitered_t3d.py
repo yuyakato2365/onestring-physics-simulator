@@ -66,6 +66,59 @@ from onestring_physics.panel_quality_visualization import (
 )
 
 
+
+def _mapping_distortion_values(surface_xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray):
+    """Per-triangle singular values of the local S->Omega map and area ratio."""
+    xyz=np.asarray(surface_xyz,float); uv=np.asarray(uv,float); tri=np.asarray(faces,int)
+    smax=np.ones(len(tri)); smin=np.ones(len(tri)); area=np.ones(len(tri))
+    for k,(i,j,l) in enumerate(tri):
+        p0,p1,p2=xyz[[i,j,l]]; q0,q1,q2=uv[[i,j,l],:2]
+        e1=p1-p0; e2=p2-p0
+        u=e1/max(np.linalg.norm(e1),1e-15)
+        e2o=e2-u*np.dot(e2,u); n2=np.linalg.norm(e2o)
+        if n2<1e-15: continue
+        v=e2o/n2
+        X=np.array([[np.dot(e1,u),np.dot(e2,u)],[np.dot(e1,v),np.dot(e2,v)]])
+        Y=np.column_stack((q1-q0,q2-q0))
+        try:
+            J=Y@np.linalg.inv(X)
+            sv=np.linalg.svd(J,compute_uv=False)
+            smax[k],smin[k]=float(sv[0]),float(max(sv[-1],1e-15))
+        except np.linalg.LinAlgError:
+            continue
+        a3=0.5*np.linalg.norm(np.cross(e1,e2))
+        a2=0.5*abs(np.cross(q1-q0,q2-q0))
+        area[k]=a2/max(a3,1e-15)
+    return smax,smin,area
+
+def _mapping_distortion_figures(parameterization, mode: str):
+    xyz=np.asarray(parameterization.surface_vertices_3d,float)
+    uv=np.asarray(parameterization.uv_vertices_2d,float)
+    faces=np.asarray(parameterization.surface_faces,int)
+    smax,smin,area=_mapping_distortion_values(xyz,uv,faces)
+    if mode=="Stretch (sigma_max)":
+        val=smax; label="sigma_max"
+    elif mode=="Compression (1/sigma_min)":
+        val=1.0/np.maximum(smin,1e-15); label="1 / sigma_min"
+    elif mode=="Area ratio (A_Omega/A_S)":
+        val=area; label="A_Omega / A_S"
+    else:
+        val=np.maximum(smax,1.0/np.maximum(smin,1e-15)); label="max(sigma_max, 1/sigma_min)"
+    finite=val[np.isfinite(val)]
+    vmax=float(np.percentile(finite,99)) if finite.size else 1.0
+    vmax=max(vmax,1.0)
+    common=dict(i=faces[:,0],j=faces[:,1],k=faces[:,2],intensity=val,intensitymode="cell",
+                colorscale="Viridis",cmin=0.0,cmax=vmax,colorbar=dict(title=label),showscale=True,
+                hovertemplate=f"{label}=%{{intensity:.4g}}<extra></extra>")
+    fs=go.Figure(go.Mesh3d(x=xyz[:,0],y=xyz[:,1],z=xyz[:,2],**common))
+    fs.update_layout(title=f"S — {label}",scene_aspectmode="data",margin=dict(l=0,r=0,t=40,b=0))
+    fo=go.Figure(go.Mesh3d(x=uv[:,0],y=uv[:,1],z=np.zeros(len(uv)),**common))
+    fo.update_layout(title=f"Omega — {label}",scene=dict(aspectmode="data",camera=dict(eye=dict(x=0,y=0,z=2.2))),margin=dict(l=0,r=0,t=40,b=0))
+    stats={"min":float(np.min(finite)) if finite.size else 0.0,"median":float(np.median(finite)) if finite.size else 0.0,
+           "p95":float(np.percentile(finite,95)) if finite.size else 0.0,"max":float(np.max(finite)) if finite.size else 0.0}
+    return fs,fo,stats
+
+
 st.set_page_config(page_title="OneString Paper-Faithful Simulator", layout="wide")
 MODEL_VERSION = "2026-07-12-one-sided-t3d"
 MODEL_VERSIONS = [
@@ -1836,6 +1889,20 @@ elif view_stage == "Split Map":
         st.dataframe(display_steps, width="stretch")
 elif view_stage == "Omega":
     st.plotly_chart(figure_domain(state), use_container_width=True, key="omega_domain")
+    st.subheader("S ↔ Omega Mapping Distortion")
+    st.caption("The same per-triangle S→Omega distortion values are painted on the original surface S and on Omega, so corresponding distorted regions have exactly the same color.")
+    distortion_mode = st.selectbox(
+        "Distortion metric",
+        ["Total distortion", "Stretch (sigma_max)", "Compression (1/sigma_min)", "Area ratio (A_Omega/A_S)"],
+        key="omega_mapping_distortion_metric",
+    )
+    distortion_s, distortion_o, distortion_stats = _mapping_distortion_figures(state.surface_parameterization, distortion_mode)
+    distortion_cols = st.columns(2)
+    with distortion_cols[0]:
+        st.plotly_chart(distortion_s, use_container_width=True, key="mapping_distortion_S")
+    with distortion_cols[1]:
+        st.plotly_chart(distortion_o, use_container_width=True, key="mapping_distortion_Omega")
+    st.caption("Distortion statistics: " + ", ".join(f"{k}={v:.4g}" for k,v in distortion_stats.items()))
     omega_info = {
         "parameterization": state.conformal_domain.method,
         "surface_parameterization_method": state.surface_parameterization.method,
