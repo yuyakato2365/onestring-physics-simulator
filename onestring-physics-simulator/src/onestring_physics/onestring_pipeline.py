@@ -439,7 +439,13 @@ def _coincident_boundary_edge_pairs(
 
 
 def _parameterization_stretch_csf(parameterization) -> np.ndarray:
-    """Estimate per-UV-vertex conformal stretch from paired 3D/UV mesh edges."""
+    """Per-UV-vertex bidirectional parameterization distortion.
+
+    Uses the singular values of the local map surface->Omega after removing one
+    global isotropic scale.  Both stretch and compression are therefore visible:
+        D = max(sigma_max, 1 / sigma_min)
+    A value of 1 is locally similarity-like; larger values are distorted.
+    """
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
     uv_faces = np.asarray(parameterization.uv_faces, dtype=int)
@@ -447,35 +453,58 @@ def _parameterization_stretch_csf(parameterization) -> np.ndarray:
     if uv.size == 0 or xyz.size == 0 or uv_faces.size == 0:
         return np.ones(len(uv), dtype=float)
 
-    values: list[list[float]] = [[] for _ in range(len(uv))]
-    ratios: list[float] = []
+    per_face: list[tuple[np.ndarray, np.ndarray]] = []
+    geometric_means: list[float] = []
     for uv_face, surface_face in zip(uv_faces, surface_faces):
-        for a, b in ((0, 1), (1, 2), (2, 0)):
-            ua, ub = int(uv_face[a]), int(uv_face[b])
-            sa, sb = int(surface_face[a]), int(surface_face[b])
-            uv_len = float(np.linalg.norm(uv[ub] - uv[ua]))
-            xyz_len = float(np.linalg.norm(xyz[sb] - xyz[sa]))
-            if uv_len <= 1e-12 or not np.isfinite(uv_len) or not np.isfinite(xyz_len):
-                continue
-            ratio = xyz_len / uv_len
-            if ratio <= 0.0 or not np.isfinite(ratio):
-                continue
-            ratios.append(ratio)
-            values[ua].append(ratio)
-            values[ub].append(ratio)
-    if not ratios:
-        return np.ones(len(uv), dtype=float)
+        tri3 = xyz[np.asarray(surface_face, dtype=int)]
+        tri2 = uv[np.asarray(uv_face, dtype=int)]
+        e1 = tri3[1] - tri3[0]
+        e2 = tri3[2] - tri3[0]
+        n1 = float(np.linalg.norm(e1))
+        if n1 <= 1e-12:
+            continue
+        x_axis = e1 / n1
+        e2_perp = e2 - float(np.dot(e2, x_axis)) * x_axis
+        n2 = float(np.linalg.norm(e2_perp))
+        if n2 <= 1e-12:
+            continue
+        y_axis = e2_perp / n2
+        X = np.asarray([
+            [float(np.dot(e1, x_axis)), float(np.dot(e2, x_axis))],
+            [float(np.dot(e1, y_axis)), float(np.dot(e2, y_axis))],
+        ])
+        Y = np.column_stack((tri2[1] - tri2[0], tri2[2] - tri2[0]))
+        try:
+            J = Y @ np.linalg.inv(X)
+            singular = np.linalg.svd(J, compute_uv=False)
+        except np.linalg.LinAlgError:
+            continue
+        singular = np.sort(np.asarray(singular, dtype=float))[::-1]
+        if len(singular) != 2 or singular[1] <= 1e-12 or not np.all(np.isfinite(singular)):
+            continue
+        per_face.append((np.asarray(uv_face, dtype=int), singular))
+        geometric_means.append(float(np.sqrt(singular[0] * singular[1])))
 
-    # Normalize out global UV scale.  The split test should react to local
-    # over-stretch, not to the arbitrary size of the Omega embedding.
-    baseline = float(np.median(ratios))
-    baseline = baseline if baseline > 1e-12 and np.isfinite(baseline) else 1.0
+    if not per_face:
+        return np.ones(len(uv), dtype=float)
+    global_scale = float(np.median(geometric_means))
+    if not np.isfinite(global_scale) or global_scale <= 1e-12:
+        global_scale = 1.0
+
+    values: list[list[float]] = [[] for _ in range(len(uv))]
+    for face, singular in per_face:
+        sigma_max = float(singular[0] / global_scale)
+        sigma_min = float(singular[1] / global_scale)
+        distortion = max(sigma_max, 1.0 / max(sigma_min, 1e-12))
+        for vertex_id in face:
+            if 0 <= int(vertex_id) < len(values):
+                values[int(vertex_id)].append(distortion)
+
     csf = np.ones(len(uv), dtype=float)
     for idx, local in enumerate(values):
         if local:
-            csf[idx] = float(np.percentile(local, 90)) / baseline
+            csf[idx] = float(np.percentile(local, 90))
     return np.maximum(csf, 1.0)
-
 
 def _nearest_reflection_error(points: np.ndarray, coord: int) -> tuple[float, float, float]:
     pts = np.asarray(points, dtype=float)
@@ -527,67 +556,67 @@ def _detect_parameterization_reflection_symmetry(parameterization, tolerance: fl
 
 
 def _surface_peak_uvs(parameterization, max_peaks: int = 8) -> np.ndarray:
+    """Return UV positions of high Gaussian-curvature vertices.
+
+    Uses the discrete angle-defect Gaussian curvature of the source surface,
+    rather than the previous world-z local maxima (which was orientation
+    dependent and unrelated to curvature).
+    """
     surface = np.asarray(parameterization.surface_vertices_3d, dtype=float)
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     faces = np.asarray(getattr(parameterization, "surface_faces", np.zeros((0, 3))), dtype=int)
-    if len(surface) == 0 or len(uv) != len(surface):
-        return np.zeros((0, 2), dtype=float)
-    z = surface[:, 2]
-    z_span = float(np.nanmax(z) - np.nanmin(z)) if len(z) else 0.0
-    if z_span <= 1e-12:
+    if len(surface) == 0 or len(uv) != len(surface) or len(faces) == 0:
         return np.zeros((0, 2), dtype=float)
 
+    angle_sum = np.zeros(len(surface), dtype=float)
+    edge_count: dict[tuple[int, int], int] = {}
+    for face in faces:
+        ids = [int(v) for v in face[:3]]
+        if len(set(ids)) < 3:
+            continue
+        pts = surface[ids]
+        for local_i, vertex_id in enumerate(ids):
+            a = pts[(local_i + 1) % 3] - pts[local_i]
+            b = pts[(local_i + 2) % 3] - pts[local_i]
+            na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+            if na > 1e-12 and nb > 1e-12:
+                angle_sum[vertex_id] += math.acos(float(np.clip(np.dot(a, b) / (na * nb), -1.0, 1.0)))
+        for a, b in ((ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])):
+            key = (min(a, b), max(a, b))
+            edge_count[key] = edge_count.get(key, 0) + 1
+
+    boundary = np.zeros(len(surface), dtype=bool)
+    for (a, b), count in edge_count.items():
+        if count == 1:
+            boundary[a] = True
+            boundary[b] = True
+    defects = 2.0 * np.pi - angle_sum
+    defects[boundary] = np.pi - angle_sum[boundary]
+    finite = np.isfinite(defects)
+    candidates = np.flatnonzero(finite & (~boundary))
+    if len(candidates) == 0:
+        candidates = np.flatnonzero(finite)
+    if len(candidates) == 0:
+        return np.zeros((0, 2), dtype=float)
+
+    order = candidates[np.argsort(defects[candidates])[::-1]]
+    kept: list[int] = []
     adjacency: list[set[int]] = [set() for _ in range(len(surface))]
     for face in faces:
-        ids = [int(v) for v in face]
-        for i, a in enumerate(ids):
-            for b in ids[i + 1 :]:
-                if 0 <= a < len(surface) and 0 <= b < len(surface):
-                    adjacency[a].add(b)
-                    adjacency[b].add(a)
-
-    eps = max(1e-9, z_span * 1e-5)
-    high_floor = float(np.nanmax(z)) - 0.25 * z_span
-    candidates: set[int] = set()
-    for idx, value in enumerate(z):
-        if float(value) < high_floor:
+        ids = [int(v) for v in face[:3]]
+        for a, b in ((ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])):
+            adjacency[a].add(b); adjacency[b].add(a)
+    blocked: set[int] = set()
+    for idx in order:
+        idx = int(idx)
+        if idx in blocked:
             continue
-        neighbors = adjacency[idx]
-        if not neighbors or all(float(value) >= float(z[n]) - eps for n in neighbors):
-            candidates.add(idx)
-    if not candidates:
-        candidates = set(np.flatnonzero(z >= float(np.nanmax(z)) - max(1e-9, z_span * 1e-4)).tolist())
-
-    components: list[list[int]] = []
-    seen: set[int] = set()
-    for start in sorted(candidates):
-        if start in seen:
-            continue
-        stack = [start]
-        seen.add(start)
-        component: list[int] = []
-        while stack:
-            node = stack.pop()
-            component.append(node)
-            for nxt in adjacency[node]:
-                if nxt in candidates and nxt not in seen:
-                    seen.add(nxt)
-                    stack.append(nxt)
-        components.append(component)
-
-    scored: list[tuple[float, np.ndarray]] = []
-    for component in components:
-        comp = np.asarray(component, dtype=int)
-        comp_max = float(np.max(z[comp]))
-        top = comp[z[comp] >= comp_max - max(1e-9, z_span * 0.02)]
-        scored.append((comp_max, np.mean(uv[top], axis=0)))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    if not scored:
-        return np.zeros((0, 2), dtype=float)
-    best = scored[0][0]
-    kept = [point for score, point in scored if score >= best - 0.2 * z_span][: max(1, int(max_peaks))]
-    return np.asarray(kept, dtype=float)
-
+        kept.append(idx)
+        blocked.add(idx)
+        blocked.update(adjacency[idx])
+        if len(kept) >= max(1, int(max_peaks)):
+            break
+    return uv[np.asarray(kept, dtype=int)]
 
 def _split_line_axis_value(split_line) -> tuple[str, float]:
     axis = str(split_line[0])
