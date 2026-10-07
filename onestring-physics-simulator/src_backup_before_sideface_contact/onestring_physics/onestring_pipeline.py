@@ -3204,7 +3204,19 @@ def _deployment_snap_gaps(state: OneStringDesignState, snap_scope: str = "string
     if snap_scope == "all_internal_gaps":
         return [gap for gap in state.gap_graph.gaps if not gap.boundary and len(gap.surrounding_tiles) == 2]
     active = set(state.string_path.gap_ids)
-    return [gap for gap in state.gap_graph.gaps if gap.id in active and not gap.boundary and len(gap.surrounding_tiles) == 2]
+    selected = [gap for gap in state.gap_graph.gaps if gap.id in active and not gap.boundary and len(gap.surrounding_tiles) == 2]
+    if selected:
+        return selected
+    internal = [gap for gap in state.gap_graph.gaps if not gap.boundary and len(gap.surrounding_tiles) == 2]
+    if internal and active:
+        # A non-empty routed string with zero actuated gaps makes the deployment
+        # simulation silently lose its snap term.  Fail loudly instead of
+        # reporting a misleading "successful" no-actuation simulation.
+        raise RuntimeError(
+            "STRING_PATH_SNAP_EMPTY: routed string contains no internal two-panel gaps; "
+            "repair the string path/gap-id mapping before deployment."
+        )
+    return []
 
 
 def _gap_separation_vectors(state: OneStringDesignState, gaps: list[Gap], include_bottom: bool = True) -> tuple[np.ndarray, np.ndarray]:
@@ -4855,7 +4867,8 @@ def _turn_angle_total(gap_graph: GapGraph, route: list[int]) -> float:
         if n0 <= 1e-12 or n1 <= 1e-12:
             continue
         dot = float(np.clip(np.dot(v0, v1) / (n0 * n1), -1.0, 1.0))
-        total += math.acos(dot)
+        # Turning angle: straight=0, right angle=pi/2, U-turn=pi.
+        total += math.pi - math.acos(dot)
     return float(total)
 
 
@@ -4872,7 +4885,7 @@ def _max_single_turn_angle(gap_graph: GapGraph, route: list[int]) -> float:
         if n0 <= 1e-12 or n1 <= 1e-12:
             continue
         dot = float(np.clip(np.dot(v0, v1) / (n0 * n1), -1.0, 1.0))
-        values.append(math.acos(dot))
+        values.append(math.pi - math.acos(dot))
     return float(max(values, default=0.0))
 
 
