@@ -72,6 +72,8 @@ def _project_root_from_this_file() -> Path:
 def _find_original_pipeline() -> Path:
     root = _project_root_from_this_file()
     candidates = [
+        root / "src" / "onestring_physics" / "legacy_pipeline_base.py",
+        # Historical fallback only; production should resolve the canonical file above.
         root / "src_backup_before_sideface_contact" / "onestring_physics" / "onestring_pipeline.py",
         root / "src_backup_before_mitered_t3d" / "onestring_physics" / "onestring_pipeline.py",
         root / "src_backup_before_sideface_contact" / "src" / "onestring_physics" / "onestring_pipeline.py",
