@@ -71,6 +71,48 @@ def _planarity_error(x,face_sets):
     return max(vals,default=0.0)
 
 
+def _convex_tiles_intersect(a, b, tol=1e-9):
+    """SAT test for two convex 8-vertex extruded quad tiles."""
+    a=np.asarray(a,float); b=np.asarray(b,float)
+    if np.any(np.max(a,axis=0) < np.min(b,axis=0)-tol) or np.any(np.max(b,axis=0) < np.min(a,axis=0)-tol):
+        return False
+    faces=((0,1,2,3),(4,7,6,5),(0,4,5,1),(1,5,6,2),(2,6,7,3),(3,7,4,0))
+    edges=((0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7))
+    axes=[]
+    for tile in (a,b):
+        for face in faces:
+            p=tile[list(face)]
+            n=np.cross(p[1]-p[0],p[2]-p[0])
+            nn=float(np.linalg.norm(n))
+            if nn>1e-12: axes.append(n/nn)
+    ea=[a[j]-a[i] for i,j in edges]
+    eb=[b[j]-b[i] for i,j in edges]
+    for va in ea:
+        for vb in eb:
+            axis=np.cross(va,vb); n=float(np.linalg.norm(axis))
+            if n>1e-12: axes.append(axis/n)
+    for axis in axes:
+        pa=a@axis; pb=b@axis
+        if float(np.max(pa)) < float(np.min(pb))-tol or float(np.max(pb)) < float(np.min(pa))-tol:
+            return False
+    return True
+
+
+def _assembled_panel_collision_pairs(tiles, mesh_faces):
+    """Non-neighbouring finite-thickness panel intersections."""
+    tiles=np.asarray(tiles,float); faces=np.asarray(mesh_faces,int)
+    vertex_sets=[set(map(int,f)) for f in faces]
+    pairs=[]
+    for i in range(len(tiles)):
+        for j in range(i+1,len(tiles)):
+            # Shared K3D vertices are intentional joints/contacts, not collisions.
+            if vertex_sets[i].intersection(vertex_sets[j]):
+                continue
+            if _convex_tiles_intersect(tiles[i],tiles[j]):
+                pairs.append((i,j))
+    return pairs
+
+
 def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     """K3D -> T3D using shared mesh vertices during Eq.(2) optimization.
 
@@ -233,6 +275,7 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         pred=a@R.T+trans
         rigid_rms.append(float(np.sqrt(np.mean(np.sum((pred-b)**2,axis=1)))))
 
+    collision_pairs=_assembled_panel_collision_pairs(tiles,mesh_faces)
     grouped=pipeline._tile_face_planarity_by_group(tiles)
     metrics=dict(metrics_in)
     metrics.update({
@@ -257,6 +300,8 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         "paper_t3d_top_bottom_parallel_angle_max_deg":max(parallel_angles,default=0.0),
         "paper_t3d_top_bottom_parallel_angle_mean_deg":float(np.mean(parallel_angles)) if parallel_angles else 0.0,
         "paper_t3d_rigid_transform_rms":float(np.mean(rigid_rms)) if rigid_rms else 0.0,
+        "paper_t3d_panel_collision_count":int(len(collision_pairs)),
+        "paper_t3d_panel_collision_pairs":[[int(a),int(b)] for a,b in collision_pairs[:64]],
         "paper_t3d_note":"Eq.(2) solved on shared mesh vertices. Weak normal-offset rest term fixes numerical drift; principal-curvature grid alignment is an upstream optional paper path and is not changed here."
     })
     local_top=np.tile(np.asarray([0,1,2,3],int),(tile_count,1))
@@ -265,6 +310,12 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     assembly=pipeline.TileAssembly(
         vertices=tiles,top_faces=local_top,bottom_faces=local_bottom,
         side_faces=local_sides,stage=stage,metrics=metrics,transform_matrices=transforms)
+    if collision_pairs:
+        raise RuntimeError(
+            "PAPER_T3D_PANEL_COLLISION: assembled finite-thickness panels intersect; "
+            f"count={len(collision_pairs)} sample={collision_pairs[:8]}. "
+            "T3D is rejected instead of silently passing a solid-invalid assembly."
+        )
     report=pipeline.StageReport(
         name=f"{mesh.stage} -> {stage}",
         objective=metrics["objective"],before_error=before,after_error=after,
