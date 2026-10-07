@@ -18,6 +18,8 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent
 _CANDIDATES = [
+    _ROOT / "app_runtime_base.py",
+    # Historical fallbacks only.
     _ROOT / "app_backup_before_sideface_contact.py",
     _ROOT / "app_backup_before_mitered_t3d.py",
 ]
