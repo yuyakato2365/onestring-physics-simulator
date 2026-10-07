@@ -872,16 +872,28 @@ with st.sidebar:
         "初期展開配置に留める重み。高いほど散らばりにくいが、衝突から逃げにくくなる。",
         lambda: st.slider("hinge layout anchor weight", 0.0, 0.5, 0.0, 0.005, help="Anchor/trust weight toward the initial fabrication layout."),
     )
-    hinge_layout_initial_expansion = _param_row(
-        "最適化前にタイル中心を少し外へ逃がす量。1.03〜1.10程度が通常。大きいと空洞が広がりすぎる。",
+    hinge_layout_initial_expansion_enabled = _param_row(
+        "独自拡張: E_Hinge 最適化前にタイル中心を外向きへ広げる処理。OFFでは元の T2D Top Hinge 配置をそのまま初期状態に使う。",
+        lambda: st.checkbox(
+            "Enable hinge layout initial expansion (project extension)",
+            value=False,
+            help="OFF: start Eq.6 from the unexpanded T2D Top Hinge layout. ON: apply the project-specific radial center expansion before optimization.",
+        ),
+    )
+    hinge_layout_initial_expansion_requested = _param_row(
+        "ON時だけ使う外向き拡大倍率。1.0は拡大なし。",
         lambda: st.slider(
             "hinge layout initial expansion",
             1.0,
             10.0,
             1.6,
             0.01,
-            help="Bounded additive tile-center expansion before E_Hinge. Use 1.03-1.12 normally; large values create oversized voids.",
+            disabled=not hinge_layout_initial_expansion_enabled,
+            help="Project-specific radial tile-center expansion before E_Hinge.",
         ),
+    )
+    hinge_layout_initial_expansion = (
+        hinge_layout_initial_expansion_requested if hinge_layout_initial_expansion_enabled else 1.0
     )
     hinge_layout_max_center_drift_tiles = _param_row(
         "展開後の基準配置から各タイル中心が移動できる最大距離。大きいほど解けるが散らばりやすい。",
