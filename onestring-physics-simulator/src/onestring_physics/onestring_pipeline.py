@@ -2710,7 +2710,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             "lambda_min": float(differential["lambda_min"]),
             "lambda_median": float(differential["lambda_median"]),
             "lambda_max": float(differential["lambda_max"]),
-            "lambda_bound": 2.0,
+            "lambda_bound": reference_split_threshold,
             "lambda_exceeds_bound_triangle_count": int(differential["lambda_exceeds_bound_triangle_count"]),
             "lambda_mapping_direction": str(differential["mapping_direction"]),
             "lambda_normalization": str(differential["lambda_normalization"]),
@@ -3207,7 +3207,8 @@ def _reference_flatten_to_domain(parameterization, grid, params):
     domain.reference_grid_index_bounds = [i_min, i_max, j_min, j_max]
     domain.csf_before = float(np.nanmax(lambda_triangles)) if lambda_triangles.size else 1.0
     domain.csf_after_split = domain.csf_before
-    domain.csf_split_threshold = 2.0
+    reference_split_threshold = float(getattr(params, "csf_split_threshold", 1.9))
+    domain.csf_split_threshold = reference_split_threshold
     domain.csf_split_enabled = False
     domain.csf_model = "exact per-triangle max singular value of J^-1"
     domain.csf_split_exactness_label = "diagnostic_only"
@@ -3221,7 +3222,7 @@ def _reference_flatten_to_domain(parameterization, grid, params):
     domain.reference_split_diagnostics = {
         "lambda_bound": 2.0,
         "lambda_max": float(domain.csf_before),
-        "split_required": bool(domain.csf_before > 2.0),
+        "split_required": bool(domain.csf_before > reference_split_threshold),
         "highest_gaussian_curvature_vertex_id": peak_id,
         "highest_gaussian_curvature_angle_defect": float(gaussian[peak_id]) if peak_id >= 0 else None,
         "highest_gaussian_curvature_uv": uv[peak_id].tolist() if peak_id >= 0 else None,
