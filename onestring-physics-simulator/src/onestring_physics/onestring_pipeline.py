@@ -3273,16 +3273,22 @@ def _paper_lambda_vertices_for_existing_omega(parameterization) -> tuple[np.ndar
 
 
 def _paper_complete_split_lines(parameterization, lambda_vertices: np.ndarray, threshold: float = 2.0, max_splits: int = 4) -> list[tuple[str, float]]:
-    """Paper-stated Sec. 4.5 split policy on an already constructed Omega.
+    """Return the *next* paper-style complete Split line for the current Omega.
 
-    Splits are complete grid-direction bisections through successively selected
-    high-Gaussian-curvature vertices.  No localized cuts, symmetry mirroring,
-    extrusion-aware costs, or high-stretch-band split placement are used.
+    Sec. 4.5 / Fig. 6 is hierarchical: test the current part, bisect it once
+    through its highest-Gaussian-curvature point along a quad-grid direction,
+    then test the resulting parts before deciding whether another Split is
+    needed.  The old implementation incorrectly interpreted max_splits as
+    permission to emit several peak lines in one pass.
 
-    The paper does not specify which of the two quad-grid directions is chosen
-    when both pass through the curvature point.  We resolve only that
-    under-specified choice by selecting the direction that most nearly bisects
-    the currently violating UV vertices; this is recorded in diagnostics.
+    This function therefore emits at most ONE line.  Repeated splitting must be
+    driven by a component-wise post-cut lambda test; max_splits is only a safety
+    budget for that outer hierarchy.
+
+    The paper does not specify which of the two grid directions to choose at the
+    curvature point.  Until that missing detail is reconstructed, choose the
+    direction that most nearly bisects the currently violating UV samples and
+    record that this is an implementation tie-break.
     """
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     values = np.asarray(lambda_vertices, dtype=float)
@@ -3292,43 +3298,33 @@ def _paper_complete_split_lines(parameterization, lambda_vertices: np.ndarray, t
     if not np.any(violating):
         return []
 
-    # Curvature ordering is computed on S; _surface_peak_uvs returns the UV
-    # positions of separated vertices in descending positive angle defect.
-    peaks = _surface_peak_uvs(parameterization, max_peaks=max(8, int(max_splits) * 4))
-    if len(peaks) == 0:
+    boundary_loop = [int(v) for v in parameterization.metrics.get("boundary_loop", [])]
+    gaussian = _reference_gaussian_angle_defects(
+        np.asarray(parameterization.surface_vertices_3d, dtype=float),
+        np.asarray(parameterization.surface_faces, dtype=int),
+        boundary_loop,
+    )
+    if not len(gaussian) or not np.any(np.isfinite(gaussian)):
         return []
 
-    residual = violating.copy()
-    lines: list[tuple[str, float]] = []
-    for peak in peaks:
-        if len(lines) >= int(max_splits) or not np.any(residual):
-            break
-
-        # Choose only between the two paper-permitted grid directions.  "Bisect"
-        # is interpreted literally: prefer the complete line producing the most
-        # balanced partition of the remaining violating samples.
-        candidates: list[tuple[float, str, float]] = []
-        pts = uv[residual]
-        for axis, coord in (("col", 0), ("row", 1)):
-            value = float(peak[coord])
-            left = int(np.count_nonzero(pts[:, coord] < value))
-            right = int(np.count_nonzero(pts[:, coord] > value))
-            if left == 0 or right == 0:
-                continue
-            candidates.append((abs(left - right), axis, value))
-        if not candidates:
+    # One current part -> one highest-curvature point -> at most one complete cut.
+    peak_id = int(np.nanargmax(gaussian))
+    peak = uv[peak_id]
+    pts = uv[violating]
+    candidates: list[tuple[int, str, float]] = []
+    for axis, coord in (("col", 0), ("row", 1)):
+        value = float(peak[coord])
+        left = int(np.count_nonzero(pts[:, coord] < value))
+        right = int(np.count_nonzero(pts[:, coord] > value))
+        if left == 0 or right == 0:
             continue
-        candidates.sort(key=lambda item: item[0])
-        _imbalance, axis, value = candidates[0]
-        if not _append_unique_split_line(lines, (axis, value), uv, int(max_splits)):
-            continue
+        candidates.append((abs(left - right), axis, value))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda item: item[0])
+    _imbalance, axis, value = candidates[0]
+    return [(axis, value)]
 
-        # Hierarchical bookkeeping only: after a complete cut, do not select the
-        # same narrow grid-line neighborhood again.  We do not claim that this
-        # recomputes a new conformal map; the paper does not specify such a
-        # reparameterization step.
-        residual &= ~_split_line_band_mask(uv, (axis, value), band_fraction=0.055)
-    return lines
 
 
 def _flatten_to_domain(parameterization, grid, params=None):
@@ -3387,7 +3383,7 @@ def _flatten_to_domain(parameterization, grid, params=None):
         "split_required": bool(domain.csf_before > 2.0),
         "split_locations": [_split_line_as_metric(line) for line in split_lines],
         "split_count": int(len(split_lines)),
-        "split_model": "complete hierarchical grid-direction split through high Gaussian curvature; Sec. 4.5",
+        "split_model": "Sec. 4.5 first hierarchical step: at most one complete grid-direction split through the highest Gaussian curvature point",
         "disabled_project_extensions": [
             "bidirectional distortion proxy",
             "localized split segments",
@@ -3396,6 +3392,11 @@ def _flatten_to_domain(parameterization, grid, params=None):
             "high-stretch-band split placement",
         ],
         "direction_tie_break": "when both grid directions are possible, choose the more balanced bisection; paper leaves this choice unspecified",
+        "hierarchy_status": (
+            "first_split_only_pending_componentwise_lambda_retest"
+            if split_lines else "no_split_required_or_no_valid_complete_cut"
+        ),
+        "max_csf_splits_semantics": "safety budget for future hierarchical recursion; never number of lines emitted in one pass",
         "lambda_normalization": str(lambda_diff.get("lambda_normalization", "min_to_one_hypothesis_a")),
     }
     parameterization.metrics["split_diagnostics"] = dict(domain.paper_split_diagnostics)
