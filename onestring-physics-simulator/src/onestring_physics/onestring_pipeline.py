@@ -3266,8 +3266,8 @@ def _flatten_to_domain(parameterization, grid, params=None):
     vertex, triangle, differential = _paper_lambda_vertices_for_existing_omega(parameterization)
     parameterization.metrics.update(
         split_area_ratio_per_triangle=triangle.tolist(),
-        split_linear_stretch_max=float(np.max(differential['sigma1'])),
-        split_conformal_anisotropy_max=float(np.max(differential['anisotropy'])),
+        split_linear_stretch_max=float(np.nanmax(differential['sigma1'])),
+        split_conformal_anisotropy_max=float(np.nanmax(differential['anisotropy'])),
         split_area_bound_requires_conformal_map=True,
     )
     threshold = float(getattr(params, "csf_split_threshold", 2.0))
@@ -3278,7 +3278,7 @@ def _flatten_to_domain(parameterization, grid, params=None):
     domain.paper_split_policy = True
     domain.parameterization = parameterization
     domain.csf_values = vertex
-    domain.csf_before = float(np.max(triangle))
+    domain.csf_before = float(np.nanmax(triangle))
     domain.csf_after_split = domain.csf_before
     domain.csf_split_threshold = threshold
     domain.max_csf_splits = max(0, int(getattr(params, "max_csf_splits", 64)))

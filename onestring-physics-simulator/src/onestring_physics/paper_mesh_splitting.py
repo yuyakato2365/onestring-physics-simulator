@@ -42,18 +42,66 @@ def area_field(parameterization):
     surface_area2 = np.linalg.norm(np.cross(surface[:, 1]-surface[:, 0], surface[:, 2]-surface[:, 0]), axis=1)
     if not len(faces) or not np.isfinite(tri).all() or not np.isfinite(surface).all():
         raise ValueError('Split CSF requires a finite, nonempty triangle correspondence')
-    if np.any(np.abs(signed) <= np.finfo(float).tiny) or np.any(surface_area2 <= np.finfo(float).tiny):
-        raise ValueError('Split CSF is undefined on a degenerate surface/UV triangle')
-    if np.any(signed > 0) and np.any(signed < 0):
+    tiny = np.finfo(float).tiny
+    uv_area = np.abs(signed)
+    # A degenerate SOURCE triangle is an input defect and still refuses the run.
+    xyz_scale = float(np.median(surface_area2)) if len(surface_area2) else 0.
+    if np.any(surface_area2 <= max(tiny, 1e-12*xyz_scale)):
+        raise ValueError('Split CSF is undefined: the source surface mesh has a degenerate triangle')
+    # A collapsed UV triangle has no flat area, so it states no area-expansion
+    # requirement of its own.  Exclude and report it rather than discarding the
+    # whole evaluation, but refuse a widespread collapse: that is a
+    # parameterization failure, not a local artefact.
+    uv_scale = float(np.median(uv_area[uv_area > tiny])) if np.any(uv_area > tiny) else 0.
+    degenerate = uv_area <= max(tiny, 1e-12*uv_scale)
+    usable = ~degenerate
+    limit = float(getattr(parameterization, 'split_csf_degenerate_uv_limit', .01))
+    if not np.any(usable):
+        raise ValueError('Split CSF is undefined: every UV triangle is degenerate')
+    if degenerate.mean() > limit:
+        raise ValueError(
+            f'Split CSF refuses a widespread UV collapse: {int(degenerate.sum())}/{len(faces)} '
+            f'triangles ({degenerate.mean():.2%}) exceed the {limit:.2%} tolerance')
+    if np.any(signed[usable] > 0) and np.any(signed[usable] < 0):
         raise ValueError('Split CSF cannot certify a folded UV map')
-    raw = surface_area2 / np.abs(signed)
-    if not np.isfinite(raw).all():
+    raw = np.full(len(faces), np.nan)
+    raw[usable] = surface_area2[usable]/uv_area[usable]
+    if not np.isfinite(raw[usable]).all():
         raise ValueError('Nonfinite area Jacobian in Split CSF')
-    normalized = raw / raw.min()
+    normalized = raw/np.nanmin(raw)
     vertex = np.ones(len(uv))
-    np.maximum.at(vertex, faces.ravel(), np.repeat(normalized, 3))
+    np.maximum.at(vertex, faces[usable].ravel(), np.repeat(normalized[usable], 3))
+    q = [0., .1, 1., 5., 25., 50., 75., 95., 99., 99.9, 100.]
+    finite_raw = raw[np.isfinite(raw)]
+    uv_ok = uv_area[usable]
+    parameterization.metrics.update(
+        split_csf_raw_percentiles={f'p{x:g}': float(v) for x, v in zip(q, np.percentile(finite_raw, q))},
+        split_csf_uv_area_percentiles={f'p{x:g}': float(v) for x, v in zip(q, np.percentile(uv_ok, q))},
+        split_csf_xyz_area_percentiles={f'p{x:g}': float(v) for x, v in zip(q, np.percentile(surface_area2, q))},
+        split_csf_raw_below_p1_count=int((finite_raw < np.percentile(finite_raw, 1.)).sum()),
+        split_csf_normalized_if_anchor_p1=float(np.nanmax(raw)/np.percentile(finite_raw, 1.)),
+        split_csf_normalized_if_anchor_median=float(np.nanmax(raw)/np.median(finite_raw)),
+        split_csf_anchor_raw_min=float(np.nanmin(raw)),
+        split_csf_degenerate_uv_face_count=int(degenerate.sum()),
+        split_csf_degenerate_uv_face_fraction=float(degenerate.mean()),
+        split_csf_degenerate_uv_face_ids=np.flatnonzero(degenerate).tolist()[:64],
+        split_csf_degenerate_uv_policy=f'excluded from the area Jacobian; refuse above {limit:.2%}',
+    )
+    pr = {f'p{x:g}': float(v) for x, v in zip(q, np.percentile(finite_raw, q))}
+    pu = {f'p{x:g}': float(v) for x, v in zip(q, np.percentile(uv_ok, q))}
+    print(
+        '[AREA-FIELD] faces=%d degenerate_uv=%d (%.3f%%)\n'
+        '  raw      p0=%.4g p1=%.4g p5=%.4g p50=%.4g p95=%.4g p99=%.4g p100=%.4g\n'
+        '  uv_area  p0=%.4g p1=%.4g p50=%.4g p100=%.4g\n'
+        '  lambda_max  anchor=min:%.4g  anchor=p1:%.4g  anchor=median:%.4g'
+        % (len(faces), int(degenerate.sum()), 100*degenerate.mean(),
+           pr['p0'], pr['p1'], pr['p5'], pr['p50'], pr['p95'], pr['p99'], pr['p100'],
+           pu['p0'], pu['p1'], pu['p50'], pu['p100'],
+           float(np.nanmax(raw)/np.nanmin(raw)),
+           float(np.nanmax(raw)/np.percentile(finite_raw, 1.)),
+           float(np.nanmax(raw)/np.median(finite_raw))),
+        flush=True)
     return vertex, normalized, raw
-
 
 def gaussian_curvature(parameterization):
     """Signed angle defect / barycentric dual area; exclude chart boundaries."""
@@ -111,23 +159,69 @@ def _intersection_area(triangle, polygon):
     return abs(sum(_cross(a, b) for a, b in zip(points, np.roll(points, -1, axis=0))))*.5
 
 
-def _face_samples(vertices, faces, parameterization):
+def _face_samples(vertices, faces, parameterization, threshold=2.):
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     sf = np.asarray(getattr(parameterization, 'uv_faces', parameterization.surface_faces), int)
     triangles = uv[sf]
     lower, upper = triangles.min(axis=1), triangles.max(axis=1)
     lo, hi, samples = [], [], []
     _, _, raw = area_field(parameterization)
+    tiny = np.finfo(float).tiny
+    # The active floor stays at 1e-12 of the quad area, i.e. "strictly positive overlap".
+    # The sweep only reports what other floors would measure; it changes nothing.
+    floors = (0., 1e-6, 1e-4, 1e-3, 1e-2, 5e-2)
+    sweep = {f: ([], []) for f in floors}
+    lo_cover, hi_cover = [], []
     for face in faces:
         polygon = vertices[face, :2]
         candidates = np.flatnonzero(np.all(upper >= polygon.min(axis=0), axis=1) & np.all(lower <= polygon.max(axis=0), axis=1))
         area = abs(sum(_cross(a-polygon[0], b-polygon[0]) for a, b in zip(polygon, np.roll(polygon, -1, axis=0))))*.5
-        ids = [int(i) for i in candidates if _intersection_area(triangles[i], polygon) > area*1e-12]
-        if not ids:
-            raise ValueError('M2D quad has no source triangles for component CSF evaluation')
-        lo.append(float(raw[ids].min())); hi.append(float(raw[ids].max()))
+        overlap = [(int(i), _intersection_area(triangles[i], polygon)) for i in candidates if np.isfinite(raw[i])]
+        overlap = [(i, c) for i, c in overlap if c > area*1e-12]
+        if not overlap:
+            raise ValueError('M2D quad has no non-degenerate source triangle for component CSF evaluation')
+        ids = np.asarray([i for i, _ in overlap], int)
+        cover = np.asarray([c for _, c in overlap], float)/max(area, tiny)
+        values = raw[ids]
+        lo.append(float(values.min())); hi.append(float(values.max()))
         samples.append(np.unique(sf[ids]))
-    return np.asarray(lo), np.asarray(hi), samples
+        lo_cover.append(float(cover[int(values.argmin())])); hi_cover.append(float(cover[int(values.argmax())]))
+        for f in floors:
+            keep = cover >= f
+            if not np.any(keep):
+                # Never drop every source triangle: fall back to the widest-covering one.
+                keep = cover >= cover.max()
+            sweep[f][0].append(float(values[keep].min())); sweep[f][1].append(float(values[keep].max()))
+    lo, hi = np.asarray(lo), np.asarray(hi)
+    lo_cover, hi_cover = np.asarray(lo_cover), np.asarray(hi_cover)
+    quad_sigma = hi/lo
+    q = [0., 50., 90., 99., 100.]
+    report = {}
+    for f in floors:
+        fl, fh = np.asarray(sweep[f][0]), np.asarray(sweep[f][1])
+        report[f] = (float(fh.max()/fl.min()), int(np.count_nonzero(fh/fl > threshold+1e-10)), float((fh/fl).max()))
+    parameterization.metrics.update(
+        split_quad_count=int(len(faces)),
+        split_quad_sigma_percentiles={f'p{x:g}': float(v) for x, v in zip(q, np.percentile(quad_sigma, q))},
+        split_quad_irreducible_count=int(np.count_nonzero(quad_sigma > threshold+1e-10)),
+        split_quad_lo_set_by_sliver_count=int(np.count_nonzero(lo_cover < .01)),
+        split_quad_hi_set_by_sliver_count=int(np.count_nonzero(hi_cover < .01)),
+        split_quad_coverage_floor_active=1e-12,
+        split_quad_coverage_floor_sweep={f'{f:g}': {'chart_sigma': report[f][0], 'quads_over_threshold': report[f][1],
+                                                    'worst_quad_sigma': report[f][2]} for f in floors},
+    )
+    print('[FACE-SAMPLES] quads=%d threshold=%.4g active_coverage_floor=1e-12 (unchanged)' % (len(faces), threshold), flush=True)
+    print('  quad sigma hi/lo  ' + '  '.join('p%g=%.4g' % (x, v) for x, v in zip(q, np.percentile(quad_sigma, q)))
+          + '   irreducible(>thr)=%d/%d' % (int(np.count_nonzero(quad_sigma > threshold+1e-10)), len(faces)), flush=True)
+    print('  lo set by a triangle covering <1%% of the quad: %d quads  (<0.01%%: %d)'
+          % (int(np.count_nonzero(lo_cover < .01)), int(np.count_nonzero(lo_cover < 1e-4))), flush=True)
+    print('  hi set by a triangle covering <1%% of the quad: %d quads  (<0.01%%: %d)'
+          % (int(np.count_nonzero(hi_cover < .01)), int(np.count_nonzero(hi_cover < 1e-4))), flush=True)
+    print('  coverage-floor sweep (report only, nothing changed):', flush=True)
+    for f in floors:
+        s, n, w = report[f]
+        print('    floor=%-8g chart_sigma=%-8.4g worst_quad_sigma=%-8.4g quads_over_threshold=%d' % (f, s, w, n), flush=True)
+    return lo, hi, samples
 
 
 def split_mesh(vertices, faces, domain, params=None):
@@ -135,7 +229,12 @@ def split_mesh(vertices, faces, domain, params=None):
 
     vertices, faces = np.asarray(vertices, float).copy(), np.asarray(faces, int).copy()
     parameterization = domain.parameterization
-    lo, hi, samples = _face_samples(vertices, faces, parameterization)
+    threshold = float(getattr(domain, 'csf_split_threshold', 2.))
+    lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
+    # A grid cut only partitions existing quads (_cut_once duplicates vertices, never adds
+    # faces), so no cut can change a quad's own lo/hi. A component holding a quad whose own
+    # hi/lo already exceeds the bound therefore cannot be brought under it by any cut.
+    irreducible = hi/lo
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     curvature = gaussian_curvature(parameterization)
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
@@ -143,7 +242,6 @@ def split_mesh(vertices, faces, domain, params=None):
     # Cuts and snapping take place in grid coordinates, including rotated BFF grids.
     vertices[:, :2] = vertices[:, :2] @ rotation
     uv_grid = uv @ rotation
-    threshold = float(getattr(domain, 'csf_split_threshold', 2.))
     budget = max(0, int(getattr(domain, 'max_csf_splits', 64)))
     enabled = bool(getattr(domain, 'csf_split_enabled', True))
     records, rejected, pairs, blocked = [], [], [], set()
@@ -154,6 +252,13 @@ def split_mesh(vertices, faces, domain, params=None):
     while enabled and len(records) < budget:
         components = _edge_components(faces)
         bad = [c for c in components if ratio(c) > threshold+1e-10 and tuple(c) not in blocked]
+        for c in bad:
+            if float(irreducible[c].max()) > threshold+1e-10:
+                blocked.add(tuple(c))
+                rejected.append({'face_ids': c.tolist(), 'sigma': ratio(c),
+                                 'irreducible_quad_sigma': float(irreducible[c].max()),
+                                 'reason': 'a_single_quad_already_exceeds_the_bound_so_no_grid_cut_can_help'})
+        bad = [c for c in bad if tuple(c) not in blocked]
         if not bad:
             break
         component = max(bad, key=ratio)
@@ -241,10 +346,15 @@ def split_mesh(vertices, faces, domain, params=None):
         raw_split_locations=[[r['axis'], r['requested_value']] for r in records],
         csf_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in records),
         csf_split_budget_exhausted=exhausted, csf_split_unresolved_component_count=unresolved,
-        csf_split_status='satisfied' if not unresolved else ('disabled' if not enabled else 'budget_exhausted' if exhausted else 'no_admissible_cut'),
+        csf_split_status='satisfied' if not unresolved else ('disabled' if not enabled else 'budget_exhausted' if exhausted
+                          else 'irreducible_quad_sigma' if all(float(irreducible[c].max()) > threshold+1e-10 for c in final if ratio(c) > threshold+1e-10)
+                          else 'no_admissible_cut'),
         csf_split_step_analysis=records, csf_split_step_count=len(records),
         csf_split_step_analysis_model='exact source-triangle area Jacobian extrema over each retained quad component; independent component similarity normalization; no reparameterization',
         csf_split_component_sigma=values, csf_split_component_area_scale=[float(lo[c].min()) for c in final],
+        csf_split_component_irreducible_quad_sigma=[float(irreducible[c].max()) for c in final],
+        csf_split_irreducible_quad_count=int(np.count_nonzero(irreducible > threshold+1e-10)),
+        csf_split_quad_coverage_floor_sweep=parameterization.metrics.get('split_quad_coverage_floor_sweep'),
         csf_split_face_sigma=face_sigma.tolist(),
         csf_split_residual_high_face_count=int(np.count_nonzero(face_sigma > threshold+1e-10)),
         csf_split_additional_split_recommended_after_all=bool(unresolved),
