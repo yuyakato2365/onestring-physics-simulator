@@ -3248,73 +3248,158 @@ def _reference_flatten_to_domain(parameterization, grid, params):
     return domain
 
 
+def _paper_lambda_vertices_for_existing_omega(parameterization) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Evaluate the paper's conformal scale factor on the existing S->Omega map.
+
+    This intentionally does NOT replace or modify Omega.  The user's selected
+    parameterization is kept verbatim; normalization is used only to remove the
+    arbitrary global similarity scale before evaluating the physical expansion
+    bound lambda <= 2 for quadrilateral auxetics.
+    """
+    xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    faces = np.asarray(parameterization.surface_faces, dtype=int)
+    if len(xyz) == 0 or len(uv) == 0 or len(faces) == 0:
+        return np.ones(len(uv), dtype=float), np.ones(len(faces), dtype=float), {}
+    _normalized_uv, differential = normalize_uv_and_compute_csf(
+        xyz,
+        uv,
+        faces,
+        normalization="min_to_one_hypothesis_a",
+    )
+    tri_lambda = np.asarray(differential["lambda"], dtype=float)
+    vertex_lambda = _reference_triangle_values_to_vertices(tri_lambda, faces, len(uv))
+    return vertex_lambda, tri_lambda, differential
+
+
+def _paper_complete_split_lines(parameterization, lambda_vertices: np.ndarray, threshold: float = 2.0, max_splits: int = 4) -> list[tuple[str, float]]:
+    """Paper-stated Sec. 4.5 split policy on an already constructed Omega.
+
+    Splits are complete grid-direction bisections through successively selected
+    high-Gaussian-curvature vertices.  No localized cuts, symmetry mirroring,
+    extrusion-aware costs, or high-stretch-band split placement are used.
+
+    The paper does not specify which of the two quad-grid directions is chosen
+    when both pass through the curvature point.  We resolve only that
+    under-specified choice by selecting the direction that most nearly bisects
+    the currently violating UV vertices; this is recorded in diagnostics.
+    """
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    values = np.asarray(lambda_vertices, dtype=float)
+    if len(uv) == 0 or len(values) != len(uv) or int(max_splits) <= 0:
+        return []
+    violating = np.isfinite(values) & (values > float(threshold))
+    if not np.any(violating):
+        return []
+
+    # Curvature ordering is computed on S; _surface_peak_uvs returns the UV
+    # positions of separated vertices in descending positive angle defect.
+    peaks = _surface_peak_uvs(parameterization, max_peaks=max(8, int(max_splits) * 4))
+    if len(peaks) == 0:
+        return []
+
+    residual = violating.copy()
+    lines: list[tuple[str, float]] = []
+    for peak in peaks:
+        if len(lines) >= int(max_splits) or not np.any(residual):
+            break
+
+        # Choose only between the two paper-permitted grid directions.  "Bisect"
+        # is interpreted literally: prefer the complete line producing the most
+        # balanced partition of the remaining violating samples.
+        candidates: list[tuple[float, str, float]] = []
+        pts = uv[residual]
+        for axis, coord in (("col", 0), ("row", 1)):
+            value = float(peak[coord])
+            left = int(np.count_nonzero(pts[:, coord] < value))
+            right = int(np.count_nonzero(pts[:, coord] > value))
+            if left == 0 or right == 0:
+                continue
+            candidates.append((abs(left - right), axis, value))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: item[0])
+        _imbalance, axis, value = candidates[0]
+        if not _append_unique_split_line(lines, (axis, value), uv, int(max_splits)):
+            continue
+
+        # Hierarchical bookkeeping only: after a complete cut, do not select the
+        # same narrow grid-line neighborhood again.  We do not claim that this
+        # recomputes a new conformal map; the paper does not specify such a
+        # reparameterization step.
+        residual &= ~_split_line_band_mask(uv, (axis, value), band_fraction=0.055)
+    return lines
+
+
 def _flatten_to_domain(parameterization, grid, params=None):
     if str(getattr(parameterization, "method", "")) == "paper_reference_bff":
         if params is None:
             raise ValueError("paper_reference_bff requires explicit PipelineParameters")
         return _reference_flatten_to_domain(parameterization, grid, params)
-    domain = _ORIGINAL_FLATTEN_TO_DOMAIN(parameterization, grid, params)
-    threshold = float(getattr(params, "csf_split_threshold", 1.9)) if params is not None else 1.9
-    enabled = bool(getattr(params, "enable_csf_splits", True)) if params is not None else True
-    enabled = enabled and bool(getattr(params, "enable_heuristic_csf_split", True)) if params is not None else enabled
-    max_splits = int(getattr(params, "max_csf_splits", 4)) if params is not None else 4
-    symmetry_enabled = bool(getattr(params, "preserve_detected_symmetry", True)) if params is not None else True
-    symmetry_enabled = symmetry_enabled and bool(getattr(params, "enable_mirror_split", True)) if params is not None else symmetry_enabled
-    symmetry = _detect_parameterization_reflection_symmetry(parameterization) if symmetry_enabled else {"axes": [], "centers": {}, "details": {}, "tolerance": 0.0}
-    csf = _parameterization_stretch_csf(parameterization)
-    peak_enabled = bool(getattr(params, "enable_peak_guided_split", True)) if params is not None else True
-    overlay_metrics = _rebuild_domain_overlay_for_general_omega(domain, parameterization, grid, params)
-    from .extrusion_aware import split_cost_values
-    selection_csf = split_cost_values(parameterization, domain, grid, params, csf, sys.modules[__name__])
-    if enabled:
-        if peak_enabled:
-            split_lines = _csf_split_lines(parameterization, selection_csf, threshold=threshold, max_splits=max_splits)
-        else:
-            uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
-            high = uv[np.asarray(selection_csf, dtype=float) > float(threshold)]
-            split_lines = _csf_split_lines_from_high_stretch(uv, high, max_splits) if len(high) else []
-    else:
-        split_lines = []
-    from .extrusion_aware import enabled as extrusion_enabled, select_split_candidates
-    if enabled and extrusion_enabled(params) and params.use_extrusion_aware_split:
-        split_lines = select_split_candidates(parameterization, csf, selection_csf, threshold, max_splits, sys.modules[__name__])
-    if symmetry_enabled:
-        split_lines = _mirror_csf_split_lines(
-            split_lines,
-            list(symmetry.get("axes", [])),
-            dict(symmetry.get("centers", {})),
-            np.asarray(parameterization.uv_vertices_2d, dtype=float),
-        )
-    localized_split_segments = _localized_csf_split_segments(parameterization, selection_csf, threshold, split_lines, params) if split_lines else []
-    peak_uvs = _surface_peak_uvs(parameterization)
-    peak_uv = np.mean(peak_uvs, axis=0) if len(peak_uvs) else None
-    peak_alignment = _align_domain_grid_to_uv_points(domain, peak_uvs if len(peak_uvs) else None)
-    domain.csf_values = csf
-    domain.split_lines = split_lines
-    domain.localized_split_segments = localized_split_segments  # type: ignore[attr-defined]
-    domain.parameterization = parameterization  # type: ignore[attr-defined]
-    domain.csf_before = float(np.max(csf)) if csf.size else 1.0  # type: ignore[attr-defined]
-    domain.csf_after_split = min(float(domain.csf_before), float(threshold)) if split_lines else float(domain.csf_before)  # type: ignore[attr-defined]
-    domain.csf_split_threshold = float(threshold)  # type: ignore[attr-defined]
-    domain.max_csf_splits = int(max_splits)  # type: ignore[attr-defined]
-    domain.csf_split_enabled = bool(enabled)  # type: ignore[attr-defined]
-    domain.csf_model = "edge_stretch_proxy"  # type: ignore[attr-defined]
-    domain.csf_split_exactness_label = "heuristic"  # type: ignore[attr-defined]
-    domain.peak_guided_split_enabled = bool(peak_enabled)  # type: ignore[attr-defined]
-    domain.mirror_split_enabled = bool(symmetry_enabled)  # type: ignore[attr-defined]
-    domain.localize_csf_splits = bool(getattr(params, "localize_csf_splits", True)) if params is not None else True  # type: ignore[attr-defined]
-    domain.localized_split_segment_count = int(len(localized_split_segments))  # type: ignore[attr-defined]
-    domain.detected_symmetry_axes = list(symmetry.get("axes", []))  # type: ignore[attr-defined]
-    domain.detected_symmetry_centers = dict(symmetry.get("centers", {}))  # type: ignore[attr-defined]
-    domain.detected_symmetry_tolerance = float(symmetry.get("tolerance", 0.0))  # type: ignore[attr-defined]
-    domain.detected_symmetry_details = dict(symmetry.get("details", {}))  # type: ignore[attr-defined]
-    domain.peak_uv_target = peak_uv  # type: ignore[attr-defined]
-    domain.peak_uv_targets = peak_uvs  # type: ignore[attr-defined]
-    domain.peak_grid_alignment = {**dict(overlay_metrics), **dict(peak_alignment)}  # type: ignore[attr-defined]
-    domain.omega_boundary_forced_rectangle = bool(parameterization.metrics.get("omega_boundary_forced_rectangle", False))  # type: ignore[attr-defined]
-    domain.omega_boundary_constraint_model = str(parameterization.metrics.get("omega_boundary_constraint_model", ""))  # type: ignore[attr-defined]
-    return domain
 
+    # Keep the intentionally customized S -> Omega parameterization untouched.
+    domain = _ORIGINAL_FLATTEN_TO_DOMAIN(parameterization, grid, params)
+    overlay_metrics = _rebuild_domain_overlay_for_general_omega(domain, parameterization, grid, params)
+
+    # From Omega onward, follow the stated OneString Sec. 4.5 rule rather than
+    # the project's former heuristic split extensions.
+    threshold = 2.0
+    enabled = bool(getattr(params, "enable_csf_splits", True)) if params is not None else True
+    max_splits = int(getattr(params, "max_csf_splits", 4)) if params is not None else 4
+    lambda_vertices, lambda_triangles, lambda_diff = _paper_lambda_vertices_for_existing_omega(parameterization)
+    split_lines = (
+        _paper_complete_split_lines(parameterization, lambda_vertices, threshold=threshold, max_splits=max_splits)
+        if enabled else []
+    )
+
+    peak_uvs = _surface_peak_uvs(parameterization, max_peaks=max(1, max_splits))
+    peak_uv = peak_uvs[0] if len(peak_uvs) else None
+    peak_alignment = _align_domain_grid_to_uv_points(domain, peak_uvs if len(peak_uvs) else None)
+
+    domain.csf_values = lambda_vertices
+    domain.split_lines = split_lines
+    # A paper split is complete.  Never convert it to a local segment.
+    domain.localized_split_segments = list(split_lines)
+    domain.parameterization = parameterization
+    domain.csf_before = float(np.nanmax(lambda_triangles)) if lambda_triangles.size else 1.0
+    domain.csf_after_split = float(domain.csf_before)
+    domain.csf_split_threshold = threshold
+    domain.max_csf_splits = int(max_splits)
+    domain.csf_split_enabled = bool(enabled)
+    domain.csf_model = "paper conformal scale factor lambda (quadrilateral bound lambda <= 2)"
+    domain.csf_split_exactness_label = "paper_stated_complete_split; grid-direction tie-break recorded"
+    domain.peak_guided_split_enabled = True
+    domain.mirror_split_enabled = False
+    domain.localize_csf_splits = False
+    domain.localized_split_segment_count = int(len(split_lines))
+    domain.detected_symmetry_axes = []
+    domain.detected_symmetry_centers = {}
+    domain.detected_symmetry_tolerance = 0.0
+    domain.detected_symmetry_details = {}
+    domain.peak_uv_target = peak_uv
+    domain.peak_uv_targets = peak_uvs
+    domain.peak_grid_alignment = {**dict(overlay_metrics), **dict(peak_alignment)}
+    domain.omega_boundary_forced_rectangle = bool(parameterization.metrics.get("omega_boundary_forced_rectangle", False))
+    domain.omega_boundary_constraint_model = str(parameterization.metrics.get("omega_boundary_constraint_model", ""))
+    domain.paper_split_diagnostics = {
+        "lambda_bound": 2.0,
+        "lambda_max": float(domain.csf_before),
+        "split_required": bool(domain.csf_before > 2.0),
+        "split_locations": [_split_line_as_metric(line) for line in split_lines],
+        "split_count": int(len(split_lines)),
+        "split_model": "complete hierarchical grid-direction split through high Gaussian curvature; Sec. 4.5",
+        "disabled_project_extensions": [
+            "bidirectional distortion proxy",
+            "localized split segments",
+            "symmetry-mirrored splits",
+            "extrusion-aware split cost",
+            "high-stretch-band split placement",
+        ],
+        "direction_tie_break": "when both grid directions are possible, choose the more balanced bisection; paper leaves this choice unspecified",
+        "lambda_normalization": str(lambda_diff.get("lambda_normalization", "min_to_one_hypothesis_a")),
+    }
+    parameterization.metrics["split_diagnostics"] = dict(domain.paper_split_diagnostics)
+    return domain
 
 def _face_crosses_split(vertices: np.ndarray, face: np.ndarray, split_line: tuple[str, float]) -> bool:
     axis, value = _split_line_axis_value(split_line)
