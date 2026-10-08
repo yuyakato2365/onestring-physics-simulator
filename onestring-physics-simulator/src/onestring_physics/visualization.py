@@ -194,8 +194,39 @@ def _split_lines_for_display(state: OneStringDesignState) -> list[tuple[str, flo
     return list(getattr(state.conformal_domain, "split_lines", []) or [])
 
 
+def _split_segments_for_display(state):
+    mesh = state.mesh_2d_initial
+    if mesh.metrics.get('paper_split_finalized', False):
+        canonical = np.asarray(getattr(mesh, '_split_panel_source_vertices', mesh.vertices))
+        return [canonical[mesh.faces[a, [ea, (ea+1)%4]], :2]
+                for a, ea, _b, _eb in mesh.metrics.get('split_boundary_pairs', [])]
+    boundary = np.asarray(state.conformal_domain.boundary)
+    if not len(boundary):
+        return []
+    lower, upper = boundary.min(axis=0), boundary.max(axis=0)
+    segments = []
+    for axis, value in _split_lines_for_display(state):
+        coord = 1 if axis == 'row' else 0
+        segment = np.array([lower, upper], float)
+        segment[:, coord] = value
+        segments.append(segment)
+    return segments
+
+
 def _split_samples_on_parameterization(state: OneStringDesignState) -> tuple[np.ndarray, np.ndarray]:
     parameterization = state.surface_parameterization
+    mesh = state.mesh_2d_initial
+    if mesh.metrics.get('paper_split_finalized', False):
+        from .onestring_pipeline import inverse_map_uv_to_surface
+        canonical = np.asarray(getattr(mesh, '_split_panel_source_vertices', mesh.vertices))
+        uv_samples, surface_samples = [], []
+        for a, ea, _b, _eb in mesh.metrics.get('split_boundary_pairs', []):
+            points = canonical[mesh.faces[a, [ea, (ea+1)%4]], :2]
+            for t in np.linspace(0., 1., 5):
+                point = (1-t)*points[0]+t*points[1]
+                xyz, _, _ = inverse_map_uv_to_surface(point, parameterization)
+                uv_samples.append(point); surface_samples.append(xyz)
+        return np.asarray(uv_samples).reshape(-1, 2), np.asarray(surface_samples).reshape(-1, 3)
     uv_vertices = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     surface_vertices = np.asarray(parameterization.surface_vertices_3d, dtype=float)
     uv_faces = np.asarray(parameterization.uv_faces, dtype=int)
@@ -242,6 +273,9 @@ def _high_csf_vertices(state: OneStringDesignState) -> tuple[np.ndarray, np.ndar
     parameterization = state.surface_parameterization
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    if state.mesh_2d_initial.metrics.get('paper_split_finalized', False):
+        from .paper_mesh_splitting import chart_geometry
+        xyz, _, _ = chart_geometry(parameterization)
     csf = np.asarray(getattr(state.conformal_domain, "csf_values", np.zeros(0)), dtype=float)
     threshold = float(state.mesh_2d_initial.metrics.get("csf_split_threshold", 2.0))
     if len(uv) == 0 or len(xyz) == 0 or len(csf) != len(uv):
@@ -251,6 +285,14 @@ def _high_csf_vertices(state: OneStringDesignState) -> tuple[np.ndarray, np.ndar
 
 
 def _residual_high_csf_vertices(state: OneStringDesignState) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mesh = state.mesh_2d_initial
+    if mesh.metrics.get('paper_split_finalized', False):
+        values = np.asarray(mesh.metrics.get('csf_split_face_sigma', []), float)
+        ids = np.flatnonzero(values > float(mesh.metrics.get('csf_split_threshold', 2.))+1e-10)
+        canonical = np.asarray(getattr(mesh, '_split_panel_source_vertices', mesh.vertices))
+        uv = canonical[mesh.faces[ids], :2].mean(axis=1)
+        xyz = np.asarray(state.mesh_3d_initial.vertices)[mesh.faces[ids]].mean(axis=1)
+        return uv, xyz, values[ids]
     parameterization = state.surface_parameterization
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
@@ -268,6 +310,11 @@ def _residual_high_csf_vertices(state: OneStringDesignState) -> tuple[np.ndarray
 
 def _surface_peak_markers(state: OneStringDesignState) -> tuple[np.ndarray, np.ndarray]:
     parameterization = state.surface_parameterization
+    if state.mesh_2d_initial.metrics.get('paper_split_finalized', False):
+        from .paper_mesh_splitting import chart_geometry
+        ids = sorted({r['curvature_vertex_id'] for r in state.mesh_2d_initial.metrics.get('simple_split_records', [])})
+        xyz, _, _ = chart_geometry(parameterization)
+        return parameterization.uv_vertices_2d[ids], xyz[ids]
     peak_uv = _surface_peak_uvs(parameterization)
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
@@ -376,8 +423,9 @@ def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
     mesh = state.mesh_2d_initial
     grid_x: list[float | None] = []
     grid_y: list[float | None] = []
+    canonical = np.asarray(getattr(mesh, "_split_panel_source_vertices", mesh.vertices))
     for face in mesh.faces:
-        pts = mesh.vertices[list(face) + [face[0]], :2]
+        pts = canonical[list(face) + [face[0]], :2]
         grid_x.extend([*pts[:, 0].tolist(), None])
         grid_y.extend([*pts[:, 1].tolist(), None])
     fig.add_trace(
@@ -441,35 +489,10 @@ def figure_split_mapping(state: OneStringDesignState) -> go.Figure:
             col=2,
         )
 
-    omega_min = np.nanmin(boundary, axis=0) if len(boundary) else np.array([0.0, 0.0])
-    omega_max = np.nanmax(boundary, axis=0) if len(boundary) else np.array([1.0, 1.0])
-    for axis, value in _split_lines_for_display(state):
-        if axis == "row":
-            fig.add_trace(
-                go.Scatter(
-                    x=[float(omega_min[0]), float(omega_max[0])],
-                    y=[float(value), float(value)],
-                    mode="lines",
-                    line=dict(color="#ef4444", dash="dash", width=2),
-                    name="Omega split line",
-                    showlegend=False,
-                ),
-                row=1,
-                col=2,
-            )
-        else:
-            fig.add_trace(
-                go.Scatter(
-                    x=[float(value), float(value)],
-                    y=[float(omega_min[1]), float(omega_max[1])],
-                    mode="lines",
-                    line=dict(color="#ef4444", dash="dash", width=2),
-                    name="Omega split line",
-                    showlegend=False,
-                ),
-                row=1,
-                col=2,
-            )
+    for segment in _split_segments_for_display(state):
+        fig.add_trace(go.Scatter(x=segment[:, 0], y=segment[:, 1], mode='lines',
+                                line=dict(color='#ef4444', dash='dash', width=2),
+                                name='Omega split edge', showlegend=False), row=1, col=2)
 
     fig.update_layout(
         title="CSF split correspondence: S -> Omega -> M2D",
@@ -834,11 +857,10 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
             showlegend=False,
         )
     )
-    for axis, value in state.conformal_domain.split_lines:
-        if axis == "row":
-            fig.add_hline(y=value, line=dict(color="#ef4444", dash="dash"))
-        else:
-            fig.add_vline(x=value, line=dict(color="#ef4444", dash="dash"))
+    for segment in _split_segments_for_display(state):
+        fig.add_trace(go.Scatter(x=segment[:, 0], y=segment[:, 1], mode='lines',
+                                line=dict(color='#ef4444', dash='dash'),
+                                name='Omega split edge', showlegend=False))
     # Draw the optimized boundary last so the result is not hidden by the
     # dense UV mesh or cropped quad overlay.
     fig.add_trace(

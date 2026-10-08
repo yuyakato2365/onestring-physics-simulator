@@ -620,23 +620,21 @@ with st.sidebar:
             ["min_to_one_hypothesis_a", "none_unspecified"],
             index=0,
         )
-        reference_stop_on_required_split = st.checkbox(
-            "stop when lambda > 2 requires unspecified reparameterization",
-            value=True,
-        )
+        reference_stop_on_required_split = False
     if selected_model_version["id"] in {"2026-09-20-paper-t3d", "2026-09-23-extrusion-aware"}:
         csf_split_threshold = float(
             st.number_input(
-                "Split threshold (CSF)",
+                "Split threshold (area expansion)",
                 min_value=1.0,
-                value=1.9,
+                value=2.0,
                 step=0.05,
                 format="%.3f",
-                help="09-20版のCSF Split閾値。小さくするとSplitが増えやすく、大きくすると減りやすくなります。",
+                help="論文 Supplement Fig. 18 の面積拡張率。論文の上限は2。各成分を再評価して完全分割します。",
             )
         )
     else:
-        csf_split_threshold = 1.9
+        csf_split_threshold = 2.0
+    max_csf_splits = int(st.number_input("Maximum complete splits", min_value=0, value=64, step=1))
     with st.expander(
         "Bijective free-boundary settings",
         expanded=omega_parameterization_mode == "bijective_free_boundary",
@@ -1358,6 +1356,7 @@ def current_pipeline_key() -> tuple:
         reference_csf_normalization,
         reference_stop_on_required_split,
         csf_split_threshold,
+        max_csf_splits,
         bijective_free_boundary_initial_boundary_shape,
         bijective_free_boundary_max_iterations,
         bijective_free_boundary_line_search_max_steps,
@@ -1479,6 +1478,7 @@ pipeline_params = PipelineParameters(
     reference_csf_normalization=reference_csf_normalization,
     reference_stop_on_required_split=reference_stop_on_required_split,
     csf_split_threshold=csf_split_threshold,
+    max_csf_splits=max_csf_splits,
     boundary_target_shape="rectangle",
     boundary_target_aspect_mode=boundary_target_aspect_mode,
     boundary_target_aspect_ratio=boundary_target_aspect_ratio,
@@ -1903,7 +1903,10 @@ elif view_stage == "Split Map":
             "max_csf_before_split": state.mesh_2d_initial.metrics.get("max_csf_before_split"),
             "max_csf_after_split": state.mesh_2d_initial.metrics.get("max_csf_after_split"),
             "csf_split_step_analysis_model": state.mesh_2d_initial.metrics.get("csf_split_step_analysis_model"),
-            "csf_split_residual_high_vertex_count_after_all": state.mesh_2d_initial.metrics.get("csf_split_residual_high_vertex_count_after_all"),
+            "csf_split_residual_high_face_count": state.mesh_2d_initial.metrics.get("csf_split_residual_high_face_count"),
+            "csf_split_status": state.mesh_2d_initial.metrics.get("csf_split_status"),
+            "csf_split_budget_exhausted": state.mesh_2d_initial.metrics.get("csf_split_budget_exhausted"),
+            "csf_split_component_sigma": state.mesh_2d_initial.metrics.get("csf_split_component_sigma"),
             "csf_split_additional_split_recommended_after_all": state.mesh_2d_initial.metrics.get("csf_split_additional_split_recommended_after_all"),
             "number_of_splits": state.mesh_2d_initial.metrics.get("number_of_splits"),
             "split_locations": state.mesh_2d_initial.metrics.get("split_locations"),

@@ -8,7 +8,7 @@ This is not the paper's Shape-Up local/global implementation. See
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import os
 import time
@@ -32,6 +32,7 @@ class LinkageTopology:
     source_vertex_ids: np.ndarray
     hinges: np.ndarray  # tile_a, local_corner_a, tile_b, local_corner_b
     gaps: np.ndarray  # joint, first ray endpoint, second ray endpoint; CCW void
+    split_boundary_pairs: list = field(default_factory=list)  # tile/local-side identities
 
 
 def build_linkage_topology(mesh):
@@ -104,6 +105,7 @@ def build_linkage_topology(mesh):
     gaps = inverse[np.asarray(ray_pairs, int)].reshape(-1, 3) if ray_pairs else np.empty((0,3), int)
     topology = LinkageTopology(sf.copy(), faces, sf.reshape(-1)[roots],
                                np.asarray(hinges, int).reshape(-1,4), gaps)
+    topology.split_boundary_pairs = [list(map(int, p)) for p in mesh.metrics.get('split_boundary_pairs', [])]
     return topology, np.asarray(mesh.vertices, float)[topology.source_vertex_ids, :2].copy()
 
 

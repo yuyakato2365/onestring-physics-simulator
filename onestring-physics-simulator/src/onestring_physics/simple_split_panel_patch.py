@@ -112,6 +112,8 @@ def _cut_once(vertices: np.ndarray, faces: np.ndarray, line: Any):
     interface = sorted(neg_vertices & pos_vertices)
     if not interface:
         return verts, out_faces, None
+    if not np.all(np.abs(verts[interface, coord]-value) <= tol):
+        return verts, out_faces, None
 
     before = len(_edge_components(out_faces))
     replacement: dict[int, int] = {}
@@ -165,6 +167,9 @@ def _open_split_gaps(
         center = np.mean(source[ids, :2], axis=0)
         offset = np.zeros(2, dtype=float)
         for record in split_records:
+            affected = record.get('face_ids')
+            if affected is not None and not np.intersect1d(ids, np.unique(faces[affected])).size:
+                continue
             axis = str(record["axis"])
             value = float(record["snapped_value"])
             coord = 1 if axis == "row" else 0
@@ -175,6 +180,45 @@ def _open_split_gaps(
         out[ids, :2] += offset[None, :]
         offsets.append(offset)
     return out, components, panel_vertices, offsets, gap
+
+
+def apply_paper_split(pipeline_module, mesh, domain, params=None):
+    """The only cut owner: final cropped M2D -> measured hierarchical parts."""
+    from .paper_mesh_splitting import split_mesh
+    canonical, faces, records, measured = split_mesh(mesh.vertices, mesh.faces, domain, params)
+    metrics = dict(mesh.metrics)
+    for key in list(metrics):
+        if key.startswith(('csf_split_', 'split_', 'simple_split_', 'max_csf_', 'number_of_splits', 'raw_split_')):
+            metrics.pop(key)
+    metrics.update(measured)
+    # Work in grid coordinates when opening a rotated grid's seams.
+    angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    grid_vertices = canonical.copy(); grid_vertices[:, :2] = canonical[:, :2] @ rotation
+    separated, components, panel_vertices, offsets, gap = _open_split_gaps(grid_vertices, faces, records, mesh.grid)
+    separated[:, :2] = separated[:, :2] @ rotation.T
+    offsets = [offset @ rotation.T for offset in offsets]
+    metrics.update(paper_split_finalized=True, simple_split_active=True, simple_split_records=records,
+                   split_panel_count=len(components), split_panel_geometry_separated=len(components)>1,
+                   split_panel_face_counts=[len(c) for c in components], split_panel_offsets_xy=[o.tolist() for o in offsets],
+                   split_panel_gap=gap if records else 0., split_panel_layout_model='component-local seam gaps',
+                   final_split_panel_count=len(components), paper_style_complete_split=bool(records))
+    if hasattr(pipeline_module, '_m2d_audit_metrics'):
+        metrics.update(pipeline_module._m2d_audit_metrics(separated, faces, suffix='after_split'))
+    out = _make_quadmesh(pipeline_module, mesh, separated, faces, metrics)
+    _copy_attrs(mesh, out)
+    for name in ('_optcuts_test_boundary_clipped', '_optcuts_test_face_sources', '_optcuts_test_face_uv'):
+        if hasattr(mesh, name):
+            setattr(out, name, getattr(mesh, name))
+    if hasattr(mesh, '_polygon_faces'):
+        out._polygon_faces = faces.tolist()
+    out.split_lines = list(domain.split_lines)
+    out._split_panel_source_vertices = canonical
+    out._split_panel_face_components = components
+    out._split_panel_vertex_components = panel_vertices
+    out._split_panel_offsets = offsets
+    out._split_panel_records = records
+    return out
 
 
 def _copy_attrs(source: Any, target: Any) -> None:
@@ -275,69 +319,35 @@ def install_simple_split_panel_patch(pipeline_module: Any, optimization_debug_mo
     base_build = pipeline_module._build_m2d
 
     def build_m2d_simple_split(grid: Any, domain: Any, params: Any = None):
-        mesh = base_build(grid, domain, params)
-        metrics = dict(getattr(mesh, "metrics", {}) or {})
-        if not bool(metrics.get("csf_split_applied", False)):
-            metrics.update({"split_panel_geometry_separated": False, "split_panel_count": len(_edge_components(mesh.faces)), "simple_split_records": []})
-            mesh.metrics.update(metrics)
-            return mesh
-
-        vertices = np.asarray(mesh.vertices, dtype=float).copy()
-        faces = np.asarray(mesh.faces, dtype=int).copy()
-        # Re-weld exact duplicate coordinates left by any upstream experimental
-        # Split, then apply exactly the requested cuts once in this wrapper.
-        # Using coordinate groups keeps the clean pre-gap geometry intact.
-        scale = max(float(np.max(np.ptp(vertices[:, :2], axis=0))) if len(vertices) else 1.0, 1.0)
-        tol = max(1e-11 * scale, 1e-12)
-        key_to_new: dict[tuple[int, ...], int] = {}
-        old_to_new = np.empty(len(vertices), dtype=int)
-        welded: list[np.ndarray] = []
-        for old_id, point in enumerate(vertices):
-            key = tuple(np.rint(point / tol).astype(np.int64).tolist())
-            new_id = key_to_new.get(key)
-            if new_id is None:
-                new_id = len(welded)
-                key_to_new[key] = new_id
-                welded.append(point.copy())
-            old_to_new[old_id] = new_id
-        vertices = np.asarray(welded, dtype=float)
-        faces = old_to_new[faces]
-
-        raw_lines = list(getattr(domain, "split_lines", []) or [])
-        if not raw_lines:
-            raw_lines = list(metrics.get("split_locations", []) or [])
-        records: list[dict[str, Any]] = []
-        rejected: list[Any] = []
-        for line in raw_lines:
-            vertices2, faces2, record = _cut_once(vertices, faces, line)
-            if record is None:
-                rejected.append(list(line) if isinstance(line, (list, tuple)) else repr(line))
-                continue
-            vertices, faces = vertices2, faces2
-            records.append(record)
-
+        import copy
+        uncut = copy.copy(domain)
+        uncut.split_lines = []
+        uncut.localized_split_segments = []
+        uncut._paper_split_deferred = True
+        mesh = base_build(grid, uncut, params)
+        if getattr(domain, "paper_split_policy", False):
+            return apply_paper_split(pipeline_module, mesh, domain, params)
+        # Compatibility for callers supplying explicit split lines without a
+        # parameterization. Keep one cut owner and never re-weld source seams.
+        vertices, faces = mesh.vertices.copy(), mesh.faces.copy()
+        records = []
+        for line in list(getattr(domain, "split_lines", []) or []):
+            vertices, faces, record = _cut_once(vertices, faces, line)
+            if record is not None:
+                records.append(record)
         canonical = vertices.copy()
-        separated, components, panel_vertices, offsets, gap = _open_split_gaps(canonical, faces, records, getattr(mesh, "grid", grid))
-        metrics.update({
-            "simple_split_active": True,
-            "simple_split_records": records,
-            "simple_split_rejected_lines": rejected,
-            "split_panel_geometry_separated": bool(len(components) > 1),
-            "split_panel_count": int(len(components)),
-            "split_panel_face_counts": [int(len(c)) for c in components],
-            "split_panel_offsets_xy": [[float(x) for x in off] for off in offsets],
-            "split_panel_gap": float(gap),
-            "split_panel_layout_model": "preserve original layout + symmetric seam gap",
-            "final_split_panel_pass_applied": False,
-            "paper_style_complete_split": bool(records),
-            "final_split_panel_count": int(len(components)),
-        })
-        out = _make_quadmesh(pipeline_module, mesh, separated, faces, metrics)
-        setattr(out, "_split_panel_source_vertices", canonical)
-        setattr(out, "_split_panel_face_components", components)
-        setattr(out, "_split_panel_vertex_components", panel_vertices)
-        setattr(out, "_split_panel_offsets", offsets)
-        setattr(out, "_split_panel_records", records)
+        vertices, components, panel_vertices, offsets, gap = _open_split_gaps(vertices, faces, records, mesh.grid)
+        metrics = dict(mesh.metrics)
+        metrics.update(csf_split_applied=bool(records), number_of_splits=len(records),
+                       split_locations=[[r['axis'], r['snapped_value']] for r in records],
+                       simple_split_records=records, split_panel_count=len(components),
+                       csf_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in records))
+        out = _make_quadmesh(pipeline_module, mesh, vertices, faces, metrics)
+        out._split_panel_source_vertices = canonical
+        out._split_panel_face_components = components
+        out._split_panel_vertex_components = panel_vertices
+        out._split_panel_offsets = offsets
+        out._split_panel_records = records
         return out
 
     pipeline_module._build_m2d = build_m2d_simple_split

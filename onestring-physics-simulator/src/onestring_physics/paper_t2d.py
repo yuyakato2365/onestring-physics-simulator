@@ -197,15 +197,17 @@ def build_gap_graph(t2d, t3d, pipeline):
         if dart != start:
             raise ValueError('Invalid corner-joint boundary permutation')
         cycles.append(cycle)
-    gaps, tile_to_gaps = [], {}
+    gaps, tile_to_gaps, corner_to_gaps, boundary_sides = [], {}, {}, {}
+    split_pairs = list(getattr(t2d.linkage_topology, 'split_boundary_pairs', []))
+    split_sides = {(int(a), int(ea)) for a, ea, b, eb in split_pairs} | {(int(b), int(eb)) for a, ea, b, eb in split_pairs}
     degenerate = 0
     scale = float(np.ptp(t2d.vertices[:, :4, :2], axis=(0, 1)).max())
-    def add(corners, boundary):
+    def add(corners, boundary, side=None):
         tiles = sorted({a for a, _ in corners})
         p2 = np.array([t2d.vertices[a, c] for a, c in corners])
         p3 = np.array([t3d.vertices[a, c] for a, c in corners])
         if boundary:
-            kind, label = 'virtual_boundary', -1
+            kind, label = ('split_boundary', -2) if side in split_sides else ('virtual_boundary', -1)
         else:
             # This geometric orientation convention is not the authors' code.
             extent = np.ptp(p2[:, :2], axis=0)
@@ -214,6 +216,16 @@ def build_gap_graph(t2d, t3d, pipeline):
         gaps.append(gap)
         for tile in tiles:
             tile_to_gaps.setdefault(tile, []).append(gap.id)
+        # Routing adjacency (Sec. 5.3) uses common physical corners, whereas
+        # the GPE graph (Sec. 5.2) uses common surrounding tiles.
+        physical_corners = set(corners)
+        if not boundary:
+            physical_corners.update((a, (c-1)%4) for a, c in corners)
+        for corner in physical_corners:
+            joint = min(corner, partners.get(corner, corner))
+            corner_to_gaps.setdefault(joint, set()).add(gap.id)
+        if side is not None:
+            boundary_sides[side] = gap.id
     for cycle in cycles:
         points = np.array([t2d.vertices[a, c, :2] for a, c in cycle])
         area = .5*np.sum(points[:, 0]*np.roll(points[:, 1], -1)-points[:, 1]*np.roll(points[:, 0], -1))
@@ -221,13 +233,29 @@ def build_gap_graph(t2d, t3d, pipeline):
             add(cycle, False)
         elif area < -scale**2*1e-12:
             for a, c in cycle:
-                add([(a, c), (a, (c-1) % 4)], True)
+                add([(a, c), (a, (c-1) % 4)], True, (a, (c-1)%4))
         else:
             degenerate += 1
     edges = set()
     for incident in tile_to_gaps.values():
         for i, a in enumerate(incident):
             edges.update(tuple(sorted((a, b))) for b in incident[i+1:])
+    routing_edges = set()
+    for incident in corner_to_gaps.values():
+        incident = sorted(incident)
+        for i, a in enumerate(incident):
+            routing_edges.update((a, b) for b in incident[i+1:])
+    bridges, missing = [], []
+    for a, ea, b, eb in split_pairs:
+        ga, gb = boundary_sides.get((a, ea)), boundary_sides.get((b, eb))
+        if ga is None or gb is None:
+            missing.append([a, ea, b, eb])
+            continue
+        bridge = tuple(sorted((ga, gb)))
+        bridges.append(bridge)
+        routing_edges.add(bridge)
+    # Do not couple separate panels in the gravitational graph: bridges are
+    # channel connections, not mechanical hinges or virtual surface welds.
     adjacency = {i: set() for i in range(len(gaps))}
     for a, b in edges:
         adjacency[a].add(b); adjacency[b].add(a)
@@ -242,19 +270,35 @@ def build_gap_graph(t2d, t3d, pipeline):
     z = np.mean(t3d.vertices[:, :4, 2], axis=1)
     for gap in gaps:
         gap.gpe = float(.25*9.81*np.sum(z[gap.surrounding_tiles]-zmin))
+    routing_adjacency = {g.id: set() for g in gaps}
+    for a, b in routing_edges:
+        if (gaps[a].label == -2 and not gaps[b].boundary) or (gaps[b].label == -2 and not gaps[a].boundary):
+            continue
+        routing_adjacency[a].add(b); routing_adjacency[b].add(a)
+    pending = set(routing_adjacency); routing_components = 0
+    while pending:
+        routing_components += 1
+        stack = [pending.pop()]
+        while stack:
+            for b in routing_adjacency[stack.pop()] & pending:
+                pending.remove(b); stack.append(b)
     return pipeline.GapGraph(gaps, sorted(edges), dict(
         gap_count=len(gaps), edge_count=len(edges),
-        boundary_gap_count=sum(g.boundary for g in gaps), split_boundary_gap_count=0,
+        boundary_gap_count=sum(g.boundary for g in gaps), split_boundary_gap_count=sum(g.label == -2 for g in gaps),
         max_gpe=max((g.gpe for g in gaps), default=0.),
         gap_graph_algorithm='explicit corner-joint void boundary cycles; shared-tile adjacency (Sec. 5.2)',
-        gap_graph_components=components, string_graph_connected=components == 1,
+        gap_graph_components=components,
+        routing_graph_components=routing_components, string_graph_connected=routing_components == 1 and not missing,
+        paper_section_5_3_graph=True, routing_edges=sorted(routing_edges),
+        split_bridge_edges=bridges, split_boundary_missing_pairs=missing,
+        boundary_tile_ids=sorted({t for g in gaps if g.boundary for t in g.surrounding_tiles}),
         degenerate_void_cycles=degenerate,
         gap_geometry_validated=bool(t2d.metrics.get('fabrication_feasible', False)) and degenerate == 0,
         gap_graph_split_virtual_weld_applied=False,
         paper_classification={
             'bounded_void_nodes_and_shared_tile_adjacency': 'Paper-exact',
             'boundary_cycle_extraction_and_orientation_labels': 'Paper-consistent approximation',
-            'virtual_boundary_sampling_and_existing_string_route_heuristic': 'Project-specific extension',
+            'virtual_boundary_sampling_and_seam_channels': 'Paper-consistent discretization',
         },
-        gap_graph_limitations='split boundary labels (-2) and Sec. 5.3 routing MILP are not implemented; disconnected components are not bridged',
+        gap_graph_limitations='boundary sampling and orientation are discretizations; route solver reports feasibility/optimality separately',
     ))

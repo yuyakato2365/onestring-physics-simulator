@@ -204,11 +204,17 @@ def install_optcuts_visualization_compat_patch() -> None:
 
     if getattr(viz, "_onestring_optcuts_visualization_compat_installed", False):
         return
+    paper_residual = viz._residual_high_csf_vertices
+    paper_peaks = viz._surface_peak_markers
 
     def high_csf_vertices(state: Any):
         p = state.surface_parameterization
         uv = np.asarray(p.uv_vertices_2d, dtype=float)
-        xyz = _xyz_per_uv(p)
+        if state.mesh_2d_initial.metrics.get('paper_split_finalized', False):
+            from .paper_mesh_splitting import chart_geometry
+            xyz, _, _ = chart_geometry(p)
+        else:
+            xyz = _xyz_per_uv(p)
         csf = np.asarray(getattr(state.conformal_domain, "csf_values", np.zeros(0)), dtype=float)
         threshold = float(state.mesh_2d_initial.metrics.get("csf_split_threshold", 2.0))
         if len(csf) != len(uv):
@@ -217,6 +223,8 @@ def install_optcuts_visualization_compat_patch() -> None:
         return uv[mask], xyz[mask], csf[mask]
 
     def residual_high_csf_vertices(state: Any):
+        if state.mesh_2d_initial.metrics.get('paper_split_finalized', False):
+            return paper_residual(state)
         p = state.surface_parameterization
         uv = np.asarray(p.uv_vertices_2d, dtype=float)
         xyz = _xyz_per_uv(p)
@@ -232,6 +240,8 @@ def install_optcuts_visualization_compat_patch() -> None:
         return uv[ids], xyz[ids], csf[ids]
 
     def surface_peak_markers(state: Any):
+        if state.mesh_2d_initial.metrics.get('paper_split_finalized', False):
+            return paper_peaks(state)
         p = state.surface_parameterization
         peak_uv = viz._surface_peak_uvs(p)
         uv = np.asarray(p.uv_vertices_2d, dtype=float)

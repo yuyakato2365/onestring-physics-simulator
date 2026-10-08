@@ -1,5 +1,9 @@
 # Split local segment + normal orientation patch
 
+> 2026-10-08: Section 3 below is historical and inactive. The current paper split
+> path performs complete cuts of individual connected components, not local
+> slits. See `docs/PAPER_SPLIT_ROUTING_20261008.md` for the active route.
+
 This patch addresses three issues observed with the half-snowman / necked target:
 
 1. **Do not re-weld CSF split boundaries**
