@@ -76,3 +76,7 @@ third_party/affine-body-dynamics/Doxyfile
 third_party/affine-body-dynamics/Jenkinsfile
 third_party/affine-body-dynamics/CODE_OF_CONDUCT.md
 third_party/affine-body-dynamics/CONTRIBUTION.md
+
+.onestring_history/
+.paper_cache/
+.onestring_optcuts_binary
