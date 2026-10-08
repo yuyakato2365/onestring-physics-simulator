@@ -556,7 +556,7 @@ with st.sidebar:
     st.header("Target Input")
     target_kind = _param_row(
         "目標曲面 S。Remeshed_Bunny.stl はリポジトリ内または一般的なローカル配置から自動探索します。",
-        lambda: st.selectbox("target shape", ["Remeshed_Bunny.stl", "paper_bulb_neck", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="Default target is Remeshed_Bunny.stl. You can still upload another OBJ/STL/PLY below."),
+        lambda: st.selectbox("target shape", ["Remeshed_Bunny.stl", "vessel.stl", "paper_bulb_neck", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="Default target is Remeshed_Bunny.stl. You can still upload another OBJ/STL/PLY below."),
     )
     uploaded = _param_row(
         "OBJ/STL/PLY を読み込む。閉じた形状では Ω の切断・境界条件が難しくなるので注意。",
@@ -1282,6 +1282,15 @@ def _default_bunny_path():
     ]
     return next((p for p in candidates if p.exists()), None)
 
+def _default_vessel_path():
+    candidates = [
+        Path(__file__).resolve().parent / "assets" / "vessel.stl",
+        Path(__file__).resolve().parent / "vessel.stl",
+        Path.home() / "Downloads" / "vessel.stl",
+        Path.home() / "Documents" / "vessel.stl",
+    ]
+    return next((p for p in candidates if p.exists()), None)
+
 
 def build_target():
     if uploaded is None and target_kind == "paper_bulb_neck":
@@ -1298,6 +1307,15 @@ def build_target():
         st.caption(f"Default mesh: {bunny_path}")
         st.warning(CLOSED_SHAPE_WARNING)
         return load_target_shape(str(bunny_path))
+    if uploaded is None and target_kind == "vessel.stl":
+        vessel_path = _default_vessel_path()
+        if vessel_path is None:
+            raise FileNotFoundError(
+                "vessel.stl was not found. Put it in repository assets/, repository root, "
+                "~/Downloads, or ~/Documents; or upload it in the sidebar."
+            )
+        st.caption(f"Target mesh: {vessel_path}")
+        return load_target_shape(str(vessel_path))
     if uploaded is None:
         radius = max(1.5, grid_size * tile_size * 0.7)
         shape_params = {"amplitude": amplitude, "radius": radius, "sigma": radius * 0.45}
