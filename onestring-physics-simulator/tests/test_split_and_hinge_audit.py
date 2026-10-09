@@ -65,3 +65,19 @@ def test_global_uv_reflection_is_not_a_local_flip():
     assert metrics['uv_degenerate_triangle_count']==0
     mixed=faces.copy();mixed[1]=mixed[1,::-1]
     assert _triangle_differential_metrics(xyz,faces,uv,mixed)['uv_triangle_flip_count']==1
+
+
+
+def test_optcuts_pareto_rejects_nonfinite_and_invalid_candidates():
+    from onestring_physics.optcuts_quality_audit import pareto_improves
+    keys = ('distortion_max', 'distortion_p95', 'distortion_area_mean',
+            'csf_max', 'csf_p95', 'csf_over_2_area_fraction', 'seam_length')
+    baseline = {key: 10.0 for key in keys}
+    baseline.update(flipped_triangles=0, degenerate_triangles=0,
+                    injectivity_overlap_pairs=0)
+    candidate = dict(baseline, seam_length=9.0)
+    assert pareto_improves(candidate, baseline)
+    assert not pareto_improves(dict(candidate, csf_max=float('nan')), baseline)
+    assert not pareto_improves(dict(candidate, distortion_p95=float('inf')), baseline)
+    assert not pareto_improves(dict(candidate, injectivity_overlap_pairs=1), baseline)
+    assert not pareto_improves(dict(baseline), baseline)
