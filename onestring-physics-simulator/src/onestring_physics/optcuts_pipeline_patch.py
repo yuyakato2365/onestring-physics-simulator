@@ -215,6 +215,16 @@ def _build_optcuts_parameterization(
         metrics=metrics,
     )
 
+    # Preserve alternate official starts on the parameterization.  The Split
+    # stage has the actual cropped grid/domain and therefore is the first place
+    # where the user's real OneString Split count can be evaluated fairly.
+    alternates = getattr(result, "_onestring_optcuts_candidates", None)
+    if alternates:
+        parameterization._onestring_optcuts_candidates = alternates
+        parameterization._onestring_optcuts_candidate_qualities = getattr(
+            result, "_onestring_optcuts_candidate_qualities", [])
+        parameterization.metrics["optcuts_split_count_selection_pending"] = True
+
     if is_grid:
         _align_uv_to_optcuts_seam_axis(parameterization)
     else:
