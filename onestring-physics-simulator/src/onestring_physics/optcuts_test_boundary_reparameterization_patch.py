@@ -214,7 +214,7 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
 
         # Route through the ordinary official OptCuts backend, but DO NOT build
         # an intermediate M2D and DO NOT move/re-solve Omega from its footprint.
-        ordinary_params = replace(params, omega_parameterization_mode="optcuts", optcuts_try_alternative_initial_cut=False)
+        ordinary_params = replace(params, omega_parameterization_mode="optcuts", optcuts_try_alternative_initial_cut=True)
         parameterization = base_parameterization(surface, target, grid, ordinary_params)
         parameterization.method = "optcuts_test"
         parameterization.metrics.update(
