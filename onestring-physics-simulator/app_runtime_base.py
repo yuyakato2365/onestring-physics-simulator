@@ -838,6 +838,9 @@ with st.sidebar:
         os.environ["ONESTRING_K3D_ADAPTIVE_PLANARITY_THRESHOLD"] = str(adaptive_planarity_threshold)
         os.environ["ONESTRING_K3D_ADAPTIVE_PLANARITY_MULTIPLIER"] = str(adaptive_planarity_multiplier)
 
+    st.caption("K3D 正方形性（hard-planarity / shape-preserving AL 段階）：平均誤差に加え、最も歪んだパネルをLSEで重点的に抑制")
+    st.latex(r"E_{\\mathrm{Square}}=\\frac{w_s}{2}\\left[\\frac{1}{N}\\sum_{i=1}^{N}d_i^2+\\alpha\\left(\\frac{1}{\\beta}\\log\\left(\\frac{1}{N}\\sum_{i=1}^{N}e^{\\beta d_i}\\right)\\right)^2\\right]")
+    st.caption("d_i: 各quadの4辺長の隣接差と対角線長差（5残差）のRMSをパネルスケールで無次元化。初期値 α=4, β=12。通常のlocal/global段階は従来のESquareを使用。")
     w_square = _param_row(
         "K3D の quad を極端に歪ませない重み。高いほど正方形・均整なタイルを保つ。",
         lambda: st.number_input("w_square / ESquare", min_value=0.1, max_value=100.0, value=10.0, step=0.5, help="Weight for square-like quad shape."),
