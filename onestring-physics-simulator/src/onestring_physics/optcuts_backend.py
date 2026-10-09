@@ -46,8 +46,6 @@ class OptCutsConfig:
     timeout_seconds: float = 600.0
     keep_workdir: bool = False
     try_alternative_initial_cut: bool = False
-    evaluate_split_count: bool = True
-    csf_aware_selection: bool = True
     csf_tail_refine: bool = True
     csf_tail_onset: float = 1.8
     csf_tail_threshold: float = 2.0
@@ -622,7 +620,10 @@ def run_official_optcuts(surface_vertices, surface_faces, config=None):
     active=len(np.unique(surface_faces))
     closed_sphere=bool(np.all(counts==2) and active-len(unique)+len(surface_faces)==2)
     if not cfg.try_alternative_initial_cut or cfg.method_type!=0 or not closed_sphere:
-        baseline.metrics['optcuts_multistart_status']='disabled_or_not_closed_genus_zero'
+        baseline.metrics['optcuts_multistart_status']='disabled_single_start_csf_tail'
+        baseline.metrics['optcuts_selection_strategy']='single official OptCuts start + CSF-tail refinement + one Split pass'
+        print('[OPTCUTS-SINGLE] official_start=1 csf_tail=%s; multistart disabled' %
+              baseline.metrics.get('optcuts_csf_tail_refine_status','unknown'), flush=True)
         return baseline
     try:
         candidate=_run_official_optcuts_once(surface_vertices,surface_faces,replace(cfg,initial_cut_option=1-cfg.initial_cut_option,try_alternative_initial_cut=False))
