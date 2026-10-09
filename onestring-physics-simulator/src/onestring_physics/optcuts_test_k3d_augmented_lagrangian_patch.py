@@ -269,11 +269,11 @@ def _square_energy_and_gradient(
     scales: np.ndarray,
     weight: float,
 ) -> tuple[float, np.ndarray, dict[str, float]]:
-    """Apply square quality to every quad, independent of its reference shape.
+    """Per-panel square residuals with a smooth worst-panel penalty.
 
-    We use four cyclic edge-equality residuals plus equality of both diagonals.
-    Together with the positional/reference metric terms this strongly resists a
-    quad becoming triangle-like while still allowing the global surface to move.
+    E = w * (mean(d_i**2) + alpha * LSE_beta(d)**2) / 2,
+    d_i = sqrt((sum of four edge-equality and diagonal-equality residuals**2)/5).
+    All residuals are dimensionless (normalized by each panel's scale).
     """
     x = np.asarray(vertices, dtype=float)
     f4 = np.asarray(faces, dtype=int)[:, :4]
@@ -282,62 +282,47 @@ def _square_energy_and_gradient(
         return 0.0, grad, {"rms": 0.0, "max": 0.0, "worst_edge_ratio": 1.0}
     q = x[f4]
     scale = np.maximum(np.asarray(scales, dtype=float), 1e-12)
-    edge_lengths = []
-    edge_deltas = []
-    for a, b in _EDGE_PAIRS:
-        d = q[:, a] - q[:, b]
-        edge_deltas.append(d)
-        edge_lengths.append(np.linalg.norm(d, axis=1))
-    edge_lengths_arr = np.stack(edge_lengths, axis=1)
-    residuals: list[np.ndarray] = []
-    norm_count = float(max(1, len(f4) * 5))
-    energy_sum = 0.0
-
-    # e0=e1=e2=e3 around the entire panel, not only on selected panels.
+    edges = [q[:, a] - q[:, b] for a, b in _EDGE_PAIRS]
+    lengths = np.stack([np.linalg.norm(d, axis=1) for d in edges], axis=1)
+    residuals = [(lengths[:, k] - lengths[:, (k + 1) % 4]) / scale for k in range(4)]
+    diagonals = [q[:, 0] - q[:, 2], q[:, 1] - q[:, 3]]
+    diag_lengths = [np.linalg.norm(d, axis=1) for d in diagonals]
+    residuals.append((diag_lengths[0] - diag_lengths[1]) / scale)
+    residual = np.stack(residuals, axis=1)
+    d = np.sqrt(np.mean(residual * residual, axis=1) + 1e-24)
+    alpha = max(0.0, _safe_float_env("ONESTRING_K3D_SQUARE_TAIL_ALPHA", 4.0))
+    beta = max(1e-6, _safe_float_env("ONESTRING_K3D_SQUARE_TAIL_BETA", 12.0))
+    z = beta * d
+    zmax = float(np.max(z))
+    expz = np.exp(z - zmax)
+    softmax = expz / np.sum(expz)
+    lse = (zmax + np.log(np.mean(expz))) / beta
+    energy = 0.5 * float(weight) * (float(np.mean(d * d)) + alpha * lse * lse)
+    # dE / d(residual_ik), with five residuals per panel.
+    coeffs = float(weight) * (1.0 / len(f4) + alpha * lse * softmax / d)[:, None] * residual / 5.0
     for k in range(4):
-        k2 = (k + 1) % 4
-        residual = (edge_lengths_arr[:, k] - edge_lengths_arr[:, k2]) / scale
-        residuals.append(residual)
-        energy_sum += float(np.dot(residual, residual))
-        for edge_id, sign in ((k, 1.0), (k2, -1.0)):
-            a, b = _EDGE_PAIRS[edge_id]
-            delta = edge_deltas[edge_id]
-            length = np.maximum(edge_lengths_arr[:, edge_id], 1e-12)
-            coeff = (float(weight) / norm_count) * sign * residual / (scale * length)
-            contribution = coeff[:, None] * delta
-            np.add.at(grad, f4[:, a], contribution)
-            np.add.at(grad, f4[:, b], -contribution)
-
-    d02 = q[:, 0] - q[:, 2]
-    d13 = q[:, 1] - q[:, 3]
-    l02 = np.linalg.norm(d02, axis=1)
-    l13 = np.linalg.norm(d13, axis=1)
-    diag_residual = (l02 - l13) / scale
-    residuals.append(diag_residual)
-    energy_sum += float(np.dot(diag_residual, diag_residual))
-    for ids_a, ids_b, delta, length, sign in (
-        (f4[:, 0], f4[:, 2], d02, np.maximum(l02, 1e-12), 1.0),
-        (f4[:, 1], f4[:, 3], d13, np.maximum(l13, 1e-12), -1.0),
-    ):
-        coeff = (float(weight) / norm_count) * sign * diag_residual / (scale * length)
-        contribution = coeff[:, None] * delta
-        np.add.at(grad, ids_a, contribution)
-        np.add.at(grad, ids_b, -contribution)
-
-    stacked = np.stack(residuals, axis=1)
-    shortest = np.min(edge_lengths_arr, axis=1)
-    longest = np.maximum(np.max(edge_lengths_arr, axis=1), 1e-12)
-    ratios = shortest / longest
-    return (
-        0.5 * float(weight) * energy_sum / norm_count,
-        grad,
-        {
-            "rms": float(np.sqrt(np.mean(stacked * stacked))) if stacked.size else 0.0,
-            "max": float(np.max(np.abs(stacked))) if stacked.size else 0.0,
-            "worst_edge_ratio": float(np.min(ratios)) if ratios.size else 1.0,
-        },
-    )
-
+        for edge_id, sign in ((k, 1.0), ((k + 1) % 4, -1.0)):
+            ia, ib = _EDGE_PAIRS[edge_id]
+            delta = edges[edge_id]
+            factor = sign * coeffs[:, k] / (scale * np.maximum(lengths[:, edge_id], 1e-12))
+            g = factor[:, None] * delta
+            np.add.at(grad, f4[:, ia], g)
+            np.add.at(grad, f4[:, ib], -g)
+    for j, (ia, ib) in enumerate(((0, 2), (1, 3))):
+        factor = (1.0 if j == 0 else -1.0) * coeffs[:, 4] / (scale * np.maximum(diag_lengths[j], 1e-12))
+        g = factor[:, None] * diagonals[j]
+        np.add.at(grad, f4[:, ia], g)
+        np.add.at(grad, f4[:, ib], -g)
+    ratios = np.min(lengths, axis=1) / np.maximum(np.max(lengths, axis=1), 1e-12)
+    return energy, grad, {
+        "rms": float(np.sqrt(np.mean(residual * residual))),
+        "max": float(np.max(np.abs(residual))),
+        "worst_edge_ratio": float(np.min(ratios)),
+        "worst_panel_deviation": float(np.max(d)),
+        "square_tail_lse": float(lse),
+        "square_tail_alpha": float(alpha),
+        "square_tail_beta": float(beta),
+    }
 
 def _consensus_planarity_restore(
     vertices: np.ndarray,
