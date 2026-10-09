@@ -46,6 +46,8 @@ class OptCutsConfig:
     timeout_seconds: float = 600.0
     keep_workdir: bool = False
     try_alternative_initial_cut: bool = False
+    evaluate_split_count: bool = True
+    csf_aware_selection: bool = True
 
 
 @dataclass
@@ -478,14 +480,17 @@ def _run_official_optcuts_once(
 
 
 def run_official_optcuts(surface_vertices, surface_faces, config=None):
-    """Optional two-start official solve; never changes bound or custom Omega."""
+    """Run official OptCuts starts and retain both candidates for OneString selection.
+
+    The official executable/objective is unchanged here.  Final Split-count
+    selection is deferred until the OneString grid/domain exists.
+    """
     from .optcuts_quality_audit import quality, pareto_improves
     cfg = config or OptCutsConfig()
     baseline = _run_official_optcuts_once(surface_vertices, surface_faces, cfg)
     baseline_quality = quality(baseline)
     baseline.metrics['optcuts_quality_audit'] = baseline_quality
-    baseline.metrics['optcuts_multistart_classification'] = 'project-specific CSF-first selection of official initial-cut options'
-    # The two initial-cut choices differ only for closed genus-zero inputs.
+    baseline.metrics['optcuts_multistart_classification'] = 'official starts; final OneString Split-count selection deferred downstream'
     edges=np.sort(np.concatenate([np.asarray(surface_faces)[:,[0,1]],np.asarray(surface_faces)[:,[1,2]],np.asarray(surface_faces)[:,[2,0]]]),axis=1)
     unique,counts=np.unique(edges,axis=0,return_counts=True)
     active=len(np.unique(surface_faces))
@@ -500,9 +505,15 @@ def run_official_optcuts(surface_vertices, surface_faces, config=None):
         baseline.metrics.update(optcuts_multistart_status='candidate_failed_retained_baseline',optcuts_multistart_candidate_error=str(exc))
         return baseline
     accepted=pareto_improves(candidate_quality,baseline_quality)
+    # Keep the CSF-first provisional result for backward compatibility, but
+    # attach both complete official results so the downstream OneString domain
+    # can evaluate the actual Split count and override this choice.
     result=candidate if accepted else baseline
     result.metrics.update(optcuts_quality_audit=candidate_quality if accepted else baseline_quality,
                           optcuts_multistart_baseline=baseline_quality,optcuts_multistart_candidate=candidate_quality,
-                          optcuts_multistart_status='candidate_accepted' if accepted else 'candidate_rejected_retained_baseline',
-                          optcuts_multistart_classification='project-specific CSF-first selection; official optimizer unchanged')
+                          optcuts_multistart_status='candidate_provisionally_accepted' if accepted else 'baseline_provisionally_retained',
+                          optcuts_multistart_classification='official optimizer unchanged; final selection by OneString Split count when available')
+    result._onestring_optcuts_candidates=[baseline,candidate]
+    result._onestring_optcuts_candidate_qualities=[baseline_quality,candidate_quality]
     return result
+
