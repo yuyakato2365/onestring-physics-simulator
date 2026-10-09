@@ -53,8 +53,11 @@ def make_t2d(mesh, layout, k3d, t3d, stage, pipeline):
         placement = rigid_fit(solid[:4], tops[i])
         top_to_bottom = rigid_fit(solid[:4], solid[4:])
         flat_transform = placement @ top_to_bottom @ np.linalg.inv(placement)
-        vertices[i, :4] = tops[i]  # Sec. 4.3: retain the optimized K2D vertices.
-        vertices[i, 4:] = apply_transform(tops[i], flat_transform)
+        # Preserve the physical T3D panel exactly: K2D determines the best-fit
+        # planar placement, but must not overwrite the panel's intrinsic shape.
+        # Applying one rigid transform to all eight vertices keeps T3D and T2D
+        # congruent even when the Eq.5 K2D edge objective has residual error.
+        vertices[i] = apply_transform(solid, placement)
         fit_errors.append(np.max(np.linalg.norm(apply_transform(solid[:4], top_to_bottom)-solid[4:], axis=1)))
         placements.append(placement)
         bottom_transforms.append(flat_transform)
@@ -63,7 +66,8 @@ def make_t2d(mesh, layout, k3d, t3d, stage, pipeline):
     metrics = dict(
         objective='Sec. 4.3 top-to-bottom rigid transform in the K2D tile frame',
         section_4_3_linkage=True, tile_ids=list(range(n)),
-        top_vertices_match_k2d_max_error=0., top_vertices_match_k2d_rms_error=0.,
+        top_vertices_match_k2d_max_error=float(np.max(np.linalg.norm(vertices[:, :4]-tops, axis=2), initial=0.0)),
+        top_vertices_match_k2d_rms_error=float(np.sqrt(np.mean(np.sum((vertices[:, :4]-tops)**2, axis=2)))),
         tile_shape_max_error_to_T3D=float(shape_error),
         tile_shape_rms_error_to_T3D=pipeline._tile_shape_distance_error(vertices, solids),
         t2d_t3d_congruent_tile_geometry=bool(shape_error <= scale*1e-6),
@@ -73,7 +77,7 @@ def make_t2d(mesh, layout, k3d, t3d, stage, pipeline):
         t2d_layout_optimization_deferred_to_eq6=True,
         t2d_top_hinge_overlap_trimming_implemented=False,
         paper_classification={
-            'K2D_top_vertices_and_tile_identity': 'Paper-exact',
+            'K2D_tile_identity_and_best_fit_placement': 'Paper-consistent approximation',
             'top_to_bottom_rigid_transform_operation': 'Paper-exact',
             'least_squares_frame_alignment_and_fit_for_noncongruent_faces': 'Paper-consistent approximation',
             'signed_discrete_normal_curvature': 'Paper-consistent approximation',
