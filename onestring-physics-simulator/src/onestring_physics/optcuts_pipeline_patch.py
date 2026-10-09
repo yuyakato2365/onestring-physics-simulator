@@ -79,6 +79,12 @@ def _config_from_params(params: Any) -> OptCutsConfig:
         timeout_seconds=float(
             getattr(params, "optcuts_timeout_seconds", _env_float("ONESTRING_OPTCUTS_TIMEOUT_SECONDS", 600.0))
         ),
+        csf_tail_refine=bool(getattr(params, "optcuts_csf_tail_refine", _env_bool("ONESTRING_OPTCUTS_CSF_TAIL_REFINE", True))),
+        csf_tail_onset=float(getattr(params, "optcuts_csf_tail_onset", _env_float("ONESTRING_OPTCUTS_CSF_TAIL_ONSET", 1.8))),
+        csf_tail_threshold=float(getattr(params, "optcuts_csf_tail_threshold", _env_float("ONESTRING_OPTCUTS_CSF_TAIL_THRESHOLD", 2.0))),
+        csf_tail_sharpness=float(getattr(params, "optcuts_csf_tail_sharpness", _env_float("ONESTRING_OPTCUTS_CSF_TAIL_SHARPNESS", 20.0))),
+        csf_tail_weight=float(getattr(params, "optcuts_csf_tail_weight", _env_float("ONESTRING_OPTCUTS_CSF_TAIL_WEIGHT", 8.0))),
+        csf_tail_maxiter=int(getattr(params, "optcuts_csf_tail_maxiter", _env_int("ONESTRING_OPTCUTS_CSF_TAIL_MAXITER", 80))),
     )
 
 
