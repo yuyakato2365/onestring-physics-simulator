@@ -13,6 +13,19 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
+
+# app_runtime_base.py is also the final legacy UI loaded by the dated launchers.
+# When a user starts this file directly, bootstrap the current 2026-09-23
+# launcher first so the OptCuts/paper-local-global patch stack is installed.
+# The sentinel prevents recursion when that launcher eventually loads this file.
+if __name__ == "__main__" and os.environ.get("ONESTRING_RUNTIME_BASE_BOOTSTRAPPED") != "1":
+    import runpy
+    os.environ["ONESTRING_RUNTIME_BASE_BOOTSTRAPPED"] = "1"
+    runpy.run_path(
+        str(Path(__file__).with_name("app_optcuts_20260923_extrusion_aware.py")),
+        run_name="__main__",
+    )
+    st.stop()
 from streamlit_plotly_events import plotly_events
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
