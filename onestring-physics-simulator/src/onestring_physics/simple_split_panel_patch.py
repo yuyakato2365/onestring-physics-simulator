@@ -191,6 +191,17 @@ def apply_paper_split(pipeline_module, mesh, domain, params=None):
         if key.startswith(('csf_split_', 'split_', 'simple_split_', 'max_csf_', 'number_of_splits', 'raw_split_')):
             metrics.pop(key)
     metrics.update(measured)
+    from .split_geometry_constraints import paired_vertices
+    metrics['split_vertex_pairs'] = list(mesh.metrics.get('split_vertex_pairs', [])) + paired_vertices(canonical, faces, measured['split_boundary_pairs'])
+    metrics.update(
+        csf_split_parameterization_method=str(getattr(domain.parameterization, 'method', 'unknown')),
+        m2d_connected_component_count_before_csf_split=len(_edge_components(mesh.faces)),
+        split_diagnostics=dict(domain.paper_split_diagnostics),
+    )
+    if getattr(domain, 'reference_mode', False):
+        # The reference-BFF builder also publishes this legacy report. Keep
+        # it in sync instead of leaving a pending/zero-split result behind.
+        domain.reference_split_diagnostics = dict(domain.paper_split_diagnostics)
     # Work in grid coordinates when opening a rotated grid's seams.
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
     rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
@@ -355,9 +366,12 @@ def install_simple_split_panel_patch(pipeline_module: Any, optimization_debug_mo
     base_lift = pipeline_module._lift_m2d_to_m3d
 
     def lift_with_canonical_uv(target: Any, mesh: Any, parameterization: Any, params: Any):
+        from .split_geometry_constraints import propagate
         canonical = getattr(mesh, "_split_panel_source_vertices", None)
         if canonical is None:
-            return base_lift(target, mesh, parameterization, params)
+            out, report = base_lift(target, mesh, parameterization, params)
+            propagate(mesh, out)
+            return out, report
         canonical_mesh = _make_quadmesh(
             pipeline_module,
             mesh,
@@ -367,6 +381,7 @@ def install_simple_split_panel_patch(pipeline_module: Any, optimization_debug_mo
         )
         out, report = base_lift(target, canonical_mesh, parameterization, params)
         _copy_attrs(mesh, out)
+        propagate(mesh, out)
         out.metrics.update({"m3d_used_pre_panel_layout_uv": True, "m3d_panel_gap_ignored_for_inverse_map": True})
         return out, report
 

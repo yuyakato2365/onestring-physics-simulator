@@ -194,14 +194,15 @@ def _candidate_executables(explicit: str | os.PathLike[str] | None) -> list[Path
     if env_value:
         values.append(Path(env_value).expanduser())
     root = Path(__file__).resolve().parents[2]
-    values.extend(
-        [
-            root / "third_party" / "boundary-first-flattening" / "binaries" / "windows-v1.6" / "bff-command-line.exe",
-            root / "third_party" / "boundary-first-flattening" / "build" / "bff-command-line.exe",
-            root / "third_party" / "boundary-first-flattening" / "build" / "bff-command-line",
-        ]
-    )
-    for name in ("bff-command-line.exe", "bff-command-line"):
+    source = root / "third_party" / "boundary-first-flattening"
+    if os.name == "nt":
+        values.extend([source / "build" / "bff-command-line.exe",
+                       source / "binaries" / "windows-v1.6" / "bff-command-line.exe"])
+        names = ("bff-command-line.exe", "bff-command-line")
+    else:
+        values.append(source / "build" / "bff-command-line")
+        names = ("bff-command-line",)
+    for name in names:
         found = shutil.which(name)
         if found:
             values.append(Path(found))
@@ -218,15 +219,15 @@ def _candidate_executables(explicit: str | os.PathLike[str] | None) -> list[Path
 def find_official_bff_executable(explicit: str | os.PathLike[str] | None = None) -> Path:
     if explicit is not None:
         requested = Path(explicit).expanduser()
-        if requested.is_file():
+        if requested.is_file() and (os.name == "nt" or os.access(requested, os.X_OK)):
             return requested.resolve()
         raise ReferenceBFFUnavailableError(
             "Official Boundary First Flattening CLI is unavailable. No substitute was used.\n"
-            f"The explicitly requested executable does not exist: {requested}"
+            f"The explicitly requested executable is missing or not executable: {requested}"
         )
     candidates = _candidate_executables(explicit)
     for candidate in candidates:
-        if candidate.is_file():
+        if candidate.is_file() and (os.name == "nt" or os.access(candidate, os.X_OK)):
             return candidate.resolve()
     tried = "\n  - ".join(str(path) for path in candidates) or "(no candidates)"
     raise ReferenceBFFUnavailableError(

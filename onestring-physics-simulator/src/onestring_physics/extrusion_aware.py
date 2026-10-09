@@ -183,6 +183,13 @@ def geometry_view(mesh, mapping):
 
 
 def optimize_assembled(base, target, mesh2d, mesh3d, p, params, pipeline):
+    from .split_geometry_constraints import propagate, optimize_shared
+    propagate(mesh2d, mesh3d)
+    if mesh3d.metrics.get('split_vertex_pairs'):
+        result, report = optimize_shared(base, target, mesh3d, p, params)
+        if enabled(params) and params.use_extrusion_aware_k3d and not result.metrics.get('extrusion_objective_applied'):
+            raise RuntimeError('Extrusion-aware K3D objective was not applied')
+        return result, report
     if not enabled(params) or feature_mask(params) == '0000':
         return base(target, mesh3d, p, params)
     mapping = source_equivalence(mesh2d, mesh3d, p, pipeline)

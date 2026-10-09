@@ -159,14 +159,26 @@ def project_angle_vectors(a, b, theta_min):
     return pa, pb, angles
 
 
-def collision_energy_gradient(xy, faces, tolerance=1e-10, exclude_face_pairs=None):
+def collision_energy_gradient(xy, faces, tolerance=1e-10, exclude_face_pairs=None, return_diagnostics=False):
     """Squared convex SAT translation depth; includes derivative of each axis.
 
-    `exclude_face_pairs` removes known physical hinge-neighbor tile pairs before SAT.
+    `exclude_face_pairs` is an explicit caller override. A physical hinge alone
+    is not a reason to exclude a pair: it allows contact, not penetration.
     This surrogate is not claimed to equal Konakovic et al.'s local half-plane
     projection. All overlapping AABBs are tested, with no candidate cap. Contact
     at a shared corner/edge has zero energy. Convexity is checked by the caller.
     """
+    def finish(energy, gradient, depths, candidate_count):
+        penetrations = np.asarray(depths)[np.asarray(depths) > tolerance]
+        count = len(penetrations)
+        result = (energy, gradient, count)
+        if return_diagnostics:
+            return (*result, dict(collision_candidate_pairs=int(candidate_count), collision_pair_count=count,
+                                 penetration_depths=penetrations.tolist(),
+                                 penetration_max=float(penetrations.max()) if count else 0.,
+                                 penetration_rms=float(np.sqrt(np.mean(penetrations**2))) if count else 0.,
+                                 penetration_model='convex XY footprint separating translation, not 3D solid depth'))
+        return result
     polygons = xy[faces]
     lo, hi = polygons.min(axis=1), polygons.max(axis=1)
     # Sweep broad phase: memory scales with nearby pairs, not all F^2 pairs.
@@ -185,7 +197,7 @@ def collision_energy_gradient(xy, faces, tolerance=1e-10, exclude_face_pairs=Non
         ii,jj=ii[keep],jj[keep]
     grad = np.zeros_like(xy)
     if len(ii) == 0:
-        return 0., grad, 0
+        return finish(0., grad, [], 0)
     a, b = polygons[ii], polygons[jj]
     edges = np.concatenate((np.roll(a,-1,axis=1)-a,np.roll(b,-1,axis=1)-b),axis=1)
     lengths = np.linalg.norm(edges,axis=2)
@@ -200,7 +212,7 @@ def collision_energy_gradient(xy, faces, tolerance=1e-10, exclude_face_pairs=Non
     live = depth > 0.
     rows = np.flatnonzero(live)
     if len(rows) == 0:
-        return 0., grad, 0
+        return finish(0., grad, [], len(ii))
     ax, dp = axis[rows], depth[rows]
     n = normals[rows,ax]
     forward = d1[rows,ax] <= d2[rows,ax]
@@ -219,7 +231,7 @@ def collision_energy_gradient(xy, faces, tolerance=1e-10, exclude_face_pairs=Non
     owner = np.where(ax<m,ii[rows],jj[rows]); local = ax%m
     np.add.at(grad,faces[owner,local],-de)
     np.add.at(grad,faces[owner,(local+1)%m],de)
-    return float(dp@dp), grad, int(np.count_nonzero(dp > tolerance))
+    return finish(float(dp@dp), grad, dp, len(ii))
 
 
 class FlatObjective:

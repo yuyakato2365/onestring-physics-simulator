@@ -22,6 +22,7 @@ class _Deadline(Exception):
 def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_callback=None):
     started=time.perf_counter()
     from .paper_t2d import build_hinge_graph, validate_flat_linkage
+    from .solid_collision_audit import audit_solid_collisions
     graph=build_hinge_graph(t2d,t3d,pipeline,dual=True)
     rest=np.asarray(t2d.vertices,float)
     centers=rest[:,:4,:2].mean(axis=1)
@@ -34,9 +35,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     faces=np.array([[8*i+j for j in h+[h[-1]]*(width-len(h))] for i,h in enumerate(hulls)],int)
     ha=np.array([8*h.tile_a+h.local_vertex_a for h in graph.hinges],int)
     hb=np.array([8*h.tile_b+h.local_vertex_b for h in graph.hinges],int)
-    # Panels intentionally connected by a physical hinge are allowed to touch/overlap
-    # at that joint and must not contribute to the T2D collision objective.
-    hinge_face_pairs={(min(int(h.tile_a),int(h.tile_b)),max(int(h.tile_a),int(h.tile_b))) for h in graph.hinges}
+    # Contact has zero SAT depth already. A hinge does not authorize positive
+    # penetration of the two tiles; use the same all-pair policy as validation.
     wconn=float(params.hinge_layout_connection_weight)
     wcoll=float(params.hinge_layout_collision_weight)
     wanchor=float(params.hinge_layout_anchor_weight)
@@ -73,7 +73,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     def evaluate(pose):
         xy,rotated=positions(pose)
         flat=xy.reshape(-1,2)
-        ec,g,ncoll=collision_energy_gradient(flat,faces,scale*1e-8,exclude_face_pairs=hinge_face_pairs)
+        ec,g,ncoll,collision_stats=collision_energy_gradient(flat,faces,scale*1e-8,return_diagnostics=True)
         g*=wcoll
         delta=flat[ha]-flat[hb]
         dz=rest.reshape(-1,3)[ha,2]-rest.reshape(-1,3)[hb,2]
@@ -87,8 +87,16 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         anchor=scale**2*float(np.sum(translation_delta**2))
         gradient[:,1:]+=2*wanchor*scale**2*translation_delta
         energy=wconn*conn+wcoll*ec+wanchor*anchor
-        stats=dict(EHinge=energy,EConn=conn,ECollision=ec,collisions=ncoll,
-                   hinge_rms=float(np.sqrt(np.mean(np.sum(delta*delta,axis=1)+dz*dz))) if len(delta) else 0.)
+        errors=np.sqrt(np.sum(delta*delta,axis=1)+dz*dz)
+        stats=dict(EHinge=energy,EConn=conn,ECollision=ec,EAnchor=anchor,ERigid=0.,
+                   wConnEConn=wconn*conn,wCollisionECollision=wcoll*ec,wAnchorEAnchor=wanchor*anchor,
+                   rigid_constraint='exact SE(2) poses; no soft weight',
+                   collisions=ncoll,**collision_stats,
+                   hinge_mean=float(errors.mean()) if len(errors) else 0.,
+                   hinge_rms=float(np.sqrt(np.mean(errors**2))) if len(errors) else 0.,
+                   hinge_p95=float(np.percentile(errors,95)) if len(errors) else 0.,
+                   hinge_max=float(errors.max()) if len(errors) else 0.,
+                   hinge_fixed_z_error_lower_bound=float(np.max(np.abs(dz))) if len(dz) else 0.)
         return energy,gradient,stats
     def fun(z):
         if time.perf_counter()>=deadline:
@@ -109,6 +117,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             progress_callback('Eq.6 rigid tile poses',min(.99,(len(records)-1)/max(1,params.hinge_layout_iterations)),
                               f"iter {len(records)-1}; EHinge={stats['EHinge']:.5g}; collisions={stats['collisions']}; hinge_rms={stats['hinge_rms']:.5g}")
     timed_out=False
+    solver_success=False
+    solver_status=None
     try:
         bounds=[]
         for i in range(len(rest)):
@@ -118,6 +128,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         result=minimize(fun,last.ravel(),jac=True,method='L-BFGS-B',bounds=bounds,callback=callback,
                         options=dict(maxiter=max(1,params.hinge_layout_iterations),maxls=30,maxcor=20,ftol=1e-13,gtol=1e-8))
         last=result.x.reshape(-1,3);message=str(result.message)
+        solver_success=bool(result.success);solver_status=int(result.status)
     except _Deadline:
         timed_out=True;message='time budget reached; returning last accepted pose'
     xy,_=positions(last)
@@ -131,12 +142,20 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         out.transform_matrices[i]=transform@t2d.transform_matrices[i]
         out.top_to_bottom_transforms[i]=transform@t2d.top_to_bottom_transforms[i]@np.linalg.inv(transform)
     _,_,final=evaluate(last)
+    if final != {k:v for k,v in records[-1].items() if k!='iteration'}:
+        record(last)
     out.metrics.update(graph.metrics)
     out.metrics.update(final)
     out.metrics.update(hinge_connection_error=final['hinge_rms'],flat_collision_count=final['collisions'],
                        dual_hinge_final_collision_count=final['collisions'],
                        dual_hinge_layout_optimizer='analytic L-BFGS on rigid SE(2) poses',
                        dual_hinge_timed_out=timed_out,dual_hinge_solver_message=message,
+                       dual_hinge_solver_success=solver_success,dual_hinge_solver_status=solver_status,
+                       dual_hinge_weights={'connection':wconn,'collision':wcoll,'anchor':wanchor},
+                       dual_hinge_rigidity='exact in-plane rigid poses; fixed Z, not unrestricted paper 3D motion',
+                       dual_hinge_fixed_z_infeasible=final['hinge_fixed_z_error_lower_bound']>=scale*1e-4,
+                       dual_hinge_collision_pair_exclusions=0,
+                       dual_hinge_collision_candidate_limit_applied=False,
                        dual_hinge_iterations=len(records)-1,dual_hinge_history=records,
                        dual_hinge_initial_expansion=initial_expansion,
                        dual_hinge_max_center_drift_tiles=max_center_drift_tiles,
@@ -146,6 +165,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        tile_shape_max_error_to_T3D=pipeline._tile_shape_distance_error(out.vertices,t3d.vertices,use_max=True),
                        fabrication_feasible=final['collisions']==0 and final['hinge_rms']<scale*1e-4)
     out.metrics.update(validate_flat_linkage(out,t3d,pipeline,graph))
+    out.metrics['dual_hinge_initial_solid_collisions'] = audit_solid_collisions(rest,scale*1e-8)
+    out.metrics.update(audit_solid_collisions(out.vertices,scale*1e-8))
+    out.metrics['fabrication_feasible'] = bool(out.metrics['fabrication_feasible'] and out.metrics['solid_collision_pair_count']==0)
     out.metrics["paper_classification"]["optional_anchor_energy"] = "Project-specific extension"
     graph.metrics=dict(out.metrics)
     for hinge in graph.hinges:

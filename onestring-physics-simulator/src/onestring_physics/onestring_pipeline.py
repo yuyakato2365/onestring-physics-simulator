@@ -991,6 +991,7 @@ class PipelineParameters(_original.PipelineParameters):
     ] = "bff"
     bff_executable: str | None = None
     optcuts_distortion_bound: float = 4.1
+    optcuts_try_alternative_initial_cut: bool = True
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
@@ -1046,7 +1047,7 @@ class PipelineParameters(_original.PipelineParameters):
     hinge_layout_connection_weight: float = 8.0
     hinge_layout_collision_weight: float = 4.0
     hinge_layout_anchor_weight: float = 0.0
-    hinge_layout_initial_expansion: float = 1.6
+    hinge_layout_initial_expansion: float = 1.0
     hinge_layout_max_center_drift_tiles: float = 5.0
 
 

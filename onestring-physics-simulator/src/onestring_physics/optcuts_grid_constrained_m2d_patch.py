@@ -269,6 +269,7 @@ def _disconnect_faces_along_edges(
         "active_cut_edges": int(active_cut_edges),
         "duplicated_vertices": int(duplicate_count),
         "face_components": int(comp_count),
+        "split_vertex_pairs": [[int(old), int(new)] for (old, _), new in replacement.items()],
     }
 
 
@@ -371,6 +372,7 @@ def install_optcuts_grid_constrained_m2d_patch(pipeline: Any) -> None:
             "optcuts_grid_native_duplicated_vertex_count": int(cut_info["duplicated_vertices"]),
             "optcuts_grid_native_face_component_count": int(cut_info["face_components"]),
             "optcuts_grid_zero_width_topology_cut": True,
+            "split_vertex_pairs": cut_info.get("split_vertex_pairs", []),
             "optcuts_grid_vertex_ids_preserved": False,
             "optcuts_grid_posthoc_seam_snap": False,
             "optcuts_grid_posthoc_seam_cell_deletion": False,

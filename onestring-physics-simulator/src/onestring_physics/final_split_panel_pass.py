@@ -130,6 +130,8 @@ def _complete_cut_candidate(vertices: np.ndarray, faces: np.ndarray, face_ids: n
     pos = comp[centroids > value + tol]
     if len(neg) == 0 or len(pos) == 0:
         return None
+    if len(neg) + len(pos) != len(comp):
+        return None  # A complete grid cut may not leave a straddling face behind.
 
     edge_to_faces, _boundary_edges, boundary_vertices = _component_edge_data(f, comp)
     neg_set, pos_set = set(map(int, neg)), set(map(int, pos))
@@ -167,6 +169,8 @@ def _complete_cut_candidate(vertices: np.ndarray, faces: np.ndarray, face_ids: n
         return None
     if not all(v in boundary_vertices for v in endpoints):
         return None
+    if any(v in boundary_vertices for v in graph if v not in endpoints):
+        return None  # No intermediate boundary touch or several slits in one cut.
 
     seam_vertices = sorted(graph.keys())
     neg_vertices = set(map(int, f[neg].reshape(-1)))

@@ -1871,10 +1871,17 @@ def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key
 if view_stage not in {"Pipeline View", "S", "Split Map", "Mode Comparison", "Metrics", "Paper Consistency Audit", "Setting Meters", "Complexity / Backend", "Performance", "Approximations"}:
     with st.expander("Mapping reference: original M2D / Omega colors", expanded=True):
         st.caption("同じ色 = Ω/M2D上の同じ場所。下の各stageでもこの色を引き継ぎます。")
+        from copy import copy as _copy_mapping_mesh
+        _mapping_mesh = _copy_mapping_mesh(state.mesh_2d_initial)
+        _mapping_mesh.vertices = np.asarray(
+            getattr(state.mesh_2d_initial, "_split_panel_source_vertices", state.mesh_2d_initial.vertices),
+            dtype=float,
+        ).copy()
+        st.caption("元のΩ座標で表示しています。Split後の接続を保持し、分割片を離す表示用移動は適用しません。切断線は Split Map で確認できます。")
         st.plotly_chart(
             figure_quad_mesh(
-                state.mesh_2d_initial,
-                title="Correspondence reference — original M2D in Ω",
+                _mapping_mesh,
+                title="Correspondence reference — M2D at original Ω coordinates",
                 correspondence_uv=_corr_uv,
                 correspondence_bounds=_corr_bounds,
             ),
@@ -1895,6 +1902,30 @@ if view_stage == "Pipeline View":
 elif view_stage == "S":
     st.plotly_chart(figure_surface_mesh(state.target_surface), use_container_width=True, key="target_surface")
 elif view_stage == "Split Map":
+    from onestring_physics.split_process_view import figure_split_process
+    st.subheader("Splitを追加する過程")
+    _split_records = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
+    _split_count = len(_split_records)
+    _split_step = st.slider("追加済みのSplit数", 0, _split_count, 0, key=f"split_process_step_{_split_count}") if _split_count else 0
+    _split_figure, _split_rows = figure_split_process(state.mesh_2d_initial, _split_step)
+    if _split_figure is None:
+        st.info("この結果には途中状態の記録がありません。対応するSplit経路で再生成すると表示できます。")
+    else:
+        st.caption("0は追加Split前です。赤＝今回追加、黒＝それまでの切断。元のΩ座標で表示し、分割片を移動させません。初期状態にある切れ目は追加Splitに含みません。")
+        st.plotly_chart(_split_figure, use_container_width=True, key="split_process_figure")
+        if _split_step:
+            _record = _split_records[_split_step-1]
+            st.caption(f"切断した領域のCSF: {_record['sigma_before']:.4g} → " + ", ".join(f"{value:.4g}" for value in _record['sigma_after']))
+        else:
+            st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
+        st.dataframe(_split_rows, hide_index=True, width="stretch")
+        st.caption("CSFは現在のUV写像に基づく評価値です。")
+    if state.mesh_2d_initial.metrics.get("csf_split_parameterization_repair_required"):
+        st.warning(
+            "UVに退化した三角形があるため、有効な領域で処理を継続しています。"
+            "表示CSFは部分評価であり、閾値達成は未確認です。"
+            f" 対象: {state.mesh_2d_initial.metrics.get('csf_split_degenerate_uv_face_count', 0)} 三角形。"
+        )
     st.plotly_chart(figure_split_mapping(state), use_container_width=True, key="split_mapping")
     st.write(
         {
@@ -1905,6 +1936,10 @@ elif view_stage == "Split Map":
             "csf_split_step_analysis_model": state.mesh_2d_initial.metrics.get("csf_split_step_analysis_model"),
             "csf_split_residual_high_face_count": state.mesh_2d_initial.metrics.get("csf_split_residual_high_face_count"),
             "csf_split_status": state.mesh_2d_initial.metrics.get("csf_split_status"),
+            "parameterization_method": state.mesh_2d_initial.metrics.get("csf_split_parameterization_method"),
+            "components_before_additional_split": state.mesh_2d_initial.metrics.get("m2d_connected_component_count_before_csf_split"),
+            "components_after_additional_split": state.mesh_2d_initial.metrics.get("m2d_connected_component_count_after_csf_split"),
+            "split_stopping_rule": state.mesh_2d_initial.metrics.get("csf_split_stopping_rule"),
             "csf_split_budget_exhausted": state.mesh_2d_initial.metrics.get("csf_split_budget_exhausted"),
             "csf_split_component_sigma": state.mesh_2d_initial.metrics.get("csf_split_component_sigma"),
             "csf_split_additional_split_recommended_after_all": state.mesh_2d_initial.metrics.get("csf_split_additional_split_recommended_after_all"),
@@ -2265,6 +2300,17 @@ elif view_stage == "T2D Top Hinge":
     state.tiles_2d_top_hinge.metrics.update(t2d_top_export_metrics)
     st.write(state.tiles_2d_top_hinge.metrics)
 elif view_stage == "T2D Dual Hinge":
+    audit_metrics = state.tiles_2d_dual_hinge.metrics
+    if audit_metrics.get("dual_hinge_history"):
+        with st.expander("DualHinge エネルギー・接続・貫通の監査", expanded=True):
+            st.caption("各反復の生エネルギーと重み付き寄与。XY footprint の貫通と3D solidの貫通は別の指標です。")
+            st.dataframe(audit_metrics["dual_hinge_history"], use_container_width=True)
+            st.write({key: audit_metrics.get(key) for key in (
+                "dual_hinge_weights", "dual_hinge_solver_success", "dual_hinge_solver_message",
+                "dual_hinge_timed_out", "hinge_mean", "hinge_rms", "hinge_p95", "hinge_max",
+                "collision_pair_count", "penetration_max", "penetration_rms",
+                "solid_collision_pair_count", "solid_penetration_max", "solid_penetration_rms",
+                "dual_hinge_fixed_z_infeasible", "fabrication_feasible")})
     _render_cross_stage_panel_inspector(
         state.tiles_2d_dual_hinge,
         t2d_label="T2D Dual Hinge",

@@ -58,6 +58,8 @@ def _config_from_params(params: Any) -> OptCutsConfig:
     if not executable:
         executable = os.environ.get("ONESTRING_OPTCUTS_EXECUTABLE") or None
     return OptCutsConfig(
+        try_alternative_initial_cut=(str(getattr(params, 'omega_parameterization_mode', '')) == 'optcuts'
+                                     and bool(getattr(params, 'optcuts_try_alternative_initial_cut', False))),
         executable=executable,
         distortion_bound=float(
             getattr(params, "optcuts_distortion_bound", _env_float("ONESTRING_OPTCUTS_DISTORTION_BOUND", 4.1))

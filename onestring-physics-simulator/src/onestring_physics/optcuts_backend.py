@@ -11,7 +11,7 @@ caller gets an explicit error instead of a silent fallback.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import os
 from pathlib import Path
@@ -45,6 +45,7 @@ class OptCutsConfig:
     initial_cut_option: int = 0
     timeout_seconds: float = 600.0
     keep_workdir: bool = False
+    try_alternative_initial_cut: bool = False
 
 
 @dataclass
@@ -327,7 +328,12 @@ def _triangle_differential_metrics(
         "per_triangle_symmetric_dirichlet": sd,
         "symmetric_dirichlet_mean": float(np.mean(finite_sd)) if len(finite_sd) else float("inf"),
         "symmetric_dirichlet_max": float(np.max(finite_sd)) if len(finite_sd) else float("inf"),
-        "uv_triangle_flip_count": int(np.count_nonzero(flips)),
+        # A globally reflected chart is not a foldover. Count triangles with
+        # orientation opposed to the chart's dominant nondegenerate winding.
+        "uv_triangle_flip_count": int(min(np.count_nonzero(np.asarray(flips) & ~np.asarray(degenerate)),
+                                           np.count_nonzero(~np.asarray(flips) & ~np.asarray(degenerate)))),
+        "uv_negative_orientation_triangle_count": int(np.count_nonzero(flips)),
+        "uv_global_orientation_reversed": bool(np.count_nonzero(flips) > len(flips)/2),
         "uv_degenerate_triangle_count": int(np.count_nonzero(degenerate)),
         "uv_signed_area_min": float(np.min(areas)) if areas else 0.0,
     }
@@ -354,7 +360,7 @@ def _find_output_obj(root: Path, tag: str, started_at: float) -> Path:
     return pool[0]
 
 
-def run_official_optcuts(
+def _run_official_optcuts_once(
     surface_vertices: np.ndarray,
     surface_faces: np.ndarray,
     config: OptCutsConfig | None = None,
@@ -469,3 +475,34 @@ def run_official_optcuts(
             # recorded for API compatibility but outputs live in OptCuts/output.
             pass
         temp_ctx.cleanup()
+
+
+def run_official_optcuts(surface_vertices, surface_faces, config=None):
+    """Optional two-start official solve; never changes bound or custom Omega."""
+    from .optcuts_quality_audit import quality, pareto_improves
+    cfg = config or OptCutsConfig()
+    baseline = _run_official_optcuts_once(surface_vertices, surface_faces, cfg)
+    baseline_quality = quality(baseline)
+    baseline.metrics['optcuts_quality_audit'] = baseline_quality
+    baseline.metrics['optcuts_multistart_classification'] = 'project-specific Pareto selection of official initial-cut options'
+    # The two initial-cut choices differ only for closed genus-zero inputs.
+    edges=np.sort(np.concatenate([np.asarray(surface_faces)[:,[0,1]],np.asarray(surface_faces)[:,[1,2]],np.asarray(surface_faces)[:,[2,0]]]),axis=1)
+    unique,counts=np.unique(edges,axis=0,return_counts=True)
+    active=len(np.unique(surface_faces))
+    closed_sphere=bool(np.all(counts==2) and active-len(unique)+len(surface_faces)==2)
+    if not cfg.try_alternative_initial_cut or cfg.method_type!=0 or not closed_sphere:
+        baseline.metrics['optcuts_multistart_status']='disabled_or_not_closed_genus_zero'
+        return baseline
+    try:
+        candidate=_run_official_optcuts_once(surface_vertices,surface_faces,replace(cfg,initial_cut_option=1-cfg.initial_cut_option,try_alternative_initial_cut=False))
+        candidate_quality=quality(candidate)
+    except OptCutsError as exc:
+        baseline.metrics.update(optcuts_multistart_status='candidate_failed_retained_baseline',optcuts_multistart_candidate_error=str(exc))
+        return baseline
+    accepted=pareto_improves(candidate_quality,baseline_quality)
+    result=candidate if accepted else baseline
+    result.metrics.update(optcuts_quality_audit=candidate_quality if accepted else baseline_quality,
+                          optcuts_multistart_baseline=baseline_quality,optcuts_multistart_candidate=candidate_quality,
+                          optcuts_multistart_status='candidate_accepted' if accepted else 'candidate_rejected_retained_baseline',
+                          optcuts_multistart_classification='project-specific Pareto selection; official optimizer unchanged')
+    return result

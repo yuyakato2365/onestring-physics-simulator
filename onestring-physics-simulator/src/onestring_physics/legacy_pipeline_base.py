@@ -387,6 +387,8 @@ def build_onestring_design(
     runtime["grid"] = time.perf_counter()-tick
     active_grid = mesh_2d_initial.grid
     mesh_3d_initial, reports["M2D -> M3D"] = _lift_m2d_to_m3d(target, mesh_2d_initial, parameterization, params)
+    from .split_geometry_constraints import propagate, optimize_shared
+    propagate(mesh_2d_initial, mesh_3d_initial)
     _emit_progress(progress_callback, "M2D -> M3D", 0.38, "Inverse map / surface lift done")
     tick = time.perf_counter()
     if experimental:
@@ -394,7 +396,7 @@ def build_onestring_design(
         mesh_3d_optimized, reports["M3D -> K3D"] = experiment.optimize_assembled(
             _optimize_k3d, target, mesh_2d_initial, mesh_3d_initial, parameterization, params, sys.modules[__name__])
     else:
-        mesh_3d_optimized, reports["M3D -> K3D"] = _optimize_k3d(target, mesh_3d_initial, parameterization, params)
+        mesh_3d_optimized, reports["M3D -> K3D"] = optimize_shared(_optimize_k3d, target, mesh_3d_initial, parameterization, params)
     runtime["K3D"] = time.perf_counter()-tick
     if experimental:
         mapping = np.asarray(mesh_3d_optimized.metrics.get("assembled_geometry_map", np.arange(len(mesh_3d_optimized.vertices))), int)
