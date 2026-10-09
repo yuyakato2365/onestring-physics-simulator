@@ -53,7 +53,7 @@ class OptCutsConfig:
     csf_tail_threshold: float = 2.0
     csf_tail_sharpness: float = 20.0
     csf_tail_weight: float = 8.0
-    csf_tail_maxiter: int = 80
+    csf_tail_maxiter: int = 30
 
 
 @dataclass
@@ -487,11 +487,11 @@ def _run_official_optcuts_once(
 
 
 def _refine_uv_for_csf_tail(result, cfg):
-    """Post-refine official OptCuts UV with a smooth CSF-tail objective.
+    """Fast CSF-tail post-refinement with analytic triangle-area gradients.
 
-    This deliberately preserves the official cut topology.  It is the
-    experimental CSF-aware stage requested by OneString, not a claim that the
-    authors' OptCuts binary optimizes this term.
+    The official OptCuts cut topology is fixed.  During optimization we use
+    only O(F+V) vectorized local terms; expensive overlap and full distortion
+    audits run once after optimization.
     """
     if not cfg.csf_tail_refine:
         return result
@@ -502,55 +502,107 @@ def _refine_uv_for_csf_tail(result, cfg):
     except Exception as exc:
         result.metrics['optcuts_csf_tail_refine_status']='unavailable:'+type(exc).__name__
         return result
+    xyz=np.asarray(result.surface_vertices_3d,float)
+    sf=np.asarray(result.surface_faces,int)
+    uf=np.asarray(result.uv_faces,int)
     base_uv=np.asarray(result.uv_vertices_2d,float).copy()
-    if len(base_uv)<3:
+    if len(base_uv)<3 or len(uf)==0:
         return result
-    # Remove translation/rotation gauge freedoms: pin one vertex, constrain a
-    # second vertex to its original ray, and optimize all remaining coordinates.
-    p0=base_uv[0].copy()
-    d=base_uv[1]-p0; dn=float(np.linalg.norm(d))
-    if dn<=1e-12:
-        result.metrics['optcuts_csf_tail_refine_status']='skipped_degenerate_gauge'
+    tri=xyz[sf]
+    area3=.5*np.linalg.norm(np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0]),axis=1)
+    total3=float(area3.sum())
+    if total3<=0:
         return result
-    u=d/dn
-    x0=np.concatenate(([dn],base_uv[2:].reshape(-1)))
+    # Keep the chart-wide normalization fixed to the official OptCuts result.
+    q0=base_uv[uf]
+    cross0=(q0[:,1,0]-q0[:,0,0])*(q0[:,2,1]-q0[:,0,1])-(q0[:,1,1]-q0[:,0,1])*(q0[:,2,0]-q0[:,0,0])
+    sign0=np.where(cross0>=0.0,1.0,-1.0)
+    area20=.5*np.abs(cross0)
+    total2=float(area20.sum())
+    global_scale=np.sqrt(total3/max(total2,1e-30))
     base_q=quality(result)
     base_sd=float(base_q['distortion_area_mean'])
     base_tail=float(csf_tail_penalty_from_result(result,cfg.csf_tail_onset,cfg.csf_tail_threshold,cfg.csf_tail_sharpness))
-    def unpack(x):
-        uv=base_uv.copy(); uv[0]=p0; uv[1]=p0+max(float(x[0]),1e-8)*u; uv[2:]=x[1:].reshape((-1,2)); return uv
-    def objective(x):
-        trial=replace(result,uv_vertices_2d=unpack(x),metrics=dict(result.metrics))
-        q=quality(trial)
-        if q['flipped_triangles'] or q['degenerate_triangles'] or q['injectivity_overlap_pairs']:
-            return 1e8 + 1e5*(q['flipped_triangles']+q['degenerate_triangles']+q['injectivity_overlap_pairs'])
-        tail=csf_tail_penalty_from_result(trial,cfg.csf_tail_onset,cfg.csf_tail_threshold,cfg.csf_tail_sharpness)
-        distortion=max(0.0,float(q['distortion_area_mean'])-base_sd)
-        displacement=float(np.mean((trial.uv_vertices_2d-base_uv)**2))
-        return float(cfg.csf_tail_weight)*tail + 0.15*distortion + 1e-3*displacement
+    # Translation is a gauge freedom; pin vertex 0. Rotation does not affect
+    # this area-based objective, so a tiny displacement regularizer fixes it.
+    free=np.arange(1,len(base_uv),dtype=int)
+    x0=base_uv[free].reshape(-1).copy()
+    w=area3/total3
+    k=float(cfg.csf_tail_sharpness); onset=float(cfg.csf_tail_onset); threshold=float(cfg.csf_tail_threshold)
+    tail_weight=float(cfg.csf_tail_weight)
+    barrier_weight=200.0
+    reg_weight=1e-4
+    min_signed_area=np.maximum(1e-10,0.05*area20)
+    def softplus_sigmoid(z):
+        kz=np.clip(k*z,-60.0,60.0)
+        sp=np.logaddexp(0.0,k*z)/k
+        sig=1.0/(1.0+np.exp(-kz))
+        return sp,sig
+    def fg(x):
+        uv=base_uv.copy(); uv[free]=x.reshape((-1,2))
+        q=uv[uf]
+        ax=q[:,1,0]-q[:,0,0]; ay=q[:,1,1]-q[:,0,1]
+        bx=q[:,2,0]-q[:,0,0]; by=q[:,2,1]-q[:,0,1]
+        cross=ax*by-ay*bx
+        signed=.5*sign0*cross
+        safe=np.maximum(signed,1e-12)
+        csf=np.sqrt(area3/safe)/global_scale
+        sp1,sig1=softplus_sigmoid(csf-onset)
+        sp2,sig2=softplus_sigmoid(csf-threshold)
+        per=sp1*sp1+3.0*sp2*sp2
+        energy=tail_weight*float(np.dot(w,per))
+        dper_dcsf=2.0*sp1*sig1+6.0*sp2*sig2
+        dcsf_darea=-0.5*csf/safe
+        dE_darea=tail_weight*w*dper_dcsf*dcsf_darea
+        # Smooth barrier before a triangle approaches a flip.
+        deficit=min_signed_area-signed
+        bsp,bsig=softplus_sigmoid(deficit)
+        energy+=barrier_weight*float(np.dot(w,bsp*bsp))
+        dE_darea+=barrier_weight*w*(-2.0*bsp*bsig)
+        grad=np.zeros_like(uv)
+        # signed area derivatives for oriented triangle (p0,p1,p2)
+        s=.5*sign0
+        g0=np.stack((s*(q[:,1,1]-q[:,2,1]),s*(q[:,2,0]-q[:,1,0])),axis=1)
+        g1=np.stack((s*(q[:,2,1]-q[:,0,1]),s*(q[:,0,0]-q[:,2,0])),axis=1)
+        g2=np.stack((s*(q[:,0,1]-q[:,1,1]),s*(q[:,1,0]-q[:,0,0])),axis=1)
+        np.add.at(grad,uf[:,0],dE_darea[:,None]*g0)
+        np.add.at(grad,uf[:,1],dE_darea[:,None]*g1)
+        np.add.at(grad,uf[:,2],dE_darea[:,None]*g2)
+        delta=uv-base_uv
+        energy+=reg_weight*float(np.mean(delta*delta))
+        grad+=(2.0*reg_weight/delta.size)*delta
+        return energy,grad[free].reshape(-1)
     try:
-        opt=minimize(objective,x0,method='L-BFGS-B',options={'maxiter':int(cfg.csf_tail_maxiter),'ftol':1e-10,'gtol':1e-7})
-        uv=unpack(opt.x)
+        opt=minimize(lambda x: fg(x),x0,jac=True,method='L-BFGS-B',
+                     options={'maxiter':int(cfg.csf_tail_maxiter),'maxls':20,'ftol':1e-9,'gtol':1e-6})
+        uv=base_uv.copy(); uv[free]=opt.x.reshape((-1,2))
         refined=replace(result,uv_vertices_2d=uv,metrics=dict(result.metrics))
+        # Full expensive validation happens only once.
         q=quality(refined)
-        tail=csf_tail_penalty_from_result(refined,cfg.csf_tail_onset,cfg.csf_tail_threshold,cfg.csf_tail_sharpness)
+        tail=csf_tail_penalty_from_result(refined,onset,threshold,k)
         overlap,_=positive_area_uv_overlaps(uv,refined.uv_faces)
         valid=(q['flipped_triangles']==0 and q['degenerate_triangles']==0 and int(overlap)==0)
-        improved=bool(valid and np.isfinite(tail) and tail < base_tail-1e-10 and q['distortion_area_mean'] <= 1.5*max(base_sd,np.finfo(float).tiny))
-        if improved:
-            refined.metrics.update(optcuts_csf_tail_refine_status='accepted',
-                optcuts_csf_tail_energy_before=base_tail,optcuts_csf_tail_energy_after=float(tail),
-                optcuts_csf_tail_onset=float(cfg.csf_tail_onset),optcuts_csf_tail_threshold=float(cfg.csf_tail_threshold),
-                optcuts_csf_tail_sharpness=float(cfg.csf_tail_sharpness),optcuts_csf_tail_weight=float(cfg.csf_tail_weight),
-                optcuts_csf_tail_optimizer_success=bool(opt.success),optcuts_csf_tail_optimizer_message=str(opt.message),
-                optcuts_csf_tail_objective_model='post-OptCuts UV refinement; official cut topology fixed')
-            return refined
-        result.metrics.update(optcuts_csf_tail_refine_status='rejected_retained_official',
+        improved=bool(valid and np.isfinite(tail) and tail<base_tail-1e-10 and
+                      q['distortion_area_mean']<=1.5*max(base_sd,np.finfo(float).tiny))
+        status='accepted' if improved else 'rejected_retained_official'
+        target=refined if improved else result
+        target.metrics.update(optcuts_csf_tail_refine_status=status,
             optcuts_csf_tail_energy_before=base_tail,optcuts_csf_tail_energy_candidate=float(tail),
-            optcuts_csf_tail_optimizer_success=bool(opt.success),optcuts_csf_tail_optimizer_message=str(opt.message))
+            optcuts_csf_tail_energy_after=float(tail) if improved else base_tail,
+            optcuts_csf_tail_onset=onset,optcuts_csf_tail_threshold=threshold,
+            optcuts_csf_tail_sharpness=k,optcuts_csf_tail_weight=tail_weight,
+            optcuts_csf_tail_optimizer_iterations=int(getattr(opt,'nit',0)),
+            optcuts_csf_tail_optimizer_evaluations=int(getattr(opt,'nfev',0)),
+            optcuts_csf_tail_optimizer_success=bool(opt.success),
+            optcuts_csf_tail_optimizer_message=str(opt.message),
+            optcuts_csf_tail_objective_model='fast analytic-gradient post-OptCuts UV refinement; official cut topology fixed')
+        print('[OPTCUTS-CSF-TAIL] status=%s iter=%d eval=%d energy=%.6g->%.6g' %
+              (status,int(getattr(opt,'nit',0)),int(getattr(opt,'nfev',0)),base_tail,float(tail)),flush=True)
+        return target
     except Exception as exc:
         result.metrics['optcuts_csf_tail_refine_status']='failed_retained_official:'+type(exc).__name__+':'+str(exc)
-    return result
+        print('[OPTCUTS-CSF-TAIL] failed: %s: %s' % (type(exc).__name__,exc),flush=True)
+        return result
 
 def run_official_optcuts(surface_vertices, surface_faces, config=None):
     """Run official OptCuts starts and retain both candidates for OneString selection.
