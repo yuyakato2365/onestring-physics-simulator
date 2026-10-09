@@ -2,9 +2,9 @@
 
 Supplement Fig. 18 bounds *area* expansion by two (linear expansion sqrt(2)).
 We retain the selected chart and measure its piecewise-affine area Jacobian.
-Each disconnected part has an independent similarity scale: its normalized
-area range is max(area Jacobian)/min(area Jacobian). No cut-band relief or
-post-cut conformal remeshing is assumed. Axis choice and grid snapping are
+CSF is chart-global, fixed by S-to-Omega; cutting does not change its value.
+Cuts isolate grid panels spanning above- and below-threshold samples. No
+post-cut conformal remeshing or component-local rescaling is assumed. Axis choice and grid snapping are
 discretization choices, not a claim to reproduce the authors' implementation.
 """
 from __future__ import annotations
@@ -295,9 +295,12 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     parameterization = domain.parameterization
     threshold = float(getattr(domain, 'csf_split_threshold', 2.))
     lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
-    # A retained-chart cut cannot reduce a quad's own range. Once the
-    # component reaches that lower bound, further cuts only fragment it.
-    irreducible = hi/lo
+    # Source-chart CSF is fixed; cuts cannot reduce its absolute maximum.
+    # Use one chart-wide anchor, never renormalize independently per component.
+    anchor = float(parameterization.metrics['split_csf_anchor_raw_min'])
+    absolute_hi = hi / anchor
+    absolute_lo = lo / anchor
+    irreducible = absolute_hi.copy()
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     curvature = gaussian_curvature(parameterization)
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
@@ -309,24 +312,30 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     enabled = bool(getattr(domain, 'csf_split_enabled', True))
     records, rejected, pairs, blocked = [], [], [], set()
     def ratio(component):
-        return float(hi[component].max()/lo[component].min())
+        return float(absolute_hi[component].max())
+    def mixed_edges(component):
+        # Count connected quad edges straddling the fixed chart-global limit.
+        edge_owner = defaultdict(list)
+        for fi in component:
+            for k in range(4):
+                edge = tuple(sorted((int(faces[fi, k]), int(faces[fi, (k+1)%4]))))
+                edge_owner[edge].append(int(fi))
+        return sum(1 for owners in edge_owner.values() if len(owners) == 2
+                   and (absolute_hi[owners[0]] > threshold + 1e-10)
+                   != (absolute_hi[owners[1]] > threshold + 1e-10))
     initial_components = _edge_components(faces)
     before = max(map(ratio, initial_components), default=1.)
     while enabled and len(records) < budget:
         components = _edge_components(faces)
-        bad = [c for c in components if ratio(c) > threshold+1e-10 and tuple(c) not in blocked]
-        for c in bad:
-            if ratio(c) <= float(irreducible[c].max()) * (1. + 1e-8):
-                blocked.add(tuple(c))
-                rejected.append({'face_ids': c.tolist(), 'sigma': ratio(c),
-                                 'irreducible_quad_sigma': float(irreducible[c].max()),
-                                 'reason': 'retained_chart_resolution_floor_reached'})
-        bad = [c for c in bad if tuple(c) not in blocked]
+        # Only cut components that still connect high-CSF and low-CSF panels.
+        # High-only components remain above the bound, but cutting them again
+        # cannot change the fixed S-to-Omega CSF.
+        bad = [c for c in components if mixed_edges(c) > 0 and tuple(c) not in blocked]
         if not bad:
             break
         # Round only the ordering key: rotating Omega can introduce last-bit
         # differences in equivalent area ratios. Keep all reported CSFs raw.
-        component = max(bad, key=lambda c: round(ratio(c), 10))
+        component = max(bad, key=lambda c: (mixed_edges(c), round(ratio(c), 10)))
         ids = np.unique(np.concatenate([samples[i] for i in component]))
         # Intrinsic source curvature remains valid at artificial split seams.
         ids = ids[np.isfinite(curvature[ids])]
@@ -368,12 +377,19 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 imbalance = abs(len(children[0])-len(children[1]))
                 child_sigmas = [ratio(component[c]) for c in children]
                 complete_candidate_seen = True
-                if max(child_sigmas) >= component_before * (1. - 1e-8):
-                    continue  # No measured worst-part improvement: keep topology.
+                # CSF itself must not improve when only connectivity changes.
+                # Prefer cuts that separate violating panels from valid ones.
                 # Paper leaves the choice between two grid directions open.
                 # Compare their measured residuals before using balance as a tie-break.
-                unresolved_faces = sum(len(c) for c, s in zip(children, child_sigmas) if s > threshold+1e-10)
-                score = (unresolved_faces, round(max(child_sigmas), 10), imbalance, axis)
+                # Evaluate separation on the proposed subset, not old connectivity.
+                old_faces = faces
+                faces = faces.copy()
+                faces[component] = subset
+                child_mixed = sum(mixed_edges(component[c]) for c in children)
+                faces = old_faces
+                if child_mixed >= mixed_edges(component):
+                    continue
+                score = (child_mixed, imbalance, axis)
                 candidates.append((score, v2, subset, record))
             if candidates:
                 selected = min(candidates, key=lambda x: x[0])
@@ -381,7 +397,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         if selected is None:
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(), 'sigma': component_before,
-                             'reason': 'no_csf_improvement' if complete_candidate_seen else 'no_complete_grid_cut_near_source_curvature_sample'})
+                             'reason': 'no_mixed_edge_reduction' if complete_candidate_seen else 'no_complete_grid_cut_near_source_curvature_sample'})
             continue
         _, vertices, subset, record = selected
         # Store seam identity using stable tile/local-edge indices, never proximity.
@@ -413,42 +429,40 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     invalid_uv_count = int(parameterization.metrics.get('split_csf_degenerate_uv_face_count', 0))
     values = [ratio(c) for c in final]
     unresolved = sum(v > threshold+1e-10 for v in values)
-    exhausted = bool(enabled and unresolved and len(records) >= budget)
+    unresolved_mixed = sum(mixed_edges(c) for c in final)
+    exhausted = bool(enabled and unresolved_mixed and len(records) >= budget)
     after = max(values, default=1.)
     face_sigma = np.ones(len(faces))
     for component in final:
-        face_sigma[component] = hi[component]/lo[component].min()
+        face_sigma[component] = absolute_hi[component]
     domain.csf_before, domain.csf_after_split = before, after
     domain.split_lines = [('row' if r['axis'] == 'row' else 'col', r['snapped_value']) for r in records]
     domain.localized_split_segments = list(domain.split_lines)
     metrics = dict(
-        csf_model='normalized per-component area Jacobian; Supplement Fig. 18',
+        csf_model='fixed chart-global area Jacobian from S-to-Omega (not per-component range)',
         csf_split_exactness_label='complete hierarchical grid cuts; retained-chart CSF estimator, not Fig. 6 numerical reproduction',
         csf_split_applied=bool(records), csf_split_threshold=threshold, max_csf_splits=budget,
         max_csf_before_split=before, max_csf_after_split=after, number_of_splits=len(records),
         split_locations=[list(x) for x in domain.split_lines],
         raw_split_locations=[[r['axis'], r['requested_value']] for r in records],
         csf_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in records),
-        csf_split_budget_exhausted=exhausted, csf_split_unresolved_component_count=unresolved,
-        csf_split_status='uncertified_uv_degeneracy' if invalid_uv_count else 'satisfied' if not unresolved else ('disabled' if not enabled else 'budget_exhausted' if exhausted
-                          else 'no_csf_improvement' if any(r['reason'] == 'no_csf_improvement' for r in rejected)
-                          else 'grid_resolution_limit' if all(r['reason'] == 'retained_chart_resolution_floor_reached' for r in rejected)
-                          else 'no_admissible_cut'),
+        csf_split_budget_exhausted=exhausted, csf_split_unresolved_component_count=unresolved, csf_split_unresolved_mixed_edges=unresolved_mixed,
+        csf_split_status='uncertified_uv_degeneracy' if invalid_uv_count else 'satisfied' if not unresolved else ('isolated_high_csf_not_certified' if not unresolved_mixed else 'disabled' if not enabled else 'budget_exhausted' if exhausted else 'mixed_boundary_remaining'),
         csf_split_step_analysis=records, csf_split_step_count=len(records),
         csf_split_initial_components=[{'face_ids': c.tolist(), 'sigma': ratio(c)} for c in initial_components],
         csf_split_bound_certified=not bool(unresolved or invalid_uv_count),
         csf_split_degenerate_uv_face_count=invalid_uv_count,
         csf_split_parameterization_repair_required=bool(invalid_uv_count),
         csf_split_evaluation_scope='usable source triangles only' if invalid_uv_count else 'all source triangles',
-        csf_split_step_analysis_model='exact source-triangle area Jacobian extrema over each retained quad component; independent component similarity normalization; no reparameterization',
-        csf_split_component_sigma=values, csf_split_component_area_scale=[float(lo[c].min()) for c in final],
+        csf_split_step_analysis_model='chart-global source-triangle area Jacobian; cuts separate high and low CSF panels; no reparameterization',
+        csf_split_component_sigma=values, csf_split_component_area_scale=[anchor for c in final],
         csf_split_component_irreducible_quad_sigma=[float(irreducible[c].max()) for c in final],
         csf_split_irreducible_quad_count=int(np.count_nonzero(irreducible > threshold+1e-10)),
         csf_split_quad_coverage_floor_sweep=parameterization.metrics.get('split_quad_coverage_floor_sweep'),
         csf_split_face_sigma=face_sigma.tolist(),
         csf_split_residual_high_face_count=int(np.count_nonzero(face_sigma > threshold+1e-10)),
         csf_split_additional_split_recommended_after_all=exhausted,
-        csf_split_stopping_rule='accept only strict worst-child CSF reduction; stop at retained-chart within-quad floor',
+        csf_split_stopping_rule='accept cuts reducing high/low quad adjacency; retain fixed chart CSF and report residual violations',
         csf_split_conformal_anisotropy_max=parameterization.metrics.get('split_conformal_anisotropy_max'),
         csf_split_area_bound_requires_conformal_map=True,
         csf_split_residual_max_after_all=after,
@@ -457,7 +471,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         m2d_quad_count_after_csf_split=len(faces), m2d_connected_component_count_after_csf_split=len(final),
         m2d_largest_component_quad_count_after_csf_split=max(map(len, final), default=0),
         m2d_smallest_component_quad_count_after_csf_split=min(map(len, final), default=0),
-        csf_split_direction_rule='highest signed area-normalized source Gaussian curvature; nearest complete grid cut; minimize unresolved faces then worst child sigma then imbalance',
+        csf_split_direction_rule='highest signed area-normalized source Gaussian curvature; nearest complete grid cut; minimize mixed high/low adjacency',
         csf_split_grid_rotation_degrees=float(np.rad2deg(angle)),
     )
     vertices[:, :2] = vertices[:, :2] @ rotation.T
