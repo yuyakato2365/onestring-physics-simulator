@@ -105,13 +105,15 @@ def _install_selector_patch() -> None:
                 options=list(args[1])
                 if not any(isinstance(v,dict) and v.get("id")==VERSION_ID for v in options): options.append({"id":VERSION_ID,"label":VERSION_LABEL,"description":VERSION_DESCRIPTION})
                 if not any(isinstance(v,dict) and v.get("id")==PAPER_LG_VERSION_ID for v in options): options.append({"id":PAPER_LG_VERSION_ID,"label":PAPER_LG_VERSION_LABEL,"description":PAPER_LG_DESCRIPTION})
-                default_index=next((i for i,v in enumerate(options) if isinstance(v,dict) and v.get("id")=="2026-09-20-paper-t3d"),len(options)-1) if os.environ.get("ONESTRING_PAPER_T3D_20260920","0")=="1" else len(options)-1
+                desired_version_id = "2026-09-23-extrusion-aware" if os.environ.get("ONESTRING_EXTRUSION_AWARE_20260923","0")=="1" else ("2026-09-20-paper-t3d" if os.environ.get("ONESTRING_PAPER_T3D_20260920","0")=="1" else PAPER_LG_VERSION_ID)
+                default_index=next((i for i,v in enumerate(options) if isinstance(v,dict) and v.get("id")==desired_version_id),len(options)-1)
                 kwargs={**kwargs,"index":default_index}; args=(args[0],options,*args[2:])
             elif "options" in kwargs:
                 options=list(kwargs["options"])
                 if not any(isinstance(v,dict) and v.get("id")==VERSION_ID for v in options): options.append({"id":VERSION_ID,"label":VERSION_LABEL,"description":VERSION_DESCRIPTION})
                 if not any(isinstance(v,dict) and v.get("id")==PAPER_LG_VERSION_ID for v in options): options.append({"id":PAPER_LG_VERSION_ID,"label":PAPER_LG_VERSION_LABEL,"description":PAPER_LG_DESCRIPTION})
-                default_index=next((i for i,v in enumerate(options) if isinstance(v,dict) and v.get("id")=="2026-09-20-paper-t3d"),len(options)-1) if os.environ.get("ONESTRING_PAPER_T3D_20260920","0")=="1" else len(options)-1
+                desired_version_id = "2026-09-23-extrusion-aware" if os.environ.get("ONESTRING_EXTRUSION_AWARE_20260923","0")=="1" else ("2026-09-20-paper-t3d" if os.environ.get("ONESTRING_PAPER_T3D_20260920","0")=="1" else PAPER_LG_VERSION_ID)
+                default_index=next((i for i,v in enumerate(options) if isinstance(v,dict) and v.get("id")==desired_version_id),len(options)-1)
                 kwargs={**kwargs,"options":options,"index":default_index}
         if label=="Omega parameterization mode":
             if len(args)>=2:
