@@ -14,7 +14,9 @@ def quality(result):
     a,b=q[:,1]-q[:,0],q[:,2]-q[:,0]
     flat = .5*np.abs(a[:,0]*b[:,1]-a[:,1]*b[:,0])
     raw = np.divide(area,flat,out=np.full(len(area),np.inf),where=flat>0)
-    csf = raw / max(float(raw.min()),np.finfo(float).tiny)
+    finite_raw = raw[np.isfinite(raw) & (raw > 0)]
+    minimum = float(finite_raw.min()) if len(finite_raw) else float('nan')
+    csf = raw / minimum if np.isfinite(minimum) else np.full(len(raw), np.inf)
     edges = defaultdict(list)
     for f,g in zip(sf,uf):
         for i in range(3):
@@ -22,10 +24,13 @@ def quality(result):
             edges[tuple(sorted((int(f[i]),int(f[j]))))].append(tuple(sorted((int(g[i]),int(g[j])))))
     seams = [edge for edge,copies in edges.items() if len(copies)==2 and copies[0]!=copies[1]]
     overlap,_=positive_area_uv_overlaps(uv,uf)
+    total_area = float(area.sum())
+    area_mean = float(np.dot(sd,area)/total_area) if total_area > 0 else float('inf')
+    high_area = float(area[csf>2].sum()/total_area) if total_area > 0 else float('inf')
     return dict(distortion_max=float(sd.max()),distortion_p95=float(np.percentile(sd,95)),
-                distortion_area_mean=float(np.dot(sd,area)/area.sum()),
+                distortion_area_mean=area_mean,
                 csf_max=float(csf.max()),csf_p95=float(np.percentile(csf,95)),
-                csf_over_2_area_fraction=float(area[csf>2].sum()/area.sum()),
+                csf_over_2_area_fraction=high_area,
                 seam_length=float(sum(np.linalg.norm(xyz[a]-xyz[b]) for a,b in seams)),
                 seam_edge_count=len(seams),flipped_triangles=differential['uv_triangle_flip_count'],
                 degenerate_triangles=differential['uv_degenerate_triangle_count'],
@@ -37,6 +42,9 @@ def pareto_improves(candidate, baseline):
     keys=('distortion_max','distortion_p95','distortion_area_mean','csf_max','csf_p95',
           'csf_over_2_area_fraction','seam_length')
     valid=all(candidate[k]==0 for k in ('flipped_triangles','degenerate_triangles','injectivity_overlap_pairs'))
+    # Never promote a result with an undefined metric. Retain the official
+    # baseline rather than silently treating NaN as a competitive score.
+    valid=valid and all(np.isfinite(candidate[k]) for k in keys)
     no_worse=all(np.isfinite(candidate[k]) and candidate[k]<=baseline[k]+1e-8*max(1.,baseline[k]) for k in keys)
     improves=any(candidate[k]<baseline[k]-1e-8*max(1.,baseline[k]) for k in keys)
     return bool(valid and no_worse and improves)
