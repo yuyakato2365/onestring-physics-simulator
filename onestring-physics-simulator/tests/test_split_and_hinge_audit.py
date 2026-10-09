@@ -68,16 +68,55 @@ def test_global_uv_reflection_is_not_a_local_flip():
 
 
 
-def test_optcuts_pareto_rejects_nonfinite_and_invalid_candidates():
-    from onestring_physics.optcuts_quality_audit import pareto_improves
+
+def _optcuts_quality_fixture(**updates):
     keys = ('distortion_max', 'distortion_p95', 'distortion_area_mean',
             'csf_max', 'csf_p95', 'csf_over_2_area_fraction', 'seam_length')
-    baseline = {key: 10.0 for key in keys}
-    baseline.update(flipped_triangles=0, degenerate_triangles=0,
-                    injectivity_overlap_pairs=0)
-    candidate = dict(baseline, seam_length=9.0)
+    result = {key: 10.0 for key in keys}
+    result.update(csf_max=2.4, csf_p95=1.8, csf_over_2_area_fraction=.12,
+                  flipped_triangles=0, degenerate_triangles=0,
+                  injectivity_overlap_pairs=0)
+    result.update(updates)
+    return result
+
+
+def test_optcuts_selection_prioritizes_csf_tail_without_seam_veto():
+    from onestring_physics.optcuts_quality_audit import pareto_improves
+    baseline = _optcuts_quality_fixture()
+    candidate = _optcuts_quality_fixture(
+        csf_over_2_area_fraction=.04,
+        seam_length=20.0,
+        distortion_max=12.0,
+        distortion_p95=12.0,
+        distortion_area_mean=12.0,
+    )
     assert pareto_improves(candidate, baseline)
-    assert not pareto_improves(dict(candidate, csf_max=float('nan')), baseline)
-    assert not pareto_improves(dict(candidate, distortion_p95=float('inf')), baseline)
-    assert not pareto_improves(dict(candidate, injectivity_overlap_pairs=1), baseline)
-    assert not pareto_improves(dict(baseline), baseline)
+
+
+def test_optcuts_selection_rejects_worse_tail_invalid_and_catastrophic_distortion():
+    from onestring_physics.optcuts_quality_audit import pareto_improves
+    baseline = _optcuts_quality_fixture()
+    assert not pareto_improves(
+        _optcuts_quality_fixture(csf_over_2_area_fraction=.13), baseline)
+    assert not pareto_improves(
+        _optcuts_quality_fixture(csf_over_2_area_fraction=.04,
+                                 distortion_p95=16.0), baseline)
+    assert not pareto_improves(
+        _optcuts_quality_fixture(csf_over_2_area_fraction=.04,
+                                 injectivity_overlap_pairs=1), baseline)
+    assert not pareto_improves(
+        _optcuts_quality_fixture(csf_over_2_area_fraction=.04,
+                                 csf_max=float('nan')), baseline)
+
+
+def test_optcuts_csf_uses_global_linear_scale_not_minimum_triangle_anchor():
+    from onestring_physics.optcuts_quality_audit import _relative_linear_scale
+    area3 = np.array([1.0e-6, 1.0, 1.0])
+    area2 = np.ones(3)
+    csf, global_scale = _relative_linear_scale(area3, area2)
+    assert global_scale == pytest.approx(np.sqrt(area3.sum()/area2.sum()))
+    # A tiny finite triangle no longer makes every ordinary triangle enormous.
+    assert csf[1] == pytest.approx(1.0/global_scale)
+    assert csf[1] < 2.0
+    scaled, _ = _relative_linear_scale(area3, 4.0*area2)
+    np.testing.assert_allclose(scaled, csf)
