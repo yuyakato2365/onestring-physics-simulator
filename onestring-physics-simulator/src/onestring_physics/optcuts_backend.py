@@ -484,7 +484,7 @@ def run_official_optcuts(surface_vertices, surface_faces, config=None):
     baseline = _run_official_optcuts_once(surface_vertices, surface_faces, cfg)
     baseline_quality = quality(baseline)
     baseline.metrics['optcuts_quality_audit'] = baseline_quality
-    baseline.metrics['optcuts_multistart_classification'] = 'project-specific Pareto selection of official initial-cut options'
+    baseline.metrics['optcuts_multistart_classification'] = 'project-specific CSF-first selection of official initial-cut options'
     # The two initial-cut choices differ only for closed genus-zero inputs.
     edges=np.sort(np.concatenate([np.asarray(surface_faces)[:,[0,1]],np.asarray(surface_faces)[:,[1,2]],np.asarray(surface_faces)[:,[2,0]]]),axis=1)
     unique,counts=np.unique(edges,axis=0,return_counts=True)
@@ -504,5 +504,5 @@ def run_official_optcuts(surface_vertices, surface_faces, config=None):
     result.metrics.update(optcuts_quality_audit=candidate_quality if accepted else baseline_quality,
                           optcuts_multistart_baseline=baseline_quality,optcuts_multistart_candidate=candidate_quality,
                           optcuts_multistart_status='candidate_accepted' if accepted else 'candidate_rejected_retained_baseline',
-                          optcuts_multistart_classification='project-specific Pareto selection; official optimizer unchanged')
+                          optcuts_multistart_classification='project-specific CSF-first selection; official optimizer unchanged')
     return result
