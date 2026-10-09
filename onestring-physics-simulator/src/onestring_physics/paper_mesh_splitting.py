@@ -219,7 +219,75 @@ def _face_samples(vertices, faces, parameterization, threshold=2.):
     return lo, hi, samples
 
 
+
+def _parameterization_from_optcuts_result(template, result):
+    """Clone the live parameterization shell around another official OptCuts UV."""
+    import copy
+    out=copy.copy(template)
+    out.surface_vertices_3d=np.asarray(result.surface_vertices_3d,float)
+    out.surface_faces=np.asarray(result.surface_faces,int)
+    out.uv_vertices_2d=np.asarray(result.uv_vertices_2d,float)
+    out.uv_faces=np.asarray(result.uv_faces,int)
+    loop=[int(v) for v in result.boundary_loops[0]]
+    out.omega_boundary=out.uv_vertices_2d[loop+[loop[0]]]
+    out.metrics=dict(getattr(template,'metrics',{}) or {})
+    out.metrics.update(result.metrics)
+    out.metrics['boundary_loop']=loop
+    return out
+
+
+def _split_count_for_parameterization(vertices, faces, domain, params, parameterization):
+    """Evaluate the real Split algorithm without mutating the caller's domain."""
+    import copy
+    trial=copy.copy(domain)
+    trial.parameterization=parameterization
+    # Avoid recursively evaluating OptCuts candidates inside the trial.
+    if hasattr(trial.parameterization,'_onestring_optcuts_candidates'):
+        trial.parameterization=copy.copy(trial.parameterization)
+        try:
+            delattr(trial.parameterization,'_onestring_optcuts_candidates')
+        except AttributeError:
+            pass
+    _,_,records,metrics=_split_mesh_single(vertices,faces,trial,params)
+    return len(records),metrics
+
+
+def _select_optcuts_by_split_count(vertices, faces, domain, params):
+    parameterization=domain.parameterization
+    candidates=getattr(parameterization,'_onestring_optcuts_candidates',None)
+    if not candidates or len(candidates)<2:
+        return parameterization,None
+    from .optcuts_quality_audit import quality, selection_score
+    evaluated=[]
+    for index,result in enumerate(candidates):
+        p=_parameterization_from_optcuts_result(parameterization,result)
+        count,split_metrics=_split_count_for_parameterization(vertices,faces,domain,params,p)
+        q=quality(result)
+        evaluated.append((selection_score(q,count),index,p,count,q,split_metrics))
+        print('[OPTCUTS-SPLIT-CANDIDATE] index=%d initial_cut=%s splits=%d tail=%.6g csf_over2=%.6g csf_p95=%.6g csf_max=%.6g'
+              % (index,result.metrics.get('optcuts_initial_cut_option'),count,q['csf_tail_penalty'],
+                 q['csf_over_2_area_fraction'],q['csf_p95'],q['csf_max']),flush=True)
+    best=min(evaluated,key=lambda x:x[0])
+    _,index,p,count,q,split_metrics=best
+    p.metrics.update(optcuts_split_count_selection_pending=False,
+                     optcuts_split_count_selection_status='selected',
+                     optcuts_split_count_selected_candidate=int(index),
+                     optcuts_split_count_selected=int(count),
+                     optcuts_split_count_candidates=[{'candidate':int(x[1]),'split_count':int(x[3]),
+                         'score':list(x[0]),'quality':x[4]} for x in evaluated],
+                     optcuts_csf_aware_candidate_selection=True,
+                     optcuts_official_objective_modified=False)
+    print('[OPTCUTS-SPLIT-SELECT] candidate=%d splits=%d' % (index,count),flush=True)
+    return p,evaluated
+
 def split_mesh(vertices, faces, domain, params=None):
+    selected,evaluated=_select_optcuts_by_split_count(vertices,faces,domain,params)
+    if evaluated is not None:
+        domain.parameterization=selected
+    return _split_mesh_single(vertices,faces,domain,params)
+
+
+def _split_mesh_single(vertices, faces, domain, params=None):
     from .simple_split_panel_patch import _edge_components
     from .final_split_panel_pass import _complete_cut_once
 
