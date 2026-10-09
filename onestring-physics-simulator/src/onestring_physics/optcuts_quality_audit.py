@@ -64,6 +64,30 @@ def quality(result):
     return out
 
 
+
+def csf_tail_penalty_from_result(result, onset=1.8, threshold=2.0, sharpness=20.0):
+    """Area-weighted smooth CSF-tail energy on every source triangle.
+
+    Unlike the compact candidate score below, this is a genuine dense tail
+    objective suitable for local UV refinement:
+        mean_A softplus(k * (CSF-onset))^2
+    plus a stronger continuation above the hard OneString threshold.
+    """
+    xyz=np.asarray(result.surface_vertices_3d,float)
+    sf=np.asarray(result.surface_faces,int)
+    uv=np.asarray(result.uv_vertices_2d,float)
+    uf=np.asarray(result.uv_faces,int)
+    tri=xyz[sf]; q=uv[uf]
+    area=.5*np.linalg.norm(np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0]),axis=1)
+    a,b=q[:,1]-q[:,0],q[:,2]-q[:,0]
+    flat=.5*np.abs(a[:,0]*b[:,1]-a[:,1]*b[:,0])
+    csf,_=_relative_linear_scale(area,flat)
+    if not np.all(np.isfinite(csf)) or float(area.sum())<=0:
+        return float('inf')
+    w=area/float(area.sum())
+    soft=lambda x: np.logaddexp(0.0,sharpness*x)/sharpness
+    return float(np.dot(w,soft(csf-onset)**2 + 3.0*soft(csf-threshold)**2))
+
 def csf_tail_penalty_from_quality(metrics, onset=1.8, threshold=2.0, sharpness=20.0):
     """Smooth diagnostic preference for the high-CSF tail."""
     p95=float(metrics['csf_p95']); maximum=float(metrics['csf_max'])
