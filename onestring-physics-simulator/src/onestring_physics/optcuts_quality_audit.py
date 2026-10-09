@@ -50,17 +50,40 @@ def quality(result):
     total_area = float(area.sum())
     area_mean = float(np.dot(sd,area)/total_area) if total_area > 0 else float('inf')
     high_area = float(area[csf>2].sum()/total_area) if total_area > 0 else float('inf')
-    return dict(distortion_max=float(sd.max()),distortion_p95=float(np.percentile(sd,95)),
-                distortion_area_mean=area_mean,
-                csf_max=float(csf.max()),csf_p95=float(np.percentile(csf,95)),
-                csf_over_2_area_fraction=high_area,
-                csf_global_linear_scale=float(global_scale),
-                seam_length=float(sum(np.linalg.norm(xyz[a]-xyz[b]) for a,b in seams)),
-                seam_edge_count=len(seams),flipped_triangles=differential['uv_triangle_flip_count'],
-                degenerate_triangles=differential['uv_degenerate_triangle_count'],
-                injectivity_overlap_pairs=int(overlap),
-                csf_definition='sqrt(A3/A2) normalized by global sqrt(sum(A3)/sum(A2)); inverse local linear scale relative to chart-wide scale')
+    out=dict(distortion_max=float(sd.max()),distortion_p95=float(np.percentile(sd,95)),
+             distortion_area_mean=area_mean,
+             csf_max=float(csf.max()),csf_p95=float(np.percentile(csf,95)),
+             csf_over_2_area_fraction=high_area,
+             csf_global_linear_scale=float(global_scale),
+             seam_length=float(sum(np.linalg.norm(xyz[a]-xyz[b]) for a,b in seams)),
+             seam_edge_count=len(seams),flipped_triangles=differential['uv_triangle_flip_count'],
+             degenerate_triangles=differential['uv_degenerate_triangle_count'],
+             injectivity_overlap_pairs=int(overlap),
+             csf_definition='sqrt(A3/A2) normalized by global sqrt(sum(A3)/sum(A2)); inverse local linear scale relative to chart-wide scale')
+    out['csf_tail_penalty']=csf_tail_penalty_from_quality(out)
+    return out
 
+
+def csf_tail_penalty_from_quality(metrics, onset=1.8, threshold=2.0, sharpness=20.0):
+    """Smooth diagnostic preference for the high-CSF tail."""
+    p95=float(metrics['csf_p95']); maximum=float(metrics['csf_max'])
+    area=float(metrics['csf_over_2_area_fraction'])
+    def softplus(x):
+        z=sharpness*x
+        return float(np.logaddexp(0.0,z)/sharpness)
+    return float(4.0*area + softplus(p95-onset)**2 + 0.25*softplus(maximum-threshold)**2)
+
+
+def selection_score(metrics, split_count=None):
+    """Lexicographic OneString score: real Split count first, then CSF tail."""
+    invalid=sum(int(metrics[k]) for k in ('flipped_triangles','degenerate_triangles','injectivity_overlap_pairs'))
+    return (invalid,
+            int(split_count) if split_count is not None else 10**9,
+            float(metrics.get('csf_tail_penalty', csf_tail_penalty_from_quality(metrics))),
+            float(metrics['csf_over_2_area_fraction']),
+            float(metrics['csf_p95']),
+            float(metrics['csf_max']),
+            float(metrics['distortion_area_mean']))
 
 def pareto_improves(candidate, baseline):
     """Select an alternative OptCuts run without requiring every metric to improve.
