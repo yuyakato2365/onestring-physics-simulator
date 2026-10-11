@@ -324,6 +324,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     out.metrics.update(audit_solid_collisions(out.vertices,scale*1e-8))
     out.metrics['fabrication_feasible'] = bool(out.metrics['fabrication_feasible'] and out.metrics['solid_collision_pair_count']==0)
     out.metrics["paper_classification"]["optional_anchor_energy"] = "Project-specific extension"
+    out.metrics["paper_classification"]["multi_start_perturbation_search"] = ("Project-specific extension" if search_mode=="multi_start" else "Disabled (paper-style single local solve)")
     graph.metrics=dict(out.metrics)
     for hinge in graph.hinges:
         hinge.rest_position_2d=.5*(out.vertices[hinge.tile_a,hinge.local_vertex_a]+out.vertices[hinge.tile_b,hinge.local_vertex_b])
