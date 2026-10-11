@@ -43,7 +43,12 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     if min(wconn,wcoll,wanchor)<0 or not np.isfinite([wconn,wcoll,wanchor]).all():
         raise ValueError('Hinge weights must be finite and nonnegative')
     budget=float(params.hinge_layout_time_budget_sec)
-    deadline=started+budget if budget>0 else float('inf')
+    if not np.isfinite(budget) or budget < 0:
+        raise ValueError('hinge_layout_time_budget_sec must be finite and nonnegative (0 = unlimited)')
+    # The time budget applies to the numerical solve, not to graph construction,
+    # initial collision audits or the first solver-history snapshot. In large
+    # meshes those preparations can otherwise consume the entire short budget.
+    deadline=float('inf')
     # Stabilization controls are part of the actual dual-hinge solve.  Expansion
     # is applied to tile centers before optimization; max drift is enforced with
     # L-BFGS-B translation bounds around that expanded reference.  This makes
@@ -125,18 +130,24 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     timed_out=False
     solver_success=False
     solver_status=None
+    optimization_elapsed=0.0
+    setup_elapsed=0.0
     try:
         bounds=[]
         for i in range(len(rest)):
             bounds.append((None,None))
             bounds.append((reference_pose[i,1]-drift_bound,reference_pose[i,1]+drift_bound))
             bounds.append((reference_pose[i,2]-drift_bound,reference_pose[i,2]+drift_bound))
+        setup_elapsed=time.perf_counter()-started
+        optimization_started=time.perf_counter()
+        deadline=optimization_started+budget if budget>0 else float('inf')
         result=minimize(fun,last.ravel(),jac=True,method='L-BFGS-B',bounds=bounds,callback=callback,
                         options=dict(maxiter=max(1,params.hinge_layout_iterations),maxls=30,maxcor=20,ftol=1e-13,gtol=1e-8))
         last=result.x.reshape(-1,3);message=str(result.message)
         solver_success=bool(result.success);solver_status=int(result.status)
     except _Deadline:
-        timed_out=True;message='time budget reached; returning last accepted pose'
+        timed_out=True;message='time budget reached before convergence; returning last accepted pose'
+    optimization_elapsed=time.perf_counter()-optimization_started
     if not pose_history or pose_history[-1][0] != len(records)-1:
         pose_history.append((len(records)-1, last.copy()))
     xy,_=positions(last)
@@ -158,6 +169,10 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_final_collision_count=final['collisions'],
                        dual_hinge_layout_optimizer='analytic L-BFGS on rigid SE(2) poses',
                        dual_hinge_timed_out=timed_out,dual_hinge_solver_message=message,
+                       dual_hinge_time_budget_sec=budget,
+                       dual_hinge_setup_elapsed_sec=setup_elapsed,
+                       dual_hinge_optimization_elapsed_sec=optimization_elapsed,
+                       dual_hinge_stop_reason=('time_budget' if timed_out else ('converged' if solver_success else 'solver_stopped')),
                        dual_hinge_solver_success=solver_success,dual_hinge_solver_status=solver_status,
                        dual_hinge_weights={'connection':wconn,'collision':wcoll,'anchor':wanchor},
                        dual_hinge_rigidity='exact in-plane rigid poses; fixed Z, not unrestricted paper 3D motion',
