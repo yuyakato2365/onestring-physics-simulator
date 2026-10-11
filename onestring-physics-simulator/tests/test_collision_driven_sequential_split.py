@@ -135,13 +135,48 @@ def test_acceptance_must_lower_collision_without_exploding_hinges():
 
 
 def _fake_state(pair_count, applied_cuts=0):
+    # An intentionally tiny but REAL M2D source topology: a 4x4 grid with
+    # either zero, one or two complete disconnected seams.
+    from collections import defaultdict
+    from onestring_physics.final_split_panel_pass import _complete_cut_once
+    vertices,faces=_grid(4)
+    seam_records=[]
+    for k in range(applied_cuts):
+        axis="col" if k==0 else "row"
+        anchor=5 if k==0 else 10
+        comp=next(comp for comp in _edge_components(faces) if anchor in comp)
+        owners=defaultdict(list)
+        for fi in comp:
+            for corner in range(4):
+                key=tuple(sorted((int(faces[fi,corner]),
+                                  int(faces[fi,(corner+1)%4]))))
+                owners[key].append((int(fi),corner))
+        vertices2,subset,record=_complete_cut_once(vertices,faces[comp],axis,2.)
+        assert record is not None
+        updated=faces.copy();updated[comp]=subset
+        pairs=[]
+        for owners_for_edge in owners.values():
+            if len(owners_for_edge)!=2:
+                continue
+            (a,ea),(b,eb)=owners_for_edge
+            if set(updated[a,[ea,(ea+1)%4]])!=set(updated[b,[eb,(eb+1)%4]]):
+                pairs.append([a,ea,b,eb])
+        assert pairs
+        seam_records.append(dict(
+            complete_boundary_to_boundary=True,
+            split_boundary_pairs=pairs,
+            collision_source_face_id=anchor,
+        ))
+        vertices,faces=vertices2,updated
     return SimpleNamespace(
         conformal_domain=SimpleNamespace(paper_split_policy=True),
         tiles_2d_dual_hinge=SimpleNamespace(metrics={}),
-        mesh_2d_initial=SimpleNamespace(metrics={
-            "collision_split_count": applied_cuts,
-            "collision_split_final_pass_applied_count": applied_cuts,
-        }),
+        mesh_2d_initial=SimpleNamespace(faces=faces,vertices=vertices,
+            metrics={
+                "collision_split_count": applied_cuts,
+                "collision_split_final_pass_applied_count": applied_cuts,
+                "collision_split_step_analysis":seam_records,
+            }),
         collision_pair_count=pair_count,
     )
 
