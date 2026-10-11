@@ -185,3 +185,22 @@ def test_soft_mode_is_backward_compatible():
     assert metrics["dual_hinge_collision_constraint_mode"] == "soft"
     assert metrics["hard_collision_feasible"] is None
     assert not metrics["hard_collision_history"]
+
+
+@pytest.mark.parametrize("collision_mode", ["soft", "hard"])
+def test_lbfgsb_does_not_receive_center_translation_bounds(monkeypatch, collision_mode):
+    # Verify the actual scipy entry point (not only a metrics flag).
+    actual_minimize=paper_hinge_solver.minimize
+    seen=[]
+
+    def checked_minimize(*args, **kwargs):
+        seen.append(kwargs.get("bounds"))
+        assert kwargs.get("bounds") is None
+        return actual_minimize(*args, **kwargs)
+
+    monkeypatch.setattr(paper_hinge_solver, "minimize", checked_minimize)
+    _, _, output, _, _ = _solve(
+        mode="single", collision_mode=collision_mode, legacy_drift=0.0,
+    )
+    assert seen == [None]
+    assert output.metrics["dual_hinge_translation_bounds_enabled"] is False
