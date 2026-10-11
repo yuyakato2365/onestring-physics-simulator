@@ -948,6 +948,17 @@ with st.sidebar:
         lambda: st.slider("collision sweeps per layout iteration", 1, 6, 2, 1, help="Number of collision separation passes per layout iteration."),
     ))
 
+    # A standalone rerun needs its own (longer) budget. The short budget above
+    # is still used for the full K3D/K2D/T3D pipeline run.
+    t2d_rerun_time_budget_sec = _param_row(
+        "T2Dのみ再最適化の時間予算（秒）。通常実行の8秒とは独立。0で時間制限なし。",
+        lambda: st.number_input(
+            "T2D-only rerun time budget (sec; 0 = unlimited)",
+            min_value=0, max_value=7200, value=180, step=30,
+            help="Used only by the ↻ T2D-only rerun button. 0 disables the time limit; iteration limit and solver convergence still apply.",
+        ),
+    )
+
     # Keep the rerun action immediately after its parameters, rather than at
     # the very bottom of the long sidebar.
     st.markdown("### ↻ T2D Dual Hingeのみ再最適化")
@@ -1637,15 +1648,30 @@ rerun_t2d_main = st.button(
 rerun_t2d_only = rerun_t2d_sidebar or rerun_t2d_main
 
 if rerun_t2d_only and not run_pipeline:
+    # Do not mutate the parameters shared with a future full pipeline run.
+    import copy as _copy
+    t2d_rerun_params = _copy.copy(pipeline_params)
+    t2d_rerun_params.hinge_layout_time_budget_sec = float(t2d_rerun_time_budget_sec)
+    rerun_progress = st.empty()
+    def _t2d_rerun_progress(stage, fraction, detail=""):
+        rerun_progress.caption(f"T2D rerun: {stage}" + (f" — {detail}" if detail else ""))
     with st.spinner("Re-optimizing cached T2D Dual Hinge (K3D/K2D unchanged)…"):
         try:
-            rerun_t2d_dual_hinge(state, pipeline_params)
+            rerun_t2d_dual_hinge(state, t2d_rerun_params, progress_callback=_t2d_rerun_progress)
         except Exception as exc:
             st.exception(exc)
             st.stop()
     # A fresh solver call also regenerates dual_hinge_pose_history for animation.
     st.session_state.pop("actuation_key", None)
-    st.success("T2D Dual Hingeの再最適化完了。3Dアニメーションも新しい履歴に更新しました。")
+    rerun_metrics = state.tiles_2d_dual_hinge.metrics
+    rerun_iterations = rerun_metrics.get("dual_hinge_iterations", "unknown")
+    rerun_reason = rerun_metrics.get("dual_hinge_solver_message", "No solver status available")
+    if rerun_metrics.get("dual_hinge_timed_out", False):
+        st.warning(f"T2Dは時間制限で途中終了しました（採用反復 {rerun_iterations} 回）。最終配置とアニメーションは途中結果です。時間予算を増やして再実行してください。理由: {rerun_reason}")
+    elif rerun_metrics.get("dual_hinge_solver_success") is False:
+        st.warning(f"T2Dソルバーは収束成功を報告していません（採用反復 {rerun_iterations} 回）。結果を確認してください。理由: {rerun_reason}")
+    else:
+        st.success(f"T2D Dual Hingeを再最適化し、アニメーションを更新しました（採用反復 {rerun_iterations} 回）。停止理由: {rerun_reason}")
 
 
 deployment_params = DeploymentParameters(
@@ -2466,7 +2492,9 @@ elif view_stage == "T2D Dual Hinge":
                     mode="immediate")]) for entry in pose_history],
                     currentvalue=dict(prefix="Iteration "), len=0.95)])
         with st.expander("▶ Dual Hinge 3D最適化アニメーション", expanded=True):
-            st.caption(f"実際のL-BFGS採用反復 {len(frames)} フレーム。"
+            if audit_metrics.get("dual_hinge_timed_out", False):
+                st.warning("時間切れによる途中結果です。T2D-only rerunの時間予算を増やしてください。")
+            st.caption(f"記録されたL-BFGS採用反復 {len(frames)} フレーム（間引き設定により実際の反復数とは異なることがあります）。"
                        "青緑＝厚みを持つ剛体パネル、橙＝ヒンジ接続誤差。"
                        " パネルはXY平面内でのみ剛体運動し、Z位置は固定です。")
             st.plotly_chart(fig, use_container_width=True, key="dual_hinge_iteration_animation_3d")
@@ -2478,7 +2506,10 @@ elif view_stage == "T2D Dual Hinge":
             st.dataframe(audit_metrics["dual_hinge_history"], use_container_width=True)
             st.write({key: audit_metrics.get(key) for key in (
                 "dual_hinge_weights", "dual_hinge_solver_success", "dual_hinge_solver_message",
-                "dual_hinge_timed_out", "hinge_mean", "hinge_rms", "hinge_p95", "hinge_max",
+                "dual_hinge_timed_out", "dual_hinge_stop_reason",
+                "dual_hinge_iterations", "dual_hinge_time_budget_sec",
+                "dual_hinge_setup_elapsed_sec", "dual_hinge_optimization_elapsed_sec",
+                "hinge_mean", "hinge_rms", "hinge_p95", "hinge_max",
                 "collision_pair_count", "penetration_max", "penetration_rms",
                 "solid_collision_pair_count", "solid_penetration_max", "solid_penetration_rms",
                 "dual_hinge_fixed_z_infeasible", "fabrication_feasible")})
