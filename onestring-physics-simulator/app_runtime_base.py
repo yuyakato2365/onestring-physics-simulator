@@ -46,6 +46,7 @@ from onestring_physics.onestring_pipeline import (
     PipelineParameters,
     TileAssembly,
     build_onestring_design,
+    rerun_t2d_dual_hinge,
     complexity_metrics,
     compute_backend_info,
     gpu_self_test,
@@ -1554,6 +1555,16 @@ pipeline_params = PipelineParameters(
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
 
+# Reuse the existing K3D / K2D / T2D Top Hinge result when only the
+# Dual Hinge layout settings need another attempt.
+st.sidebar.markdown("### T2D Dual Hinge — 再最適化")
+rerun_t2d_only = st.sidebar.button(
+    "↻ T2D Dual Hingeだけ再計算",
+    disabled="onestring_state" not in st.session_state,
+    help="現在保存されているT2D Top Hingeを入力にして、Dual Hinge配置とアニメーション履歴を再計算します。S/Ω/M2D/K3D/K2Dは再計算しません。",
+)
+st.sidebar.caption("前回のT2D Top Hingeを使用。上流設定を変更した場合は先にRun OneString pipelineを実行してください。")
+
 pipeline_key = current_pipeline_key()
 if "onestring_state" not in st.session_state and not run_pipeline:
     st.info("Set parameters, then click Run OneString pipeline. The paper-default path stops at unimplemented stages; enable the experimental pipeline explicitly to run the old prototype path.")
@@ -1603,6 +1614,17 @@ if run_pipeline:
         st.session_state.pop("actuation_key", None)
 
 state = st.session_state.onestring_state
+if rerun_t2d_only and not run_pipeline:
+    with st.spinner("Re-optimizing cached T2D Dual Hinge (K3D/K2D unchanged)…"):
+        try:
+            rerun_t2d_dual_hinge(state, pipeline_params)
+        except Exception as exc:
+            st.exception(exc)
+            st.stop()
+    # A fresh solver call also regenerates dual_hinge_pose_history for animation.
+    st.session_state.pop("actuation_key", None)
+    st.success("T2D Dual Hingeの再最適化完了。3Dアニメーションも新しい履歴に更新しました。")
+
 
 deployment_params = DeploymentParameters(
     physics_backend=physics_backend,
