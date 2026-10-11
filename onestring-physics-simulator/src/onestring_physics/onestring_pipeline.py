@@ -8498,6 +8498,35 @@ def build_onestring_design(
     return state
 
 
+def rerun_t2d_dual_hinge(state, params=None, progress_callback=None):
+    """Re-optimize only T2D Dual Hinge from the cached Top Hinge state.
+
+    K3D, T3D, K2D and Top Hinge are not rebuilt. The top-hinge input is
+    deep-copied because some legacy dual-hinge paths mutate its placement.
+    """
+    import copy
+    active_params = params or PipelineParameters()
+    top = copy.deepcopy(state.tiles_2d_top_hinge)
+    source_faces = state.mesh_3d_optimized.faces
+    grid = state.mesh_2d_initial.grid
+    dual, hinges, report = _optimize_dual_hinges(
+        grid, source_faces, top, state.tiles_3d, active_params,
+        progress_callback=progress_callback,
+    )
+    gaps = _build_gap_graph(source_faces, dual, state.tiles_3d)
+    lift_points = _select_lift_points(gaps, active_params.lift_tau)
+    string_path = _build_string_path(gaps, lift_points, active_params.channel_friction)
+    # Publish only after all dependent stages succeeded.
+    state.tiles_2d_dual_hinge = dual
+    state.hinge_graph = hinges
+    state.gap_graph = gaps
+    state.lift_points = lift_points
+    state.string_path = string_path
+    state.stage_reports["T2D top hinge -> T2D dual hinge"] = report
+    state.simulation_result = None
+    return state
+
+
 # Patch the original module in-place. Functions such as build_onestring_design()
 # keep their original global namespace, so this assignment is what makes them call
 # the new extrusion implementation.
