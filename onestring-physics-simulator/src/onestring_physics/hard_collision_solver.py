@@ -54,18 +54,22 @@ def footprint_contacts(xy, faces):
 
 
 def repair_nonpenetration(initial_pose, positions, faces, reference_pose,
-                          max_center_drift_tiles, scale, deadline, rng,
+                          scale, deadline, rng,
                           *, max_iterations=480, log_stride=8, callback=None):
     """Try to enforce SAT nonpenetration by rigid SE(2) panel displacements.
 
-    Translation bounds match the original L-BFGS-B bounds. Feasibility means
-    every SAT depth is within numerical tolerance 1e-10 * tile scale; failure
-    is explicitly reported and never silently converted into success.
+    Translation is unbounded. Only the common XY translation gauge is fixed:
+    subtracting the mean displacement leaves all pairwise collisions and hinge
+    differences unchanged, and also minimizes any quadratic anchor penalty
+    over pure global translations. All RELATIVE tile translations stay free.
+    Feasibility means every SAT depth is within numerical tolerance
+    1e-10 * tile scale; failure is never silently declared successful.
     """
     pose = np.asarray(initial_pose, float).copy()
     ref = np.asarray(reference_pose, float)
-    drift = float(max_center_drift_tiles)
-    pose[:, 1:] = np.clip(pose[:, 1:], ref[:, 1:]-drift, ref[:, 1:]+drift)
+    if len(pose):
+        # Suppress only global translation; never clip relative panel travel.
+        pose[:, 1:] += np.mean(ref[:, 1:] - pose[:, 1:], axis=0)
     best = pose.copy()
     history = [(0, pose.copy())]
     eps = max(1e-12, float(scale)*1e-10)
@@ -105,13 +109,13 @@ def repair_nonpenetration(initial_pose, positions, faces, reference_pose,
         displacement[active] /= degree[active, None]
         proposal = pose.copy()
         proposal[:, 1:] += .7*displacement/max(scale, 1e-30)
-        proposal[:, 1:] = np.clip(proposal[:, 1:], ref[:, 1:]-drift, ref[:, 1:]+drift)
         if stagnation >= 12 and np.any(active):
             magnitude = min(.3, .015*(1+stagnation//12))
             proposal[active, 1:] += rng.normal(0., magnitude, (np.count_nonzero(active), 2))
             proposal[active, 0] += rng.normal(0., .075, np.count_nonzero(active))
-            proposal[:, 1:] = np.clip(proposal[:, 1:], ref[:, 1:]-drift, ref[:, 1:]+drift)
             stagnation = 0
+        if len(proposal):
+            proposal[:, 1:] += np.mean(ref[:, 1:] - proposal[:, 1:], axis=0)
         pose = proposal
         if iteration%max(1, log_stride) == 0:
             history.append((iteration+1, pose.copy()))
@@ -122,7 +126,7 @@ def repair_nonpenetration(initial_pose, positions, faces, reference_pose,
     return best, False, history, diagnostics
 
 
-def refine_feasible_pose(pose, positions, faces, reference_pose, max_center_drift_tiles,
+def refine_feasible_pose(pose, positions, faces, reference_pose,
                          scale, deadline, rng, objective, *, iterations=24):
     """Projected descent on hinge/anchor energy, rejecting nonfeasible steps."""
     current = np.asarray(pose, float).copy()
@@ -139,7 +143,7 @@ def refine_feasible_pose(pose, positions, faces, reference_pose, max_center_drif
         direction[:, 1:] = np.clip(direction[:, 1:], -1., 1.)
         proposed = current+step*direction
         projected, feasible, _, _ = repair_nonpenetration(
-            proposed, positions, faces, reference_pose, max_center_drift_tiles,
+            proposed, positions, faces, reference_pose,
             scale, deadline, rng, max_iterations=24, log_stride=24,
         )
         if feasible:
