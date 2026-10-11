@@ -272,7 +272,11 @@ def test_two_cuts_are_proposed_sequentially_with_fresh_collision_map(monkeypatch
     def fake_rank(state,**kwargs):
         # Verify the candidate is re-ranked *after* the first cut.
         scored_states.append(state)
-        i=states.index(state)
+        # Compare identities, never SimpleNamespace values: these contain
+        # NumPy arrays of different shapes after each topological cut, and
+        # list.index() invokes equality (which raises on ndarray comparison).
+        i=next(i for i, candidate_state in enumerate(states)
+               if candidate_state is state)
         proposal=dict(
             axis="col" if i==0 else "row",
             value=2.0,source_face_id=5 if i==0 else 10,
