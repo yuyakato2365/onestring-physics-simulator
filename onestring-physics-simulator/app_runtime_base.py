@@ -948,6 +948,21 @@ with st.sidebar:
         lambda: st.slider("collision sweeps per layout iteration", 1, 6, 2, 1, help="Number of collision separation passes per layout iteration."),
     ))
 
+    # Keep the rerun action immediately after its parameters, rather than at
+    # the very bottom of the long sidebar.
+    st.markdown("### ↻ T2D Dual Hingeのみ再最適化")
+    st.caption("上のヒンジ設定を変更後に押してください。保存済みのT2D Top Hingeから計算し直し、K3D・K2D・T3Dは再計算しません。")
+    rerun_t2d_sidebar = st.button(
+        "↻ T2Dだけ再最適化（K3D再計算なし）",
+        type="primary",
+        use_container_width=True,
+        disabled="onestring_state" not in st.session_state,
+        key="rerun_t2d_sidebar",
+        help="現在のT2D Top Hingeを元にDual Hinge配置と3Dアニメーション履歴を更新します。",
+    )
+    if "onestring_state" not in st.session_state:
+        st.caption("最初に「Run OneString pipeline」を実行してください。")
+
     st.header("Compute Backend")
     compute_backend = _param_row(
         "計算バックエンド。cuda はK3D/K2D/PDの一部で使うが、描画や一部ジオメトリ処理はCPU。",
@@ -1555,15 +1570,22 @@ pipeline_params = PipelineParameters(
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
 
-# Reuse the existing K3D / K2D / T2D Top Hinge result when only the
-# Dual Hinge layout settings need another attempt.
-st.sidebar.markdown("### T2D Dual Hinge — 再最適化")
-rerun_t2d_only = st.sidebar.button(
-    "↻ T2D Dual Hingeだけ再計算",
-    disabled="onestring_state" not in st.session_state,
-    help="現在保存されているT2D Top Hingeを入力にして、Dual Hinge配置とアニメーション履歴を再計算します。S/Ω/M2D/K3D/K2Dは再計算しません。",
+# Main-page entry point: visible alongside the result viewer, even when the
+# user has scrolled away from the sidebar hinge controls.
+st.markdown("### ↻ T2D Dual Hingeのみ再最適化")
+st.caption(
+    "左サイドバーの「Hinge Layout Optimization」で条件を変更してから実行。"
+    "保存済みのT2D Top Hingeを使い、K3D・K2D・T3Dを再計算せずT2D配置と3Dアニメーションを更新します。"
 )
-st.sidebar.caption("前回のT2D Top Hingeを使用。上流設定を変更した場合は先にRun OneString pipelineを実行してください。")
+rerun_t2d_main = st.button(
+    "↻ T2Dだけ再最適化（K3D再計算なし）",
+    type="primary",
+    use_container_width=True,
+    disabled="onestring_state" not in st.session_state,
+    key="rerun_t2d_main",
+    help="初期配置は保存済みのT2D Top Hingeです。上流設定を変更した場合は先にRun OneString pipelineを実行してください。",
+)
+rerun_t2d_only = rerun_t2d_sidebar or rerun_t2d_main
 
 pipeline_key = current_pipeline_key()
 if "onestring_state" not in st.session_state and not run_pipeline:
