@@ -278,8 +278,11 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         out.transform_matrices[i]=transform@t2d.transform_matrices[i]
         out.top_to_bottom_transforms[i]=transform@t2d.top_to_bottom_transforms[i]@np.linalg.inv(transform)
     _,_,final=evaluate(last)
-    if final != {k:v for k,v in records[-1].items() if k!='iteration'}:
-        record(last)
+    # The chosen trial has its own completed history. Never call a callback
+    # local to an already finished trial from this outer scope.
+    if not np.isclose(final['EHinge'], records[-1]['EHinge'], rtol=1e-10, atol=1e-12*scale**2):
+        records.append(dict(iteration=len(records),**final))
+        pose_history.append((len(records)-1,last.copy()))
     out.metrics.update(graph.metrics)
     out.metrics.update(final)
     out.metrics.update(hinge_connection_error=final['hinge_rms'],flat_collision_count=final['collisions'],
@@ -326,7 +329,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         hinge.rest_position_2d=.5*(out.vertices[hinge.tile_a,hinge.local_vertex_a]+out.vertices[hinge.tile_b,hinge.local_vertex_b])
     report=pipeline.StageReport(name='T2D top hinge -> T2D dual hinge',
                                objective='Rigid SE(2) Eq.6 with convex footprint SAT surrogate',
-                               before_error=records[0]['EHinge'],after_error=final['EHinge'],
+                               before_error=trial_summaries[0]['initial_EHinge'],after_error=final['EHinge'],
                                constraint_violation=final['hinge_rms'],computation_time=time.perf_counter()-started,
                                counts={'tiles':len(rest),'hinges':len(graph.hinges)})
     if progress_callback:
