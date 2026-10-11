@@ -75,9 +75,12 @@ def _stub_non_search_diagnostics(monkeypatch):
     )
 
 
-def _solve(mode="multi_start"):
+def _solve(mode="multi_start", collision_mode="soft", drift=None):
     original, top, t3d, params, pipeline = _data()
     params.hinge_layout_search_mode = mode
+    params.hinge_layout_collision_mode = collision_mode
+    if drift is not None:
+        params.hinge_layout_max_center_drift_tiles = drift
     result, graph, report = paper_hinge_solver.optimize_hinge_poses(
         None, None, top, t3d, params, pipeline
     )
@@ -139,3 +142,50 @@ def test_multistart_is_seed_reproducible():
     for a, b in zip(first_metrics["dual_hinge_trial_summary"], second_metrics["dual_hinge_trial_summary"]):
         assert a["initial_source"] == b["initial_source"]
         np.testing.assert_allclose(a["final_EHinge"], b["final_EHinge"], rtol=1e-9, atol=1e-9)
+
+
+def test_hard_solver_repairs_overlapping_rigid_tiles():
+    original, top, out, _, _ = _solve(mode="single", collision_mode="hard")
+    metrics = out.metrics
+    assert metrics["dual_hinge_collision_constraint_mode"] == "hard"
+    assert metrics["hard_collision_feasible"] is True
+    assert metrics["hard_collision_status"] == "verified_feasible"
+    assert metrics["flat_collision_count"] == 0
+    assert metrics["collision_pair_count"] == 0
+    assert metrics["hard_collision_repair_source_trial"] == 0
+    assert metrics["hard_collision_repair_attempts"]
+    assert metrics["hard_collision_history"]
+    final_pose = np.asarray(metrics["dual_hinge_pose_history"][-1]["poses"])
+    centers = original[:, :4, :2].mean(axis=1)
+    local = original[:, :, :2]-centers[:, None, :]
+    expected = np.empty_like(local)
+    for i, (angle, tx, ty) in enumerate(final_pose):
+        c, sn = np.cos(angle), np.sin(angle)
+        rot = np.array([[c, -sn], [sn, c]])
+        expected[i] = local[i]@rot.T + centers[i] + np.array([tx,ty])
+    np.testing.assert_allclose(out.vertices[:, :, :2], expected, atol=1e-8)
+    assert metrics["hard_collision_repair_elapsed_sec"] >= 0
+    assert metrics["hard_collision_refinement_elapsed_sec"] >= 0
+
+
+def test_hard_solver_reports_infeasible_when_no_translation_is_possible():
+    # Two overlapping unit square tiles have inscribed disks of radius 0.5.
+    # Their centers are 0.55 apart. No amount of in-plane rotation can
+    # separate those inscribed disks if both translation bounds are exactly 0.
+    original, top, out, _, _ = _solve(
+        mode="single", collision_mode="hard", drift=0.0,
+    )
+    metrics = out.metrics
+    assert metrics["hard_collision_feasible"] is False
+    assert metrics["hard_collision_status"] == "NONPENETRATION_NOT_FOUND"
+    assert metrics["fabrication_feasible"] is False
+    assert metrics["hard_collision_repair_source_trial"] is None
+    assert metrics["hard_collision_best_unresolved_count"] > 0
+
+
+def test_soft_mode_is_backward_compatible():
+    _, _, out, _, _ = _solve("single", collision_mode="soft")
+    metrics = out.metrics
+    assert metrics["dual_hinge_collision_constraint_mode"] == "soft"
+    assert metrics["hard_collision_feasible"] is None
+    assert not metrics["hard_collision_history"]
