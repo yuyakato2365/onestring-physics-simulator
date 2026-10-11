@@ -1052,9 +1052,12 @@ class PipelineParameters(_original.PipelineParameters):
     # Both active Sec.4.3 T2D Dual Hinge Soft and Hard solvers ignore this
     # legacy setting; their rigid SE(2) translations are unbounded.
     hinge_layout_max_center_drift_tiles: float = 5.0
-    # Optional multi-start for the T2D-only rerun; full pipeline remains single.
+    # Sec.4.3 T2D options apply to BOTH full builds and T2D-only reruns.
+    # The full build uses its stage time budget once PER requested attempt,
+    # while the dedicated rerun can distribute a total budget across attempts.
     hinge_layout_search_mode: str = "single"
-    hinge_layout_collision_mode: str = "soft"  # standalone T2D option; full build unchanged
+    hinge_layout_collision_mode: str = "soft"
+    hinge_layout_budget_mode: str = "per_trial"
     hinge_layout_restart_count: int = 6
     hinge_layout_perturb_translation: float = 0.35
     hinge_layout_perturb_rotation_deg: float = 20.0
