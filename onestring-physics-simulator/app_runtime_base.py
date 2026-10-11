@@ -925,8 +925,13 @@ with st.sidebar:
     )
     st.caption("T2D Dual Hinge: パネル中心の移動距離制限なし（Soft / Hard共通）。各パネルの形状は剛体のままです。")
     hinge_layout_time_budget_sec = _param_row(
-        "Top Hinge / Dual Hinge 各段階の最大計算時間。超えると partial convergence として止める。",
-        lambda: st.slider("hinge layout time budget / stage", 1.0, 30.0, 8.0, 1.0, help="Maximum seconds spent in each hinge layout stage."),
+        "通常パイプラインのT2Dでは、各L-BFGS-B試行にこの秒数を割り当てます。"
+        "Multi-startなら入力した全試行に個別の制限時間を適用します（回数分だけ計算時間が増えます）。",
+        lambda: st.slider(
+            "hinge layout time budget / trial (full pipeline)",
+            1.0, 120.0, 8.0, 1.0,
+            help="Full pipeline: seconds PER T2D attempt, not total across restarts. Each requested trial is executed. Other hinge stages use their existing stage budget.",
+        ),
     )
     hinge_layout_max_candidate_pairs = int(_param_row(
         "衝突判定する候補ペア数の上限。上げると正確だが重く、下げると衝突を見逃しやすい。",
@@ -937,11 +942,13 @@ with st.sidebar:
         lambda: st.slider("collision sweeps per layout iteration", 1, 6, 2, 1, help="Number of collision separation passes per layout iteration."),
     ))
 
-    # T2D-only reruns can search several basins without rerunning K3D/K2D.
+    # Both Run OneString pipeline and the cached T2D-only rerun honor these
+    # controls; only the time-budget policy differs.
     t2d_search_mode = _param_row(
-        "T2D単独再実行の方式。Multi-startは一度求めた最良解と元のTop Hinge配置の両方から再探索する。",
+        "通常パイプラインでもT2D単独再実行でも同じ最適化方式を使う。"
+        "Multi-startは一度求めた最良解と元のTop Hinge配置の両方から再探索する。",
         lambda: st.selectbox(
-            "T2D-only optimization method",
+            "T2D optimization method (full run + rerun)",
             ["multi_start", "single"],
             format_func=lambda value: "Multi-start + perturbation (70% best / 30% initial)" if value == "multi_start" else "Original L-BFGS-B (single trial)",
             index=0,
@@ -957,9 +964,15 @@ with st.sidebar:
         ),
     )
     t2d_restart_count = int(_param_row(
-        "初回の通常最適化に加えて実行する再探索試行回数。70%は最良解、30%は元のTop Hingeから始める。",
-        lambda: st.slider("T2D additional search trials", 1, 30, 6, 1, disabled=t2d_search_mode=="single"),
+        "初回の通常最適化に加えて実行する再探索回数。例えば10なら初回＋10回＝計11回。"
+        "通常パイプライン実行時にも必ずこの回数を試行する。",
+        lambda: st.slider("T2D additional search trials (full run + rerun)",
+                          1, 30, 6, 1, disabled=t2d_search_mode=="single"),
     ))
+    st.caption(
+        f"T2D実行予定: {1+t2d_restart_count if t2d_search_mode=='multi_start' else 1} 回"
+        "（初回のL-BFGS-Bを含む）。"
+    )
     t2d_perturb_translation = float(_param_row(
         "摂動の平行移動標準偏差（タイル代表辺長単位）。",
         lambda: st.slider("T2D translation perturbation / tile", 0.0, 2.0, 0.35, 0.05, disabled=t2d_search_mode=="single"),
@@ -977,7 +990,7 @@ with st.sidebar:
         lambda: st.number_input(
             "T2D-only TOTAL search time budget (sec; 0 = unlimited)",
             min_value=0, max_value=7200, value=360, step=60,
-            help="The whole multi-start search shares this budget. Each trial also has its own max iteration limit.",
+            help="T2D-only rerun: split this total equally among every requested soft L-BFGS-B attempt (55% for soft search when Hard mode is selected). All attempts will run.",
         ),
     )
 
@@ -1474,6 +1487,12 @@ def current_pipeline_key() -> tuple:
         hinge_layout_anchor_weight,
         hinge_layout_initial_expansion,
         hinge_layout_time_budget_sec,
+        t2d_search_mode,
+        t2d_collision_mode,
+        t2d_restart_count,
+        t2d_perturb_translation,
+        t2d_perturb_rotation_deg,
+        t2d_search_seed,
         hinge_layout_max_candidate_pairs,
         hinge_layout_collision_sweeps_per_iteration,
         compute_backend,
@@ -1587,6 +1606,13 @@ pipeline_params = PipelineParameters(
     hinge_layout_anchor_weight=hinge_layout_anchor_weight,
     hinge_layout_initial_expansion=hinge_layout_initial_expansion,
     hinge_layout_time_budget_sec=hinge_layout_time_budget_sec,
+    hinge_layout_search_mode=t2d_search_mode,
+    hinge_layout_collision_mode=t2d_collision_mode,
+    hinge_layout_budget_mode="per_trial",
+    hinge_layout_restart_count=t2d_restart_count,
+    hinge_layout_perturb_translation=t2d_perturb_translation,
+    hinge_layout_perturb_rotation_deg=t2d_perturb_rotation_deg,
+    hinge_layout_random_seed=t2d_search_seed,
     hinge_layout_max_candidate_pairs=hinge_layout_max_candidate_pairs,
     hinge_layout_collision_sweeps_per_iteration=hinge_layout_collision_sweeps_per_iteration,
     strict_paper_flow=True,
@@ -1671,6 +1697,7 @@ if rerun_t2d_only and not run_pipeline:
     import copy as _copy
     t2d_rerun_params = _copy.copy(pipeline_params)
     t2d_rerun_params.hinge_layout_time_budget_sec = float(t2d_rerun_time_budget_sec)
+    t2d_rerun_params.hinge_layout_budget_mode = "total_shared"
     t2d_rerun_params.hinge_layout_search_mode = t2d_search_mode
     t2d_rerun_params.hinge_layout_collision_mode = t2d_collision_mode
     t2d_rerun_params.hinge_layout_restart_count = t2d_restart_count
@@ -2482,6 +2509,14 @@ elif view_stage == "T2D Dual Hinge":
             f"｜Soft探索 {len(trial_summaries)} / 予定 {audit_metrics.get('dual_hinge_trials_requested', len(trial_summaries))} 回 "
             f"｜初回比エネルギー変化 {-audit_metrics.get('dual_hinge_best_improvement', 0.):.6g}"
         )
+        st.caption(
+            "計算予算の方式: "
+            + ("各試行に独立した時間制限" if audit_metrics.get("dual_hinge_budget_mode")=="per_trial"
+               else "総予算を全試行へ均等に分配")
+            + f"。L-BFGS-Bの試行ごとの上限: {audit_metrics.get('dual_hinge_trial_time_budget_sec', 0.):.3g} 秒。"
+        )
+        if not audit_metrics.get("dual_hinge_all_requested_trials_run", True):
+            st.error("要求されたL-BFGS-B試行数と実行した試行数が一致しません。")
         if hard_mode_active and hard_ok:
             st.caption("以下の表はHard修復前のSoft探索結果です。最終採用配置はHard修復・非貫通制約下の再最適化後のものです。")
         st.dataframe(trial_summaries, use_container_width=True, hide_index=True)
@@ -2614,6 +2649,8 @@ elif view_stage == "T2D Dual Hinge":
                 "dual_hinge_weights", "dual_hinge_solver_success", "dual_hinge_solver_message",
                 "dual_hinge_timed_out", "dual_hinge_stop_reason",
                 "dual_hinge_iterations", "dual_hinge_time_budget_sec",
+                "dual_hinge_budget_mode", "dual_hinge_trial_time_budget_sec",
+                "dual_hinge_hard_phase_time_budget_sec", "dual_hinge_all_requested_trials_run",
                 "dual_hinge_search_mode", "dual_hinge_collision_constraint_mode",
                 "hard_collision_status", "hard_collision_feasible",
                 "hard_collision_repair_source_trial", "hard_collision_tolerance",
