@@ -8479,6 +8479,11 @@ def build_onestring_design(
     progress_callback=None,
 ):
     active_params = params or PipelineParameters()
+    if bool(getattr(active_params, 'collision_split_enabled', False)) and run_simulation:
+        raise ValueError(
+            'Collision-driven Split requires run_simulation=False: '
+            'the final accepted geometry must be built before simulating deployment.'
+        )
     progress_attribute = "_bijective_free_boundary_progress_callback"
     missing_progress = object()
     previous_progress = getattr(active_params, progress_attribute, missing_progress)
@@ -8519,11 +8524,6 @@ def build_onestring_design(
     # One cut, one full reoptimization, one acceptance decision. Failed
     # candidate builds are rejected and the last accepted state is preserved.
     if bool(getattr(active_params,'collision_split_enabled',False)):
-        if run_simulation:
-            raise ValueError(
-                'Collision-driven Split requires run_simulation=False: '
-                'the complete geometry must be accepted before deployment simulation.'
-            )
         from .paper_collision_split import (
             rank_collision_split_candidates, collision_quality, accept_if_improved,
         )
