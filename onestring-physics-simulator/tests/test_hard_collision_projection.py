@@ -47,7 +47,7 @@ def test_complete_containment_uses_translation_depth_not_interval_intersection()
 def test_repair_is_rigid_and_collision_free():
     tiles,faces,reference,positions=_fixture()
     candidate,feasible,frames,diagnostics=repair_nonpenetration(
-        reference,positions,faces,reference,5.0,1.0,
+        reference,positions,faces,reference,1.0,
         time.perf_counter()+10.0,np.random.default_rng(4),
     )
     assert feasible
@@ -62,21 +62,39 @@ def test_repair_is_rigid_and_collision_free():
         )
 
 
-def test_infeasible_bounds_are_not_certified():
-    tiles,faces,reference,positions=_fixture()
+def test_hard_repair_can_translate_beyond_old_five_tile_limit():
+    # Both overlapping 20x20 squares require >=19.45 units of separation.
+    # Fixing only the mean global translation requires at least one panel
+    # to move >5 units; the former center-drift cap would prevent this.
+    square=np.array([[0.,0.],[20.,0.],[20.,20.],[0.,20.]])
+    tiles=np.stack([np.tile(square,(2,1)),
+                    np.tile(square+[.55,0.],(2,1))])
+    centers=tiles[:,:4].mean(axis=1)
+    local=tiles-centers[:,None,:]
+    faces=np.arange(16).reshape(2,8)
+    reference=np.zeros((2,3))
+    def positions(pose):
+        angle=pose[:,0]
+        c,s=np.cos(angle)[:,None],np.sin(angle)[:,None]
+        rotated=np.stack((c*local[:,:,0]-s*local[:,:,1],
+                          s*local[:,:,0]+c*local[:,:,1]),axis=-1)
+        return rotated+centers[:,None,:]+pose[:,None,1:],rotated
     candidate,feasible,frames,diagnostics=repair_nonpenetration(
-        reference,positions,faces,reference,0.,1.,
-        time.perf_counter()+10.0,np.random.default_rng(4),
-        max_iterations=50,
+        reference,positions,faces,reference,1.0,
+        time.perf_counter()+10.,np.random.default_rng(3),
     )
-    assert not feasible
-    assert len(footprint_contacts(positions(candidate)[0],faces)[-1])>0
+    assert feasible
+    assert np.max(np.abs(candidate[:,1:])) > 5.0
+    assert len(footprint_contacts(positions(candidate)[0],faces)[-1]) == 0
+    # Only common translation is normalized; relative tile offsets are free.
+    np.testing.assert_allclose(candidate[:,1:].mean(axis=0),
+                               reference[:,1:].mean(axis=0), atol=1e-12)
 
 
 def test_refinement_never_reintroduces_penetration():
     tiles,faces,reference,positions=_fixture()
     candidate,feasible,_,_=repair_nonpenetration(
-        reference,positions,faces,reference,5.,1.,
+        reference,positions,faces,reference,1.,
         time.perf_counter()+10.,np.random.default_rng(9),
     )
     assert feasible
@@ -88,7 +106,7 @@ def test_refinement_never_reintroduces_penetration():
         return float(np.sum(delta**2)), 2.*delta
 
     after,history=refine_feasible_pose(
-        candidate,positions,faces,reference,5.,1.,
+        candidate,positions,faces,reference,1.,
         time.perf_counter()+10.,np.random.default_rng(9),
         objective,iterations=12,
     )
