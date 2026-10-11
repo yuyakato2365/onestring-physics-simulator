@@ -2331,6 +2331,62 @@ elif view_stage == "T2D Top Hinge":
     st.write(state.tiles_2d_top_hinge.metrics)
 elif view_stage == "T2D Dual Hinge":
     audit_metrics = state.tiles_2d_dual_hinge.metrics
+    # Render the *accepted solver poses*, not interpolation between start/end.
+    pose_history = audit_metrics.get("dual_hinge_pose_history", [])
+    if pose_history:
+        import plotly.graph_objects as go
+        import numpy as _np
+        rest_tiles = _np.asarray(state.tiles_2d_top_hinge.vertices, dtype=float)
+        centers = rest_tiles[:, :4, :2].mean(axis=1)
+        local_xy = rest_tiles[:, :, :2] - centers[:, None, :]
+        tile_scale = float(_np.median(_np.linalg.norm(
+            _np.roll(rest_tiles[:, :4, :2], -1, axis=1) - rest_tiles[:, :4, :2], axis=2)))
+        hinges = state.hinge_graph.hinges
+        def _hinge_frame(entry):
+            pose = _np.asarray(entry["poses"], dtype=float)
+            angle = pose[:, 0]
+            c, sn = _np.cos(angle)[:, None], _np.sin(angle)[:, None]
+            xy = _np.stack((c * local_xy[:, :, 0] - sn * local_xy[:, :, 1],
+                            sn * local_xy[:, :, 0] + c * local_xy[:, :, 1]), axis=2)
+            xy += centers[:, None, :] + tile_scale * pose[:, None, 1:]
+            px, py, hx, hy = [], [], [], []
+            for tile in xy:
+                corners = tile[:4]
+                px.extend([*corners[:, 0], corners[0, 0], None])
+                py.extend([*corners[:, 1], corners[0, 1], None])
+            for hinge in hinges:
+                a = xy[hinge.tile_a, hinge.local_vertex_a]
+                b = xy[hinge.tile_b, hinge.local_vertex_b]
+                hx.extend([a[0], b[0], None])
+                hy.extend([a[1], b[1], None])
+            return [
+                go.Scatter(x=px, y=py, mode="lines", line=dict(color="#18a999", width=1.5), name="Panels"),
+                go.Scatter(x=hx, y=hy, mode="lines", line=dict(color="#e05b36", width=1.5), name="Hinge connection gaps")
+            ]
+        frames = [go.Frame(data=_hinge_frame(entry), name=str(entry["iteration"]))
+                  for entry in pose_history]
+        fig = go.Figure(data=frames[0].data, frames=frames)
+        fig.update_layout(
+            title="T2D Dual Hinge — accepted optimization iterations",
+            xaxis=dict(scaleanchor="y", scaleratio=1, title="X"),
+            yaxis=dict(title="Y"), height=650, showlegend=True,
+            updatemenus=[dict(type="buttons", showactive=False, buttons=[
+                dict(label="▶ Play", method="animate", args=[None, dict(
+                    frame=dict(duration=75, redraw=True), transition=dict(duration=0),
+                    fromcurrent=True, mode="immediate")]),
+                dict(label="❚❚ Pause", method="animate", args=[[None], dict(
+                    frame=dict(duration=0, redraw=False), mode="immediate")])])],
+            sliders=[dict(steps=[dict(label=str(entry["iteration"]), method="animate",
+                    args=[[str(entry["iteration"])], dict(frame=dict(duration=0, redraw=True),
+                    mode="immediate")]) for entry in pose_history],
+                    currentvalue=dict(prefix="Iteration "), len=0.95)])
+        with st.expander("▶ Dual Hinge 最適化の変化を再生", expanded=True):
+            st.caption(f"実際のL-BFGS採用反復から {len(frames)} フレームを保存。"
+                       "緑＝パネル輪郭、橙＝対応するヒンジ点を結ぶ線（長いほど接続誤差）。"
+                       " 最大1000回以上の設定では一部の反復を間引いて表示します。")
+            st.plotly_chart(fig, use_container_width=True, key="dual_hinge_iteration_animation")
+    else:
+        st.info("この実行にはヒンジ配置履歴がありません。修正後に再計算してください。")
     if audit_metrics.get("dual_hinge_history"):
         with st.expander("DualHinge エネルギー・接続・貫通の監査", expanded=True):
             st.caption("各反復の生エネルギーと重み付き寄与。XY footprint の貫通と3D solidの貫通は別の指標です。")
