@@ -45,10 +45,12 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     budget=float(params.hinge_layout_time_budget_sec)
     if not np.isfinite(budget) or budget < 0:
         raise ValueError('hinge_layout_time_budget_sec must be finite and nonnegative (0 = unlimited)')
-    # The time budget applies to the numerical solve, not to graph construction,
-    # initial collision audits or the first solver-history snapshot. In large
-    # meshes those preparations can otherwise consume the entire short budget.
+    # Each requested local solve gets an independent wall-clock allowance.
+    # Preparing an initial frame is not charged to that trial's solver budget.
     deadline=float('inf')
+    budget_mode=str(getattr(params, 'hinge_layout_budget_mode', 'per_trial'))
+    if budget_mode not in ('per_trial','total_shared'):
+        raise ValueError(f'Unsupported hinge_layout_budget_mode: {budget_mode}')
     # The panel pose variables have NO artificial center-travel bounds in
     # either Soft or Hard mode. The hinge and optional anchor energies control
     # relative separation; Hard mode tests actual XY SAT feasibility.
@@ -127,15 +129,23 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     bounds=None
     setup_elapsed=time.perf_counter()-started
     optimization_started=time.perf_counter()
-    global_deadline=optimization_started+budget if budget>0 else float('inf')
-    # Hard mode reserves a large part of the wall-clock budget to restore
-    # nonpenetration. Soft multi-start alone must not consume the entire budget.
-    soft_deadline=(optimization_started+0.55*budget
-                   if collision_mode=='hard' and budget>0 else global_deadline)
+    trials_requested=restarts+1
+    soft_fraction=.55 if collision_mode=='hard' else 1.0
+    # For the full pipeline the stage budget applies PER optimization attempt.
+    # T2D-only reruns retain their displayed TOTAL budget by splitting it into
+    # an equal, independent allowance for every requested attempt. Neither
+    # mode is allowed to skip later attempts because an earlier one ran long.
+    trial_budget=(budget*soft_fraction/trials_requested
+                  if budget_mode=='total_shared' else budget*soft_fraction)
+    hard_budget=(budget*(1.-soft_fraction)*
+                 (1 if budget_mode=='total_shared' else trials_requested))
+    if budget==0.:
+        trial_budget=0.
+        hard_budget=0.
 
-    def run_trial(initial_pose, trial_id, source, trial_deadline):
+    def run_trial(initial_pose, trial_id, source, trial_budget_seconds):
         nonlocal deadline
-        deadline=trial_deadline
+        deadline=float('inf')
         current=initial_pose.copy()
         records=[]
         frames=[]
@@ -151,6 +161,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             return stats
 
         initial_stats=record(current)
+        # Charge only the actual L-BFGS-B search against this attempt.
+        deadline=(time.perf_counter()+trial_budget_seconds
+                  if trial_budget_seconds>0 else float('inf'))
 
         def callback(z):
             nonlocal current
@@ -196,6 +209,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                      hinge_rms=float(final_stats['hinge_rms']),
                      iterations=int(len(records)-1),solver_nit=nit,solver_nfev=nfev,
                      elapsed_sec=float(time.perf_counter()-trial_started),
+                     trial_solver_budget_sec=float(trial_budget_seconds),
                      solver_success=success,solver_status=status,
                      timed_out=timed_out,solver_message=message)
         return dict(pose=current,history=records,frames=frames,summary=summary)
@@ -217,7 +231,6 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             candidate[:,1:]+=np.mean(reference_pose[:,1:]-candidate[:,1:],axis=0)
         return candidate
 
-    trials_requested=restarts+1
     best=None
     baseline_energy=None
     trial_candidates=[]
@@ -225,9 +238,6 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     # and 30% around the original Top Hinge reference (not around a new rest).
     best_restart_count=int(round(.7*restarts))
     for trial_id in range(trials_requested):
-        now=time.perf_counter()
-        if now>=soft_deadline:
-            break
         if trial_id==0:
             source='baseline Top Hinge'
             initial=reference_pose.copy()
@@ -239,10 +249,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             source='perturbed best' if best_source else 'perturbed Top Hinge'
             parent_trial_id=int(best['summary']['trial_id']) if best_source else None
             initial=perturb_pose(best['pose'] if best_source else reference_pose)
-        remaining_trials=trials_requested-trial_id
-        local_deadline=(min(soft_deadline, now+(soft_deadline-now)/remaining_trials)
-                        if np.isfinite(soft_deadline) else float('inf'))
-        trial=run_trial(initial,trial_id,source,local_deadline)
+        trial=run_trial(initial,trial_id,source,trial_budget)
         summary=trial['summary']
         summary['parent_trial_id']=parent_trial_id
         improved=(best is None or summary['final_EHinge'] < best['summary']['final_EHinge']-1e-12*max(scale**2,1e-30))
@@ -272,7 +279,11 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     message=selected['solver_message']
     chosen_trial=int(selected['trial_id'])
     chosen_source=selected['initial_source']
-    global_budget_exhausted=(len(trial_summaries)<trials_requested)
+    global_budget_exhausted=False  # requested attempts always run unless a genuine exception occurs
+    # The Hard repair phase has its own allowance, beginning AFTER the required
+    # local solves. This prevents Hard repair from stealing whole trials.
+    global_deadline=(time.perf_counter()+hard_budget
+                     if hard_budget>0 else float('inf'))
     hard_feasible=None
     hard_attempts=[]
     hard_selected_source_trial=None
@@ -421,6 +432,10 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_layout_optimizer=('analytic L-BFGS-B with SE(2) multi-start' if search_mode=='multi_start' else 'analytic L-BFGS on rigid SE(2) poses'),
                        dual_hinge_timed_out=timed_out,dual_hinge_solver_message=message,
                        dual_hinge_time_budget_sec=budget,
+                       dual_hinge_budget_mode=budget_mode,
+                       dual_hinge_trial_time_budget_sec=float(trial_budget),
+                       dual_hinge_hard_phase_time_budget_sec=float(hard_budget),
+                       dual_hinge_all_requested_trials_run=len(trial_summaries)==trials_requested,
                        dual_hinge_search_mode=search_mode,
                        dual_hinge_collision_constraint_mode=collision_mode,
                        hard_collision_feasible=hard_feasible,
