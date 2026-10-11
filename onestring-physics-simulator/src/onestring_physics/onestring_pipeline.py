@@ -8596,10 +8596,15 @@ def build_onestring_design(
                         applied_count=int(trial_state.mesh_2d_initial.metrics.get(
                             'collision_split_count',-1
                         ))
-                        if applied_count!=len(next_forced):
+                        final_cut_count=int(trial_state.mesh_2d_initial.metrics.get(
+                            'collision_split_final_pass_applied_count',-1
+                        ))
+                        if (applied_count!=len(next_forced)
+                                or final_cut_count!=len(next_forced)):
                             raise RuntimeError(
-                                'Collision Split topology not propagated through M2D: '
-                                f'expected={len(next_forced)}, actual={applied_count}'
+                                'Collision Split topology not propagated through final M2D: '
+                                f'expected={len(next_forced)}, '
+                                f'initial_cuts={applied_count}, final_cuts={final_cut_count}'
                             )
                         after=collision_quality(trial_state)
                         improved,reason=accept_if_improved(
