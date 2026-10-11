@@ -1051,6 +1051,7 @@ class PipelineParameters(_original.PipelineParameters):
     hinge_layout_max_center_drift_tiles: float = 5.0
     # Optional multi-start for the T2D-only rerun; full pipeline remains single.
     hinge_layout_search_mode: str = "single"
+    hinge_layout_collision_mode: str = "soft"  # standalone T2D option; full build unchanged
     hinge_layout_restart_count: int = 6
     hinge_layout_perturb_translation: float = 0.35
     hinge_layout_perturb_rotation_deg: float = 20.0
