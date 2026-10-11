@@ -985,6 +985,42 @@ with st.sidebar:
         "比較実験の再現性のための乱数シード。同じ形状・パラメータなら同じ初期候補を生成。",
         lambda: st.number_input("T2D multi-start random seed", min_value=0, max_value=2147483647, value=0, step=1, disabled=t2d_search_mode=="single"),
     ))
+    st.markdown("#### Collision-driven Split（逐次追加・実験機能）")
+    collision_split_enabled = _param_row(
+        "Run OneString pipeline時のみ動作。重なりが残ると、衝突深さと境界距離で"
+        "完全な格子カットを順位付けし、1本だけ加えてM2D以降を再計算します。"
+        "改善がなければ元に戻し、最大本数まで1本ずつ反復します。既存CSF Splitとは別です。",
+        lambda: st.checkbox(
+            "Enable sequential collision-driven Split (full pipeline)",
+            value=False,
+            help="EXPERIMENTAL: can rebuild the full pipeline several times. "
+                 "Requires a paper-style M2D Split topology. No T2D-only fake hinge deletion.",
+        ),
+    )
+    collision_split_max_additional = int(_param_row(
+        "追加できる衝突回避用Splitの最大本数。0なら追加しません。",
+        lambda: st.slider("Maximum collision Split cuts", 0, 5, 2, 1,
+                          disabled=not collision_split_enabled),
+    ))
+    collision_split_boundary_weight = float(_param_row(
+        "境界から遠い内部の衝突ほどSplit候補を優先する度合い。0は衝突深さのみを重視。",
+        lambda: st.slider("Collision Split boundary-distance weight", 0.0, 4.0,
+                          1.0, 0.1, disabled=not collision_split_enabled),
+    ))
+    collision_split_candidate_attempts = int(_param_row(
+        "1本のSplitを決める前に試せる候補数。各候補でM2D以降を再計算し、"
+        "衝突改善が確認できなければ棄却します。",
+        lambda: st.slider("Split candidates tested per cut", 1, 5, 2, 1,
+                          disabled=not collision_split_enabled),
+    ))
+    collision_split_min_improvement = float(_param_row(
+        "Split採用に必要な貫通エネルギー改善率。接続誤差が大幅に悪化した候補は棄却します。",
+        lambda: st.slider("Minimum collision improvement fraction", 0.0, 0.5,
+                          0.03, 0.01, disabled=not collision_split_enabled),
+    ))
+    if collision_split_enabled:
+        st.warning("Collision-driven Splitは全工程の再計算を繰り返します。"
+                   "T2D-only rerunボタンではSplitを追加しません。")
     t2d_rerun_time_budget_sec = _param_row(
         "T2D単独再実行の全試行に共有する時間予算（秒）。試行ごとに時間を分配。0で時間制限なし。",
         lambda: st.number_input(
@@ -1493,6 +1529,11 @@ def current_pipeline_key() -> tuple:
         t2d_perturb_translation,
         t2d_perturb_rotation_deg,
         t2d_search_seed,
+        collision_split_enabled,
+        collision_split_max_additional,
+        collision_split_boundary_weight,
+        collision_split_candidate_attempts,
+        collision_split_min_improvement,
         hinge_layout_max_candidate_pairs,
         hinge_layout_collision_sweeps_per_iteration,
         compute_backend,
@@ -1613,6 +1654,11 @@ pipeline_params = PipelineParameters(
     hinge_layout_perturb_translation=t2d_perturb_translation,
     hinge_layout_perturb_rotation_deg=t2d_perturb_rotation_deg,
     hinge_layout_random_seed=t2d_search_seed,
+    collision_split_enabled=collision_split_enabled,
+    collision_split_max_additional=collision_split_max_additional,
+    collision_split_boundary_weight=collision_split_boundary_weight,
+    collision_split_candidate_attempts=collision_split_candidate_attempts,
+    collision_split_min_relative_improvement=collision_split_min_improvement,
     hinge_layout_max_candidate_pairs=hinge_layout_max_candidate_pairs,
     hinge_layout_collision_sweeps_per_iteration=hinge_layout_collision_sweeps_per_iteration,
     strict_paper_flow=True,
@@ -1698,6 +1744,7 @@ if rerun_t2d_only and not run_pipeline:
     t2d_rerun_params = _copy.copy(pipeline_params)
     t2d_rerun_params.hinge_layout_time_budget_sec = float(t2d_rerun_time_budget_sec)
     t2d_rerun_params.hinge_layout_budget_mode = "total_shared"
+    t2d_rerun_params.collision_split_enabled = False  # requires complete M2D rebuild
     t2d_rerun_params.hinge_layout_search_mode = t2d_search_mode
     t2d_rerun_params.hinge_layout_collision_mode = t2d_collision_mode
     t2d_rerun_params.hinge_layout_restart_count = t2d_restart_count
@@ -2488,6 +2535,33 @@ elif view_stage == "T2D Dual Hinge":
     hard_mode_active = audit_metrics.get("dual_hinge_collision_constraint_mode") == "hard"
     hard_ok = audit_metrics.get("hard_collision_feasible", False)
     hard_history = audit_metrics.get("hard_collision_history", [])
+    split_history = audit_metrics.get("collision_split_feedback_steps", [])
+    if audit_metrics.get("collision_split_feedback_enabled", False):
+        status = audit_metrics.get("collision_split_status", "unknown")
+        ncuts = len(audit_metrics.get("collision_split_accepted_lines", []))
+        st.subheader("Collision-driven Split — 逐次フィードバック")
+        st.write(
+            f"状態: **{status}** / 採用したSplit: **{ncuts}本** / "
+            f"境界距離の重み: {audit_metrics.get('collision_split_boundary_weight', 0.):.2g}"
+        )
+        st.caption("候補はM2Dの境界距離とT2DのSAT貫通深さから選択。"
+                   "1本ごとにM2D→M3D→K3D→K2D→T3D→T2Dを再計算し、"
+                   "改善しない候補は棄却します。")
+        if split_history:
+            st.dataframe([{
+                "Split番号": row["cut_number"],
+                "採否": "採用" if row["accepted"] else "棄却",
+                "方向": row["proposal"]["axis"],
+                "格子座標": row["proposal"]["value"],
+                "境界距離/タイル": row["proposal"]["boundary_distance_tiles"],
+                "衝突強度": row["proposal"]["hotspot_severity"],
+                "候補スコア": row["proposal"]["score"],
+                "衝突ペア 前": row["before"].get("collision_pairs"),
+                "衝突ペア 後": row["after"].get("collision_pairs"),
+                "貫通エネルギー 前": row["before"].get("collision_energy"),
+                "貫通エネルギー 後": row["after"].get("collision_energy"),
+                "理由": row["decision_reason"],
+            } for row in split_history], use_container_width=True, hide_index=True)
     if hard_mode_active:
         if hard_ok:
             st.success(
