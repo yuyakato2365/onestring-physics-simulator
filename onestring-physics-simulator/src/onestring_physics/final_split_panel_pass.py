@@ -338,7 +338,10 @@ def install_final_split_panel_pass(pipeline_module: Any) -> None:
                     raise ValueError(
                         "Collision Split became invalid during final complete-cut reconstruction"
                     )
+                components_before=len(_edge_components(faces))
                 canonical,faces,added=_apply_complete_cut(canonical,faces,candidate)
+                if len(_edge_components(faces)) != components_before+1:
+                    raise RuntimeError("Final Collision Split did not increase component count by one")
                 actual_collision+=1
                 record=dict(
                     axis=axis,requested_value=float(value),
