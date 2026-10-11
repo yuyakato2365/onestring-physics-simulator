@@ -38,7 +38,6 @@ def _data():
         hinge_layout_collision_weight=4.0,
         hinge_layout_anchor_weight=0.0,
         hinge_layout_initial_expansion=1.0,
-        hinge_layout_max_center_drift_tiles=5.0,
         hinge_layout_max_candidate_pairs=3000,
         hinge_layout_time_budget_sec=0.0,
         hinge_layout_iterations=35,
@@ -75,12 +74,13 @@ def _stub_non_search_diagnostics(monkeypatch):
     )
 
 
-def _solve(mode="multi_start", collision_mode="soft", drift=None):
+def _solve(mode="multi_start", collision_mode="soft", legacy_drift=None):
     original, top, t3d, params, pipeline = _data()
     params.hinge_layout_search_mode = mode
     params.hinge_layout_collision_mode = collision_mode
-    if drift is not None:
-        params.hinge_layout_max_center_drift_tiles = drift
+    if legacy_drift is not None:
+        # Legacy user-settings must no longer constrain either active solver.
+        params.hinge_layout_max_center_drift_tiles = legacy_drift
     result, graph, report = paper_hinge_solver.optimize_hinge_poses(
         None, None, top, t3d, params, pipeline
     )
@@ -168,19 +168,15 @@ def test_hard_solver_repairs_overlapping_rigid_tiles():
     assert metrics["hard_collision_refinement_elapsed_sec"] >= 0
 
 
-def test_hard_solver_reports_infeasible_when_no_translation_is_possible():
-    # Two overlapping unit square tiles have inscribed disks of radius 0.5.
-    # Their centers are 0.55 apart. No amount of in-plane rotation can
-    # separate those inscribed disks if both translation bounds are exactly 0.
-    original, top, out, _, _ = _solve(
-        mode="single", collision_mode="hard", drift=0.0,
-    )
-    metrics = out.metrics
-    assert metrics["hard_collision_feasible"] is False
-    assert metrics["hard_collision_status"] == "NONPENETRATION_NOT_FOUND"
-    assert metrics["fabrication_feasible"] is False
-    assert metrics["hard_collision_repair_source_trial"] is None
-    assert metrics["hard_collision_best_unresolved_count"] > 0
+def test_legacy_drift_setting_does_not_constrain_soft_or_hard():
+    for collision_mode in ("soft", "hard"):
+        _, _, output, _, _ = _solve(
+            mode="single", collision_mode=collision_mode, legacy_drift=0.0,
+        )
+        assert output.metrics["dual_hinge_translation_bounds_enabled"] is False
+        assert output.metrics["dual_hinge_translation_bounds"] == "unbounded in Soft and Hard"
+        if collision_mode == "hard":
+            assert output.metrics["hard_collision_feasible"] is True
 
 
 def test_soft_mode_is_backward_compatible():
