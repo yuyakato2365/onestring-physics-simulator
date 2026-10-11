@@ -61,3 +61,41 @@ def test_t2d_only_uses_shared_budget_and_full_run_cache_key_tracks_settings():
         "t2d_perturb_translation", "t2d_perturb_rotation_deg",
         "t2d_search_seed",
     } <= referenced
+
+
+
+def test_collision_split_configuration_is_wired_only_to_full_rebuild():
+    tree=_app_ast()
+    constructors=[node for node in ast.walk(tree)
+                  if isinstance(node,ast.Call)
+                  and isinstance(node.func,ast.Name)
+                  and node.func.id=="PipelineParameters"]
+    assert constructors
+    kwargs={kw.arg:kw.value for kw in constructors[0].keywords
+            if kw.arg is not None}
+    controls={
+        "collision_split_enabled":"collision_split_enabled",
+        "collision_split_max_additional":"collision_split_max_additional",
+        "collision_split_boundary_weight":"collision_split_boundary_weight",
+        "collision_split_candidate_attempts":"collision_split_candidate_attempts",
+        "collision_split_min_relative_improvement":"collision_split_min_improvement",
+    }
+    for param,widget in controls.items():
+        assert param in kwargs
+        assert isinstance(kwargs[param],ast.Name)
+        assert kwargs[param].id==widget
+    functions=[node for node in ast.walk(tree)
+               if isinstance(node,ast.FunctionDef)
+               and node.name=="current_pipeline_key"]
+    referenced={node.id for node in ast.walk(functions[0])
+                if isinstance(node,ast.Name)}
+    assert set(controls.values())<=referenced
+    # T2D-only rerun may not run false-M2D topology changes; it requires
+    # a complete source mesh rebuild and is deliberately disabled there.
+    assignments=[node for node in ast.walk(tree)
+                 if isinstance(node,ast.Assign)
+                 and any(isinstance(t,ast.Attribute)
+                         and t.attr=="collision_split_enabled"
+                         for t in node.targets)]
+    assert any(isinstance(node.value,ast.Constant) and node.value.value is False
+               for node in assignments)
