@@ -350,7 +350,6 @@ def _compute_setting_meters(
     hinge_layout_collision_weight: float,
     hinge_layout_anchor_weight: float,
     hinge_layout_initial_expansion: float,
-    hinge_layout_max_center_drift_tiles: float,
     hinge_layout_max_candidate_pairs: int,
     hinge_layout_collision_sweeps_per_iteration: int,
     compute_backend: str,
@@ -382,7 +381,7 @@ def _compute_setting_meters(
     geometry = _clamp01(0.24 * target_factor + 0.28 * amp_factor + 0.20 * thickness_factor + 0.14 * subdiv_factor + 0.14 * grid_factor)
     k2d = _clamp01(0.32 * geometry + 0.25 * k2d_factor + 0.18 * strict_budget_factor + 0.15 * grid_factor + 0.10 * max(0.0, thickness_factor - gap_factor))
     hinge_conflict = _clamp01(0.28 * hinge_iter_factor + 0.20 * (hinge_layout_connection_weight / 8.0) + 0.22 * (hinge_layout_collision_weight / 4.0) + 0.12 * sweep_factor + 0.10 * candidate_factor + 0.08 * max(0.0, 0.12 - hinge_layout_anchor_weight) / 0.12)
-    void = _clamp01(0.55 * ((hinge_layout_initial_expansion - 1.0) / 0.25) + 0.25 * (hinge_layout_max_center_drift_tiles / 5.0) + 0.20 * gap_factor)
+    void = _clamp01(0.75 * ((hinge_layout_initial_expansion - 1.0) / 0.25) + 0.25 * gap_factor)
     animation = _clamp01(0.60 * sim_factor + 0.18 * (1.0 if store_animation_frames else 0.0) + 0.12 * (1.0 if high_fidelity else 0.0) + 0.10 * grid_factor)
 
     notes = {
@@ -390,7 +389,7 @@ def _compute_setting_meters(
         "形状難度": "Sの曲率/振幅/厚みから見た設計の難しさ。高いほどK2Dやヒンジ配置が破綻しやすいです。",
         "K2D辺長合わせ難度": "K3Dの対応辺長をK2Dで満たす難しさ。高いとedge errorが残りやすいです。",
         "ヒンジ配置競合": "E_ConnとE_Collisionが衝突する度合い。高いと接続維持と非衝突の両立が難しいです。",
-        "空洞/展開量": "initial expansion・gap・center driftから見たタイル間の空きやすさ。高すぎると空洞が大きくなります。",
+        "空洞/展開量": "initial expansion・gapから見たタイル間の空きやすさ（移動距離制限はありません）。",
         "アニメーション負荷": "PD simulationのステップ数・反復数・保存フレーム量。高いほど再生/計算が重くなります。",
     }
     return {
@@ -924,17 +923,7 @@ with st.sidebar:
     hinge_layout_initial_expansion = (
         hinge_layout_initial_expansion_requested if hinge_layout_initial_expansion_enabled else 1.0
     )
-    hinge_layout_max_center_drift_tiles = _param_row(
-        "展開後の基準配置から各タイル中心が移動できる最大距離。大きいほど解けるが散らばりやすい。",
-        lambda: st.slider(
-            "hinge layout max center drift / tile",
-            0.25,
-            5.0,
-            5.0,
-            0.25,
-            help="Trust-region radius measured in tile-size units around the expanded layout.",
-        ),
-    )
+    st.caption("T2D Dual Hinge: パネル中心の移動距離制限なし（Soft / Hard共通）。各パネルの形状は剛体のままです。")
     hinge_layout_time_budget_sec = _param_row(
         "Top Hinge / Dual Hinge 各段階の最大計算時間。超えると partial convergence として止める。",
         lambda: st.slider("hinge layout time budget / stage", 1.0, 30.0, 8.0, 1.0, help="Maximum seconds spent in each hinge layout stage."),
@@ -1217,7 +1206,6 @@ with st.sidebar:
         hinge_layout_collision_weight=hinge_layout_collision_weight,
         hinge_layout_anchor_weight=hinge_layout_anchor_weight,
         hinge_layout_initial_expansion=hinge_layout_initial_expansion,
-        hinge_layout_max_center_drift_tiles=hinge_layout_max_center_drift_tiles,
         hinge_layout_max_candidate_pairs=hinge_layout_max_candidate_pairs,
         hinge_layout_collision_sweeps_per_iteration=hinge_layout_collision_sweeps_per_iteration,
         compute_backend=compute_backend,
@@ -1485,7 +1473,6 @@ def current_pipeline_key() -> tuple:
         hinge_layout_collision_weight,
         hinge_layout_anchor_weight,
         hinge_layout_initial_expansion,
-        hinge_layout_max_center_drift_tiles,
         hinge_layout_time_budget_sec,
         hinge_layout_max_candidate_pairs,
         hinge_layout_collision_sweeps_per_iteration,
@@ -1599,7 +1586,6 @@ pipeline_params = PipelineParameters(
     hinge_layout_collision_weight=hinge_layout_collision_weight,
     hinge_layout_anchor_weight=hinge_layout_anchor_weight,
     hinge_layout_initial_expansion=hinge_layout_initial_expansion,
-    hinge_layout_max_center_drift_tiles=hinge_layout_max_center_drift_tiles,
     hinge_layout_time_budget_sec=hinge_layout_time_budget_sec,
     hinge_layout_max_candidate_pairs=hinge_layout_max_candidate_pairs,
     hinge_layout_collision_sweeps_per_iteration=hinge_layout_collision_sweeps_per_iteration,
@@ -3207,7 +3193,7 @@ elif view_stage == "Setting Meters":
             ],
             "空洞/展開量が高い": [
                 "hinge layout initial expansion を 1.03〜1.08 付近へ下げる",
-                "gap size と max center drift / tile を下げる",
+                "gap size を下げる",
             ],
             "アニメーション負荷が高い": [
                 "actuation steps、solver iterations、solver substeps を下げる",
