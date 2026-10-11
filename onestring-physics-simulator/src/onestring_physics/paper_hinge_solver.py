@@ -61,6 +61,10 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     expanded_centers=layout_center+initial_expansion*(centers-layout_center)
     center_offsets=expanded_centers-centers
     records=[]
+    # Store sampled accepted SE(2) poses for an actual solver-trajectory animation.
+    # Bounded snapshots avoid retaining 10,000 full tile layouts in memory.
+    pose_history=[]
+    history_stride=max(1, int(np.ceil(max(1, params.hinge_layout_iterations)/240)))
     last=np.zeros((len(rest),3),float)
     last[:,1:]=center_offsets/max(scale,1e-30)
     reference_pose=last.copy()
@@ -106,6 +110,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     def record(pose):
         _,_,stats=evaluate(pose)
         records.append(dict(iteration=len(records),**stats))
+        if (len(records)-1) % history_stride == 0:
+            pose_history.append((len(records)-1, pose.copy()))
         if len(records)>1 and records[-1]['EHinge']>records[-2]['EHinge']+1e-10*scale**2:
             raise RuntimeError('Hinge solver accepted an increasing objective')
         return stats
@@ -131,6 +137,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         solver_success=bool(result.success);solver_status=int(result.status)
     except _Deadline:
         timed_out=True;message='time budget reached; returning last accepted pose'
+    if not pose_history or pose_history[-1][0] != len(records)-1:
+        pose_history.append((len(records)-1, last.copy()))
     xy,_=positions(last)
     out=copy.deepcopy(t2d);out.vertices[:,:,:2]=xy;out.stage='T2D dual hinge'
     # Compose the SE(2) placement with each original T3D->T2D rigid transform.
@@ -157,6 +165,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_collision_pair_exclusions=0,
                        dual_hinge_collision_candidate_limit_applied=False,
                        dual_hinge_iterations=len(records)-1,dual_hinge_history=records,
+                       dual_hinge_pose_history=[{'iteration': i, 'poses': p.tolist()} for i,p in pose_history],
                        dual_hinge_initial_expansion=initial_expansion,
                        dual_hinge_max_center_drift_tiles=max_center_drift_tiles,
                        dual_hinge_max_candidate_pairs=max_candidate_pairs,
