@@ -204,3 +204,59 @@ def test_lbfgsb_does_not_receive_center_translation_bounds(monkeypatch, collisio
     )
     assert seen == [None]
     assert output.metrics["dual_hinge_translation_bounds_enabled"] is False
+
+
+
+@pytest.mark.parametrize(
+    "budget_mode,budget,restarts,expected_trial_budget",
+    [
+        ("per_trial", 8.0, 10, 8.0),
+        ("total_shared", 360.0, 10, 360.0 / 11),
+        ("total_shared", 1e-6, 6, 1e-6 / 7),
+    ],
+)
+def test_all_requested_attempts_run_even_when_total_budget_is_tiny(
+    monkeypatch, budget_mode, budget, restarts, expected_trial_budget,
+):
+    # A fake instantaneous optimizer isolates the scheduling. The legacy
+    # shared/global deadline used to drop trials when elapsed time ran out.
+    # Every requested trial must now invoke minimize, regardless of the
+    # scheduling budget or slow prior setup/evaluation overhead.
+    calls = []
+
+    def count_minimize(fun, x0, **kwargs):
+        calls.append(np.array(x0, copy=True))
+        return SimpleNamespace(
+            x=np.array(x0, copy=True), success=True,
+            status=0, nfev=1, nit=0, message="test optimizer returned",
+        )
+
+    monkeypatch.setattr(paper_hinge_solver, "minimize", count_minimize)
+    original, top, t3d, params, pipeline = _data()
+    params.hinge_layout_search_mode = "multi_start"
+    params.hinge_layout_collision_mode = "soft"
+    params.hinge_layout_restart_count = restarts
+    params.hinge_layout_time_budget_sec = budget
+    params.hinge_layout_budget_mode = budget_mode
+    output, _, _ = paper_hinge_solver.optimize_hinge_poses(
+        None, None, top, t3d, params, pipeline,
+    )
+    metrics = output.metrics
+    assert len(calls) == restarts + 1
+    assert metrics["dual_hinge_trials_completed"] == restarts + 1
+    assert metrics["dual_hinge_trials_requested"] == restarts + 1
+    assert metrics["dual_hinge_all_requested_trials_run"] is True
+    assert metrics["dual_hinge_search_global_budget_exhausted"] is False
+    assert metrics["dual_hinge_budget_mode"] == budget_mode
+    assert metrics["dual_hinge_trial_time_budget_sec"] == pytest.approx(expected_trial_budget)
+    for attempt in metrics["dual_hinge_trial_summary"]:
+        assert attempt["trial_solver_budget_sec"] == pytest.approx(expected_trial_budget)
+
+
+def test_invalid_budget_mode_is_rejected():
+    original, top, t3d, params, pipeline = _data()
+    params.hinge_layout_budget_mode = "invalid"
+    with pytest.raises(ValueError, match="hinge_layout_budget_mode"):
+        paper_hinge_solver.optimize_hinge_poses(
+            None, None, top, t3d, params, pipeline,
+        )
