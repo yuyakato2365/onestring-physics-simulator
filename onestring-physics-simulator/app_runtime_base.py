@@ -838,9 +838,23 @@ with st.sidebar:
         os.environ["ONESTRING_K3D_ADAPTIVE_PLANARITY_THRESHOLD"] = str(adaptive_planarity_threshold)
         os.environ["ONESTRING_K3D_ADAPTIVE_PLANARITY_MULTIPLIER"] = str(adaptive_planarity_multiplier)
 
-    st.caption("K3D 正方形性（hard-planarity / shape-preserving AL 段階）：平均誤差に加え、最も歪んだパネルをLSEで重点的に抑制")
-    st.latex(r"E_{\\mathrm{Square}}=\\frac{w_s}{2}\\left[\\frac{1}{N}\\sum_{i=1}^{N}d_i^2+\\alpha\\left(\\frac{1}{\\beta}\\log\\left(\\frac{1}{N}\\sum_{i=1}^{N}e^{\\beta d_i}\\right)\\right)^2\\right]")
-    st.caption("d_i: 各quadの4辺長の隣接差と対角線長差（5残差）のRMSをパネルスケールで無次元化。初期値 α=4, β=12。通常のlocal/global段階は従来のESquareを使用。")
+    st.caption("K3D 正方形性（shape-preserving AL 段階）：平均誤差と最大歪みLSEの両方を抑制")
+    st.latex(r"E_{\mathrm{Square}}=\frac{w_s}{2}\left[\frac{1}{N}\sum_{i=1}^{N}d_i^2+\alpha\left(\frac{1}{\beta}\log\left(\frac{1}{N}\sum_{i=1}^{N}e^{\beta d_i}\right)\right)^2\right]")
+    square_tail_alpha = float(st.number_input(
+        "Square 最大歪み α", min_value=0.0, max_value=1000.0,
+        value=float(os.environ.get("ONESTRING_K3D_SQUARE_TAIL_ALPHA", "4.0")),
+        step=0.5, format="%.2f", key="onestring_k3d_square_tail_alpha",
+        help="0で最大歪みペナルティを無効化。大きいほど極端に歪むパネルを強く罰する。",
+    ))
+    square_tail_beta = float(st.number_input(
+        "Square 最大歪み β", min_value=0.001, max_value=1000.0,
+        value=float(os.environ.get("ONESTRING_K3D_SQUARE_TAIL_BETA", "12.0")),
+        step=1.0, format="%.3f", key="onestring_k3d_square_tail_beta",
+        help="大きいほどLSEが最大歪みに近づく。0より大きい値を指定する。",
+    ))
+    os.environ["ONESTRING_K3D_SQUARE_TAIL_ALPHA"] = str(square_tail_alpha)
+    os.environ["ONESTRING_K3D_SQUARE_TAIL_BETA"] = str(square_tail_beta)
+    st.caption("d_iは4辺の隣接長さ差と対角線長さ差（計5残差）の無次元RMS。通常のlocal/global段階は従来のESquareを使用。")
     w_square = _param_row(
         "K3D の quad を極端に歪ませない重み。高いほど正方形・均整なタイルを保つ。",
         lambda: st.number_input("w_square / ESquare", min_value=0.1, max_value=100.0, value=10.0, step=0.5, help="Weight for square-like quad shape."),
