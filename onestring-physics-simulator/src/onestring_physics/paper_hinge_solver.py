@@ -70,6 +70,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     reference_pose=np.zeros((len(rest),3),float)
     reference_pose[:,1:]=center_offsets/max(scale,1e-30)
     drift_bound=max_center_drift_tiles
+    collision_mode=str(getattr(params, 'hinge_layout_collision_mode', 'soft'))
+    if collision_mode not in ('soft', 'hard'):
+        raise ValueError(f'Unsupported hinge_layout_collision_mode: {collision_mode}')
     search_mode=str(getattr(params, 'hinge_layout_search_mode', 'single'))
     if search_mode not in ('single', 'multi_start'):
         raise ValueError(f'Unsupported hinge_layout_search_mode: {search_mode}')
@@ -133,6 +136,10 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     setup_elapsed=time.perf_counter()-started
     optimization_started=time.perf_counter()
     global_deadline=optimization_started+budget if budget>0 else float('inf')
+    # Hard mode reserves a large part of the wall-clock budget to restore
+    # nonpenetration. Soft multi-start alone must not consume the entire budget.
+    soft_deadline=(optimization_started+0.55*budget
+                   if collision_mode=='hard' and budget>0 else global_deadline)
 
     def run_trial(initial_pose, trial_id, source, trial_deadline):
         nonlocal deadline
@@ -220,12 +227,13 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     trials_requested=restarts+1
     best=None
     baseline_energy=None
+    trial_candidates=[]
     # Distribute approximately 70% of restarts around the incumbent best
     # and 30% around the original Top Hinge reference (not around a new rest).
     best_restart_count=int(round(.7*restarts))
     for trial_id in range(trials_requested):
         now=time.perf_counter()
-        if now>=global_deadline:
+        if now>=soft_deadline:
             break
         if trial_id==0:
             source='baseline Top Hinge'
@@ -239,8 +247,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             parent_trial_id=int(best['summary']['trial_id']) if best_source else None
             initial=perturb_pose(best['pose'] if best_source else reference_pose)
         remaining_trials=trials_requested-trial_id
-        local_deadline=(min(global_deadline, now+(global_deadline-now)/remaining_trials)
-                        if np.isfinite(global_deadline) else float('inf'))
+        local_deadline=(min(soft_deadline, now+(soft_deadline-now)/remaining_trials)
+                        if np.isfinite(soft_deadline) else float('inf'))
         trial=run_trial(initial,trial_id,source,local_deadline)
         summary=trial['summary']
         summary['parent_trial_id']=parent_trial_id
@@ -249,6 +257,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         if improved:
             best=trial
         trial_summaries.append(summary)
+        trial_candidates.append(dict(trial_id=int(trial_id), pose=trial['pose'].copy(),
+                                     energy=float(summary['final_EHinge'])))
         trial_trajectories.append(dict(trial_id=int(trial_id),initial_source=source,parent_trial_id=parent_trial_id,
                                        pose_history=[{'iteration': int(i),'poses':p.tolist()} for i,p in trial['frames']]))
         if trial_id==0:
@@ -270,6 +280,129 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     chosen_trial=int(selected['trial_id'])
     chosen_source=selected['initial_source']
     global_budget_exhausted=(len(trial_summaries)<trials_requested)
+    hard_feasible=None
+    hard_attempts=[]
+    hard_selected_source_trial=None
+    hard_history=[]
+    hard_repair_elapsed=0.0
+    hard_refinement_elapsed=0.0
+    hard_remaining_collision_count=None
+    hard_remaining_max_depth=None
+    hard_tolerance=max(1e-12,scale*1e-10)
+    if collision_mode=='hard':
+        from .hard_collision_solver import (
+            footprint_contacts, repair_nonpenetration, refine_feasible_pose,
+        )
+        hard_started=time.perf_counter()
+        hard_feasible=False
+        # Prioritize the best soft energy but also try geometrically different
+        # soft endpoints. Each candidate retains the ORIGINAL pose bounds.
+        ordered=sorted(trial_candidates,key=lambda item:item['energy'])
+        repair_sources=ordered[:min(len(ordered),6)]
+        winning_hard=None
+        near_miss=None
+        repair_duration_fraction=.75
+        for idx,item in enumerate(repair_sources):
+            now=time.perf_counter()
+            if now>=global_deadline:
+                break
+            remaining=len(repair_sources)-idx
+            if np.isfinite(global_deadline):
+                allotted=max(0.,(global_deadline-now)*repair_duration_fraction/remaining)
+                attempt_deadline=min(global_deadline, now+allotted)
+            else:
+                attempt_deadline=float('inf')
+            before_pose=item['pose']
+            before_xy,_=positions(before_pose)
+            _,_,before_count,_=collision_energy_gradient(
+                before_xy.reshape(-1,2),faces,scale*1e-8,return_diagnostics=True)
+            if before_count==0:
+                candidate=before_pose.copy()
+                repaired=True
+                repair_frames=[(0,candidate.copy())]
+                steps=[]
+            else:
+                candidate,repaired,repair_frames,steps=repair_nonpenetration(
+                    before_pose,positions,faces,reference_pose,drift_bound,
+                    scale,attempt_deadline,rng,max_iterations=480,
+                )
+            candidate_xy,_=positions(candidate)
+            ci,cj,cn,cs,depths=footprint_contacts(candidate_xy,faces)
+            _,_,ncount,_=collision_energy_gradient(
+                candidate_xy.reshape(-1,2),faces,scale*1e-8,return_diagnostics=True)
+            max_depth=float(np.max(depths,initial=0.))
+            certified=bool(repaired and ncount==0 and max_depth<=hard_tolerance)
+            candidate_energy,_,_ = evaluate(candidate)
+            diag=dict(source_trial_id=int(item['trial_id']),
+                      initial_collision_count=int(before_count),
+                      final_collision_count=int(ncount),
+                      final_max_depth=max_depth,
+                      resulting_EHinge=float(candidate_energy),
+                      feasible=certified,
+                      repair_iterations=int(steps[-1]['iteration']) if steps else 0)
+            hard_attempts.append(diag)
+            miss_score=(int(ncount),max_depth,float(candidate_energy))
+            if near_miss is None or miss_score<near_miss[0]:
+                near_miss=(miss_score,diag)
+            if certified and (winning_hard is None or candidate_energy<winning_hard['energy']):
+                winning_hard=dict(pose=candidate.copy(),energy=float(candidate_energy),
+                                  source_trial_id=int(item['trial_id']),
+                                  frames=repair_frames)
+            if progress_callback:
+                progress_callback('Hard collision repair',min(.99,(idx+1)/len(repair_sources)),
+                                  f"repair {idx+1}/{len(repair_sources)}; XY overlaps={ncount}; feasible={certified}")
+        hard_repair_elapsed=time.perf_counter()-hard_started
+        if winning_hard is not None:
+            hard_refinement_started=time.perf_counter()
+            refined, refine_frames=refine_feasible_pose(
+                winning_hard['pose'],positions,faces,reference_pose,
+                drift_bound,scale,global_deadline,rng,
+                lambda pose: (lambda energy, gradient, stats: (energy,gradient))(*evaluate(pose)),
+                iterations=24,
+            )
+            hard_refinement_elapsed=time.perf_counter()-hard_refinement_started
+            refined_xy,_=positions(refined)
+            _,_,refined_count,_=collision_energy_gradient(
+                refined_xy.reshape(-1,2),faces,scale*1e-8,return_diagnostics=True)
+            _,_,_,_,refined_depths=footprint_contacts(refined_xy,faces)
+            hard_feasible=bool(refined_count==0 and np.max(refined_depths,initial=0.)<=hard_tolerance)
+            if hard_feasible:
+                last=refined.copy()
+                hard_selected_source_trial=winning_hard['source_trial_id']
+                chosen_trial=hard_selected_source_trial
+                chosen_source=f"hard-feasible repair from soft trial #{chosen_trial}"
+                records=[]  # Hard phase has separate trajectory and energy scale.
+                raw_frames=winning_hard['frames']
+                hard_history=[
+                    dict(iteration=int(k),poses=p.tolist(),phase='collision repair')
+                    for k,p in raw_frames
+                ]
+                offset=int(hard_history[-1]['iteration'])+1
+                hard_history.extend(
+                    dict(iteration=offset+int(k),poses=p.tolist(),phase='feasible refinement')
+                    for k,p in refine_frames
+                )
+                # Final accepted state must be the final frame.
+                if not np.array_equal(np.asarray(hard_history[-1]['poses']),last):
+                    hard_history.append(dict(iteration=hard_history[-1]['iteration']+1,
+                                             poses=last.tolist(),phase='feasible refinement'))
+                _,_,hard_stats=evaluate(last)
+                records=[dict(iteration=i,**hard_stats) for i in range(1)]
+                pose_history=[(int(row['iteration']),np.asarray(row['poses'])) for row in hard_history]
+            else:
+                hard_attempts.append(dict(source_trial_id=winning_hard['source_trial_id'],
+                                          feasible=False,reason='refinement audit failed'))
+        if not hard_feasible:
+            # A hard request that cannot be satisfied is NOT silently certified
+            # or replaced by an arbitrary high-connection-error configuration.
+            # Keep the best soft solution for diagnosis, mark it INVALID.
+            if near_miss is not None:
+                hard_remaining_collision_count=near_miss[1]['final_collision_count']
+                hard_remaining_max_depth=near_miss[1]['final_max_depth']
+        else:
+            hard_remaining_collision_count=0
+            hard_remaining_max_depth=0.
+        optimization_elapsed=time.perf_counter()-optimization_started
     xy,_=positions(last)
     out=copy.deepcopy(t2d);out.vertices[:,:,:2]=xy;out.stage='T2D dual hinge'
     # Compose the SE(2) placement with each original T3D->T2D rigid transform.
@@ -294,6 +427,16 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_timed_out=timed_out,dual_hinge_solver_message=message,
                        dual_hinge_time_budget_sec=budget,
                        dual_hinge_search_mode=search_mode,
+                       dual_hinge_collision_constraint_mode=collision_mode,
+                       hard_collision_feasible=hard_feasible,
+                       hard_collision_repair_attempts=hard_attempts,
+                       hard_collision_repair_source_trial=hard_selected_source_trial,
+                       hard_collision_history=hard_history,
+                       hard_collision_tolerance=hard_tolerance,
+                       hard_collision_repair_elapsed_sec=hard_repair_elapsed,
+                       hard_collision_refinement_elapsed_sec=hard_refinement_elapsed,
+                       hard_collision_best_unresolved_count=hard_remaining_collision_count,
+                       hard_collision_best_unresolved_max_depth=hard_remaining_max_depth,
                        dual_hinge_selected_trial=chosen_trial,
                        dual_hinge_selected_source=chosen_source,
                        dual_hinge_trials_requested=trials_requested,
@@ -326,8 +469,12 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     out.metrics['dual_hinge_initial_solid_collisions'] = audit_solid_collisions(rest,scale*1e-8)
     out.metrics.update(audit_solid_collisions(out.vertices,scale*1e-8))
     out.metrics['fabrication_feasible'] = bool(out.metrics['fabrication_feasible'] and out.metrics['solid_collision_pair_count']==0)
+    if collision_mode=='hard':
+        out.metrics['fabrication_feasible']=bool(out.metrics['fabrication_feasible'] and hard_feasible)
+        out.metrics['hard_collision_status']=('verified_feasible' if hard_feasible else 'NONPENETRATION_NOT_FOUND')
     out.metrics["paper_classification"]["optional_anchor_energy"] = "Project-specific extension"
     out.metrics["paper_classification"]["multi_start_perturbation_search"] = ("Project-specific extension" if search_mode=="multi_start" else "Disabled (paper-style single local solve)")
+    out.metrics["paper_classification"]["hard_collision_projection"] = ("Project-specific extension" if collision_mode=="hard" else "Disabled")
     graph.metrics=dict(out.metrics)
     for hinge in graph.hinges:
         hinge.rest_position_2d=.5*(out.vertices[hinge.tile_a,hinge.local_vertex_a]+out.vertices[hinge.tile_b,hinge.local_vertex_b])
