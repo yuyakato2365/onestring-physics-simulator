@@ -230,23 +230,26 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         if trial_id==0:
             source='baseline Top Hinge'
             initial=reference_pose.copy()
+            parent_trial_id=None
         else:
             restart_index=trial_id-1
             # Accumulator alternates restart sources while preserving 70/30.
             best_source=((restart_index+1)*best_restart_count+restarts-1)//restarts > (restart_index*best_restart_count+restarts-1)//restarts
             source='perturbed best' if best_source else 'perturbed Top Hinge'
+            parent_trial_id=int(best['summary']['trial_id']) if best_source else None
             initial=perturb_pose(best['pose'] if best_source else reference_pose)
         remaining_trials=trials_requested-trial_id
         local_deadline=(min(global_deadline, now+(global_deadline-now)/remaining_trials)
                         if np.isfinite(global_deadline) else float('inf'))
         trial=run_trial(initial,trial_id,source,local_deadline)
         summary=trial['summary']
+        summary['parent_trial_id']=parent_trial_id
         improved=(best is None or summary['final_EHinge'] < best['summary']['final_EHinge']-1e-12*max(scale**2,1e-30))
         summary['became_best']=bool(improved)
         if improved:
             best=trial
         trial_summaries.append(summary)
-        trial_trajectories.append(dict(trial_id=int(trial_id),initial_source=source,
+        trial_trajectories.append(dict(trial_id=int(trial_id),initial_source=source,parent_trial_id=parent_trial_id,
                                        pose_history=[{'iteration': int(i),'poses':p.tolist()} for i,p in trial['frames']]))
         if trial_id==0:
             baseline_energy=float(summary['final_EHinge'])
