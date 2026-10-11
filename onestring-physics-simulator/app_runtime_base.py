@@ -879,7 +879,7 @@ with st.sidebar:
     )
     hinge_layout_iterations = _param_row(
         "E_Hinge 配置最適化の最大反復回数。増やすと改善余地は増えるが、時間予算に達すると途中終了する。",
-        lambda: st.slider("hinge layout iterations", 20, 400, 80, 20, help="Maximum iterations for the T2D hinge layout optimizer."),
+        lambda: st.number_input("hinge layout iterations", min_value=20, max_value=10000, value=80, step=100, help="Maximum L-BFGS iterations for the T2D dual-hinge layout optimizer. Values above 1000 are supported; convergence may stop earlier."),
     )
     hinge_layout_connection_weight = _param_row(
         "ヒンジ点を一致させる重み。高いほど接続は保つが、衝突回避の自由度は減る。",
