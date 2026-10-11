@@ -8676,6 +8676,31 @@ def rerun_t2d_dual_hinge(state, params=None, progress_callback=None):
     gaps = _build_gap_graph(source_faces, dual, state.tiles_3d)
     lift_points = _select_lift_points(gaps, active_params.lift_tau)
     string_path = _build_string_path(gaps, lift_points, active_params.channel_friction)
+    # Preserve the committed M2D seam provenance when the user reruns ONLY
+    # T2D. This action never adds a new source Split, but must not erase the
+    # existing cut list/acceptance audit from the screen.
+    previous_split_metrics=getattr(state.mesh_2d_initial,'metrics',{}) or {}
+    if previous_split_metrics.get('collision_split_feedback_enabled',False):
+        keys=(
+            'collision_split_feedback_enabled',
+            'collision_split_boundary_weight',
+            'collision_split_attempted',
+            'collision_split_accepted',
+            'collision_split_newly_accepted',
+            'collision_split_feedback_steps',
+            'collision_split_accepted_lines',
+            'collision_split_before',
+            'collision_split_complete_boundary_to_boundary_only',
+            'collision_split_recompute_scope',
+            'collision_split_auto_feasibility_proof',
+        )
+        dual.metrics.update({key: previous_split_metrics[key]
+                             for key in keys if key in previous_split_metrics})
+        dual.metrics['collision_split_status']='T2D_reoptimized_on_existing_split_topology'
+        from .paper_collision_split import collision_quality
+        provisional=copy.copy(state)
+        provisional.tiles_2d_dual_hinge=dual
+        dual.metrics['collision_split_after']=collision_quality(provisional)
     # Publish only after all dependent stages succeeded.
     state.tiles_2d_dual_hinge = dual
     state.hinge_graph = hinges
