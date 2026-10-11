@@ -2331,7 +2331,8 @@ elif view_stage == "T2D Top Hinge":
     st.write(state.tiles_2d_top_hinge.metrics)
 elif view_stage == "T2D Dual Hinge":
     audit_metrics = state.tiles_2d_dual_hinge.metrics
-    # Render the *accepted solver poses*, not interpolation between start/end.
+    # Animate accepted SE(2) poses as actual 3D rigid solids. Z is fixed by
+    # the solver; this visualization must not suggest out-of-plane motion.
     pose_history = audit_metrics.get("dual_hinge_pose_history", [])
     if pose_history:
         import plotly.graph_objects as go
@@ -2342,6 +2343,19 @@ elif view_stage == "T2D Dual Hinge":
         tile_scale = float(_np.median(_np.linalg.norm(
             _np.roll(rest_tiles[:, :4, :2], -1, axis=1) - rest_tiles[:, :4, :2], axis=2)))
         hinges = state.hinge_graph.hinges
+        # Each rigid panel is an eight-vertex prism: top/bottom quads and sides.
+        triangles = ((0, 1, 2), (0, 2, 3), (4, 6, 5), (4, 7, 6),
+                     (0, 1, 5), (0, 5, 4), (1, 2, 6), (1, 6, 5),
+                     (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7))
+        edges = ((0, 1), (1, 2), (2, 3), (3, 0),
+                 (4, 5), (5, 6), (6, 7), (7, 4),
+                 (0, 4), (1, 5), (2, 6), (3, 7))
+        ii, jj, kk = [], [], []
+        for tile_idx in range(len(rest_tiles)):
+            for x, y, z in triangles:
+                ii.append(8 * tile_idx + x)
+                jj.append(8 * tile_idx + y)
+                kk.append(8 * tile_idx + z)
         def _hinge_frame(entry):
             pose = _np.asarray(entry["poses"], dtype=float)
             angle = pose[:, 0]
@@ -2349,30 +2363,57 @@ elif view_stage == "T2D Dual Hinge":
             xy = _np.stack((c * local_xy[:, :, 0] - sn * local_xy[:, :, 1],
                             sn * local_xy[:, :, 0] + c * local_xy[:, :, 1]), axis=2)
             xy += centers[:, None, :] + tile_scale * pose[:, None, 1:]
-            px, py, hx, hy = [], [], [], []
-            for tile in xy:
-                corners = tile[:4]
-                px.extend([*corners[:, 0], corners[0, 0], None])
-                py.extend([*corners[:, 1], corners[0, 1], None])
+            xyz = _np.concatenate((xy, rest_tiles[:, :, 2:3]), axis=2)
+            flat = xyz.reshape(-1, 3)
+            ex, ey, ez, hx, hy, hz = [], [], [], [], [], []
+            for tile in xyz:
+                for v1, v2 in edges:
+                    a, b = tile[v1], tile[v2]
+                    ex.extend((a[0], b[0], None))
+                    ey.extend((a[1], b[1], None))
+                    ez.extend((a[2], b[2], None))
             for hinge in hinges:
-                a = xy[hinge.tile_a, hinge.local_vertex_a]
-                b = xy[hinge.tile_b, hinge.local_vertex_b]
-                hx.extend([a[0], b[0], None])
-                hy.extend([a[1], b[1], None])
+                a = xyz[hinge.tile_a, hinge.local_vertex_a]
+                b = xyz[hinge.tile_b, hinge.local_vertex_b]
+                hx.extend((a[0], b[0], None))
+                hy.extend((a[1], b[1], None))
+                hz.extend((a[2], b[2], None))
             return [
-                go.Scatter(x=px, y=py, mode="lines", line=dict(color="#18a999", width=1.5), name="Panels"),
-                go.Scatter(x=hx, y=hy, mode="lines", line=dict(color="#e05b36", width=1.5), name="Hinge connection gaps")
+                go.Mesh3d(x=flat[:, 0], y=flat[:, 1], z=flat[:, 2],
+                          i=ii, j=jj, k=kk, color="#26c6b7",
+                          opacity=0.80, flatshading=True, name="Rigid panels",
+                          hoverinfo="skip", showscale=False),
+                go.Scatter3d(x=ex, y=ey, z=ez, mode="lines",
+                             line=dict(color="#087f75", width=2),
+                             name="Panel edges", hoverinfo="skip"),
+                go.Scatter3d(x=hx, y=hy, z=hz, mode="lines",
+                             line=dict(color="#e05b36", width=4),
+                             name="Hinge connection gaps", hoverinfo="skip"),
             ]
         frames = [go.Frame(data=_hinge_frame(entry), name=str(entry["iteration"]))
                   for entry in pose_history]
+        all_xyz = rest_tiles.reshape(-1, 3)
+        # Fix axes across the entire trajectory, avoiding misleading auto-zoom.
+        all_centers = _np.asarray([_np.asarray(entry["poses"])[:, 1:]
+                                   for entry in pose_history])
+        all_trans = centers[None, :, :] + tile_scale * all_centers
+        max_radius = float(_np.max(_np.linalg.norm(local_xy, axis=2)))
+        low = _np.min(all_trans, axis=(0, 1)) - max_radius
+        high = _np.max(all_trans, axis=(0, 1)) + max_radius
+        zlo = float(_np.min(all_xyz[:, 2]))
+        zhi = float(_np.max(all_xyz[:, 2]))
+        zpad = max((zhi - zlo) * 0.1, tile_scale * 0.05)
         fig = go.Figure(data=frames[0].data, frames=frames)
         fig.update_layout(
-            title="T2D Dual Hinge — accepted optimization iterations",
-            xaxis=dict(scaleanchor="y", scaleratio=1, title="X"),
-            yaxis=dict(title="Y"), height=650, showlegend=True,
+            title="T2D Dual Hinge — 3D rigid panel optimization history",
+            scene=dict(xaxis=dict(title="X", range=[float(low[0]), float(high[0])]),
+                       yaxis=dict(title="Y", range=[float(low[1]), float(high[1])]),
+                       zaxis=dict(title="Z (fixed)", range=[zlo-zpad, zhi+zpad]),
+                       aspectmode="data", camera=dict(eye=dict(x=1.5, y=1.4, z=1.1))),
+            uirevision="dual_hinge_3d_camera", height=720, showlegend=True,
             updatemenus=[dict(type="buttons", showactive=False, buttons=[
                 dict(label="▶ Play", method="animate", args=[None, dict(
-                    frame=dict(duration=75, redraw=True), transition=dict(duration=0),
+                    frame=dict(duration=100, redraw=True), transition=dict(duration=0),
                     fromcurrent=True, mode="immediate")]),
                 dict(label="❚❚ Pause", method="animate", args=[[None], dict(
                     frame=dict(duration=0, redraw=False), mode="immediate")])])],
@@ -2380,11 +2421,11 @@ elif view_stage == "T2D Dual Hinge":
                     args=[[str(entry["iteration"])], dict(frame=dict(duration=0, redraw=True),
                     mode="immediate")]) for entry in pose_history],
                     currentvalue=dict(prefix="Iteration "), len=0.95)])
-        with st.expander("▶ Dual Hinge 最適化の変化を再生", expanded=True):
-            st.caption(f"実際のL-BFGS採用反復から {len(frames)} フレームを保存。"
-                       "緑＝パネル輪郭、橙＝対応するヒンジ点を結ぶ線（長いほど接続誤差）。"
-                       " 最大1000回以上の設定では一部の反復を間引いて表示します。")
-            st.plotly_chart(fig, use_container_width=True, key="dual_hinge_iteration_animation")
+        with st.expander("▶ Dual Hinge 3D最適化アニメーション", expanded=True):
+            st.caption(f"実際のL-BFGS採用反復 {len(frames)} フレーム。"
+                       "青緑＝厚みを持つ剛体パネル、橙＝ヒンジ接続誤差。"
+                       " パネルはXY平面内でのみ剛体運動し、Z位置は固定です。")
+            st.plotly_chart(fig, use_container_width=True, key="dual_hinge_iteration_animation_3d")
     else:
         st.info("この実行にはヒンジ配置履歴がありません。修正後に再計算してください。")
     if audit_metrics.get("dual_hinge_history"):
