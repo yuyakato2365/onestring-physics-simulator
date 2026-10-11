@@ -958,6 +958,15 @@ with st.sidebar:
             index=0,
         ),
     )
+    t2d_collision_mode = _param_row(
+        "Soft: 従来どおり衝突ペナルティを最小化。Hard: ソフト探索後にXY footprintの非貫通へ修復し、実行可能な配置のみHard成功と判定。ヒンジ接続は引き続きソフト制約。",
+        lambda: st.selectbox(
+            "T2D collision constraint (soft / hard)",
+            ["soft", "hard"],
+            format_func=lambda value: "Soft collision (original)" if value == "soft" else "Hard nonpenetration (repair + feasible refinement)",
+            index=0,
+        ),
+    )
     t2d_restart_count = int(_param_row(
         "初回の通常最適化に加えて実行する再探索試行回数。70%は最良解、30%は元のTop Hingeから始める。",
         lambda: st.slider("T2D additional search trials", 1, 30, 6, 1, disabled=t2d_search_mode=="single"),
@@ -1677,6 +1686,7 @@ if rerun_t2d_only and not run_pipeline:
     t2d_rerun_params = _copy.copy(pipeline_params)
     t2d_rerun_params.hinge_layout_time_budget_sec = float(t2d_rerun_time_budget_sec)
     t2d_rerun_params.hinge_layout_search_mode = t2d_search_mode
+    t2d_rerun_params.hinge_layout_collision_mode = t2d_collision_mode
     t2d_rerun_params.hinge_layout_restart_count = t2d_restart_count
     t2d_rerun_params.hinge_layout_perturb_translation = t2d_perturb_translation
     t2d_rerun_params.hinge_layout_perturb_rotation_deg = t2d_perturb_rotation_deg
@@ -1700,15 +1710,33 @@ if rerun_t2d_only and not run_pipeline:
     winner_source = rerun_metrics.get("dual_hinge_selected_source", "baseline")
     n_trials = rerun_metrics.get("dual_hinge_trials_completed", 1)
     improvement = rerun_metrics.get("dual_hinge_best_improvement", 0.0)
-    st.info(f"採用された試行: **#{winner_id}（{winner_source}）** / 実行{n_trials}回。初回通常試行からのエネルギー改善: {improvement:.6g}。")
-    if rerun_metrics.get("dual_hinge_search_global_budget_exhausted", False):
-        st.warning("総探索時間の上限に達したため、予定していた全試行は完了していません。")
-    if rerun_metrics.get("dual_hinge_timed_out", False):
-        st.warning(f"採用された試行は時間制限で途中終了しました（反復 {rerun_iterations} 回）。停止理由: {rerun_reason}")
-    elif rerun_metrics.get("dual_hinge_solver_success") is False:
-        st.warning(f"採用された試行は収束成功を報告していません（反復 {rerun_iterations} 回）。停止理由: {rerun_reason}")
+    if rerun_metrics.get("dual_hinge_collision_constraint_mode") == "hard":
+        if rerun_metrics.get("hard_collision_feasible", False):
+            st.success(
+                f"Hard Collision: **非貫通を確認**（XY footprint）。"
+                f"ソフト候補の試行 #{rerun_metrics.get('hard_collision_repair_source_trial')} を修復・再最適化して採用しました。"
+                f"最終 E_Hinge={rerun_metrics.get('EHinge', 0.):.6g}。"
+                "ヒンジ接続とその他の製作条件は別途検証してください。"
+            )
+        else:
+            st.error(
+                "Hard Collision: **非貫通配置を発見できませんでした。製作可能な解ではありません。** "
+                f"試行した修復候補 {len(rerun_metrics.get('hard_collision_repair_attempts', []))} 件。"
+                f"修復途中の最少残存衝突数 {rerun_metrics.get('hard_collision_best_unresolved_count')}。"
+                "画面の配置は診断用のソフト最良解であり、Hard制約の成功解ではありません。"
+            )
+        st.caption(f"ソフト探索 {n_trials} / 予定 {rerun_metrics.get('dual_hinge_trials_requested', n_trials)} 試行。"
+                   f" 元の初回試行に対する最終エネルギー変化 {-improvement:.6g}（Hardでは増加する場合があります）。")
     else:
-        st.success(f"T2D Dual Hingeを再最適化しました。採用試行 #{winner_id}、反復 {rerun_iterations} 回。停止理由: {rerun_reason}")
+        st.info(f"採用された試行: **#{winner_id}（{winner_source}）** / 実行{n_trials}回。初回通常試行からのエネルギー改善: {improvement:.6g}。")
+        if rerun_metrics.get("dual_hinge_timed_out", False):
+            st.warning(f"採用された試行は時間制限で途中終了しました（反復 {rerun_iterations} 回）。停止理由: {rerun_reason}")
+        elif rerun_metrics.get("dual_hinge_solver_success") is False:
+            st.warning(f"採用された試行は収束成功を報告していません（反復 {rerun_iterations} 回）。停止理由: {rerun_reason}")
+        else:
+            st.success(f"T2D Dual Hingeを再最適化しました。採用試行 #{winner_id}、反復 {rerun_iterations} 回。停止理由: {rerun_reason}")
+    if rerun_metrics.get("dual_hinge_search_global_budget_exhausted", False):
+        st.warning("指定されたソフト探索試行がすべては完了していません（時間予算に達したか、Hard修復用に時間を確保しました）。")
 
 
 deployment_params = DeploymentParameters(
@@ -2444,31 +2472,57 @@ elif view_stage == "T2D Dual Hinge":
     trial_trajectories = audit_metrics.get("dual_hinge_trial_pose_histories", [])
     selected_trial_id = int(audit_metrics.get("dual_hinge_selected_trial", 0))
     pose_history = audit_metrics.get("dual_hinge_pose_history", [])
+    hard_mode_active = audit_metrics.get("dual_hinge_collision_constraint_mode") == "hard"
+    hard_ok = audit_metrics.get("hard_collision_feasible", False)
+    hard_history = audit_metrics.get("hard_collision_history", [])
+    if hard_mode_active:
+        if hard_ok:
+            st.success(
+                f"Hard Collision: XY footprint非貫通を検証済み。"
+                f"採用元のソフト試行 #{audit_metrics.get('hard_collision_repair_source_trial')}。"
+                f"最終ヒンジRMS {audit_metrics.get('hinge_rms', 0.):.5g}。"
+                f"製作可能性: {audit_metrics.get('fabrication_feasible', False)}"
+            )
+        else:
+            st.error("Hard Collision未達成：このT2Dは非貫通の製作可能配置ではありません。表示中の配置は診断用です。")
+        if audit_metrics.get("hard_collision_repair_attempts"):
+            with st.expander("Hard Collision修復試行の診断", expanded=True):
+                st.dataframe(audit_metrics["hard_collision_repair_attempts"], use_container_width=True, hide_index=True)
     if trial_summaries:
         st.subheader("T2D探索試行の比較")
         st.markdown(
-            f"**最終採用: 試行 #{selected_trial_id} "
+            f"**最終採用元: 試行 #{selected_trial_id} "
             f"（{audit_metrics.get('dual_hinge_selected_source', 'baseline')}）** "
-            f"｜実行 {len(trial_summaries)} / 予定 {audit_metrics.get('dual_hinge_trials_requested', len(trial_summaries))} 回 "
-            f"｜初回比エネルギー改善 {audit_metrics.get('dual_hinge_best_improvement', 0.):.6g}"
+            f"｜Soft探索 {len(trial_summaries)} / 予定 {audit_metrics.get('dual_hinge_trials_requested', len(trial_summaries))} 回 "
+            f"｜初回比エネルギー変化 {-audit_metrics.get('dual_hinge_best_improvement', 0.):.6g}"
         )
+        if hard_mode_active and hard_ok:
+            st.caption("以下の表はHard修復前のSoft探索結果です。最終採用配置はHard修復・非貫通制約下の再最適化後のものです。")
         st.dataframe(trial_summaries, use_container_width=True, hide_index=True)
     if trial_trajectories:
-        trial_ids = [int(item["trial_id"]) for item in trial_trajectories]
+        trial_ids = ([-1] if hard_ok and hard_history else []) + [
+            int(item["trial_id"]) for item in trial_trajectories
+        ]
         display_trial = st.selectbox(
             "3Dアニメーションで表示する探索試行",
             trial_ids,
-            index=trial_ids.index(selected_trial_id) if selected_trial_id in trial_ids else 0,
+            index=0 if hard_ok and hard_history else (
+                trial_ids.index(selected_trial_id) if selected_trial_id in trial_ids else 0
+            ),
             format_func=lambda trial_id: (
-                f"試行 #{trial_id} — {next((item['initial_source'] for item in trial_summaries if item['trial_id']==trial_id), '')}"
-                + (" ★ 最終採用" if trial_id==selected_trial_id else "")
+                "★ Hard修復・最終採用配置" if trial_id == -1
+                else f"試行 #{trial_id} — {next((item['initial_source'] for item in trial_summaries if item['trial_id']==trial_id), '')}"
+                + (" ★ Soft最良" if trial_id==selected_trial_id else "")
             ),
             key="dual_hinge_inspection_trial",
         )
-        inspected_trial = next(item for item in trial_trajectories if item["trial_id"]==display_trial)
-        pose_history = inspected_trial["pose_history"]
-        if display_trial != selected_trial_id:
-            st.caption("選択した試行の途中経過を表示しています。最終T2D結果・STLは常に最終採用試行の配置です。")
+        if display_trial == -1:
+            pose_history = hard_history
+        else:
+            inspected_trial = next(item for item in trial_trajectories if item["trial_id"]==display_trial)
+            pose_history = inspected_trial["pose_history"]
+            if hard_ok or display_trial != selected_trial_id:
+                st.caption("選択した試行の途中経過を表示しています。最終T2D結果はHard修復の採用配置です（Hard成功時）。")
     if pose_history:
         import plotly.graph_objects as go
         import numpy as _np
@@ -2574,7 +2628,12 @@ elif view_stage == "T2D Dual Hinge":
                 "dual_hinge_weights", "dual_hinge_solver_success", "dual_hinge_solver_message",
                 "dual_hinge_timed_out", "dual_hinge_stop_reason",
                 "dual_hinge_iterations", "dual_hinge_time_budget_sec",
-                "dual_hinge_search_mode", "dual_hinge_selected_trial",
+                "dual_hinge_search_mode", "dual_hinge_collision_constraint_mode",
+                "hard_collision_status", "hard_collision_feasible",
+                "hard_collision_repair_source_trial", "hard_collision_tolerance",
+                "hard_collision_repair_elapsed_sec", "hard_collision_refinement_elapsed_sec",
+                "hard_collision_best_unresolved_count", "hard_collision_best_unresolved_max_depth",
+                "dual_hinge_selected_trial",
                 "dual_hinge_selected_source", "dual_hinge_trials_completed",
                 "dual_hinge_trials_requested", "dual_hinge_best_improvement",
                 "dual_hinge_search_global_budget_exhausted",
@@ -2595,15 +2654,18 @@ elif view_stage == "T2D Dual Hinge":
     collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_dual_hinge, hinge_graph=None)
     st.plotly_chart(collision_fig, use_container_width=True, key="t2d_dual_collision_map")
     st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs (hinge-connected pairs included, as in ECollision). Red = collision participant.")
-    t2d_dual_stl, t2d_dual_export_metrics = export_t2d_stl(state, stage="dual_hinge", panel_size=0.1, solid_name="onestring_t2d_dual_hinge")
-    st.download_button(
-        "Download T2D Dual Hinge STL",
-        data=t2d_dual_stl,
-        file_name="onestring_t2d_dual_hinge.stl",
-        mime="model/stl",
-        key="download_t2d_dual_hinge_stl",
-    )
-    state.tiles_2d_dual_hinge.metrics.update(t2d_dual_export_metrics)
+    if hard_mode_active and not hard_ok:
+        st.error("Hard非貫通未達成のため、製作用T2D STLのダウンロードを無効化しています。")
+    else:
+        t2d_dual_stl, t2d_dual_export_metrics = export_t2d_stl(state, stage="dual_hinge", panel_size=0.1, solid_name="onestring_t2d_dual_hinge")
+        st.download_button(
+            "Download T2D Dual Hinge STL",
+            data=t2d_dual_stl,
+            file_name="onestring_t2d_dual_hinge.stl",
+            mime="model/stl",
+            key="download_t2d_dual_hinge_stl",
+        )
+        state.tiles_2d_dual_hinge.metrics.update(t2d_dual_export_metrics)
     st.write(state.tiles_2d_dual_hinge.metrics)
 elif view_stage in {"Lift Points", "String Path"}:
     st.plotly_chart(
