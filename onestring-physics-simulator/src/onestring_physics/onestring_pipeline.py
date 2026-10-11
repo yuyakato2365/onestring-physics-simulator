@@ -8551,10 +8551,14 @@ def build_onestring_design(
                 if before['status']!='ok' or before['collision_pairs']==0:
                     status='collision_free' if before['collision_pairs']==0 else 'invalid_T2D'
                     break
-                candidates,proposal_metrics=rank_collision_split_candidates(
-                    state,boundary_weight=weight,
-                    max_candidates=max(attempts*3,attempts),
-                )
+                try:
+                    candidates,proposal_metrics=rank_collision_split_candidates(
+                        state,boundary_weight=weight,
+                        max_candidates=max(attempts*3,attempts),
+                    )
+                except Exception as exc:
+                    status=f'collision_split_proposal_failed: {type(exc).__name__}: {str(exc)[:160]}'
+                    break
                 if not candidates:
                     status=proposal_metrics.get('status','no_valid_complete_grid_cut')
                     break
@@ -8637,6 +8641,7 @@ def build_onestring_design(
             collision_split_boundary_weight=weight,
             collision_split_attempted=len(steps),
             collision_split_accepted=len(accepted),
+            collision_split_newly_accepted=sum(bool(step['accepted']) for step in steps),
             collision_split_feedback_steps=steps,
             collision_split_accepted_lines=accepted,
             collision_split_before=baseline,
