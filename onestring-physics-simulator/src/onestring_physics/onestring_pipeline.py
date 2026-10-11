@@ -8593,18 +8593,45 @@ def build_onestring_design(
                         )
                         # A candidate is not real unless the rebuilt M2D
                         # actually contains ALL committed collision seams.
-                        applied_count=int(trial_state.mesh_2d_initial.metrics.get(
-                            'collision_split_count',-1
-                        ))
-                        final_cut_count=int(trial_state.mesh_2d_initial.metrics.get(
-                            'collision_split_final_pass_applied_count',-1
-                        ))
-                        if (applied_count!=len(next_forced)
-                                or final_cut_count!=len(next_forced)):
+                        from .simple_split_panel_patch import _edge_components
+                        split_mesh=trial_state.mesh_2d_initial
+                        split_metrics=split_mesh.metrics
+                        applied_count=int(split_metrics.get('collision_split_count',-1))
+                        final_cut_count=split_metrics.get(
+                            'collision_split_final_pass_applied_count',None
+                        )
+                        if applied_count!=len(next_forced):
                             raise RuntimeError(
-                                'Collision Split topology not propagated through final M2D: '
-                                f'expected={len(next_forced)}, '
-                                f'initial_cuts={applied_count}, final_cuts={final_cut_count}'
+                                'Collision Split topology not propagated through M2D: '
+                                f'expected={len(next_forced)}, initial_cuts={applied_count}'
+                            )
+                        if final_cut_count is not None and int(final_cut_count)!=len(next_forced):
+                            raise RuntimeError(
+                                'Collision Split lost during optional final M2D topology pass'
+                            )
+                        # The active dated launcher may use the Simple Split
+                        # pass without installing final_split_panel_pass. In
+                        # that case audit REAL source-face IDs and connected
+                        # components, rather than requiring an uninstalled
+                        # optional pass's metrics field.
+                        seam_records=split_metrics.get('collision_split_step_analysis',[])
+                        final_faces=np.asarray(split_mesh.faces,int)
+                        if len(seam_records)!=len(next_forced):
+                            raise RuntimeError('Collision Split source seam records missing')
+                        for seam in seam_records:
+                            if (not seam.get('complete_boundary_to_boundary',False)
+                                    or not seam.get('split_boundary_pairs')):
+                                raise RuntimeError('Collision Split was not a complete real source seam')
+                            for a,ea,b,eb in seam['split_boundary_pairs']:
+                                edge_a=set(map(int,final_faces[a,[ea,(ea+1)%4]]))
+                                edge_b=set(map(int,final_faces[b,[eb,(eb+1)%4]]))
+                                if edge_a==edge_b:
+                                    raise RuntimeError('Collision Split edge was rewelded')
+                        old_parts=len(_edge_components(np.asarray(state.mesh_2d_initial.faces,int)))
+                        new_parts=len(_edge_components(final_faces))
+                        if new_parts<=old_parts:
+                            raise RuntimeError(
+                                'Collision Split did not add a real disconnected M2D component'
                             )
                         after=collision_quality(trial_state)
                         improved,reason=accept_if_improved(
