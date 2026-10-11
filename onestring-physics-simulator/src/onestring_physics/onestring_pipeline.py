@@ -1048,6 +1048,9 @@ class PipelineParameters(_original.PipelineParameters):
     hinge_layout_collision_weight: float = 4.0
     hinge_layout_anchor_weight: float = 0.0
     hinge_layout_initial_expansion: float = 1.0
+    # Compatibility with older K2D/local-global layout paths only.
+    # Both active Sec.4.3 T2D Dual Hinge Soft and Hard solvers ignore this
+    # legacy setting; their rigid SE(2) translations are unbounded.
     hinge_layout_max_center_drift_tiles: float = 5.0
     # Optional multi-start for the T2D-only rerun; full pipeline remains single.
     hinge_layout_search_mode: str = "single"
