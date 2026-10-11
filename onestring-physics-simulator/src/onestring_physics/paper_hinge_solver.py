@@ -49,27 +49,22 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     # initial collision audits or the first solver-history snapshot. In large
     # meshes those preparations can otherwise consume the entire short budget.
     deadline=float('inf')
-    # Stabilization controls are part of the actual dual-hinge solve.  Expansion
-    # is applied to tile centers before optimization; max drift is enforced with
-    # L-BFGS-B translation bounds around that expanded reference.  This makes
-    # the UI controls authoritative instead of display-only.
+    # The panel pose variables have NO artificial center-travel bounds in
+    # either Soft or Hard mode. The hinge and optional anchor energies control
+    # relative separation; Hard mode tests actual XY SAT feasibility.
     initial_expansion=float(getattr(params,'hinge_layout_initial_expansion',1.0))
-    max_center_drift_tiles=float(getattr(params,'hinge_layout_max_center_drift_tiles',2.0))
     max_candidate_pairs=int(getattr(params,'hinge_layout_max_candidate_pairs',3000))
     if not np.isfinite(initial_expansion) or initial_expansion<=0:
         raise ValueError('hinge_layout_initial_expansion must be finite and positive')
-    if not np.isfinite(max_center_drift_tiles) or max_center_drift_tiles<0:
-        raise ValueError('hinge_layout_max_center_drift_tiles must be finite and nonnegative')
     if max_candidate_pairs<=0:
         raise ValueError('hinge_layout_max_candidate_pairs must be positive')
     layout_center=centers.mean(axis=0)
     expanded_centers=layout_center+initial_expansion*(centers-layout_center)
     center_offsets=expanded_centers-centers
-    # Keep the objective, reference placement and translation bounds identical
-    # across ALL restarts. Only the initial SE(2) pose is perturbed.
+    # Keep the objective and anchor reference identical across ALL restarts;
+    # no translation bounds are imposed in either collision mode.
     reference_pose=np.zeros((len(rest),3),float)
     reference_pose[:,1:]=center_offsets/max(scale,1e-30)
-    drift_bound=max_center_drift_tiles
     collision_mode=str(getattr(params, 'hinge_layout_collision_mode', 'soft'))
     if collision_mode not in ('soft', 'hard'):
         raise ValueError(f'Unsupported hinge_layout_collision_mode: {collision_mode}')
@@ -127,12 +122,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             raise _Deadline()
         e,g,_=evaluate(z.reshape(-1,3))
         return e/(scale**2),(g/(scale**2)).ravel()
-    # The exact same objective and bounds are reused for every local solve.
-    bounds=[]
-    for i in range(len(rest)):
-        bounds.append((None,None))
-        bounds.append((reference_pose[i,1]-drift_bound,reference_pose[i,1]+drift_bound))
-        bounds.append((reference_pose[i,2]-drift_bound,reference_pose[i,2]+drift_bound))
+    # All three variables (rotation, tx, ty) are unbounded for each tile.
+    # scipy.optimize.minimize(method='L-BFGS-B') accepts no bounds at all.
+    bounds=None
     setup_elapsed=time.perf_counter()-started
     optimization_started=time.perf_counter()
     global_deadline=optimization_started+budget if budget>0 else float('inf')
@@ -219,9 +211,10 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             indices=rng.choice(len(candidate),size=count,replace=False)
             candidate[indices,0]+=rng.normal(0.,rotation_sigma,size=count)
             candidate[indices,1:]+=rng.normal(0.,translation_sigma,size=(count,2))
-        candidate[:,1:]=np.clip(candidate[:,1:],
-                                reference_pose[:,1:]-drift_bound,
-                                reference_pose[:,1:]+drift_bound)
+        if len(candidate):
+            # Remove the meaningless common translation component without
+            # restricting relative tile motions or changing hinge collisions.
+            candidate[:,1:]+=np.mean(reference_pose[:,1:]-candidate[:,1:],axis=0)
         return candidate
 
     trials_requested=restarts+1
@@ -296,7 +289,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         hard_started=time.perf_counter()
         hard_feasible=False
         # Prioritize the best soft energy but also try geometrically different
-        # soft endpoints. Each candidate retains the ORIGINAL pose bounds.
+        # soft endpoints. All starts share the same anchor reference and
+        # unbounded rigid SE(2) pose variables.
         ordered=sorted(trial_candidates,key=lambda item:item['energy'])
         repair_sources=ordered[:min(len(ordered),6)]
         winning_hard=None
@@ -324,7 +318,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                 steps=[]
             else:
                 candidate,repaired,repair_frames,steps=repair_nonpenetration(
-                    before_pose,positions,faces,reference_pose,drift_bound,
+                    before_pose,positions,faces,reference_pose,
                     scale,attempt_deadline,rng,max_iterations=480,
                 )
             candidate_xy,_=positions(candidate)
@@ -357,7 +351,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             hard_refinement_started=time.perf_counter()
             refined, refine_frames=refine_feasible_pose(
                 winning_hard['pose'],positions,faces,reference_pose,
-                drift_bound,scale,global_deadline,rng,
+                scale,global_deadline,rng,
                 lambda pose: (lambda energy, gradient, stats: (energy,gradient))(*evaluate(pose)),
                 iterations=24,
             )
@@ -463,7 +457,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_iterations=(int(records[-1]['iteration']) if records else 0),dual_hinge_history=records,
                        dual_hinge_pose_history=[{'iteration': i, 'poses': p.tolist()} for i,p in pose_history],
                        dual_hinge_initial_expansion=initial_expansion,
-                       dual_hinge_max_center_drift_tiles=max_center_drift_tiles,
+                       dual_hinge_translation_bounds_enabled=False,
+                       dual_hinge_translation_bounds='unbounded in Soft and Hard',
                        dual_hinge_max_candidate_pairs=max_candidate_pairs,
                        dual_hinge_collision_model='convex 2D footprint SAT; conservative surrogate for 3D solids',
                        dual_hinge_connection_model='2 * sum squared paired 3D corner distances',
