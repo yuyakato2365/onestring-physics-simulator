@@ -948,14 +948,38 @@ with st.sidebar:
         lambda: st.slider("collision sweeps per layout iteration", 1, 6, 2, 1, help="Number of collision separation passes per layout iteration."),
     ))
 
-    # A standalone rerun needs its own (longer) budget. The short budget above
-    # is still used for the full K3D/K2D/T3D pipeline run.
+    # T2D-only reruns can search several basins without rerunning K3D/K2D.
+    t2d_search_mode = _param_row(
+        "T2D単独再実行の方式。Multi-startは一度求めた最良解と元のTop Hinge配置の両方から再探索する。",
+        lambda: st.selectbox(
+            "T2D-only optimization method",
+            ["multi_start", "single"],
+            format_func=lambda value: "Multi-start + perturbation (70% best / 30% initial)" if value == "multi_start" else "Original L-BFGS-B (single trial)",
+            index=0,
+        ),
+    )
+    t2d_restart_count = int(_param_row(
+        "初回の通常最適化に加えて実行する再探索試行回数。70%は最良解、30%は元のTop Hingeから始める。",
+        lambda: st.slider("T2D additional search trials", 1, 30, 6, 1, disabled=t2d_search_mode=="single"),
+    ))
+    t2d_perturb_translation = float(_param_row(
+        "摂動の平行移動標準偏差（タイル代表辺長単位）。",
+        lambda: st.slider("T2D translation perturbation / tile", 0.0, 2.0, 0.35, 0.05, disabled=t2d_search_mode=="single"),
+    ))
+    t2d_perturb_rotation_deg = float(_param_row(
+        "摂動の回転角の標準偏差（度）。",
+        lambda: st.slider("T2D rotation perturbation (degrees)", 0.0, 90.0, 20.0, 1.0, disabled=t2d_search_mode=="single"),
+    ))
+    t2d_search_seed = int(_param_row(
+        "比較実験の再現性のための乱数シード。同じ形状・パラメータなら同じ初期候補を生成。",
+        lambda: st.number_input("T2D multi-start random seed", min_value=0, max_value=2147483647, value=0, step=1, disabled=t2d_search_mode=="single"),
+    ))
     t2d_rerun_time_budget_sec = _param_row(
-        "T2Dのみ再最適化の時間予算（秒）。通常実行の8秒とは独立。0で時間制限なし。",
+        "T2D単独再実行の全試行に共有する時間予算（秒）。試行ごとに時間を分配。0で時間制限なし。",
         lambda: st.number_input(
-            "T2D-only rerun time budget (sec; 0 = unlimited)",
-            min_value=0, max_value=7200, value=180, step=30,
-            help="Used only by the ↻ T2D-only rerun button. 0 disables the time limit; iteration limit and solver convergence still apply.",
+            "T2D-only TOTAL search time budget (sec; 0 = unlimited)",
+            min_value=0, max_value=7200, value=360, step=60,
+            help="The whole multi-start search shares this budget. Each trial also has its own max iteration limit.",
         ),
     )
 
@@ -1652,6 +1676,11 @@ if rerun_t2d_only and not run_pipeline:
     import copy as _copy
     t2d_rerun_params = _copy.copy(pipeline_params)
     t2d_rerun_params.hinge_layout_time_budget_sec = float(t2d_rerun_time_budget_sec)
+    t2d_rerun_params.hinge_layout_search_mode = t2d_search_mode
+    t2d_rerun_params.hinge_layout_restart_count = t2d_restart_count
+    t2d_rerun_params.hinge_layout_perturb_translation = t2d_perturb_translation
+    t2d_rerun_params.hinge_layout_perturb_rotation_deg = t2d_perturb_rotation_deg
+    t2d_rerun_params.hinge_layout_random_seed = t2d_search_seed
     rerun_progress = st.empty()
     def _t2d_rerun_progress(stage, fraction, detail=""):
         rerun_progress.caption(f"T2D rerun: {stage}" + (f" — {detail}" if detail else ""))
@@ -1663,15 +1692,23 @@ if rerun_t2d_only and not run_pipeline:
             st.stop()
     # A fresh solver call also regenerates dual_hinge_pose_history for animation.
     st.session_state.pop("actuation_key", None)
+    st.session_state.pop("dual_hinge_inspection_trial", None)
     rerun_metrics = state.tiles_2d_dual_hinge.metrics
     rerun_iterations = rerun_metrics.get("dual_hinge_iterations", "unknown")
     rerun_reason = rerun_metrics.get("dual_hinge_solver_message", "No solver status available")
+    winner_id = rerun_metrics.get("dual_hinge_selected_trial", 0)
+    winner_source = rerun_metrics.get("dual_hinge_selected_source", "baseline")
+    n_trials = rerun_metrics.get("dual_hinge_trials_completed", 1)
+    improvement = rerun_metrics.get("dual_hinge_best_improvement", 0.0)
+    st.info(f"採用された試行: **#{winner_id}（{winner_source}）** / 実行{n_trials}回。初回通常試行からのエネルギー改善: {improvement:.6g}。")
+    if rerun_metrics.get("dual_hinge_search_global_budget_exhausted", False):
+        st.warning("総探索時間の上限に達したため、予定していた全試行は完了していません。")
     if rerun_metrics.get("dual_hinge_timed_out", False):
-        st.warning(f"T2Dは時間制限で途中終了しました（採用反復 {rerun_iterations} 回）。最終配置とアニメーションは途中結果です。時間予算を増やして再実行してください。理由: {rerun_reason}")
+        st.warning(f"採用された試行は時間制限で途中終了しました（反復 {rerun_iterations} 回）。停止理由: {rerun_reason}")
     elif rerun_metrics.get("dual_hinge_solver_success") is False:
-        st.warning(f"T2Dソルバーは収束成功を報告していません（採用反復 {rerun_iterations} 回）。結果を確認してください。理由: {rerun_reason}")
+        st.warning(f"採用された試行は収束成功を報告していません（反復 {rerun_iterations} 回）。停止理由: {rerun_reason}")
     else:
-        st.success(f"T2D Dual Hingeを再最適化し、アニメーションを更新しました（採用反復 {rerun_iterations} 回）。停止理由: {rerun_reason}")
+        st.success(f"T2D Dual Hingeを再最適化しました。採用試行 #{winner_id}、反復 {rerun_iterations} 回。停止理由: {rerun_reason}")
 
 
 deployment_params = DeploymentParameters(
@@ -2403,7 +2440,35 @@ elif view_stage == "T2D Dual Hinge":
     audit_metrics = state.tiles_2d_dual_hinge.metrics
     # Animate accepted SE(2) poses as actual 3D rigid solids. Z is fixed by
     # the solver; this visualization must not suggest out-of-plane motion.
+    trial_summaries = audit_metrics.get("dual_hinge_trial_summary", [])
+    trial_trajectories = audit_metrics.get("dual_hinge_trial_pose_histories", [])
+    selected_trial_id = int(audit_metrics.get("dual_hinge_selected_trial", 0))
     pose_history = audit_metrics.get("dual_hinge_pose_history", [])
+    if trial_summaries:
+        st.subheader("T2D探索試行の比較")
+        st.markdown(
+            f"**最終採用: 試行 #{selected_trial_id} "
+            f"（{audit_metrics.get('dual_hinge_selected_source', 'baseline')}）** "
+            f"｜実行 {len(trial_summaries)} / 予定 {audit_metrics.get('dual_hinge_trials_requested', len(trial_summaries))} 回 "
+            f"｜初回比エネルギー改善 {audit_metrics.get('dual_hinge_best_improvement', 0.):.6g}"
+        )
+        st.dataframe(trial_summaries, use_container_width=True, hide_index=True)
+    if trial_trajectories:
+        trial_ids = [int(item["trial_id"]) for item in trial_trajectories]
+        display_trial = st.selectbox(
+            "3Dアニメーションで表示する探索試行",
+            trial_ids,
+            index=trial_ids.index(selected_trial_id) if selected_trial_id in trial_ids else 0,
+            format_func=lambda trial_id: (
+                f"試行 #{trial_id} — {next((item['initial_source'] for item in trial_summaries if item['trial_id']==trial_id), '')}"
+                + (" ★ 最終採用" if trial_id==selected_trial_id else "")
+            ),
+            key="dual_hinge_inspection_trial",
+        )
+        inspected_trial = next(item for item in trial_trajectories if item["trial_id"]==display_trial)
+        pose_history = inspected_trial["pose_history"]
+        if display_trial != selected_trial_id:
+            st.caption("選択した試行の途中経過を表示しています。最終T2D結果・STLは常に最終採用試行の配置です。")
     if pose_history:
         import plotly.graph_objects as go
         import numpy as _np
@@ -2492,8 +2557,9 @@ elif view_stage == "T2D Dual Hinge":
                     mode="immediate")]) for entry in pose_history],
                     currentvalue=dict(prefix="Iteration "), len=0.95)])
         with st.expander("▶ Dual Hinge 3D最適化アニメーション", expanded=True):
-            if audit_metrics.get("dual_hinge_timed_out", False):
-                st.warning("時間切れによる途中結果です。T2D-only rerunの時間予算を増やしてください。")
+            shown_trial = next((item for item in trial_summaries if item["trial_id"] == (display_trial if trial_trajectories else selected_trial_id)), None)
+            if shown_trial and shown_trial.get("timed_out", False):
+                st.warning("この試行は時間制限による途中結果です。")
             st.caption(f"記録されたL-BFGS採用反復 {len(frames)} フレーム（間引き設定により実際の反復数とは異なることがあります）。"
                        "青緑＝厚みを持つ剛体パネル、橙＝ヒンジ接続誤差。"
                        " パネルはXY平面内でのみ剛体運動し、Z位置は固定です。")
@@ -2508,6 +2574,10 @@ elif view_stage == "T2D Dual Hinge":
                 "dual_hinge_weights", "dual_hinge_solver_success", "dual_hinge_solver_message",
                 "dual_hinge_timed_out", "dual_hinge_stop_reason",
                 "dual_hinge_iterations", "dual_hinge_time_budget_sec",
+                "dual_hinge_search_mode", "dual_hinge_selected_trial",
+                "dual_hinge_selected_source", "dual_hinge_trials_completed",
+                "dual_hinge_trials_requested", "dual_hinge_best_improvement",
+                "dual_hinge_search_global_budget_exhausted",
                 "dual_hinge_setup_elapsed_sec", "dual_hinge_optimization_elapsed_sec",
                 "hinge_mean", "hinge_rms", "hinge_p95", "hinge_max",
                 "collision_pair_count", "penetration_max", "penetration_rms",
