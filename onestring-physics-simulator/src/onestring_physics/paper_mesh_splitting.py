@@ -329,6 +329,16 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         ids = ids[np.isfinite(curvature[ids])]
         ids = ids[np.argsort(-curvature[ids], kind='stable')]
         component_before = ratio(component)
+        # Splitting along existing quad edges cannot change the distortion
+        # already contained in an individual quad. Avoid futile cuts when the
+        # component is at that mathematical lower bound.
+        component_floor = float(irreducible[component].max())
+        if component_before <= component_floor * (1. + 1e-10):
+            blocked.add(tuple(component))
+            rejected.append({'face_ids': component.tolist(), 'sigma': component_before,
+                             'reason': 'within_quad_distortion_floor',
+                             'irreducible_sigma': component_floor})
+            continue
         selected = None
         selected_peak = None
         used = np.unique(faces[component])
@@ -370,7 +380,13 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 # breaks the tie between the two grid-aligned directions.
                 # Do not move to a lower-curvature peak merely because this
                 # particular split fails to improve the estimated CSF.
-                score = (max(child_sigmas), imbalance, axis)
+                worst_child = max(child_sigmas)
+                # Reject a cut that does not reduce the violating component's
+                # distortion. Curvature chooses *where* to cut, but cannot
+                # justify indefinitely subdividing a region with no gain.
+                if worst_child >= component_before - 1e-10:
+                    continue
+                score = (worst_child, imbalance, axis)
                 candidates.append((score, v2, subset, record))
             if candidates:
                 selected = min(candidates, key=lambda x: x[0])
@@ -379,7 +395,8 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         if selected is None:
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(), 'sigma': component_before,
-                             'reason': 'no_complete_grid_cut_near_source_curvature_sample'})
+                             'reason': 'no_distortion_reducing_grid_cut' if complete_candidate_seen else 'no_complete_grid_cut_near_source_curvature_sample',
+                             'irreducible_sigma': component_floor})
             continue
         _, vertices, subset, record = selected
         # Store seam identity using stable tile/local-edge indices, never proximity.
@@ -443,7 +460,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_quad_coverage_floor_sweep=parameterization.metrics.get('split_quad_coverage_floor_sweep'),
         csf_split_face_sigma=face_sigma.tolist(),
         csf_split_residual_high_face_count=int(np.count_nonzero(face_sigma > threshold+1e-10)),
-        csf_split_additional_split_recommended_after_all=exhausted,
+        csf_split_additional_split_recommended_after_all=bool(exhausted and any(r['reason'] not in ('within_quad_distortion_floor',) for r in rejected)),
         csf_split_stopping_rule='cut at highest admissible Gaussian-curvature peak; evaluate child CSF and repeat until bound, budget or no valid cut',
         csf_split_conformal_anisotropy_max=parameterization.metrics.get('split_conformal_anisotropy_max'),
         csf_split_area_bound_requires_conformal_map=True,
