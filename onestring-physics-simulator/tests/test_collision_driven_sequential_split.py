@@ -218,3 +218,86 @@ def test_feedback_rejects_nonimproving_cut_and_preserves_old_state(monkeypatch):
     assert m["collision_split_accepted"]==0
     assert m["collision_split_status"]=="no_candidate_improved_or_rebuilt"
     assert not m["collision_split_feedback_steps"][0]["accepted"]
+
+
+
+def test_two_cuts_are_proposed_sequentially_with_fresh_collision_map(monkeypatch):
+    states=[_fake_state(10,0),_fake_state(4,1),_fake_state(0,2)]
+    forced_history=[]
+    scored_states=[]
+
+    def fake_full_build(target,params,**kwargs):
+        forced=list(getattr(params,"collision_split_forced_lines",()))
+        forced_history.append([dict(x) for x in forced])
+        return states[len(forced)]
+
+    def fake_rank(state,**kwargs):
+        # Verify the candidate is re-ranked *after* the first cut.
+        scored_states.append(state)
+        i=states.index(state)
+        proposal=dict(
+            axis="col" if i==0 else "row",
+            value=2.0,source_face_id=5 if i==0 else 10,
+            boundary_distance_tiles=1.0+i,score=3.0,
+        )
+        return [proposal],dict(status="candidates_ranked")
+
+    monkeypatch.setattr(pipeline,"_ORIGINAL_BUILD_ONESTRING_DESIGN",fake_full_build)
+    monkeypatch.setattr(collision,"rank_collision_split_candidates",fake_rank)
+    monkeypatch.setattr(collision,"collision_quality",lambda state: dict(
+        status="ok",collision_pairs=state.collision_pair_count,
+        collision_energy=float(state.collision_pair_count),
+        hinge_rms=.01,tile_scale=1.,
+    ))
+    params=SimpleNamespace(
+        collision_split_enabled=True,collision_split_max_additional=4,
+        collision_split_candidate_attempts=1,
+        collision_split_boundary_weight=2.,
+        collision_split_min_relative_improvement=.03,
+        collision_split_forced_lines=(),
+        omega_parameterization_mode="",
+    )
+    result=pipeline.build_onestring_design(object(),params)
+    assert result is states[2]
+    assert len(scored_states)==2 and scored_states==states[:2]
+    assert [len(v) for v in forced_history]==[0,1,2]
+    assert forced_history[2][0]["axis"]=="col"
+    assert forced_history[2][1]["axis"]=="row"
+    metrics=result.tiles_2d_dual_hinge.metrics
+    assert metrics["collision_split_status"]=="collision_free"
+    assert metrics["collision_split_accepted"]==2
+    assert all(x["accepted"] for x in metrics["collision_split_feedback_steps"])
+    assert len(metrics["collision_split_feedback_steps"])==2
+
+
+def test_rebuild_with_missing_seam_is_rejected(monkeypatch):
+    baseline=_fake_state(9,0)
+    # Energy improves, but the new M2D did not actually get cut!
+    uncaught_fake=_fake_state(0,0)
+    monkeypatch.setattr(
+        pipeline,"_ORIGINAL_BUILD_ONESTRING_DESIGN",
+        lambda target,params,**kwargs: baseline
+        if not getattr(params,"collision_split_forced_lines",()) else uncaught_fake,
+    )
+    monkeypatch.setattr(collision,"collision_quality",lambda state: dict(
+        status="ok",collision_pairs=state.collision_pair_count,
+        collision_energy=float(state.collision_pair_count),
+        hinge_rms=.01,tile_scale=1.,
+    ))
+    candidate=dict(axis="col",value=2.,source_face_id=5,
+                   boundary_distance_tiles=1.5,score=2.)
+    monkeypatch.setattr(collision,"rank_collision_split_candidates",
+                        lambda *a,**kw: ([candidate],dict(status="candidates_ranked")))
+    params=SimpleNamespace(
+        collision_split_enabled=True,collision_split_max_additional=1,
+        collision_split_candidate_attempts=1,
+        collision_split_boundary_weight=1.,
+        collision_split_min_relative_improvement=.03,
+        collision_split_forced_lines=(),
+        omega_parameterization_mode="",
+    )
+    result=pipeline.build_onestring_design(object(),params)
+    assert result is baseline
+    report=result.tiles_2d_dual_hinge.metrics
+    assert report["collision_split_accepted"]==0
+    assert "topology not propagated" in report["collision_split_feedback_steps"][0]["decision_reason"]
