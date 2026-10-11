@@ -140,6 +140,7 @@ def _fake_state(pair_count, applied_cuts=0):
         tiles_2d_dual_hinge=SimpleNamespace(metrics={}),
         mesh_2d_initial=SimpleNamespace(metrics={
             "collision_split_count": applied_cuts,
+            "collision_split_final_pass_applied_count": applied_cuts,
         }),
         collision_pair_count=pair_count,
     )
@@ -301,3 +302,97 @@ def test_rebuild_with_missing_seam_is_rejected(monkeypatch):
     report=result.tiles_2d_dual_hinge.metrics
     assert report["collision_split_accepted"]==0
     assert "topology not propagated" in report["collision_split_feedback_steps"][0]["decision_reason"]
+
+
+
+def test_final_pass_preserves_col_collision_cut_without_csf():
+    from onestring_physics.final_split_panel_pass import (
+        _split_axis_value, _complete_cut_once, install_final_split_panel_pass,
+    )
+    assert _split_axis_value(("col",2.)) == ("column",2.)
+    vertices, faces = _grid(4)
+    new_vertices,new_faces,record=_complete_cut_once(vertices,faces,"col",2.)
+    assert record is not None
+    class Mesh:
+        def __init__(self,vertices,faces,grid,stage,metrics,split_lines):
+            self.vertices=vertices
+            self.faces=faces
+            self.grid=grid
+            self.stage=stage
+            self.metrics=metrics
+            self.split_lines=split_lines
+
+    mesh=Mesh(
+        new_vertices,new_faces,SimpleNamespace(tile_size=1.,gap_size=.1),
+        "M2D",dict(
+            csf_split_applied=False,
+            csf_split_step_analysis=[],
+            collision_split_applied=True,
+            collision_split_count=1,
+            collision_split_step_analysis=[
+                {"collision_source_face_id":5,"axis":"col","snapped_value":2.}
+            ],
+            split_locations=[["col",2.]],
+        ),[("col",2.)],
+    )
+    mesh._split_panel_source_vertices=new_vertices.copy()
+    fake=SimpleNamespace(
+        _build_m2d=lambda grid,domain,params=None:mesh,
+        _original=SimpleNamespace(QuadMesh=Mesh),
+    )
+    install_final_split_panel_pass(fake)
+    result=fake._build_m2d(mesh.grid,SimpleNamespace(),None)
+    assert result.metrics["final_split_panel_pass_applied"] is True
+    assert result.metrics["collision_split_final_pass_applied_count"]==1
+    assert len(_edge_components(result.faces))==2
+    assert len(result.metrics["final_split_panel_per_line"])==1
+    assert result.metrics["final_split_panel_per_line"][0]["collision_driven"]
+
+
+def test_final_pass_keeps_source_face_anchor_on_sequential_collisions():
+    from onestring_physics.final_split_panel_pass import (
+        _complete_cut_once, install_final_split_panel_pass,
+    )
+    vertices, faces = _grid(4)
+    vertices, faces, row_record = _complete_cut_once(vertices,faces,"row",2.)
+    # The second cut belongs only to the upper-right or upper-left component;
+    # it cannot silently be applied to the wrong component.
+    upper_anchor=10
+    upper_component=next(c for c in _edge_components(faces) if upper_anchor in c)
+    vertices_after,subset,col_record=_complete_cut_once(
+        vertices,faces[upper_component],"col",2.,
+    )
+    assert col_record is not None
+    faces_after=faces.copy();faces_after[upper_component]=subset
+    class Mesh:
+        def __init__(self,vertices,faces,grid,stage,metrics,split_lines):
+            self.vertices=vertices
+            self.faces=faces
+            self.grid=grid
+            self.stage=stage
+            self.metrics=metrics
+            self.split_lines=split_lines
+    m=Mesh(vertices_after,faces_after,
+           SimpleNamespace(tile_size=1.,gap_size=.1),
+           "M2D",{
+               "csf_split_applied":True,
+               "csf_split_step_analysis":[{"axis":"row","snapped_value":2.}],
+               "collision_split_applied":True,
+               "collision_split_count":1,
+               "collision_split_step_analysis":[
+                   {"collision_source_face_id":upper_anchor}],
+               "split_locations":[["row",2.],["col",2.]],
+           },[("row",2.),("col",2.)])
+    m._split_panel_source_vertices=vertices_after.copy()
+    fake=SimpleNamespace(
+        _build_m2d=lambda grid,domain,params=None:m,
+        _original=SimpleNamespace(QuadMesh=Mesh),
+    )
+    install_final_split_panel_pass(fake)
+    result=fake._build_m2d(m.grid,SimpleNamespace(),None)
+    assert result.metrics["collision_split_final_pass_applied_count"]==1
+    assert len(_edge_components(result.faces))==3
+    final_collisions=[r for r in result.metrics["final_split_panel_per_line"]
+                      if r.get("collision_driven",False)]
+    assert len(final_collisions)==1
+    assert final_collisions[0]["collision_source_face_id"]==upper_anchor
