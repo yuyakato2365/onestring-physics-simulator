@@ -126,7 +126,7 @@ def test_multistart_selects_best_and_reports_70_30_sources():
     for i, (angle, tx, ty) in enumerate(pose):
         c, s = np.cos(angle), np.sin(angle)
         rot = np.array([[c, -s], [s, c]])
-        expected[i] = local[i] @ rot.T + centers[i] + scale * [tx, ty]
+        expected[i] = local[i] @ rot.T + centers[i] + scale * np.array([tx, ty])
     np.testing.assert_allclose(out.vertices[:, :, :2], expected, atol=1e-8)
 
 
