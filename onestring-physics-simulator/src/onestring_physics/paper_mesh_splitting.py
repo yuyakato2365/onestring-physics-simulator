@@ -415,12 +415,64 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                       grid_snap_distance=abs(record['snapped_value']-record['requested_value']),
                       component_id=int(component.min()))
         records.append(record)
+    # The CSF cuts above are left unchanged. Collision-driven cuts are injected
+    # ONE AT A TIME by the outer full-pipeline feedback loop. They modify the
+    # real M2D vertex IDs before M3D/K3D/K2D/T3D/T2D are rebuilt.
+    csf_count=len(records)
+    collision_records=[]
+    forced = list(getattr(params, 'collision_split_forced_lines', ()) or ())
+    for entry in forced:
+        axis=str(entry.get('axis',''))
+        value=float(entry.get('value',float('nan')))
+        anchor=int(entry.get('source_face_id',-1))
+        if axis not in ('row','col') or not np.isfinite(value) or not (0 <= anchor < len(faces)):
+            raise ValueError(f'Invalid collision Split candidate: {entry!r}')
+        comp=next((c for c in _edge_components(faces) if anchor in c),None)
+        if comp is None:
+            raise ValueError('Collision Split source face no longer belongs to a component')
+        # Exactly one current component and one complete internal grid line.
+        old_owners=defaultdict(list)
+        for fi in comp:
+            for k in range(4):
+                edge=tuple(sorted((int(faces[fi,k]),int(faces[fi,(k+1)%4]))))
+                old_owners[edge].append((int(fi),k))
+        new_vertices,subset,record=_complete_cut_once(
+            vertices,faces[comp],axis,value
+        )
+        if record is None or abs(float(record['snapped_value'])-value) > 1e-7*max(1.,abs(value)):
+            raise ValueError(
+                'Collision Split candidate was not a valid complete seam '
+                f'(axis={axis}, value={value}, face={anchor})'
+            )
+        updated=faces.copy();updated[comp]=subset
+        step_pairs=[]
+        for entries in old_owners.values():
+            if len(entries)!=2:
+                continue
+            (a,ea),(b,eb)=entries
+            if set(updated[a,[ea,(ea+1)%4]]) != set(updated[b,[eb,(eb+1)%4]]):
+                pair=[a,ea,b,eb]
+                step_pairs.append(pair);pairs.append(pair)
+        if not step_pairs:
+            raise ValueError('Collision Split produced no actual broken shared edges')
+        vertices,faces=new_vertices,updated
+        record.update(
+            face_ids=comp.tolist(),
+            collision_driven=True,
+            collision_source_face_id=anchor,
+            collision_score=float(entry.get('score',0.)),
+            collision_boundary_distance_tiles=float(entry.get('boundary_distance_tiles',0.)),
+            split_boundary_pairs=step_pairs,
+            component_id=int(comp.min()),
+        )
+        records.append(record);collision_records.append(record)
+
     final = _edge_components(faces)
     invalid_uv_count = int(parameterization.metrics.get('split_csf_degenerate_uv_face_count', 0))
     values = [ratio(c) for c in final]
     unresolved = sum(v > threshold+1e-10 for v in values)
     unresolved_mixed = 0  # legacy metric retained for dashboard compatibility
-    exhausted = bool(enabled and unresolved and len(records) >= budget)
+    exhausted = bool(enabled and unresolved and csf_count >= budget)
     after = max(values, default=1.)
     face_sigma = np.sqrt(hi).copy()
     domain.csf_before, domain.csf_after_split = before, after
@@ -429,14 +481,21 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     metrics = dict(
         csf_model='local inverse length scale sqrt(dA_S/dA_Omega); retained UV chart',
         csf_split_exactness_label='fixed-chart inverse-length CSF; no reparameterization, not Fig. 6 reproduction',
-        csf_split_applied=bool(records), csf_split_threshold=threshold, max_csf_splits=budget,
+        csf_split_applied=bool(csf_count), csf_split_threshold=threshold, max_csf_splits=budget,
         max_csf_before_split=before, max_csf_after_split=after, number_of_splits=len(records),
         split_locations=[list(x) for x in domain.split_lines],
         raw_split_locations=[[r['axis'], r['requested_value']] for r in records],
-        csf_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in records),
+        csf_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in records[:csf_count]),
+        collision_split_applied=bool(collision_records),
+        collision_split_count=len(collision_records),
+        collision_split_step_analysis=collision_records,
+        collision_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in collision_records),
+        collision_split_grid_seam_model='complete boundary-to-boundary M2D cut; full downstream rebuild',
         csf_split_budget_exhausted=exhausted, csf_split_unresolved_component_count=unresolved, csf_split_unresolved_mixed_edges=unresolved_mixed,
         csf_split_status='uncertified_uv_degeneracy' if invalid_uv_count else 'satisfied' if not unresolved else ('disabled' if not enabled else 'budget_exhausted' if exhausted else 'no_admissible_curvature_guided_grid_cut'),
-        csf_split_step_analysis=records, csf_split_step_count=len(records),
+        csf_split_step_analysis=records[:csf_count], csf_split_step_count=csf_count,
+        csf_split_locations=[['row' if r['axis']=='row' else 'col',r['snapped_value']]
+                             for r in records[:csf_count]],
         csf_split_initial_components=[{'face_ids': c.tolist(), 'sigma': ratio(c)} for c in initial_components],
         csf_split_bound_certified=not bool(unresolved or invalid_uv_count),
         csf_split_degenerate_uv_face_count=invalid_uv_count,
@@ -450,7 +509,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_face_sigma=face_sigma.tolist(),
         csf_split_residual_high_face_count=int(np.count_nonzero(face_sigma > threshold+1e-10)),
         csf_split_additional_split_recommended_after_all=bool(exhausted),
-        csf_split_stopping_rule='cut at highest admissible curvature sample while CSF exceeds threshold; stop at budget or when no complete grid cut remains; unresolved is not success',
+        csf_split_stopping_rule='CSF cuts are curvature-guided and limited by the CSF budget; optional collision cuts are independently ranked after T2D feedback',
         csf_split_conformal_anisotropy_max=parameterization.metrics.get('split_conformal_anisotropy_max'),
         csf_split_area_bound_requires_conformal_map=True,
         csf_split_residual_max_after_all=after,
