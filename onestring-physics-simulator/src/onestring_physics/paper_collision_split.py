@@ -188,37 +188,57 @@ def rank_collision_split_candidates(state, *, boundary_weight: float = 1.,
 
 def accept_if_improved(before: dict, after: dict, *,
                        minimum_relative_improvement: float = 0.02,
-                       max_hinge_rms_multiplier: float = 3.0) -> tuple[bool,str]:
-    """Conservative accept/reject after a full downstream rebuild.
+                       max_hinge_rms_multiplier: float = 3.0) -> tuple[bool, str]:
+    """Accept one *verified* cut based primarily on penetration severity.
 
-    The split must meaningfully reduce collision energy or pair count without
-    producing unacceptably larger hinge errors. Zero overlap is preferred.
-    Scores are computed on the *same final T2D metric definitions*.
+    SAT pair count alone is discontinuous: a broad deep contact can turn into
+    several shallow contacts when a cut is added. Therefore a SMALL increase
+    in pair count may be permitted ONLY with a substantial (>=20%) reduction
+    in total squared penetration, and never if the deepest contact increases.
+    Zero contact remains best. Each candidate has passed a full M2D->T2D
+    rebuild and the separate topology checks before reaching this function.
     """
-    if after.get("status") != "ok":
-        return False,"rebuild_missing_valid_T2D"
-    before_pairs=int(before["collision_pairs"])
-    after_pairs=int(after["collision_pairs"])
-    e0=float(before["collision_energy"])
-    e1=float(after["collision_energy"])
-    h0=float(before["hinge_rms"])
-    h1=float(after["hinge_rms"])
-    if not all(np.isfinite(x) for x in (e0,e1,h0,h1)):
-        return False,"nonfinite_collision_or_hinge_metrics"
-    if h1 > max(h0*max_hinge_rms_multiplier,
-                float(before.get("tile_scale",1.))*0.1):
-        return False,"hinge_connection_regression"
-    if after_pairs == 0 and before_pairs > 0:
-        return True,"no_remaining_collision_pairs"
-    # Lexicographic pair-count priority is restricted to a meaningful
-    # energy improvement, to avoid accepting more severe overlaps.
-    if before_pairs > 0 and after_pairs < before_pairs and (
-        e1 <= e0*(1.-min(.5,minimum_relative_improvement/2.))
-    ):
-        return True,"collision_pair_count_and_energy_reduced"
-    if e0 > 0 and e1 < e0*(1.-minimum_relative_improvement) and after_pairs <= before_pairs:
-        return True,"penetration_energy_reduced"
-    return False,"insufficient_verified_improvement"
+    if after.get("status") != "ok" or before.get("status") != "ok":
+        return False, "rebuild_missing_valid_T2D"
+    try:
+        p0, p1 = int(before["collision_pairs"]), int(after["collision_pairs"])
+        e0, e1 = float(before["collision_energy"]), float(after["collision_energy"])
+        h0, h1 = float(before["hinge_rms"]), float(after["hinge_rms"])
+        d0, d1 = float(before["penetration_max"]), float(after["penetration_max"])
+        scale = float(before["tile_scale"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False, "missing_collision_or_hinge_diagnostics"
+    if not (min(p0,p1) >= 0 and min(e0,e1,d0,d1,h0,h1) >= 0
+            and np.isfinite([e0,e1,d0,d1,h0,h1,scale]).all()
+            and scale > 0):
+        return False, "invalid_collision_or_hinge_diagnostics"
+    if not 0 <= minimum_relative_improvement <= 1:
+        return False, "invalid_improvement_threshold"
+    if h1 > max(h0 * max_hinge_rms_multiplier, scale * 0.1):
+        return False, "hinge_connection_regression"
+    # Inspect the worst surviving intersection too, not only the sum.
+    depth_tol = max(scale * 1e-8, 1e-12)
+    if d1 > d0 + depth_tol:
+        return False, "max_penetration_worsened"
+    if p1 == 0 and e1 <= max(scale**2 * 1e-14, 1e-24):
+        return True, "collision_free"
+    if p0 == 0:
+        return False, "introduced_collision"
+    if e0 <= 0:
+        return False, "no_penetration_energy_to_improve"
+    reduction = (e0 - e1) / e0
+    if reduction < minimum_relative_improvement:
+        return False, "insufficient_penetration_energy_reduction"
+    if p1 <= p0:
+        return True, "penetration_energy_reduced_without_new_pairs"
+    # Only a very small increase in shallow contacts can be exchanged for
+    # a major reduction in overall penetration. This avoids over-splitting.
+    allowed_extra = max(2, int(np.ceil(0.02 * p0)))
+    if p1 - p0 > allowed_extra:
+        return False, "too_many_new_collision_pairs"
+    if reduction < max(0.20, minimum_relative_improvement):
+        return False, "insufficient_reduction_for_extra_pairs"
+    return True, "penetration_severity_reduced_with_minor_pair_increase"
 
 
 def collision_quality(state) -> dict:
