@@ -134,18 +134,20 @@ def test_acceptance_must_lower_collision_without_exploding_hinges():
     assert not collision.accept_if_improved(before,worsened)[0]
 
 
-def _fake_state(pair_count):
+def _fake_state(pair_count, applied_cuts=0):
     return SimpleNamespace(
         conformal_domain=SimpleNamespace(paper_split_policy=True),
         tiles_2d_dual_hinge=SimpleNamespace(metrics={}),
-        mesh_2d_initial=SimpleNamespace(metrics={}),
+        mesh_2d_initial=SimpleNamespace(metrics={
+            "collision_split_count": applied_cuts,
+        }),
         collision_pair_count=pair_count,
     )
 
 
 def test_feedback_accepts_one_cut_then_reoptimizes_and_stops(monkeypatch):
     initial=_fake_state(9)
-    rebuilt=_fake_state(0)
+    rebuilt=_fake_state(0,applied_cuts=1)
     calls=[]
 
     def fake_full_build(target,params,**kwargs):
@@ -183,7 +185,7 @@ def test_feedback_accepts_one_cut_then_reoptimizes_and_stops(monkeypatch):
 
 def test_feedback_rejects_nonimproving_cut_and_preserves_old_state(monkeypatch):
     baseline=_fake_state(9)
-    candidate_state=_fake_state(12)
+    candidate_state=_fake_state(12,applied_cuts=1)
     calls=[]
 
     def fake_full_build(target,params,**kwargs):
