@@ -30,7 +30,8 @@ def _split_axis_value(line: Any) -> tuple[str, float] | None:
         value = float(line[1])
     except Exception:
         return None
-    if axis not in {"row", "column"} or not np.isfinite(value):
+    axis = {"col": "column", "column": "column", "row": "row"}.get(axis)
+    if axis is None or not np.isfinite(value):
         return None
     return axis, value
 
@@ -285,7 +286,8 @@ def install_final_split_panel_pass(pipeline_module: Any) -> None:
     def build_m2d_final_split(grid: Any, domain: Any, params: Any = None):
         mesh = previous_build(grid, domain, params)
         metrics = dict(getattr(mesh, "metrics", {}) or {})
-        if not bool(metrics.get("csf_split_applied", False)):
+        if not (bool(metrics.get("csf_split_applied", False))
+                or bool(metrics.get("collision_split_applied", False))):
             metrics["final_split_panel_pass_applied"] = False
             mesh.metrics.update(metrics)
             return mesh
@@ -309,13 +311,58 @@ def install_final_split_panel_pass(pipeline_module: Any) -> None:
 
         per_line = []
         rejected = []
-        for axis, value in parsed:
-            canonical2, faces2, record = _complete_cut_once(canonical, faces, axis, value)
-            if record is None:
-                rejected.append({"axis": axis, "requested_value": float(value), "reason": "no valid boundary-to-boundary internal grid seam"})
-                continue
-            canonical, faces = canonical2, faces2
+        collision_source_records=list(metrics.get("collision_split_step_analysis",[]) or [])
+        collision_start=len(metrics.get("csf_split_step_analysis",[]) or [])
+        actual_collision=0
+        for line_idx,(axis, value) in enumerate(parsed):
+            # Existing CSF seams preserve their normal global selection. New
+            # collision seams MUST be reapplied to the component containing
+            # their original source-face anchor, or the rebuilt topology is
+            # NOT equivalent to the candidate that T2D scored.
+            if line_idx >= collision_start and collision_source_records:
+                collision_idx=line_idx-collision_start
+                if not (0 <= collision_idx < len(collision_source_records)):
+                    raise ValueError("Collision Split seam provenance mismatch")
+                source=collision_source_records[collision_idx]
+                source_face_id=int(source["collision_source_face_id"])
+                if not 0 <= source_face_id < len(faces):
+                    raise ValueError("Collision Split source face missing in final M2D")
+                component=next((comp for comp in _edge_components(faces)
+                                if source_face_id in comp),None)
+                if component is None:
+                    raise ValueError("Collision Split component disappeared")
+                candidate=_complete_cut_candidate(
+                    canonical,faces,component,axis,value
+                )
+                if candidate is None or abs(float(candidate["value"])-value)>1e-7*max(1.,abs(value)):
+                    raise ValueError(
+                        "Collision Split became invalid during final complete-cut reconstruction"
+                    )
+                canonical,faces,added=_apply_complete_cut(canonical,faces,candidate)
+                actual_collision+=1
+                record=dict(
+                    axis=axis,requested_value=float(value),
+                    snapped_value=float(candidate["value"]),
+                    duplicated_vertices=int(added),
+                    seam_edge_count=int(len(candidate["seam_edges"])),
+                    boundary_endpoints=[int(x) for x in candidate["endpoints"]],
+                    complete_boundary_to_boundary=True,
+                    collision_driven=True,
+                    collision_source_face_id=source_face_id,
+                )
+            else:
+                canonical2, faces2, record = _complete_cut_once(
+                    canonical, faces, axis, value
+                )
+                if record is None:
+                    rejected.append({"axis": axis, "requested_value": float(value), "reason": "no valid boundary-to-boundary internal grid seam"})
+                    continue
+                canonical, faces = canonical2, faces2
             per_line.append(record)
+        if actual_collision != len(collision_source_records):
+            raise RuntimeError(
+                "Collision Split source cuts were lost in final M2D reconstruction"
+            )
 
         components = _edge_components(faces)
         if parsed and not per_line:
@@ -338,6 +385,7 @@ def install_final_split_panel_pass(pipeline_module: Any) -> None:
             "final_split_panel_vertex_counts": [int(len(v)) for v in pverts],
             "final_split_panel_added_duplicate_vertices": int(sum(r["duplicated_vertices"] for r in per_line)),
             "final_split_panel_per_line": per_line,
+            "collision_split_final_pass_applied_count": int(actual_collision),
             "final_split_panel_rejected_lines": rejected,
             "split_panel_geometry_separated": bool(len(components) > len(initial_components)),
             "split_panel_count": int(len(components)),
