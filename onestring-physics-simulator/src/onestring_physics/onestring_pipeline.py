@@ -8519,6 +8519,11 @@ def build_onestring_design(
     # One cut, one full reoptimization, one acceptance decision. Failed
     # candidate builds are rejected and the last accepted state is preserved.
     if bool(getattr(active_params,'collision_split_enabled',False)):
+        if run_simulation:
+            raise ValueError(
+                'Collision-driven Split requires run_simulation=False: '
+                'the complete geometry must be accepted before deployment simulation.'
+            )
         from .paper_collision_split import (
             rank_collision_split_candidates, collision_quality, accept_if_improved,
         )
@@ -8582,6 +8587,16 @@ def build_onestring_design(
                             deployment_params=deployment_params,
                             progress_callback=report,
                         )
+                        # A candidate is not real unless the rebuilt M2D
+                        # actually contains ALL committed collision seams.
+                        applied_count=int(trial_state.mesh_2d_initial.metrics.get(
+                            'collision_split_count',-1
+                        ))
+                        if applied_count!=len(next_forced):
+                            raise RuntimeError(
+                                'Collision Split topology not propagated through M2D: '
+                                f'expected={len(next_forced)}, actual={applied_count}'
+                            )
                         after=collision_quality(trial_state)
                         improved,reason=accept_if_improved(
                             before,after,minimum_relative_improvement=minimum,
