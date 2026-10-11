@@ -123,9 +123,9 @@ def test_forced_cut_is_real_mesh_disconnection_and_separate_from_csf(monkeypatch
 
 def test_acceptance_must_lower_collision_without_exploding_hinges():
     before=dict(status="ok",collision_pairs=8,collision_energy=10.,
-                hinge_rms=.01,tile_scale=1.)
+                penetration_max=.2,hinge_rms=.01,tile_scale=1.)
     after=dict(status="ok",collision_pairs=2,collision_energy=3.,
-               hinge_rms=.02)
+               penetration_max=.1,hinge_rms=.02)
     assert collision.accept_if_improved(before,after)[0]
     bad=dict(after,hinge_rms=.5)
     accepted,reason=collision.accept_if_improved(before,bad)
@@ -195,6 +195,7 @@ def test_feedback_accepts_one_cut_then_reoptimizes_and_stops(monkeypatch):
     monkeypatch.setattr(collision,"collision_quality",lambda state: dict(
         status="ok",collision_pairs=state.collision_pair_count,
         collision_energy=float(state.collision_pair_count),
+        penetration_max=.1 if state.collision_pair_count else 0.,
         hinge_rms=.01,tile_scale=1.,
     ))
     candidate=dict(axis="col",value=2.,source_face_id=5,
@@ -233,6 +234,7 @@ def test_feedback_rejects_nonimproving_cut_and_preserves_old_state(monkeypatch):
     monkeypatch.setattr(collision,"collision_quality",lambda state: dict(
         status="ok",collision_pairs=state.collision_pair_count,
         collision_energy=float(state.collision_pair_count),
+        penetration_max=.1 if state.collision_pair_count else 0.,
         hinge_rms=.01,tile_scale=1.,
     ))
     candidate=dict(axis="row",value=2.,source_face_id=5,
@@ -283,6 +285,7 @@ def test_two_cuts_are_proposed_sequentially_with_fresh_collision_map(monkeypatch
     monkeypatch.setattr(collision,"collision_quality",lambda state: dict(
         status="ok",collision_pairs=state.collision_pair_count,
         collision_energy=float(state.collision_pair_count),
+        penetration_max=.1 if state.collision_pair_count else 0.,
         hinge_rms=.01,tile_scale=1.,
     ))
     params=SimpleNamespace(
@@ -318,6 +321,7 @@ def test_rebuild_with_missing_seam_is_rejected(monkeypatch):
     monkeypatch.setattr(collision,"collision_quality",lambda state: dict(
         status="ok",collision_pairs=state.collision_pair_count,
         collision_energy=float(state.collision_pair_count),
+        penetration_max=.1 if state.collision_pair_count else 0.,
         hinge_rms=.01,tile_scale=1.,
     ))
     candidate=dict(axis="col",value=2.,source_face_id=5,
@@ -431,3 +435,55 @@ def test_final_pass_keeps_source_face_anchor_on_sequential_collisions():
                       if r.get("collision_driven",False)]
     assert len(final_collisions)==1
     assert final_collisions[0]["collision_source_face_id"]==upper_anchor
+
+
+def test_split_accepts_deeper_contact_reduction_with_one_extra_pair():
+    # Regression from actual UI: 168 -> 169 contacts, but 0.0036 -> 0.0021
+    # summed squared depth (~42% lower). The old condition rejected this
+    # beneficial Split solely due to a one-pair count increase.
+    before=dict(status="ok",collision_pairs=168,collision_energy=.0036,
+                penetration_max=.0162,hinge_rms=.0084,tile_scale=1.)
+    after=dict(status="ok",collision_pairs=169,collision_energy=.0021,
+               penetration_max=.0130,hinge_rms=.0085,tile_scale=1.)
+    accepted,reason=collision.accept_if_improved(before,after,
+                                                 minimum_relative_improvement=.03)
+    assert accepted
+    assert reason=="penetration_severity_reduced_with_minor_pair_increase"
+
+
+def test_split_rejects_many_extra_pairs_even_when_summed_severity_falls():
+    before=dict(status="ok",collision_pairs=168,collision_energy=.0036,
+                penetration_max=.0162,hinge_rms=.0084,tile_scale=1.)
+    after=dict(status="ok",collision_pairs=173,collision_energy=.0026,
+               penetration_max=.012,hinge_rms=.0085,tile_scale=1.)
+    accepted,reason=collision.accept_if_improved(before,after)
+    assert not accepted
+    assert reason=="too_many_new_collision_pairs"
+
+
+def test_split_rejects_worse_maximum_penetration_despite_lower_total_energy():
+    before=dict(status="ok",collision_pairs=168,collision_energy=.0036,
+                penetration_max=.0162,hinge_rms=.0084,tile_scale=1.)
+    after=dict(status="ok",collision_pairs=169,collision_energy=.0021,
+               penetration_max=.019,hinge_rms=.0085,tile_scale=1.)
+    accepted,reason=collision.accept_if_improved(before,after)
+    assert not accepted
+    assert reason=="max_penetration_worsened"
+
+
+def test_split_rejects_minor_total_energy_improvement_if_pair_count_rises():
+    before=dict(status="ok",collision_pairs=168,collision_energy=.0036,
+                penetration_max=.0162,hinge_rms=.0084,tile_scale=1.)
+    after=dict(status="ok",collision_pairs=169,collision_energy=.0033,
+               penetration_max=.015,hinge_rms=.0085,tile_scale=1.)
+    assert collision.accept_if_improved(before,after)[1]=="insufficient_reduction_for_extra_pairs"
+
+
+def test_split_requires_depth_metrics_for_acceptance():
+    before=dict(status="ok",collision_pairs=168,collision_energy=.0036,
+                hinge_rms=.0084,tile_scale=1.)
+    after=dict(status="ok",collision_pairs=169,collision_energy=.0021,
+               hinge_rms=.0085,tile_scale=1.)
+    assert collision.accept_if_improved(before,after)==(
+        False,"missing_collision_or_hinge_diagnostics"
+    )
