@@ -249,7 +249,12 @@ def _split_count_for_parameterization(vertices, faces, domain, params, parameter
             delattr(trial.parameterization,'_onestring_optcuts_candidates')
         except AttributeError:
             pass
-    _,_,records,metrics=_split_mesh_single(vertices,faces,trial,params)
+    # OptCuts candidate selection evaluates CSF cuts only; do not accidentally
+    # inject the outer T2D-feedback cut on every alternative UV chart.
+    trial_params=copy.copy(params) if params is not None else None
+    if trial_params is not None:
+        trial_params.collision_split_forced_lines=[]
+    _,_,records,metrics=_split_mesh_single(vertices,faces,trial,trial_params)
     return len(records),metrics
 
 
