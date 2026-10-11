@@ -316,7 +316,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             before_xy,_=positions(before_pose)
             _,_,before_count,_=collision_energy_gradient(
                 before_xy.reshape(-1,2),faces,scale*1e-8,return_diagnostics=True)
-            if before_count==0:
+            _,_,_,_,before_depths=footprint_contacts(before_xy,faces)
+            if before_count==0 and np.max(before_depths,initial=0.)<=hard_tolerance:
                 candidate=before_pose.copy()
                 repaired=True
                 repair_frames=[(0,candidate.copy())]
@@ -386,9 +387,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                 if not np.array_equal(np.asarray(hard_history[-1]['poses']),last):
                     hard_history.append(dict(iteration=hard_history[-1]['iteration']+1,
                                              poses=last.tolist(),phase='feasible refinement'))
-                _,_,hard_stats=evaluate(last)
-                records=[dict(iteration=i,**hard_stats) for i in range(1)]
                 pose_history=[(int(row['iteration']),np.asarray(row['poses'])) for row in hard_history]
+                records=[dict(iteration=int(row['iteration']),**evaluate(np.asarray(row['poses']))[2])
+                         for row in hard_history]
             else:
                 hard_attempts.append(dict(source_trial_id=winning_hard['source_trial_id'],
                                           feasible=False,reason='refinement audit failed'))
@@ -431,6 +432,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        hard_collision_feasible=hard_feasible,
                        hard_collision_repair_attempts=hard_attempts,
                        hard_collision_repair_source_trial=hard_selected_source_trial,
+                       hard_collision_repair_iterations=(int(hard_history[-1]['iteration']) if hard_history else 0),
                        hard_collision_history=hard_history,
                        hard_collision_tolerance=hard_tolerance,
                        hard_collision_repair_elapsed_sec=hard_repair_elapsed,
@@ -449,14 +451,16 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_search_seed=seed,
                        dual_hinge_setup_elapsed_sec=setup_elapsed,
                        dual_hinge_optimization_elapsed_sec=optimization_elapsed,
-                       dual_hinge_stop_reason=('time_budget' if timed_out else ('converged' if solver_success else 'solver_stopped')),
+                       dual_hinge_stop_reason=(('hard_feasible' if hard_feasible else 'hard_infeasible_or_not_found')
+                                               if collision_mode=='hard'
+                                               else ('time_budget' if timed_out else ('converged' if solver_success else 'solver_stopped'))),
                        dual_hinge_solver_success=solver_success,dual_hinge_solver_status=solver_status,
                        dual_hinge_weights={'connection':wconn,'collision':wcoll,'anchor':wanchor},
                        dual_hinge_rigidity='exact in-plane rigid poses; fixed Z, not unrestricted paper 3D motion',
                        dual_hinge_fixed_z_infeasible=final['hinge_fixed_z_error_lower_bound']>=scale*1e-4,
                        dual_hinge_collision_pair_exclusions=0,
                        dual_hinge_collision_candidate_limit_applied=False,
-                       dual_hinge_iterations=len(records)-1,dual_hinge_history=records,
+                       dual_hinge_iterations=(int(records[-1]['iteration']) if records else 0),dual_hinge_history=records,
                        dual_hinge_pose_history=[{'iteration': i, 'poses': p.tolist()} for i,p in pose_history],
                        dual_hinge_initial_expansion=initial_expansion,
                        dual_hinge_max_center_drift_tiles=max_center_drift_tiles,
