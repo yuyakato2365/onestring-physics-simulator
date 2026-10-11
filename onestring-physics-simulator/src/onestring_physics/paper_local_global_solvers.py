@@ -433,6 +433,36 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         return checkpoint
     # --------------------------------------------------------------------------
 
+    # Worst-panel regularization in the paper local/global K3D path.
+    # IRLS: linearize the LSE penalty into positive per-quad square projection
+    # weights at each local step. The exact LSE value is tracked separately.
+    square_tail_alpha=max(0.0,_env_float("ONESTRING_K3D_SQUARE_TAIL_ALPHA",4.0))
+    square_tail_beta=max(1e-6,_env_float("ONESTRING_K3D_SQUARE_TAIL_BETA",12.0))
+    square_tail_active=(str(getattr(params,"omega_parameterization_mode",""))=="optcuts_paper_local_global_k3d_k2d")
+
+    def _square_tail_deviations(v):
+        q=np.asarray(v)[faces]
+        lengths=np.linalg.norm(np.roll(q,-1,axis=1)-q,axis=2)
+        diag0=np.linalg.norm(q[:,0]-q[:,2],axis=1)
+        diag1=np.linalg.norm(q[:,1]-q[:,3],axis=1)
+        scale=np.maximum(np.mean(lengths,axis=1),1e-12)
+        residual=np.concatenate(((lengths-np.roll(lengths,-1,axis=1))/scale[:,None],
+                                 ((diag0-diag1)/scale)[:,None]),axis=1)
+        return np.sqrt(np.mean(residual*residual,axis=1)+1e-24)
+
+    def _square_tail_weights(v):
+        d=_square_tail_deviations(v)
+        z=square_tail_beta*d
+        zmax=float(np.max(z))
+        ex=np.exp(z-zmax)
+        probs=ex/np.sum(ex)
+        lse=(zmax+np.log(np.mean(ex)))/square_tail_beta
+        # Relative to the ordinary uniform square projection weights.
+        # 1 + alpha*N*LSE*softmax_i/d_i corresponds to the ratio of
+        # d/d(d_i^2) for the mean-square plus LSE-square objective.
+        weights=1.0+square_tail_alpha*len(d)*lse*probs/np.maximum(d,1e-8)
+        return np.clip(weights,1.0,1e6),d,lse
+
     records=[_checkpoint(x,0,0.0)]
     for it in range(iterations):
         constraints=[]
@@ -440,14 +470,20 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         deg_worst_edge=float("inf")
         deg_worst_area=float("inf")
         deg_max_weight=0.0
-        # Local P_P and P_Q.
-        for f in faces:
+        # Local P_P and P_Q. Tail weights prioritize the most distorted quads.
+        if square_tail_active and square_tail_alpha>0.0 and len(faces):
+            tail_weights,tail_deviations,tail_lse=_square_tail_weights(x)
+            if it==0 or (it+1)%10==0 or it==iterations-1:
+                print(f"[K3D-SQUARE-TAIL] iter={it+1} alpha={square_tail_alpha:.6g} beta={square_tail_beta:.6g} max_d={np.max(tail_deviations):.6g} lse={tail_lse:.6g} max_weight={np.max(tail_weights):.6g}",flush=True)
+        else:
+            tail_weights=np.ones(len(faces))
+        for face_idx,f in enumerate(faces):
             q=x[f]
             pp=_best_fit_plane_projection(q)
             pq=_closest_square_projection(q)
             for local,vid in enumerate(f):
                 constraints.append(([int(vid)],[1.],pp[local],w_planar))
-                constraints.append(([int(vid)],[1.],pq[local],w_square))
+                constraints.append(([int(vid)],[1.],pq[local],w_square*float(tail_weights[face_idx])))
         # Optional anti-degeneracy barrier.  This is deliberately dormant for
         # healthy quads and rises steeply only when a quad starts collapsing.
         # The target is the same closest-square local projection already used by
