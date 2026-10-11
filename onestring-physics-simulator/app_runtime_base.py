@@ -2548,20 +2548,63 @@ elif view_stage == "T2D Dual Hinge":
                    "1本ごとにM2D→M3D→K3D→K2D→T3D→T2Dを再計算し、"
                    "改善しない候補は棄却します。")
         if split_history:
-            st.dataframe([{
-                "Split番号": row["cut_number"],
-                "採否": "採用" if row["accepted"] else "棄却",
-                "方向": row["proposal"]["axis"],
-                "格子座標": row["proposal"]["value"],
-                "境界距離/タイル": row["proposal"]["boundary_distance_tiles"],
-                "衝突強度": row["proposal"]["hotspot_severity"],
-                "候補スコア": row["proposal"]["score"],
-                "衝突ペア 前": row["before"].get("collision_pairs"),
-                "衝突ペア 後": row["after"].get("collision_pairs"),
-                "貫通エネルギー 前": row["before"].get("collision_energy"),
-                "貫通エネルギー 後": row["after"].get("collision_energy"),
-                "理由": row["decision_reason"],
-            } for row in split_history], use_container_width=True, hide_index=True)
+            def _format_split_result(row):
+                before = row["before"]
+                after = row["after"]
+                energy_before = before.get("collision_energy")
+                energy_after = after.get("collision_energy")
+                pairs_before = before.get("collision_pairs")
+                pairs_after = after.get("collision_pairs")
+                improvement = (
+                    100.0 * (1.0 - energy_after / energy_before)
+                    if isinstance(energy_before, (int, float))
+                    and isinstance(energy_after, (int, float))
+                    and energy_before > 0 else None
+                )
+                reason_labels = {
+                    "collision_free": "衝突ゼロを確認",
+                    "penetration_energy_reduced_without_new_pairs": "貫通深刻度改善（衝突数も非増加）",
+                    "penetration_severity_reduced_with_minor_pair_increase": "深い衝突を大幅に軽減（浅い衝突が少数増加）",
+                    "too_many_new_collision_pairs": "新しく増えた衝突ペアが多すぎる",
+                    "max_penetration_worsened": "最大貫通深さが悪化",
+                    "hinge_connection_regression": "ヒンジ接続誤差が悪化",
+                    "insufficient_penetration_energy_reduction": "貫通エネルギーの改善が不十分",
+                    "insufficient_reduction_for_extra_pairs": "新規衝突の増加を許容するほどの改善ではない",
+                    "missing_collision_or_hinge_diagnostics": "貫通・ヒンジ診断値が欠落",
+                }
+                return {
+                    "Split番号": row["cut_number"],
+                    "採否": "採用" if row["accepted"] else "棄却",
+                    "方向": row["proposal"]["axis"],
+                    "格子座標": row["proposal"]["value"],
+                    "境界距離/タイル": row["proposal"]["boundary_distance_tiles"],
+                    "衝突強度": row["proposal"]["hotspot_severity"],
+                    "候補スコア": row["proposal"]["score"],
+                    "衝突ペア 前": pairs_before,
+                    "衝突ペア 後": pairs_after,
+                    "衝突ペア 増減": (
+                        pairs_after - pairs_before
+                        if isinstance(pairs_before, int) and isinstance(pairs_after, int)
+                        else None
+                    ),
+                    "貫通エネルギー 前": energy_before,
+                    "貫通エネルギー 後": energy_after,
+                    "貫通改善率 (%)": round(improvement, 2) if improvement is not None else None,
+                    "最大貫通深さ 前": before.get("penetration_max"),
+                    "最大貫通深さ 後": after.get("penetration_max"),
+                    "ヒンジRMS 前": before.get("hinge_rms"),
+                    "ヒンジRMS 後": after.get("hinge_rms"),
+                    "理由": reason_labels.get(row["decision_reason"], row["decision_reason"]),
+                }
+            st.dataframe([_format_split_result(row) for row in split_history],
+                         use_container_width=True, hide_index=True)
+            st.caption(
+                "Splitの採用は貫通エネルギー改善、最大貫通深さの非悪化、"
+                "ヒンジ接続誤差で判定します。衝突ペア数が増える場合は、"
+                "増加が少数（従来数の2%、最低2ペア以内）で、"
+                "貫通エネルギーが20%以上改善した場合のみ許容します。"
+                "衝突ゼロに到達したこととは区別してください。"
+            )
     if hard_mode_active:
         if hard_ok:
             st.success(
