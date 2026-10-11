@@ -297,11 +297,8 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
     # The source chart is fixed; re-evaluate area distortion after each cut
     # relative to the minimum scale within each connected component.
-    # Use one chart-wide anchor, never renormalize independently per component.
-    anchor = float(parameterization.metrics['split_csf_anchor_raw_min'])
-    absolute_hi = hi / anchor
-    absolute_lo = lo / anchor
-    irreducible = absolute_hi.copy()
+    # Within-quad variation is an irreducible lower bound for grid cuts.
+    irreducible = hi / lo
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     curvature = gaussian_curvature(parameterization)
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
@@ -323,8 +320,8 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 edge = tuple(sorted((int(faces[fi, k]), int(faces[fi, (k+1)%4]))))
                 edge_owner[edge].append(int(fi))
         return sum(1 for owners in edge_owner.values() if len(owners) == 2
-                   and (absolute_hi[owners[0]] > threshold + 1e-10)
-                   != (absolute_hi[owners[1]] > threshold + 1e-10))
+                   and (irreducible[owners[0]] > threshold + 1e-10)
+                   != (irreducible[owners[1]] > threshold + 1e-10))
     initial_components = _edge_components(faces)
     before = max(map(ratio, initial_components), default=1.)
     while enabled and len(records) < budget:
@@ -449,7 +446,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         raw_split_locations=[[r['axis'], r['requested_value']] for r in records],
         csf_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in records),
         csf_split_budget_exhausted=exhausted, csf_split_unresolved_component_count=unresolved, csf_split_unresolved_mixed_edges=unresolved_mixed,
-        csf_split_status='uncertified_uv_degeneracy' if invalid_uv_count else 'satisfied' if not unresolved else ('isolated_high_csf_not_certified' if not unresolved_mixed else 'disabled' if not enabled else 'budget_exhausted' if exhausted else 'mixed_boundary_remaining'),
+        csf_split_status='uncertified_uv_degeneracy' if invalid_uv_count else 'satisfied' if not unresolved else ('disabled' if not enabled else 'budget_exhausted' if exhausted else 'no_admissible_stretch_reducing_cut'),
         csf_split_step_analysis=records, csf_split_step_count=len(records),
         csf_split_initial_components=[{'face_ids': c.tolist(), 'sigma': ratio(c)} for c in initial_components],
         csf_split_bound_certified=not bool(unresolved or invalid_uv_count),
