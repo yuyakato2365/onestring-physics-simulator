@@ -1062,6 +1062,14 @@ class PipelineParameters(_original.PipelineParameters):
     hinge_layout_perturb_translation: float = 0.35
     hinge_layout_perturb_rotation_deg: float = 20.0
     hinge_layout_random_seed: int = 0
+    # Distinct from curvature-driven CSF Split. The feedback loop rebuilds
+    # the full downstream pipeline after each accepted complete M2D cut.
+    collision_split_enabled: bool = False
+    collision_split_max_additional: int = 3
+    collision_split_boundary_weight: float = 1.0
+    collision_split_min_relative_improvement: float = 0.03
+    collision_split_candidate_attempts: int = 3
+    collision_split_forced_lines: tuple = ()
 
 
 @dataclass
@@ -8508,6 +8516,125 @@ def build_onestring_design(
                 "Reference run recorded fallbacks and is therefore rejected: "
                 + "; ".join(str(value) for value in diagnostics["fallbacks_used"])
             )
+    # One cut, one full reoptimization, one acceptance decision. Failed
+    # candidate builds are rejected and the last accepted state is preserved.
+    if bool(getattr(active_params,'collision_split_enabled',False)):
+        from .paper_collision_split import (
+            rank_collision_split_candidates, collision_quality, accept_if_improved,
+        )
+        steps=[]
+        accepted=list(getattr(active_params,'collision_split_forced_lines',()) or ())
+        limit=int(getattr(active_params,'collision_split_max_additional',3))
+        attempts=int(getattr(active_params,'collision_split_candidate_attempts',3))
+        weight=float(getattr(active_params,'collision_split_boundary_weight',1.))
+        minimum=float(getattr(active_params,'collision_split_min_relative_improvement',.03))
+        if not (0<=limit<=10 and 1<=attempts<=16
+                and np.isfinite([weight,minimum]).all()
+                and weight>=0 and 0<=minimum<=1):
+            raise ValueError('Invalid collision-driven Split limits/weights')
+        status='already_feasible'
+        baseline=collision_quality(state)
+        if not bool(getattr(state.conformal_domain,'paper_split_policy',False)):
+            status='unsupported_non_paper_M2D_split_topology'
+        elif baseline['status']!='ok':
+            status='unsupported_missing_T2D'
+        else:
+            # A collision-free layout already has no reason for an extra cut.
+            status='no_collisions' if baseline['collision_pairs']==0 else 'searching'
+            for cut_index in range(limit):
+                before=collision_quality(state)
+                if before['status']!='ok' or before['collision_pairs']==0:
+                    status='collision_free' if before['collision_pairs']==0 else 'invalid_T2D'
+                    break
+                candidates,proposal_metrics=rank_collision_split_candidates(
+                    state,boundary_weight=weight,
+                    max_candidates=max(attempts*3,attempts),
+                )
+                if not candidates:
+                    status=proposal_metrics.get('status','no_valid_complete_grid_cut')
+                    break
+                picked=False
+                for proposal in candidates[:attempts]:
+                    # Re-run source M2D -> target T2D, not an imaginary deleted
+                    # hinge in only the dual-hinge solver. Rejected builds are
+                    # rolled back without touching the published state.
+                    next_forced=accepted+[proposal]
+                    attempt_params=copy.copy(active_params)
+                    attempt_params.collision_split_enabled=False
+                    attempt_params.collision_split_forced_lines=tuple(next_forced)
+                    # Progress is labelled so users can see each re-run is a
+                    # full rebuild, rather than T2D-only reoptimization.
+                    def report(stage,fraction,detail='',k=cut_index+1):
+                        if progress_callback:
+                            progress_callback(
+                                f'Collision Split {k}/{limit}: {stage}',
+                                min(.99,max(0.,float(fraction))),detail,
+                            )
+                    row=dict(
+                        cut_number=cut_index+1,
+                        proposal=dict(proposal),
+                        before=dict(before),
+                        status='pending',
+                    )
+                    try:
+                        trial_state=_ORIGINAL_BUILD_ONESTRING_DESIGN(
+                            target,attempt_params,run_simulation=False,
+                            deployment_params=deployment_params,
+                            progress_callback=report,
+                        )
+                        after=collision_quality(trial_state)
+                        improved,reason=accept_if_improved(
+                            before,after,minimum_relative_improvement=minimum,
+                        )
+                    except Exception as exc:
+                        trial_state=None
+                        after={'status':'build_failed'}
+                        improved=False
+                        reason=f'rebuild_failed: {type(exc).__name__}: {str(exc)[:240]}'
+                    row.update(after=dict(after),
+                               accepted=bool(improved),
+                               decision_reason=str(reason),
+                               status='accepted' if improved else 'rejected')
+                    steps.append(row)
+                    if not improved:
+                        continue
+                    state=trial_state
+                    accepted=next_forced
+                    picked=True
+                    status='collision_free' if after['collision_pairs']==0 else 'searching'
+                    if progress_callback:
+                        progress_callback(
+                            'Collision Split accepted',.99,
+                            f"cut #{cut_index+1} {proposal['axis']}={proposal['value']:.5g}; "
+                            f"collisions {before['collision_pairs']} -> {after['collision_pairs']}; "
+                            f"boundary distance {proposal['boundary_distance_tiles']:.3g} tiles",
+                        )
+                    break
+                if not picked:
+                    status='no_candidate_improved_or_rebuilt'
+                    break
+            else:
+                status=('collision_free' if collision_quality(state)['collision_pairs']==0
+                        else 'split_limit_reached')
+        summary=dict(
+            collision_split_feedback_enabled=True,
+            collision_split_status=status,
+            collision_split_boundary_weight=weight,
+            collision_split_attempted=len(steps),
+            collision_split_accepted=len(accepted),
+            collision_split_feedback_steps=steps,
+            collision_split_accepted_lines=accepted,
+            collision_split_before=baseline,
+            collision_split_after=collision_quality(state),
+            collision_split_complete_boundary_to_boundary_only=True,
+            collision_split_recompute_scope='full M2D through T2D, gap graph and string route',
+            collision_split_auto_feasibility_proof=False,
+        )
+        state.tiles_2d_dual_hinge.metrics.update(summary)
+        state.mesh_2d_initial.metrics.update(summary)
+        if progress_callback:
+            progress_callback('Collision-driven Split finished',1.,
+                              f"{status}; accepted {len(accepted)} cut(s)")
     return state
 
 
