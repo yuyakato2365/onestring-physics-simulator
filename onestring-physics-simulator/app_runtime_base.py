@@ -1570,23 +1570,6 @@ pipeline_params = PipelineParameters(
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
 
-# Main-page entry point: visible alongside the result viewer, even when the
-# user has scrolled away from the sidebar hinge controls.
-st.markdown("### ↻ T2D Dual Hingeのみ再最適化")
-st.caption(
-    "左サイドバーの「Hinge Layout Optimization」で条件を変更してから実行。"
-    "保存済みのT2D Top Hingeを使い、K3D・K2D・T3Dを再計算せずT2D配置と3Dアニメーションを更新します。"
-)
-rerun_t2d_main = st.button(
-    "↻ T2Dだけ再最適化（K3D再計算なし）",
-    type="primary",
-    use_container_width=True,
-    disabled="onestring_state" not in st.session_state,
-    key="rerun_t2d_main",
-    help="初期配置は保存済みのT2D Top Hingeです。上流設定を変更した場合は先にRun OneString pipelineを実行してください。",
-)
-rerun_t2d_only = rerun_t2d_sidebar or rerun_t2d_main
-
 pipeline_key = current_pipeline_key()
 if "onestring_state" not in st.session_state and not run_pipeline:
     st.info("Set parameters, then click Run OneString pipeline. The paper-default path stops at unimplemented stages; enable the experimental pipeline explicitly to run the old prototype path.")
@@ -1636,6 +1619,23 @@ if run_pipeline:
         st.session_state.pop("actuation_key", None)
 
 state = st.session_state.onestring_state
+
+# The main-page action is shown after the initial pipeline is available, so
+# it is enabled immediately after the first successful full build.
+st.markdown("### ↻ T2D Dual Hingeのみ再最適化")
+st.caption(
+    "左サイドバーの「Hinge Layout Optimization」で条件を変更してから実行。"
+    "保存済みのT2D Top Hingeを使い、K3D・K2D・T3Dを再計算せずT2D配置と3Dアニメーションを更新します。"
+)
+rerun_t2d_main = st.button(
+    "↻ T2Dだけ再最適化（K3D再計算なし）",
+    type="primary",
+    use_container_width=True,
+    key="rerun_t2d_main",
+    help="初期配置は保存済みのT2D Top Hingeです。上流設定を変更した場合は先にRun OneString pipelineを実行してください。",
+)
+rerun_t2d_only = rerun_t2d_sidebar or rerun_t2d_main
+
 if rerun_t2d_only and not run_pipeline:
     with st.spinner("Re-optimizing cached T2D Dual Hinge (K3D/K2D unchanged)…"):
         try:
