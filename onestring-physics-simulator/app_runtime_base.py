@@ -1097,6 +1097,8 @@ with st.sidebar:
     native_pull_end_ratio = 0.45
     native_anchor_height_tiles = 2.0
     native_timestep = 0.02
+    native_solver_steps = 180
+    native_pull_fraction = 0.70
     if physics_backend == "native":
         st.info(
             "T2D Dualのパネルをそのまま剛体として使用し、ヒンジを保ちながら"
@@ -1116,6 +1118,25 @@ with st.sidebar:
             native_timestep = st.number_input(
                 "native timestep (seconds)", min_value=0.001,
                 max_value=0.05, value=0.02, step=0.005, format="%.3f",
+            )
+            native_solver_steps = st.slider(
+                "Native PHYSICS steps (not animation frames)",
+                min_value=40, max_value=600, value=180, step=20,
+                help="Increases the physical duration: steps × timestep. "
+                     "Display frames are independent samples of this trajectory. "
+                     "Larger values can be much slower on large grids.",
+            )
+            native_pull_fraction = st.slider(
+                "Pull phase fraction (rest is settling)",
+                min_value=0.25, max_value=1.0, value=0.70, step=0.05,
+                help="0.70 means 70% of time reeling in the string and "
+                     "30% holding the command at its final length.",
+            )
+            st.caption(
+                f"物理時間: {native_solver_steps * native_timestep:.2f} 秒 "
+                f"(引く {native_solver_steps*native_timestep*native_pull_fraction:.2f} 秒、"
+                f"保持 {native_solver_steps*native_timestep*(1-native_pull_fraction):.2f} 秒)。"
+                "表示フレーム数を増やしても、この計算時間は増えません。"
             )
             st.caption(
                 "Nativeに反映する共通パラメータ: actuation steps、solver iterations/substeps、"
@@ -1640,6 +1661,8 @@ def current_actuation_key() -> tuple:
         native_pull_end_ratio,
         native_anchor_height_tiles,
         native_timestep,
+        native_solver_steps,
+        native_pull_fraction,
         abd_executable,
         abd_timestep,
         abd_density,
@@ -1959,6 +1982,7 @@ deployment_params = DeploymentParameters(
     native_pull_end_ratio=native_pull_end_ratio,
     native_anchor_height_tiles=native_anchor_height_tiles,
     native_timestep=native_timestep,
+    native_pull_fraction=native_pull_fraction,
     abd_executable=abd_executable or None,
     abd_timestep=abd_timestep,
     abd_density=abd_density,
@@ -1976,7 +2000,7 @@ deployment_params = DeploymentParameters(
     abd_shake_direction_z=abd_shake_direction[2],
     abd_shake_start_time=abd_shake_start_time,
     abd_shake_end_time=abd_shake_end_time,
-    steps=sim_steps,
+    steps=native_solver_steps if physics_backend == "native" else sim_steps,
     solver_iterations=solver_iterations,
     rigid_weight=rigid_weight,
     rigid_projection_passes=rigid_projection_passes,
@@ -3164,7 +3188,11 @@ elif view_stage == "Assembly Animation":
             "Only frames returned by that executable are shown here; legacy PD/SAT is not used as fallback."
         )
 
-    frame_count = st.slider("animation frames", 8, 96, 40, 4)
+    frame_count = st.slider(
+        "animation frames (saved display samples)", 8, 160, 40, 4,
+        help="Only the number of saved visual frames. Native PHYSICS steps "
+             "and timestep in the sidebar control simulated time.",
+    )
     preview_default = min(total_tiles, 900)
     preview_upper = min(max(total_tiles, 0), 3000)
     if preview_upper <= 50:
@@ -3257,7 +3285,8 @@ elif view_stage == "Assembly Animation":
         if refresh_sim or (need_sim_frames and physics_backend != "abd"):
             paper_params = replace(
                 deployment_params,
-                steps=max(sim_steps, frame_count),
+                steps=(native_solver_steps if physics_backend == "native"
+                       else max(sim_steps, frame_count)),
                 store_animation_frames=True,
                 max_animation_frames=frame_count,
             )
@@ -3284,6 +3313,19 @@ elif view_stage == "Assembly Animation":
                     "end_string_length_ratio": paper_params.native_pull_end_ratio,
                     "timestep": paper_params.native_timestep,
                     "steps": paper_params.steps,
+                    "simulated_seconds": (
+                        paper_params.steps * paper_params.native_timestep
+                    ),
+                    "pull_fraction": paper_params.native_pull_fraction,
+                    "pull_seconds": (
+                        paper_params.steps * paper_params.native_timestep
+                        * paper_params.native_pull_fraction
+                    ),
+                    "settling_seconds": (
+                        paper_params.steps * paper_params.native_timestep
+                        * (1.0 - paper_params.native_pull_fraction)
+                    ),
+                    "display_frames_requested": frame_count,
                     "solver_iterations": paper_params.solver_iterations,
                     "substeps": paper_params.solver_substeps,
                     "contact": "discrete 3D OBB-SAT approximation (not CCD/IPC)",
@@ -3445,6 +3487,12 @@ elif view_stage == "Assembly Animation":
                         "途中の軌道を信頼できる状態にするには、先にT2Dの衝突を修正する必要があります。"
                         "計算は診断目的で継続しています。"
                     )
+                st.caption(
+                    f"物理時間 {vals.get('total_physical_duration_seconds',0.):.2f}秒："
+                    f"紐を引く {vals.get('pull_duration_seconds',0.):.2f}秒、"
+                    f"引いた後の保持 {vals.get('settle_duration_seconds',0.):.2f}秒。"
+                    f"保存した表示フレーム {len(frames)}枚。"
+                )
                 if not vals.get("stable_state",False):
                     st.warning(
                         "この結果は物理的な組立て成功を示していません。"
