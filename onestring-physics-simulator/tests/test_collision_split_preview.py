@@ -8,7 +8,7 @@ import pytest
 
 from onestring_physics.paper_collision_split_preview import (
     capture_split_trial_geometry, collision_tile_severity,
-    hinge_gap_segments, rejection_comparison,
+    hinge_gap_segments, rejection_comparison, acceptance_checklist,
 )
 from onestring_physics.paper_collision_split_preview_view import (
     _preview_figure, _severity_colors,
@@ -219,3 +219,31 @@ def test_rejected_full_rebuild_keeps_viewable_trial_but_not_authoritative_state(
     # The authoritative topology is unchanged after a rejected trial.
     np.testing.assert_array_equal(result.mesh_2d_initial.faces,faces)
     assert candidates[0]["after"]["stages"]["M2D"]["faces"].max()>faces.max()
+
+
+
+def test_rejection_threshold_checklist_exposes_exact_reason():
+    before=dict(collision_pairs=272,collision_energy=.0057,
+                penetration_max=.016,hinge_rms=.0084,tile_scale=1.)
+    after=dict(collision_pairs=241,collision_energy=.0038,
+               penetration_max=.017,hinge_rms=.009)
+    checks=acceptance_checklist(before,after,min_relative_improvement=.03)
+    assert len(checks)==3
+    by_name={row["criterion"]:row for row in checks}
+    assert by_name["最大SAT貫通深さの非悪化"]["ok"] is False
+    assert by_name["貫通エネルギー改善率"]["ok"] is True
+    assert by_name["残存ヒンジRMS上限"]["ok"] is True
+
+
+def test_collision_pair_increase_criteria_only_when_needed():
+    before=dict(collision_pairs=168,collision_energy=.0036,
+                penetration_max=.018,hinge_rms=.0084,tile_scale=1.)
+    after=dict(collision_pairs=169,collision_energy=.0021,
+               penetration_max=.012,hinge_rms=.009)
+    checks=acceptance_checklist(before,after)
+    assert len(checks)==5
+    assert all(row["ok"] for row in checks)
+    after_more=dict(after,collision_pairs=180)
+    more=acceptance_checklist(before,after_more)
+    assert any(row["criterion"]=="衝突ペア増加数の上限" and not row["ok"]
+               for row in more)
