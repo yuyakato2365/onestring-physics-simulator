@@ -43,8 +43,9 @@ def _collision_depths(tiles: np.ndarray):
         return np.zeros(0, int), np.zeros(0, int), np.zeros(0, float)
     hulls = [ConvexHull(tile[:, :2]).vertices.tolist() for tile in tiles]
     width = max(map(len, hulls))
+    stride=int(np.asarray(tiles).shape[1])
     faces = np.asarray(
-        [[8*i+j for j in hull+[hull[-1]]*(width-len(hull))]
+        [[stride*i+j for j in hull+[hull[-1]]*(width-len(hull))]
          for i, hull in enumerate(hulls)], dtype=int
     )
     i,j,_,_,depth = footprint_contacts(tiles[:, :, :2], faces)
@@ -260,3 +261,77 @@ def collision_quality(state) -> dict:
                 hinge_rms=float(metrics.get("hinge_rms",float("inf"))),
                 tile_scale=float(scale),
                 fabrication_feasible=bool(metrics.get("fabrication_feasible",False)))
+
+
+
+def collision_component_audit(state) -> dict:
+    """Locate which stage reintroduces overlap after a real M2D Split.
+
+    Two levels are distinguished:
+      - within: both touching panels belong to one M2D face component;
+      - between: the panels belong to different cut components.
+    If the *between* count is zero after Split, simply spreading cut
+    components cannot directly resolve the surviving *within* collisions.
+
+    M2D and K2D are thin quad footprints; Top/Dual T2D use full projected
+    eight-corner solids. Counts need not be monotone across these models.
+    """
+    from .final_split_panel_pass import _edge_components
+
+    m2d=getattr(state,"mesh_2d_initial",None)
+    if m2d is None:
+        return {"status":"missing_M2D"}
+    faces=np.asarray(m2d.faces,int)
+    if faces.ndim!=2 or faces.shape[1]!=4 or not len(faces):
+        return {"status":"invalid_M2D_faces"}
+    labels=np.full(len(faces),-1,dtype=int)
+    components=_edge_components(faces)
+    for idx,component in enumerate(components):
+        labels[component]=idx
+    if np.any(labels<0):
+        return {"status":"component_label_failure"}
+    summary={"status":"ok","component_count":len(components)}
+    models=(
+        ("M2D",m2d,"mesh"),
+        ("K2D",getattr(state,"mesh_2d_optimized",None),"mesh"),
+        ("T2D Top",getattr(state,"tiles_2d_top_hinge",None),"tiles"),
+        ("T2D Dual",getattr(state,"tiles_2d_dual_hinge",None),"tiles"),
+    )
+    for name,stage,kind in models:
+        if stage is None:
+            summary[name]={"status":"missing_stage"}
+            continue
+        try:
+            if kind=="mesh":
+                sf=np.asarray(stage.faces,int)
+                if len(sf)!=len(labels):
+                    summary[name]={"status":"source_face_mismatch"}
+                    continue
+                tiles=np.asarray(stage.vertices,float)[sf]
+            else:
+                tiles=np.asarray(stage.vertices,float)
+                if len(tiles)!=len(labels):
+                    summary[name]={"status":"tile_count_mismatch"}
+                    continue
+            tile_size=max(1e-10,float(np.median(np.linalg.norm(
+                np.roll(tiles[:,:4,:2],-1,axis=1)-tiles[:,:4,:2],axis=2
+            ))))
+            i,j,depth=_collision_depths(tiles)
+            mask=depth>tile_size*1e-8
+            i,j,depth=i[mask],j[mask],depth[mask]
+            between=labels[i]!=labels[j]
+            inner=~between
+            summary[name]=dict(
+                status="ok",
+                collision_pairs=int(len(depth)),
+                between_split_component_pairs=int(np.count_nonzero(between)),
+                within_split_component_pairs=int(np.count_nonzero(inner)),
+                between_component_depth_squared=float(np.sum(depth[between]**2)),
+                within_component_depth_squared=float(np.sum(depth[inner]**2)),
+                between_component_max_depth=float(np.max(depth[between],initial=0.)),
+                within_component_max_depth=float(np.max(depth[inner],initial=0.)),
+                tile_size=tile_size,
+            )
+        except (ValueError, IndexError, FloatingPointError) as exc:
+            summary[name]={"status":f"audit_failed: {type(exc).__name__}: {str(exc)[:120]}"}
+    return summary
