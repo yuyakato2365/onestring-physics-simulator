@@ -20,20 +20,20 @@ def prepare_completed_pipeline_display(session_state, *, old_grid_size, new_grid
     # A selected trial from a previous run is not necessarily present now.
     session_state.pop("dual_hinge_inspection_trial", None)
     session_state.pop("dual_hinge_show_large_history", None)
+    # Panel identity and count can also change after Split even if nx stays
+    # the same. Never retain an old keyed number_input value beyond its new max.
+    for key in (
+        "cross_stage_panel_id",
+        "t2d_top_panel_id",
+        "t2d_dual_panel_id",
+        "t2d_top_pending_panel_id",
+        "t2d_dual_pending_panel_id",
+    ):
+        session_state.pop(key, None)
     if changed:
         # Don't immediately attempt huge 3D plots from the old stage. Display
         # the lightweight pipeline summary first, preserving the new result.
         session_state["onestring_view_stage"] = "Pipeline View"
-        for key in (
-            "cross_stage_panel_id",
-            "t2d_top_panel_id",
-            "t2d_dual_panel_id",
-            "t2d_top_pending_panel_id",
-            "t2d_dual_pending_panel_id",
-            "t2d_top_click_k3d_sel_0",
-            "t2d_dual_click_k3d_sel_0",
-        ):
-            session_state.pop(key, None)
     session_state["onestring_completed_grid_size"] = new_size
     session_state["onestring_grid_view_reset"] = bool(changed)
     return bool(changed)
