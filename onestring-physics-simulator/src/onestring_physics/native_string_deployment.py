@@ -31,6 +31,7 @@ class _Mechanism:
     inv_inertia_local: np.ndarray
     hinges: list[tuple[int, int, int, int]]
     guide_bodies: np.ndarray
+    guide_vertex_indices: np.ndarray
     guide_locals: np.ndarray
     anchor: np.ndarray
     initial_length: float
@@ -91,6 +92,7 @@ def _prepare(state, *, anchor_height_tiles: float) -> _Mechanism:
                            _vertex_idx(h, "local_vertex_b")))
     gaps = {int(g.id): g for g in getattr(state.gap_graph, "gaps", [])}
     guide_bodies = []
+    guide_vertex_indices = []
     guide_vertices = []
     ids = list(getattr(state.string_path, "gap_ids", []))
     for gap_id in ids:
@@ -107,6 +109,7 @@ def _prepare(state, *, anchor_height_tiles: float) -> _Mechanism:
             raise NativeDeploymentError(f"STRING_GUIDE_POSITION_INVALID: gap {gap_id}")
         nearest = int(np.argmin(np.linalg.norm(rest[tile_id, :4, :2] - xy, axis=1)))
         guide_bodies.append(tile_id)
+        guide_vertex_indices.append(nearest)
         guide_vertices.append(local[tile_id, nearest].copy())
     if len(guide_bodies) < 2 or len(set(guide_bodies)) < 2:
         raise NativeDeploymentError(
@@ -126,7 +129,8 @@ def _prepare(state, *, anchor_height_tiles: float) -> _Mechanism:
         rest=rest.copy(), local=local, centers=centers.copy(),
         rotations=np.broadcast_to(np.eye(3), (n, 3, 3)).copy(),
         inv_inertia_local=inertia_inv, hinges=hinges,
-        guide_bodies=bodies, guide_locals=guides,
+        guide_bodies=bodies, guide_vertex_indices=np.asarray(guide_vertex_indices,dtype=int),
+        guide_locals=guides,
         anchor=anchor, initial_length=length,
         floor_z=float(np.min(rest[:, 4:, 2])),
         tile_scale=scale, axes_local=axes,
@@ -179,10 +183,15 @@ def _pin_constraints(m: _Mechanism, stiffness: float) -> None:
         _apply_point_impulse(m, b, rb, -impulse)
 
 
+def _string_world_points(m: _Mechanism) -> np.ndarray:
+    radii = _rotated_vectors(m, m.guide_bodies, m.guide_locals)
+    return np.vstack((m.anchor[None, :], m.centers[m.guide_bodies] + radii))
+
+
 def _string_geometry(m: _Mechanism) -> tuple[float, np.ndarray, np.ndarray]:
     radii = _rotated_vectors(m, m.guide_bodies, m.guide_locals)
-    positions = m.centers[m.guide_bodies] + radii
-    points = np.vstack((m.anchor[None, :], positions))
+    points = _string_world_points(m)
+    positions = points[1:]
     segments = np.diff(points, axis=0)
     lengths = np.linalg.norm(segments, axis=1)
     u = segments / np.maximum(lengths[:, None], 1e-12)
@@ -319,6 +328,9 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
     collision_strength = float(np.clip(params.collision_weight, 0., 1.))
     nframes = max(2, int(getattr(params, "max_animation_frames", 40)))
     frames = [m.rest.copy()]
+    string_path_frames = [_string_world_points(m).copy()]
+    string_command_history = [float(m.initial_length)]
+    string_actual_history = [float(m.initial_length)]
     collision_counts = [_contacts(m, apply=False, strength=0.)]
     v = np.zeros_like(m.centers)
     w = np.zeros_like(m.centers)
@@ -367,10 +379,16 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
         if (len(frames) < nframes - 1 and
                 (step + 1) % max(1, total // max(1, nframes - 2)) == 0):
             frames.append(_vertices(m).copy())
+            string_path_frames.append(_string_world_points(m).copy())
+            string_command_history.append(float(command))
+            string_actual_history.append(float(_string_geometry(m)[0]))
             collision_counts.append(_contacts(m, apply=False, strength=0.))
     final = _vertices(m)
     if len(frames) == 0 or not np.array_equal(frames[-1], final):
         frames.append(final.copy())
+        string_path_frames.append(_string_world_points(m).copy())
+        string_command_history.append(float(m.initial_length * ratio))
+        string_actual_history.append(float(_string_geometry(m)[0]))
         collision_counts.append(_contacts(m, apply=False, strength=0.))
     string_length, _, _ = _string_geometry(m)
     final_command = m.initial_length * ratio
@@ -417,7 +435,12 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
     }
     if progress_callback:
         progress_callback("Native rigid OneString completed", 1., "frames and diagnostics available")
-    return DeploymentResult(
+    result=DeploymentResult(
         frames=frames, final_tiles=final.copy(),
         metrics=metrics, collision_counts=collision_counts,
     )
+    # Visualization-only frame arrays; no hidden forces or goal interpolation.
+    result.string_path_frames=string_path_frames
+    result.string_command_history=string_command_history
+    result.string_actual_history=string_actual_history
+    return result
