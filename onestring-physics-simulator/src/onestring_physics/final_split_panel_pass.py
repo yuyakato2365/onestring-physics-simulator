@@ -244,7 +244,8 @@ def _panel_vertices(faces: np.ndarray, components: list[np.ndarray]) -> list[np.
     return [np.unique(f[c].reshape(-1)) for c in components]
 
 
-def _pack_panels(vertices: np.ndarray, panel_vertices: list[np.ndarray], grid: Any) -> tuple[np.ndarray, list[np.ndarray]]:
+def _pack_panels(vertices: np.ndarray, panel_vertices: list[np.ndarray], grid: Any,
+                 *, collision_gap_multiplier: float = 1.0) -> tuple[np.ndarray, list[np.ndarray]]:
     pts = np.asarray(vertices, dtype=float).copy()
     if len(panel_vertices) <= 1:
         return pts, [np.zeros(2, dtype=float)] if panel_vertices else []
@@ -253,7 +254,11 @@ def _pack_panels(vertices: np.ndarray, panel_vertices: list[np.ndarray], grid: A
     scale = max(float(np.max(span)), 1e-9)
     tile_size = max(float(getattr(grid, "tile_size", 0.0) or 0.0), 0.0)
     gap_size = max(float(getattr(grid, "gap_size", 0.0) or 0.0), 0.0)
+    collision_gap_multiplier=float(collision_gap_multiplier)
+    if not np.isfinite(collision_gap_multiplier) or collision_gap_multiplier<1.0:
+        raise ValueError("collision_gap_multiplier must be finite and >= 1")
     gap = max(2.0 * tile_size, 8.0 * gap_size, 0.12 * scale, 1e-5)
+    gap *= collision_gap_multiplier
     boxes = []
     for ids in panel_vertices:
         p = xy[ids]
@@ -377,7 +382,15 @@ def install_final_split_panel_pass(pipeline_module: Any) -> None:
             raise RuntimeError("PAPER_STYLE_SPLIT_FAILED: final topology did not gain a disconnected panel.")
 
         pverts = _panel_vertices(faces, components)
-        packed, offsets = _pack_panels(canonical, pverts, getattr(mesh, "grid", grid))
+        # The optional final packing pass has one common gutter between
+        # disconnected panels; scale it only when Collision-driven Split is
+        # actually present. CSF-only runs keep the original packing unchanged.
+        factor=(float(getattr(params,"collision_split_gap_multiplier",1.0))
+                if collision_source_records else 1.0)
+        packed, offsets = _pack_panels(
+            canonical, pverts, getattr(mesh, "grid", grid),
+            collision_gap_multiplier=factor,
+        )
         metrics.update({
             "final_split_panel_pass_applied": bool(per_line),
             "paper_style_complete_split": True,
@@ -394,6 +407,7 @@ def install_final_split_panel_pass(pipeline_module: Any) -> None:
             "split_panel_count": int(len(components)),
             "split_panel_offsets_xy": [[float(x) for x in off] for off in offsets],
             "split_panel_layout_model": "paper-style complete boundary-to-boundary grid seam + rigid panel packing",
+            "collision_split_gap_multiplier": float(factor),
             "split_panel_source_uv_preserved_for_m3d": True,
         })
 
