@@ -2682,9 +2682,22 @@ elif view_stage == "T2D Dual Hinge":
                    f" Collision Split初期離隔倍率: {audit_metrics.get('collision_split_gap_multiplier', 1.):.2g}。")
         if audit_metrics.get("collision_split_lookahead_enabled", False):
             st.info(
-                "2本先読み探索を有効化中：単独採用候補がない場合、総貫通エネルギーが"
-                "改善した棄却候補からさらに1本追加して完全再計算します。"
-                "2本セットで元の採用基準を満たさない限り、両方棄却します。"
+                "2本先読み探索はONです。単独採用候補がない場合、衝突数が"
+                "2%程度増えても貫通エネルギーが改善した候補から、もう1本試します。"
+                "2本セットで従来の採用条件を満たしたときだけ正式採用します。"
+            )
+            if (status=="no_candidate_improved_or_rebuilt"
+                    and not any(row.get("acceptance_mode")=="lookahead_second_cut"
+                                for row in split_history)):
+                st.caption(
+                    "今回は2本目の全面再計算が記録されていません。"
+                    "候補が中間条件を満たさないか、2本目の有効な切断線を生成できなかった可能性があります。"
+                )
+        else:
+            st.caption(
+                "2本先読み探索はOFFです。2本セットの改善を試す場合は、"
+                "サイドバーの Enable two-cut lookahead from rejected Split をONにし、"
+                "Maximum collision Split cutsを2以上にして再実行してください。"
             )
         if status == "T2D_reoptimized_on_existing_split_topology":
             st.info(
