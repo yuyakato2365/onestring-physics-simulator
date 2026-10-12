@@ -178,3 +178,41 @@ def test_pull_fraction_one_has_no_settling_phase():
     assert result.string_command_history[-1]==pytest.approx(
         result.metrics["commanded_string_length"]
     )
+
+
+def test_rigid_contact_solver_responds_to_off_center_overlaps():
+    state=_two_panel_state()
+    mechanism=_prepare(state,anchor_height_tiles=2.)
+    # Partial overlap with an offset contact patch, not just exact stacking.
+    mechanism.centers[1]=mechanism.centers[0]+np.array([.72,.55,0.])
+    before=_contacts(mechanism,apply=False,strength=0.)
+    assert before >= 1
+    centers_before=mechanism.centers.copy()
+    rotations_before=mechanism.rotations.copy()
+    _contacts(mechanism,apply=True,strength=1.)
+    assert not np.allclose(mechanism.centers,centers_before)
+    assert np.isfinite(mechanism.centers).all()
+    assert np.isfinite(mechanism.rotations).all()
+    np.testing.assert_allclose(
+        np.linalg.det(mechanism.rotations),np.ones(len(mechanism.rotations)),
+        atol=1e-8,
+    )
+
+
+def test_simulation_reports_termination_separately_from_assembly_success():
+    state=_two_panel_state()
+    params=DeploymentParameters(
+        physics_backend="native",steps=8,solver_iterations=3,
+        gravity=0.,native_pull_end_ratio=.1,
+        max_animation_frames=6,
+    )
+    result=simulate_native_string_deployment(state,params)
+    metrics=result.metrics
+    assert metrics["solver_terminated"]
+    assert metrics["status"] in {
+        "constraints_satisfied","ended_with_constraint_residuals",
+    }
+    assert metrics["assembled_successfully"] == metrics["stable_state"]
+    assert len(result.hinge_error_history)==len(result.frames)
+    assert len(result.collision_counts)==len(result.frames)
+    assert len(result.string_actual_history)==len(result.frames)
