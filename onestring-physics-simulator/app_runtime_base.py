@@ -3121,6 +3121,57 @@ elif view_stage == "T2D Dual Hinge":
     collision_fig, collision_ids, collision_pairs = add_t2d_collision_overlay(collision_fig, state.tiles_2d_dual_hinge, hinge_graph=None)
     st.plotly_chart(collision_fig, use_container_width=True, key="t2d_dual_collision_map")
     st.caption(f"Collision map: {len(collision_ids)} panels / {len(collision_pairs)} SAT-overlap pairs (hinge-connected pairs included, as in ECollision). Red = collision participant.")
+
+    # Diagnostic counterfactual: rigidly put ACTUAL T2D fabricated solids at
+    # their corresponding T3D tile poses. This does not claim that a string
+    # can move through a collision-free path to these poses.
+    st.subheader("T2Dパネルを再び3Dへ組み立てた場合（剛体再配置）")
+    st.caption(
+        "下の3DモデルはT3Dの各パネル位置・姿勢に、T2D実体を剛体変換して"
+        "配置したものです。T3Dパネルへの置換・変形ではありません。"
+        "物理的な組立て軌道や紐だけで到達可能かどうかを示すものでもありません。"
+    )
+    from onestring_physics.t2d_rigid_reassembly import rigid_reassemble_t2d
+    try:
+        _reassembled_tiles, _reassembled_metrics = rigid_reassemble_t2d(state)
+    except (ValueError, np.linalg.LinAlgError) as _reassembly_exc:
+        st.error(f"T2D剛体再配置に失敗: {_reassembly_exc}")
+    else:
+        c_r1, c_r2, c_r3, c_r4 = st.columns(4)
+        c_r1.metric("T3Dとの頂点RMS", f"{_reassembled_metrics['total_target_vertex_rms']:.4g}")
+        c_r2.metric("ヒンジRMS", f"{_reassembled_metrics['hinge_rms']:.4g}")
+        c_r3.metric("再組立て3D交差ペア(近似)", str(_reassembled_metrics["reassembled_3d_obb_pairs"]))
+        c_r4.metric("T2D初期3D交差ペア(近似)", str(_reassembled_metrics["initial_t2d_3d_obb_pairs"]))
+        _reassembly_view = TileAssembly(
+            vertices=_reassembled_tiles,
+            top_faces=state.tiles_2d_dual_hinge.top_faces,
+            bottom_faces=state.tiles_2d_dual_hinge.bottom_faces,
+            side_faces=state.tiles_2d_dual_hinge.side_faces,
+            stage="T2D actual solids at target T3D tile poses (rigid SE3)",
+        )
+        _reassembly_fig = figure_tile_assembly(
+            _reassembly_view,
+            title="Rigid T2D panel reassembly at T3D designed poses",
+        )
+        if st.checkbox("半透明のT3D設計形状を重ねる", value=True,
+                       key="rigid_reassembly_show_target"):
+            add_tile_assembly(
+                _reassembly_fig, state.tiles_3d,
+                color="#2563eb", opacity=0.16, name="T3D target (reference)",
+            )
+        st.plotly_chart(_reassembly_fig, use_container_width=True,
+                        key="t2d_rigid_reassembly_3d")
+        if _reassembled_metrics["reassembled_3d_obb_pairs"]:
+            st.warning(
+                "再配置後の3Dパネル同士にも近似交差が存在します。"
+                "T2Dで衝突0件でもT3Dの配置で3D衝突が起こり得ます。"
+                "接触判定は15軸OBB SAT近似であり厳密な厚肉タイルの衝突証明ではありません。"
+            )
+        if _reassembled_metrics["hinge_count"] and _reassembled_metrics["hinge_rms"] > 1e-3:
+            st.warning("剛体再配置後にもヒンジの接続ギャップが残っています。")
+        with st.expander("剛体再組立ての数値診断", expanded=False):
+            st.json({k:v for k,v in _reassembled_metrics.items()
+                     if k!="reassembled_3d_obb_participants"})
     if hard_mode_active and not hard_ok:
         st.error("Hard非貫通未達成のため、製作用T2D STLのダウンロードを無効化しています。")
     else:
