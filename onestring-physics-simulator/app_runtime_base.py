@@ -1688,6 +1688,17 @@ if stored_pipeline_key is not None and stored_pipeline_key != pipeline_key and n
 # Rebuild only on the explicit Run button; the completed state remains in the
 # session and changing the view never repeats the expensive pipeline.
 if run_pipeline:
+    # Keep the previous *successful* state intact until the replacement
+    # pipeline has actually returned. The old grid is used to reset stale
+    # view/widget state after a successful topology-changing rebuild.
+    _previous_successful_state = st.session_state.get("onestring_state")
+    _previous_grid = getattr(
+        getattr(getattr(_previous_successful_state, "mesh_2d_initial", None),
+                "grid", None),
+        "nx", None,
+    )
+    if _previous_grid is None:
+        _previous_grid = st.session_state.get("onestring_completed_grid_size")
     with st.spinner("Building OneString pipeline state"):
         progress_bar = st.progress(0.0, text="Preparing pipeline…")
         progress_status = st.empty()
@@ -1718,9 +1729,31 @@ if run_pipeline:
         _build_progress("Done", 1.0, "Pipeline state stored")
         st.session_state.pipeline_progress_log = progress_log
         st.session_state.pipeline_key = pipeline_key
+        from onestring_physics.ui_result_recovery import prepare_completed_pipeline_display
+        _grid_view_reset = prepare_completed_pipeline_display(
+            st.session_state,
+            old_grid_size=_previous_grid,
+            new_grid_size=grid_size,
+        )
         st.session_state.pop("actuation_key", None)
 
 state = st.session_state.onestring_state
+if run_pipeline:
+    # Shown *before* any Plotly figure generation. Users can now distinguish
+    # a completed calculation from a display/rendering failure.
+    _quad_count = len(state.mesh_2d_initial.faces)
+    _tile_count = len(state.tiles_2d_dual_hinge.vertices)
+    st.success(
+        f"計算結果を保存しました: grid={grid_size}×{grid_size}, "
+        f"M2D四角形={_quad_count}, T2Dパネル={_tile_count}。"
+        " 下の「View stage」で各工程の結果を確認できます。"
+    )
+    if _grid_view_reset:
+        st.info(
+            "gridサイズが変わったため、古いパネル番号と表示状態をリセットし、"
+            "軽量なPipeline Viewを表示しています。"
+            "T2D Dual Hingeなどの表示はView stageから選び直せます。"
+        )
 
 # The main-page action is shown after the initial pipeline is available, so
 # it is enabled immediately after the first successful full build.
@@ -2661,7 +2694,23 @@ elif view_stage == "T2D Dual Hinge":
             pose_history = inspected_trial["pose_history"]
             if hard_ok or display_trial != selected_trial_id:
                 st.caption("選択した試行の途中経過を表示しています。最終T2D結果はHard修復の採用配置です（Hard成功時）。")
-    if pose_history:
+    _history_tile_count = len(state.tiles_2d_top_hinge.vertices)
+    _history_frame_count = len(pose_history)
+    _large_history = _history_tile_count * _history_frame_count > 12000
+    _render_history = bool(pose_history)
+    if pose_history and _large_history:
+        st.warning(
+            f"このgridでは最適化履歴が大きくなっています"
+            f"（{_history_tile_count}パネル × {_history_frame_count}フレーム）。"
+            "全フレームの3D描画はブラウザが重くなり、結果が表示されない原因になるため、"
+            "初期状態では無効にしています。"
+        )
+        _render_history = st.checkbox(
+            "大きなDual Hinge 3D最適化履歴を描画する（高負荷）",
+            value=False,
+            key="dual_hinge_show_large_history",
+        )
+    if pose_history and _render_history:
         import plotly.graph_objects as go
         import numpy as _np
         rest_tiles = _np.asarray(state.tiles_2d_top_hinge.vertices, dtype=float)
@@ -2756,6 +2805,9 @@ elif view_stage == "T2D Dual Hinge":
                        "青緑＝厚みを持つ剛体パネル、橙＝ヒンジ接続誤差。"
                        " パネルはXY平面内でのみ剛体運動し、Z位置は固定です。")
             st.plotly_chart(fig, use_container_width=True, key="dual_hinge_iteration_animation_3d")
+    elif pose_history:
+        st.info("最適化履歴は保存済みです。上のチェックをONにすると3Dアニメーションを描画します。"
+                "アニメーションを描画しなくても最終T2D配置・衝突マップは確認できます。")
     else:
         st.info("この実行にはヒンジ配置履歴がありません。修正後に再計算してください。")
     if audit_metrics.get("dual_hinge_history"):
