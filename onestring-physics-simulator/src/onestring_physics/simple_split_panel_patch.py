@@ -155,13 +155,21 @@ def _open_split_gaps(
     faces: np.ndarray,
     split_records: list[dict[str, Any]],
     grid: Any | None,
+    collision_gap_multiplier: float = 1.0,
 ):
-    """Rigidly translate each panel; never pack/reorder panels."""
+    """Rigidly translate each panel; never pack/reorder panels.
+
+    Only seams added in response to T2D collisions use the extra gap factor.
+    Existing curvature-guided CSF seams retain their original separation.
+    """
     source = np.asarray(canonical, dtype=float)
     out = source.copy()
     components = _edge_components(faces)
     panel_vertices = _component_vertices(faces, components)
     gap = _panel_gap(source, grid)
+    collision_gap_multiplier=float(collision_gap_multiplier)
+    if not np.isfinite(collision_gap_multiplier) or collision_gap_multiplier<1.0:
+        raise ValueError("collision_gap_multiplier must be finite and >= 1")
     offsets: list[np.ndarray] = []
     for ids in panel_vertices:
         center = np.mean(source[ids, :2], axis=0)
@@ -173,10 +181,12 @@ def _open_split_gaps(
             axis = str(record["axis"])
             value = float(record["snapped_value"])
             coord = 1 if axis == "row" else 0
+            local_gap=gap*(collision_gap_multiplier
+                            if record.get("collision_driven",False) else 1.0)
             if center[coord] < value:
-                offset[coord] -= 0.5 * gap
+                offset[coord] -= 0.5 * local_gap
             elif center[coord] > value:
-                offset[coord] += 0.5 * gap
+                offset[coord] += 0.5 * local_gap
         out[ids, :2] += offset[None, :]
         offsets.append(offset)
     return out, components, panel_vertices, offsets, gap
@@ -206,13 +216,24 @@ def apply_paper_split(pipeline_module, mesh, domain, params=None):
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
     rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
     grid_vertices = canonical.copy(); grid_vertices[:, :2] = canonical[:, :2] @ rotation
-    separated, components, panel_vertices, offsets, gap = _open_split_gaps(grid_vertices, faces, records, mesh.grid)
+    collision_gap_multiplier=float(
+        getattr(params,"collision_split_gap_multiplier",1.0)
+    )
+    separated, components, panel_vertices, offsets, gap = _open_split_gaps(
+        grid_vertices, faces, records, mesh.grid,
+        collision_gap_multiplier=collision_gap_multiplier,
+    )
     separated[:, :2] = separated[:, :2] @ rotation.T
     offsets = [offset @ rotation.T for offset in offsets]
     metrics.update(paper_split_finalized=True, simple_split_active=True, simple_split_records=records,
                    split_panel_count=len(components), split_panel_geometry_separated=len(components)>1,
                    split_panel_face_counts=[len(c) for c in components], split_panel_offsets_xy=[o.tolist() for o in offsets],
-                   split_panel_gap=gap if records else 0., split_panel_layout_model='component-local seam gaps',
+                   split_panel_gap=gap if records else 0.,
+                   collision_split_gap_multiplier=float(collision_gap_multiplier),
+                   collision_split_effective_seam_gap=float(gap*collision_gap_multiplier) if any(
+                       r.get("collision_driven",False) for r in records
+                   ) else 0.,
+                   split_panel_layout_model='component-local seam gaps',
                    final_split_panel_count=len(components), paper_style_complete_split=bool(records))
     if hasattr(pipeline_module, '_m2d_audit_metrics'):
         metrics.update(pipeline_module._m2d_audit_metrics(separated, faces, suffix='after_split'))
