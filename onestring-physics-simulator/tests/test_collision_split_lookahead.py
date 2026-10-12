@@ -71,6 +71,10 @@ def test_promising_first_cut_allows_local_max_worsening_but_not_bad_energy():
     assert promising_rejected_first_cut(before, after)
     assert not promising_rejected_first_cut(before, dict(after, collision_energy=10.))
     assert not promising_rejected_first_cut(before, dict(after, collision_pairs=10))
+    # A zero-contact result with disconnected hinges has no collision hotspot
+    # from which to propose the second cut. Do not starve viable parents.
+    assert not promising_rejected_first_cut(before, dict(after, collision_pairs=0,
+                                                       collision_energy=0.))
     assert not promising_rejected_first_cut(before, dict(after, collision_energy=float("nan")))
 
 
@@ -164,3 +168,67 @@ def test_lookahead_disabled_reproduces_original_single_cut_behavior(monkeypatch)
     assert result is original
     assert built == [0, 1]
     assert len(result.tiles_2d_dual_hinge.metrics["collision_split_feedback_steps"])==1
+
+
+def test_collision_free_but_hinge_broken_candidate_does_not_starve_lookahead(monkeypatch):
+    """Regression: skip a 0-contact parent and explore the next energy-improving
+    but maximum-penetration-worsened parent (the observed real-world scenario).
+    """
+    import copy
+    original, first, second = _grid_states()
+    first_bad = copy.deepcopy(first)
+    first_bad.fixture_quality.update(
+        collision_pairs=0, collision_energy=0., penetration_max=0.,
+        hinge_rms=.30,  # forbidden: baseline=.05, ceiling=.15
+    )
+    first_good = first
+    second.fixture_quality["hinge_rms"] = .05
+    built=[]
+
+    def fake_build(_target, params, **_kwargs):
+        forced=tuple(getattr(params, "collision_split_forced_lines", ()))
+        built.append(tuple(str(c["name"]) for c in forced))
+        if not forced:
+            return original
+        if len(forced)==1:
+            return first_bad if forced[0]["name"]=="collision_zero" else first_good
+        return second
+
+    def candidate(name):
+        return dict(name=name, axis="col", value=1., source_face_id=0,
+                    boundary_distance_tiles=1., score=1.)
+
+    def fake_rank(state, **_kwargs):
+        if state is original:
+            return ([candidate("collision_zero"), candidate("max_worse")],
+                    dict(status="ok"))
+        if state is first_good:
+            return [candidate("second")], dict(status="ok")
+        return [], dict(status="no_collisions")
+
+    monkeypatch.setattr(pipeline, "_ORIGINAL_BUILD_ONESTRING_DESIGN", fake_build)
+    monkeypatch.setattr(collision, "rank_collision_split_candidates", fake_rank)
+    monkeypatch.setattr(collision, "collision_quality",
+                        lambda state: dict(state.fixture_quality))
+    monkeypatch.setattr(collision, "collision_component_audit",
+                        lambda _: dict(status="ok"))
+    params=SimpleNamespace(
+        omega_parameterization_mode="",
+        collision_split_enabled=True, collision_split_max_additional=2,
+        collision_split_candidate_attempts=2, collision_split_boundary_weight=1.,
+        collision_split_min_relative_improvement=.03,
+        collision_split_gap_multiplier=1., collision_split_forced_lines=(),
+        collision_split_lookahead_enabled=True,
+        collision_split_lookahead_children=1,
+    )
+    result=pipeline.build_onestring_design(object(),params)
+    assert result is second
+    assert built == [(), ("collision_zero",), ("max_worse",),
+                     ("max_worse","second")]
+    steps=result.tiles_2d_dual_hinge.metrics["collision_split_feedback_steps"]
+    assert len(steps)==3
+    assert steps[0]["decision_reason"]=="hinge_connection_regression"
+    assert not steps[0]["accepted"]
+    assert steps[1]["single_step_decision_reason"]=="max_penetration_worsened"
+    assert steps[1]["accepted"] and steps[2]["accepted"]
+    assert len(result.tiles_2d_dual_hinge.metrics["collision_split_accepted_lines"])==2
