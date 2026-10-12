@@ -2083,6 +2083,21 @@ def _render_cross_stage_panel_inspector(t2d_assembly,*,t2d_label,hinge_graph,key
     if len(set(counts.values()))!=1:
         st.warning(f"Panel correspondence count mismatch: {counts}. Linking is limited to 0..{common-1}.")
 
+    # The linked inspector creates one selectable 3D trace PER tile on EACH of
+    # K3D, T3D and T2D. For large grids, automatically preloading all of them
+    # can monopolize the Streamlit WebSocket or crash the browser.
+    if common > 200:
+        st.warning(
+            f"連動パネル検査には{common}枚×3ステージの3D表示が必要です。"
+            "大きなgridではブラウザ負荷を避けるため初期状態では描画しません。"
+        )
+        if not st.checkbox(
+            "大量パネルのK3D/T3D/T2D連動3D検査を描画する（高負荷）",
+            value=False,
+            key=f"{key_prefix}_show_large_panel_inspector",
+        ):
+            return
+
     colors=list(_corr_tile_colors[:common])
     if len(colors)<common:
         colors += ["#2dd4bf"]*(common-len(colors))
