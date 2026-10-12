@@ -336,7 +336,14 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
             "Invalid native pull ratio, anchor height, timestep or pull fraction"
         )
     m = _prepare(state, anchor_height_tiles=anchor_height)
-    total = max(2, int(params.steps))
+    commanded_steps = max(2, int(params.steps))
+    extra_settle_steps = int(getattr(params, "native_extra_settle_steps", 0))
+    if not 0 <= extra_settle_steps <= 1000:
+        raise NativeDeploymentError("Extra settling steps must be between 0 and 1000")
+    # Complete the commanded pull first; then keep its final string length
+    # fixed for a bounded additional relaxation period. Never fake a T3D
+    # target pose at the final frame.
+    total = commanded_steps + extra_settle_steps
     iterations = max(1, int(params.solver_iterations))
     substeps = max(1, int(params.solver_substeps))
     damping = float(np.clip(params.damping_ratio, 0, .99))
@@ -363,7 +370,7 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
     for step in range(total):
         # Smoothly reel in during the early part of the run, then KEEP
         # the commanded string length fixed while the mechanism settles.
-        phase = min(1.0, (step + 1) / (total * pull_fraction))
+        phase = min(1.0, (step + 1) / (commanded_steps * pull_fraction))
         pull_smooth = phase * phase * (3. - 2. * phase)
         command = m.initial_length * (1. - (1. - ratio) * pull_smooth)
         for substep in range(substeps):
@@ -406,7 +413,9 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
         if progress_callback and (step % max(1, total // 30) == 0 or step == total - 1):
             progress_callback(
                 "Native rigid OneString pull", min(0.98, (step + 1) / total),
-                f"step {step + 1}/{total}; string command {command:.5g}",
+                f"step {step + 1}/{total} "
+                f"({'pull/hold' if step < commanded_steps else 'extra settling'}); "
+                f"string command {command:.5g}",
             )
         if step + 1 in save_at_steps:
             frames.append(_vertices(m).copy())
@@ -457,11 +466,15 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
         "anchor_height_tiles": anchor_height,
         "rise_from_t2d": rise,
         "solver_steps": int(total),
+        "commanded_solver_steps": int(commanded_steps),
+        "extra_settle_steps": int(extra_settle_steps),
         "timestep": float(timestep),
         "total_physical_duration_seconds": float(total * timestep),
         "pull_fraction": float(pull_fraction),
-        "pull_duration_seconds": float(total * timestep * pull_fraction),
-        "settle_duration_seconds": float(total * timestep * (1.0 - pull_fraction)),
+        "pull_duration_seconds": float(commanded_steps * timestep * pull_fraction),
+        "settle_duration_seconds": float(
+            (total - commanded_steps * pull_fraction) * timestep
+        ),
         "animation_frame_count": int(len(frames)),
         "final_deployment_error_to_T3D": target_error,
         "snap_error": float("nan"),
