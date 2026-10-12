@@ -3544,12 +3544,32 @@ elif view_stage == "Assembly Animation":
                     f"引いた後の保持 {vals.get('settle_duration_seconds',0.):.2f}秒。"
                     f"保存した表示フレーム {len(frames)}枚。"
                 )
+                st.metric(
+                    "T3D設計位置との最終頂点RMS（目標に吸引しない）",
+                    f"{vals.get('final_deployment_error_to_T3D',float('nan')):.4g}",
+                )
                 if not vals.get("stable_state",False):
-                    st.warning(
-                        "この結果は物理的な組立て成功を示していません。"
-                        "ヒンジ誤差・衝突・紐長未達を確認してください。"
-                        "T2Dに初期衝突が多数ある場合は、初期配置の修正が先に必要です。"
+                    st.error(
+                        "計算時間が終了しましたが、物理拘束は未収束です。"
+                        "これは再生フレーム数の不足ではありません。"
+                        "ヒンジ誤差・残存3D衝突・紐長未達を下のグラフで確認してください。"
+                        "T2Dの2D衝突0件は、立ち上がった後の3D非貫通を保証しません。"
                     )
+                else:
+                    st.info(
+                        "指定の近似拘束の残差は許容範囲ですが、"
+                        "T3D設計形状に達したことや、製作物で組み立て可能なことは証明されていません。"
+                    )
+                _contact_hist=getattr(result,"collision_counts",[])
+                _hinge_hist=getattr(result,"hinge_error_history",[])
+                if _contact_hist and _hinge_hist and len(_contact_hist)==len(_hinge_hist):
+                    c1,c2=st.columns(2)
+                    with c1:
+                        st.caption("各保存フレームの3D接触ペア数（OBB近似）")
+                        st.line_chart({"3D contact pairs": _contact_hist})
+                    with c2:
+                        st.caption("各保存フレームのヒンジRMS")
+                        st.line_chart({"hinge RMS": _hinge_hist})
                 history_actual=getattr(result,"string_actual_history",[])
                 history_cmd=getattr(result,"string_command_history",[])
                 if history_actual and len(history_actual)==len(history_cmd):
