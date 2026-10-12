@@ -94,3 +94,44 @@ The tests verify rigid shape invariance, a true rising two-panel
 linkage under pull, initial geometry fidelity, tension-only behavior,
 3D approximate contacts and absence of T3D target forces. They are
 **not** a real-mesh or fabrication deployment validation.
+
+
+## T2D rigid reassembly diagnostic (added 2026-10-13)
+
+The T2D Dual Hinge stage now includes an additional 3D view directly below
+the flat collision map. It takes EACH actual fabricated T2D eight-vertex
+solid and uses a proper Kabsch SE(3) rigid fit (det R=+1) to its corresponding
+T3D 8-vertex solid. It does not use T3D's local geometry as the result.
+
+It reports per-tile fit error, vertex RMS error, hinge gaps and approximate
+3D OBB SAT collision pairs in the reconstructed target placement. This is
+a *kinematic feasibility diagnostic*, not a claim that one routed string
+can reach those poses or avoid collisions along a deployment path.
+
+The flat T2D collision overlay is 2D SAT in XY, while the new
+post-reassembly and Native dynamic contact diagnostics check approximate
+three-dimensional overlaps between thick panel prisms. Zero flat
+collision pairs DOES NOT imply zero 3D collisions after rotation.
+
+## Native contact and bounded extra settling (added 2026-10-13)
+
+Native physical mode now projects approximate rigid-body contact positional
+impulses at support-region contact points, affecting both translation and
+rotation, instead of translating two intersecting panels only. The final
+projection pass reapplies collision correction after hinge/string constraints.
+
+A new `Extra settling steps after scheduled physics` control defaults to
+40. It continues physical time integration after the original pull+hold
+schedule with the final commanded string length fixed. The default
+180 commanded + 40 extra steps at 0.02s corresponds to 4.4s of simulation.
+This is bounded: it does NOT converge to the T3D goal by applying invisible
+forces. A failed result is explicitly labeled
+`ended_with_constraint_residuals`. Contact counts and hinge RMS by
+display frame can be inspected alongside string length histories.
+
+These changes are still an approximate PBD prototype. In particular,
+3D OBB SAT is not exact geometry-on-geometry CCD/IPC, and the heuristic
+contact point may not match the real contacting feature of a tile.
+Validate on real geometries and use ABD if verified contact fidelity
+is required. Physics failure may reflect an infeasible linkage/string
+route rather than missing animation frames.
