@@ -60,11 +60,27 @@ The ABD route is kept separate and not silently substituted.
 
 ## Suggested settings / reproduction
 
-Use a small grid initially; approximately 8–12 `actuation steps` and
-8–16 `solver iterations` to check mechanics, then scale up to 40–100
-steps with 16–30 iterations as CPU budget allows. Start with pull ratio
-0.65–0.85 to avoid abrupt constraints; adjust anchor height. View
-`Smooth browser player` to see the red string along with the rigid tiles.
+**Native PHYSICS steps** and **native timestep** control how much time the
+solver advances. **Animation frames** is only the number of snapshots
+sampled *uniformly across this duration* for playback: increasing it
+does not make the physical simulation longer. The old sampling filled
+most of the snapshots early in the simulation, skipping later changes.
+
+The Native sidebar now allows 40–600 physical steps (default 180) and
+a **Pull phase fraction** (default 0.70): the prescribed string length
+decreases over the first 70% of the physical time, then remains
+constant over the final 30% so hinge constraints and rigid-body
+contacts can relax. At timestep 0.02s, 180 steps yield 3.6s:
+2.52s pulling followed by 1.08s holding.
+
+Use a small grid initially; on larger cases CPU OBB contacts can make
+180 steps expensive. Start at 60–100 steps, then try 180–300 with
+8–20 solver iterations for diagnosis. Use 40–80 displayed frames and
+a pull end ratio 0.65–0.85 to reduce abrupt constraints. If the
+actual string length remains far above the commanded length, or
+hinge gaps grow, more steps alone will not solve the actuation problem.
+Inspect the contact count and string length residuals. View the
+`Smooth browser player` to see the red string and rigid tiles.
 
 Run targeted tests:
 
