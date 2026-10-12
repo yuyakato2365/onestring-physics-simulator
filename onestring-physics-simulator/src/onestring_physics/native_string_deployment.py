@@ -286,9 +286,23 @@ def _contacts(m: _Mechanism, *, apply: bool, strength: float) -> int:
             continue
         count += 1
         if apply and strength > 0:
-            correction = 0.5 * min(depth, 0.2 * m.tile_scale) * strength * normal
-            m.centers[i] -= correction
-            m.centers[j] += correction
+            # Rigid-body contact positional impulse, not only a translation.
+            # The support-region midpoints approximate the application point
+            # of a normal contact impulse. Rotations remain in SO(3).
+            proj_i = world[i] @ normal
+            proj_j = world[j] @ normal
+            support_band = max(1e-8, 0.15 * min(depth, m.tile_scale))
+            contact_a = world[i][proj_i >= float(proj_i.max())-support_band].mean(axis=0)
+            contact_b = world[j][proj_j <= float(proj_j.min())+support_band].mean(axis=0)
+            ra, rb = contact_a-m.centers[i], contact_b-m.centers[j]
+            xa, xb = np.cross(ra, normal), np.cross(rb, normal)
+            effective_mass = (2.0
+                              + xa @ _inverse_inertia_world(m, i) @ xa
+                              + xb @ _inverse_inertia_world(m, j) @ xb)
+            correction = min(float(depth), 0.20 * m.tile_scale) * float(strength)
+            impulse = normal * (correction / max(effective_mass, 1e-12))
+            _apply_point_impulse(m, i, ra, -impulse)
+            _apply_point_impulse(m, j, rb, impulse)
     return count
 
 
@@ -341,6 +355,7 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
     string_command_history = [float(m.initial_length)]
     string_actual_history = [float(m.initial_length)]
     collision_counts = [_contacts(m, apply=False, strength=0.)]
+    hinge_error_history=[_hinge_rms(m)]
     v = np.zeros_like(m.centers)
     w = np.zeros_like(m.centers)
     gravity_vec = np.array([0., 0., -gravity])
@@ -368,6 +383,12 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
                     _contacts(m, apply=True, strength=collision_strength)
             _pin_constraints(m, hinge_strength)
             _floor_constraint(m)
+            # Hard final collision pass: hinge/string projections earlier in
+            # the sweep can undo previous collision corrections. This is an
+            # experimental contact projection, NOT collision-free CCD/IPC.
+            if collision_strength > 0:
+                _contacts(m, apply=True, strength=collision_strength)
+                _floor_constraint(m)
             v = (m.centers - old_center) / dt
             w = (Rotation.from_matrix(
                 np.einsum("nij,nkj->nik", m.rotations, old_rot)
@@ -393,6 +414,7 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
             string_command_history.append(float(command))
             string_actual_history.append(float(_string_geometry(m)[0]))
             collision_counts.append(_contacts(m, apply=False, strength=0.))
+            hinge_error_history.append(_hinge_rms(m))
     final = _vertices(m)
     if len(frames) == 0 or not np.array_equal(frames[-1], final):
         frames.append(final.copy())
@@ -400,6 +422,7 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
         string_command_history.append(float(m.initial_length * ratio))
         string_actual_history.append(float(_string_geometry(m)[0]))
         collision_counts.append(_contacts(m, apply=False, strength=0.))
+        hinge_error_history.append(_hinge_rms(m))
     string_length, _, _ = _string_geometry(m)
     final_command = m.initial_length * ratio
     hinge_error = _hinge_rms(m)
@@ -423,6 +446,8 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
         "hinge_error": hinge_error,
         "collision_count": int(contacts),
         "initial_collision_count": int(collision_counts[0]),
+        "collision_counts_by_frame":list(collision_counts),
+        "hinge_rms_by_frame":list(hinge_error_history),
         "initial_string_length": float(m.initial_length),
         "commanded_string_length": float(final_command),
         "actual_string_length": float(string_length),
@@ -450,8 +475,18 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
         "simulation_runtime_seconds": float(time.perf_counter()-t0),
         "elapsed_time": float(time.perf_counter()-t0),
     }
+    metrics["solver_terminated"] = True
+    metrics["assembled_successfully"] = bool(metrics["stable_state"])
+    metrics["status"] = ("constraints_satisfied" if metrics["stable_state"]
+                         else "ended_with_constraint_residuals")
+    metrics["kinematic_reassembly_verified"] = False
     if progress_callback:
-        progress_callback("Native rigid OneString completed", 1., "frames and diagnostics available")
+        progress_callback(
+            "Native solver stopped", 1.,
+            f"status={metrics['status']}; collisions={contacts}, "
+            f"hinge_rms={hinge_error:.4g}, string_violation="
+            f"{metrics['constraint_violation']:.4g}",
+        )
     result=DeploymentResult(
         frames=frames, final_tiles=final.copy(),
         metrics=metrics, collision_counts=collision_counts,
@@ -460,4 +495,5 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
     result.string_path_frames=string_path_frames
     result.string_command_history=string_command_history
     result.string_actual_history=string_actual_history
+    result.hinge_error_history=hinge_error_history
     return result
