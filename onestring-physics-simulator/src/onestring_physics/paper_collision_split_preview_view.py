@@ -221,7 +221,9 @@ def render_split_candidate_previews(st, state, step_rows: list[dict]):
     )
 
     ntiles=int(new.get("tile_count",0))
-    render=ntiles<=700
+    # Match the existing performance guard in the cross-stage 3D inspector:
+    # two live Plotly meshes with hundreds of tiles are expensive.
+    render=ntiles<=250
     if not render:
         st.warning(
             f"{ntiles}パネル×前後2画面の3D描画は高負荷です。"
