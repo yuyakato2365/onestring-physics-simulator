@@ -1117,6 +1117,11 @@ with st.sidebar:
                 "native timestep (seconds)", min_value=0.001,
                 max_value=0.05, value=0.02, step=0.005, format="%.3f",
             )
+            st.caption(
+                "Nativeに反映する共通パラメータ: actuation steps、solver iterations/substeps、"
+                "damping ratio、hinge/collision weight、gravity、contact friction。"
+                "Legacy専用のsnap/lift weight、target T3D fit/guardなどはNativeに効きません。"
+            )
     abd_executable = ""
     abd_timestep = 0.01
     abd_density = 1000.0
