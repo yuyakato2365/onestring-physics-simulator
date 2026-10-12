@@ -247,3 +247,18 @@ def test_collision_pair_increase_criteria_only_when_needed():
     more=acceptance_checklist(before,after_more)
     assert any(row["criterion"]=="衝突ペア増加数の上限" and not row["ok"]
                for row in more)
+
+
+
+def test_top_hinge_preview_uses_top_corners_even_for_bottom_selected_dual_joints():
+    state=_pair()
+    state.hinge_graph.hinges[0].local_vertex_a=5
+    state.hinge_graph.hinges[0].local_vertex_b=4
+    snap=capture_split_trial_geometry(state)
+    np.testing.assert_array_equal(snap["hinges"],[[0,5,1,4]])
+    np.testing.assert_array_equal(snap["top_hinges"],[[0,1,1,0]])
+    fig,_=_preview_figure(
+        snap,"T2D Top",title="top",severity_max=.5,
+        include_hinges=True,red_collision_overlay=False,
+    )
+    assert any("hinge" in str(trace.name).lower() for trace in fig.data)
