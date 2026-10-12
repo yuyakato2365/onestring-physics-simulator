@@ -77,6 +77,7 @@ def test_collision_split_configuration_is_wired_only_to_full_rebuild():
         "collision_split_enabled":"collision_split_enabled",
         "collision_split_max_additional":"collision_split_max_additional",
         "collision_split_boundary_weight":"collision_split_boundary_weight",
+        "collision_split_gap_multiplier":"collision_split_gap_multiplier",
         "collision_split_candidate_attempts":"collision_split_candidate_attempts",
         "collision_split_min_relative_improvement":"collision_split_min_improvement",
     }
