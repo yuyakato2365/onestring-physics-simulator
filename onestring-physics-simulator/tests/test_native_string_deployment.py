@@ -216,3 +216,37 @@ def test_simulation_reports_termination_separately_from_assembly_success():
     assert len(result.hinge_error_history)==len(result.frames)
     assert len(result.collision_counts)==len(result.frames)
     assert len(result.string_actual_history)==len(result.frames)
+
+
+def test_bounded_extra_settling_extends_solver_not_the_pull_command():
+    state=_two_panel_state()
+    params=DeploymentParameters(
+        physics_backend="native", steps=20, native_extra_settle_steps=20,
+        native_timestep=.01,native_pull_fraction=.5,
+        native_pull_end_ratio=.80,solver_iterations=4,
+        gravity=0.,max_animation_frames=11,
+    )
+    result=simulate_native_string_deployment(state,params)
+    metrics=result.metrics
+    assert metrics["commanded_solver_steps"]==20
+    assert metrics["solver_steps"]==40
+    assert metrics["extra_settle_steps"]==20
+    assert metrics["total_physical_duration_seconds"]==pytest.approx(.40)
+    assert metrics["pull_duration_seconds"]==pytest.approx(.10)
+    assert metrics["settle_duration_seconds"]==pytest.approx(.30)
+    assert metrics["animation_frame_count"]==11
+    assert result.string_command_history[-1]==pytest.approx(
+        result.string_command_history[-3]
+    )
+    assert metrics["status"] in (
+        "ended_with_constraint_residuals","constraints_satisfied",
+    )
+
+
+def test_extra_settle_step_count_is_bounded():
+    state=_two_panel_state()
+    p=DeploymentParameters(
+        physics_backend="native",steps=10,native_extra_settle_steps=1001,
+    )
+    with pytest.raises(NativeDeploymentError,match="Extra settling"):
+        simulate_native_string_deployment(state,p)
