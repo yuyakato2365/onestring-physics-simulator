@@ -1026,6 +1026,23 @@ with st.sidebar:
         lambda: st.slider("Minimum collision improvement fraction", 0.0, 0.5,
                           0.03, 0.01, disabled=not collision_split_enabled),
     ))
+    collision_split_lookahead_enabled = _param_row(
+        "通常候補がすべて棄却された場合のみ、衝突数と総貫通エネルギーが"
+        "改善した棄却候補を1件保留し、その状態から2本目を仮追加します。"
+        "最終的な2本の配置をSplit前と比較し、既存の厳しい採用基準を"
+        "満たす場合だけ両方採用します。中間状態だけをSTLへ出力しません。",
+        lambda: st.checkbox(
+            "Enable two-cut lookahead from rejected Split (experimental)",
+            value=False,disabled=not collision_split_enabled,
+        ),
+    )
+    collision_split_lookahead_children = int(_param_row(
+        "保留した1本目から試す2本目の候補数。いずれも全工程を再計算します。",
+        lambda: st.slider("Second-cut candidates per lookahead",1,4,2,1,
+                          disabled=not collision_split_enabled or not collision_split_lookahead_enabled),
+    ))
+    if collision_split_lookahead_enabled and collision_split_max_additional < 2:
+        st.info("Two-cut lookaheadにはMaximum collision Split cutsが2以上必要です。")
     if collision_split_enabled:
         st.warning("Collision-driven Splitは全工程の再計算を繰り返します。"
                    "T2D-only rerunボタンではSplitを追加しません。")
@@ -1543,6 +1560,8 @@ def current_pipeline_key() -> tuple:
         collision_split_gap_multiplier,
         collision_split_candidate_attempts,
         collision_split_min_improvement,
+        collision_split_lookahead_enabled,
+        collision_split_lookahead_children,
         hinge_layout_max_candidate_pairs,
         hinge_layout_collision_sweeps_per_iteration,
         compute_backend,
@@ -1669,6 +1688,8 @@ pipeline_params = PipelineParameters(
     collision_split_gap_multiplier=collision_split_gap_multiplier,
     collision_split_candidate_attempts=collision_split_candidate_attempts,
     collision_split_min_relative_improvement=collision_split_min_improvement,
+    collision_split_lookahead_enabled=collision_split_lookahead_enabled,
+    collision_split_lookahead_children=collision_split_lookahead_children,
     hinge_layout_max_candidate_pairs=hinge_layout_max_candidate_pairs,
     hinge_layout_collision_sweeps_per_iteration=hinge_layout_collision_sweeps_per_iteration,
     strict_paper_flow=True,
@@ -2659,6 +2680,12 @@ elif view_stage == "T2D Dual Hinge":
                    "1本ごとにM2D→M3D→K3D→K2D→T3D→T2Dを再計算し、"
                    "改善しない候補は棄却します。"
                    f" Collision Split初期離隔倍率: {audit_metrics.get('collision_split_gap_multiplier', 1.):.2g}。")
+        if audit_metrics.get("collision_split_lookahead_enabled", False):
+            st.info(
+                "2本先読み探索を有効化中：単独採用候補がない場合、総貫通エネルギーが"
+                "改善した棄却候補からさらに1本追加して完全再計算します。"
+                "2本セットで元の採用基準を満たさない限り、両方棄却します。"
+            )
         if status == "T2D_reoptimized_on_existing_split_topology":
             st.info(
                 "この画面のSplit候補プレビューは、最後にRun OneString pipelineで"
