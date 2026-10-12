@@ -22,6 +22,7 @@ def _previous_state():
         "dual_hinge_show_large_history": True,
         "t2d_dual_show_large_panel_inspector": True,
         "t2d_top_show_large_panel_inspector": True,
+        "onestring_render_overview": True,
         "unrelated_user_preference": "untouched",
     }
 
@@ -41,6 +42,7 @@ def test_changed_grid_resets_heavy_stage_and_stale_panel_ids():
         "dual_hinge_inspection_trial", "dual_hinge_show_large_history",
         "t2d_top_show_large_panel_inspector",
         "t2d_dual_show_large_panel_inspector",
+        "onestring_render_overview",
     ):
         assert key not in state
     assert state["unrelated_user_preference"] == "untouched"
@@ -57,6 +59,7 @@ def test_same_grid_keeps_requested_stage_but_resets_panel_topology():
     assert "cross_stage_panel_id" not in state
     assert "dual_hinge_inspection_trial" not in state
     assert "dual_hinge_show_large_history" not in state
+    assert state["onestring_render_overview"] is True
 
 
 def test_first_pipeline_run_preserves_default_selection():
@@ -91,3 +94,14 @@ def test_result_is_published_before_costly_stage_rendering():
     assert '_large_history = _history_tile_count * _history_frame_count > 12000' in source
     assert 'if pose_history and _render_history:' in source
     assert 'if common > 200:' in source
+    assert source.index('st.session_state["onestring_just_completed_pipeline"] = True') < (
+        source.index('    st.rerun()\n\nstate = st.session_state.onestring_state')
+    )
+    assert source.index('progress_bar.empty()') < (
+        source.index('    st.rerun()\n\nstate = st.session_state.onestring_state')
+    )
+    assert 'st.session_state.pop("onestring_just_completed_pipeline", False)' in source
+    assert 'st.subheader("計算済み工程の概要")' in source
+    assert source.index('st.subheader("計算済み工程の概要")') < (
+        source.index('st.plotly_chart(figure_pipeline_overview(state)')
+    )
