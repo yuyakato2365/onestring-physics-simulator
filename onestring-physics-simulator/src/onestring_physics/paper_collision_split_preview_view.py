@@ -84,7 +84,9 @@ def _preview_figure(snapshot: dict, stage: str, *,
     if red_collision_overlay:
         fig,_,_=add_t2d_collision_overlay(fig,assembly,hinge_graph=None)
     if include_hinges:
-        _add_largest_hinge_gaps(fig,snapshot,vertices)
+        hinge_snapshot=(snapshot if stage=="T2D Dual" else
+                        dict(snapshot,hinges=snapshot.get("top_hinges",snapshot.get("hinges",[]))))
+        _add_largest_hinge_gaps(fig,hinge_snapshot,vertices)
     fig.update_layout(
         scene=dict(aspectmode="data"),
         margin=dict(l=8,r=8,t=52,b=8),
