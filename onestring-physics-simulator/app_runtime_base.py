@@ -1740,17 +1740,23 @@ if run_pipeline:
         st.session_state.pop("actuation_key", None)
 
 state = st.session_state.onestring_state
-if run_pipeline:
-    # Shown *before* any Plotly figure generation. Users can now distinguish
-    # a completed calculation from a display/rendering failure.
+# A small, persistent result status is shown on EVERY subsequent UI rerun,
+# not just on the Run button event. This helps distinguish a missing rendered
+# figure from a lost session state after a grid change.
+_saved_grid_size = st.session_state.get("onestring_completed_grid_size")
+if _saved_grid_size is not None:
     _quad_count = len(state.mesh_2d_initial.faces)
     _tile_count = len(state.tiles_2d_dual_hinge.vertices)
-    st.success(
-        f"計算結果を保存しました: grid={grid_size}×{grid_size}, "
+    _result_text = (
+        f"保存済み結果: grid={_saved_grid_size}×{_saved_grid_size}, "
         f"M2D四角形={_quad_count}, T2Dパネル={_tile_count}。"
-        " 下の「View stage」で各工程の結果を確認できます。"
     )
-    if _grid_view_reset:
+    if run_pipeline:
+        st.success("計算結果を保存しました。 " + _result_text +
+                   " 下の「View stage」で各工程を確認できます。")
+    else:
+        st.caption(_result_text)
+    if run_pipeline and _grid_view_reset:
         st.info(
             "gridサイズが変わったため、古いパネル番号と表示状態をリセットし、"
             "軽量なPipeline Viewを表示しています。"
@@ -2165,7 +2171,15 @@ if view_stage not in {"Pipeline View", "S", "Split Map", "Mode Comparison", "Met
         )
 
 if view_stage == "Pipeline View":
-    st.plotly_chart(figure_pipeline_overview(state), use_container_width=True, key="pipeline_overview")
+    try:
+        st.plotly_chart(figure_pipeline_overview(state),
+                        use_container_width=True, key="pipeline_overview")
+    except Exception as exc:
+        # Completed data remains available even if the overview visualizer
+        # fails on a new grid shape. Make the failure visible and actionable.
+        st.error("計算は完了していますが、Pipeline Viewの描画に失敗しました。"
+                 "View stageのMetricsなどから保存結果を確認できます。")
+        st.exception(exc)
     selected_report = st.selectbox("stage report", list(state.stage_reports.keys()))
     report = state.stage_reports[selected_report]
     cols = st.columns(4)
