@@ -44,6 +44,7 @@ def test_reassembly_does_not_copy_distorted_target_into_t2d_panels():
     placed,report=rigid_reassemble_t2d(_state(rest,target))
     assert report["kinematic_only"]
     assert report["rigid_panels_preserved"]
+    assert report["max_internal_distance_change"] < 1e-10
     assert report["total_target_vertex_rms"]>0.02
     assert report["max_tile_target_fit_rms"]>0.02
     assert not np.allclose(placed,target)
