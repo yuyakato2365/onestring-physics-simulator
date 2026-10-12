@@ -3,7 +3,7 @@
 A trial has been fully rebuilt and optimized, but a rejected candidate must not
 replace the authoritative OneStringDesignState. Keeping entire rejected states
 would retain huge K3D histories, surface caches and optimizer internals.
-Snapshots contain only float32 vertices, source faces, and small hinge index
+Snapshots contain only float64 vertices, source faces, and small hinge index
 arrays; no objective history, SciPy state or STL source is altered.
 """
 from __future__ import annotations
@@ -55,7 +55,10 @@ def capture_split_trial_geometry(state) -> dict | None:
             continue
         if width == 4 and (pts.ndim != 2 or pts.shape[1] != 3):
             continue
-        entry = {"vertices": np.asarray(pts, dtype=np.float32).copy()}
+        # Keep float64 precision so near-tangent SAT contacts do not switch
+        # classification when the user compares the captured trial with the
+        # original rejection diagnostics.
+        entry = {"vertices": np.asarray(pts, dtype=np.float64).copy()}
         if faces is not None:
             entry["faces"] = faces.copy()
         captured[name] = entry
