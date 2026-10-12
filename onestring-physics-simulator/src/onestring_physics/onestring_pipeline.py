@@ -8603,7 +8603,12 @@ def build_onestring_design(
                     status=proposal_metrics.get('status','no_valid_complete_grid_cut')
                     break
                 picked=False
-                before_preview=capture_split_trial_geometry(state)
+                try:
+                    before_preview=capture_split_trial_geometry(state)
+                except Exception:
+                    # Pure visualization is optional: invalid/unusual geometry
+                    # must never prevent the numerical Split search.
+                    before_preview=None
                 for proposal in candidates[:attempts]:
                     # Re-run source M2D -> target T2D, not an imaginary deleted
                     # hinge in only the dual-hinge solver. Rejected builds are
