@@ -1099,6 +1099,7 @@ with st.sidebar:
     native_timestep = 0.02
     native_solver_steps = 180
     native_pull_fraction = 0.70
+    native_extra_settle_steps = 40
     if physics_backend == "native":
         st.info(
             "T2D Dualのパネルをそのまま剛体として使用し、ヒンジを保ちながら"
@@ -1132,10 +1133,16 @@ with st.sidebar:
                 help="0.70 means 70% of time reeling in the string and "
                      "30% holding the command at its final length.",
             )
+            native_extra_settle_steps = st.slider(
+                "Extra settling steps after scheduled physics",
+                min_value=0, max_value=400, value=40, step=20,
+                help="Bounded additional physical iterations, holding the final "
+                     "commanded string length. This does not force the T3D target.",
+            )
             st.caption(
-                f"物理時間: {native_solver_steps * native_timestep:.2f} 秒 "
+                f"物理時間: {(native_solver_steps+native_extra_settle_steps)*native_timestep:.2f} 秒 "
                 f"(引く {native_solver_steps*native_timestep*native_pull_fraction:.2f} 秒、"
-                f"保持 {native_solver_steps*native_timestep*(1-native_pull_fraction):.2f} 秒)。"
+                f"紐長保持 {(native_solver_steps*(1-native_pull_fraction)+native_extra_settle_steps)*native_timestep:.2f} 秒)。"
                 "表示フレーム数を増やしても、この計算時間は増えません。"
             )
             st.caption(
@@ -1663,6 +1670,7 @@ def current_actuation_key() -> tuple:
         native_timestep,
         native_solver_steps,
         native_pull_fraction,
+        native_extra_settle_steps,
         abd_executable,
         abd_timestep,
         abd_density,
@@ -1983,6 +1991,7 @@ deployment_params = DeploymentParameters(
     native_anchor_height_tiles=native_anchor_height_tiles,
     native_timestep=native_timestep,
     native_pull_fraction=native_pull_fraction,
+    native_extra_settle_steps=native_extra_settle_steps,
     abd_executable=abd_executable or None,
     abd_timestep=abd_timestep,
     abd_density=abd_density,
@@ -3365,16 +3374,19 @@ elif view_stage == "Assembly Animation":
                     "timestep": paper_params.native_timestep,
                     "steps": paper_params.steps,
                     "simulated_seconds": (
-                        paper_params.steps * paper_params.native_timestep
+                        (paper_params.steps+paper_params.native_extra_settle_steps)
+                        * paper_params.native_timestep
                     ),
+                    "extra_settle_steps":paper_params.native_extra_settle_steps,
                     "pull_fraction": paper_params.native_pull_fraction,
                     "pull_seconds": (
                         paper_params.steps * paper_params.native_timestep
                         * paper_params.native_pull_fraction
                     ),
                     "settling_seconds": (
-                        paper_params.steps * paper_params.native_timestep
-                        * (1.0 - paper_params.native_pull_fraction)
+                        (paper_params.steps * (1.0 - paper_params.native_pull_fraction)
+                         + paper_params.native_extra_settle_steps)
+                        * paper_params.native_timestep
                     ),
                     "display_frames_requested": frame_count,
                     "solver_iterations": paper_params.solver_iterations,
