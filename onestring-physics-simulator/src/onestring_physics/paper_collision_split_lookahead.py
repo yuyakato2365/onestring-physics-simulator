@@ -16,6 +16,8 @@ def promising_rejected_first_cut(before: dict, after: dict) -> bool:
 
     An increased *maximum* SAT penetration is allowed in this temporary state,
     since the second cut is intended to address such a remaining hotspot.
+    Require a remaining collision: collision-ranked second cuts cannot be
+    generated from a collision-free layout, even if its hinges are disconnected.
     This does NOT weaken the final committed-state acceptance test.
     """
     if before.get("status") != "ok" or after.get("status") != "ok":
@@ -27,7 +29,7 @@ def promising_rejected_first_cut(before: dict, after: dict) -> bool:
         e1 = float(after["collision_energy"])
     except (KeyError, ValueError, TypeError, OverflowError):
         return False
-    return (0 <= p1 <= p0 and p0 > 0
+    return (0 < p1 <= p0
             and math.isfinite(e0) and math.isfinite(e1)
             and 0 <= e1 < e0)
 
