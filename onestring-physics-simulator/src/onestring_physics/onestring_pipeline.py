@@ -1089,6 +1089,7 @@ class DeploymentParameters(_original.DeploymentParameters):
     native_anchor_height_tiles: float = 2.0
     native_timestep: float = 0.02
     native_pull_fraction: float = 0.70
+    native_extra_settle_steps: int = 0
     abd_executable: str | None = None
     abd_job_directory: str = "output/abd_run"
     abd_timestep: float = 0.01
