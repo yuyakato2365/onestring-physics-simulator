@@ -1082,7 +1082,12 @@ class PipelineParameters(_original.PipelineParameters):
 
 @dataclass
 class DeploymentParameters(_original.DeploymentParameters):
-    physics_backend: Literal["legacy", "abd"] = "legacy"
+    physics_backend: Literal["native", "legacy", "abd"] = "native"
+    # Self-contained approximate PBD: genuine T2D shape, rigid bodies,
+    # hinges and unilateral routed-string pull (never a T3D pose actuator).
+    native_pull_end_ratio: float = 0.45
+    native_anchor_height_tiles: float = 2.0
+    native_timestep: float = 0.02
     abd_executable: str | None = None
     abd_job_directory: str = "output/abd_run"
     abd_timestep: float = 0.01
@@ -9107,7 +9112,7 @@ def simulate_onestring_deployment(state, params=None, progress_callback=None):
         raise ValueError('Cannot actuate an invalid string route: ' + str(route_metrics.get('string_path_status')))
     params = params or DeploymentParameters()
     backend = str(getattr(params, "physics_backend", "legacy"))
-    if backend not in {"legacy", "abd"}:
+    if backend not in {"native", "legacy", "abd"}:
         raise ValueError(f"unknown physics backend: {backend}")
     cache_enabled = True
     cache = None
@@ -9126,7 +9131,12 @@ def simulate_onestring_deployment(state, params=None, progress_callback=None):
     except Exception:
         cache_enabled = False
 
-    if backend == "abd":
+    if backend == "native":
+        from .native_string_deployment import simulate_native_string_deployment
+        result = simulate_native_string_deployment(
+            state, params, progress_callback=progress_callback,
+        )
+    elif backend == "abd":
         if progress_callback is not None:
             progress_callback("Prepare Autodesk ABD job", 0.03, "serialize rest meshes, joints, guides, pull and shake schedules")
         abd_gravity_z = float(getattr(params, "abd_gravity_z", 0.0))
