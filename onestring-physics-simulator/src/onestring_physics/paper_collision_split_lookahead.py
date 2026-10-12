@@ -12,13 +12,17 @@ import numpy as np
 
 
 def promising_rejected_first_cut(before: dict, after: dict) -> bool:
-    """Bound lookahead to first cuts with fewer collisions and lower total energy.
+    """Accept intermediate states with lower energy and only minor pair growth.
 
-    An increased *maximum* SAT penetration is allowed in this temporary state,
-    since the second cut is intended to address such a remaining hotspot.
-    Require a remaining collision: collision-ranked second cuts cannot be
-    generated from a collision-free layout, even if its hinges are disconnected.
-    This does NOT weaken the final committed-state acceptance test.
+    These candidates are NOT committed. A first cut may have a few more
+    shallow collision pairs (within the ORIGINAL acceptance pair allowance)
+    and still be a useful starting state for the next cut. In particular,
+    an intermediate energy improvement < 20% must not prematurely block
+    a possible two-cut improvement. The ORIGINAL acceptance rules remain
+    mandatory for the final combined layout.
+
+    Require at least one surviving collision to seed a collision-driven
+    second cut; a zero-collision layout with broken hinges has no hotspot.
     """
     if before.get("status") != "ok" or after.get("status") != "ok":
         return False
@@ -29,7 +33,8 @@ def promising_rejected_first_cut(before: dict, after: dict) -> bool:
         e1 = float(after["collision_energy"])
     except (KeyError, ValueError, TypeError, OverflowError):
         return False
-    return (0 < p1 <= p0
+    allowed_extra = max(2, math.ceil(0.02 * p0))
+    return (p0 > 0 and 0 < p1 <= p0 + allowed_extra
             and math.isfinite(e0) and math.isfinite(e1)
             and 0 <= e1 < e0)
 
