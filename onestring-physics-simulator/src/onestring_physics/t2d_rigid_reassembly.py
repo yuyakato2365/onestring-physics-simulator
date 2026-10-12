@@ -121,6 +121,11 @@ def rigid_reassemble_t2d(state) -> tuple[np.ndarray, dict]:
     contact=obb_overlap_3d_counts(placed)
     initial_contact=obb_overlap_3d_counts(rest)
     tgt_rms=float(np.sqrt(np.mean(np.sum((placed-target)**2,axis=-1)))) if len(rest) else 0.
+    # Confirm invariant Euclidean distances for ALL vertex pairs of each
+    # tile: T2D solids are rigidly moved, never replaced by T3D geometry.
+    old_dist=np.linalg.norm(rest[:,:,None,:]-rest[:,None,:,:],axis=-1)
+    new_dist=np.linalg.norm(placed[:,:,None,:]-placed[:,None,:,:],axis=-1)
+    max_internal_distance_change=float(np.max(np.abs(new_dist-old_dist))) if len(rest) else 0.
     return placed,{
         "tile_count":int(len(rest)),
         "per_tile_target_fit_rms":float(np.sqrt(np.mean(np.square(tile_fit)))) if tile_fit else 0.,
@@ -133,7 +138,8 @@ def rigid_reassemble_t2d(state) -> tuple[np.ndarray, dict]:
         "reassembled_3d_obb_pairs":contact["pairs"],
         "reassembled_3d_obb_max_depth":contact["max_penetration"],
         "reassembled_3d_obb_participants":contact["participants"],
-        "rigid_panels_preserved":True,
+        "rigid_panels_preserved":bool(max_internal_distance_change<=1e-8),
+        "max_internal_distance_change":max_internal_distance_change,
         "kinematic_only":True,
         "contact_method":"approximate 15-axis OBB SAT, not exact polyhedral intersection",
     }
