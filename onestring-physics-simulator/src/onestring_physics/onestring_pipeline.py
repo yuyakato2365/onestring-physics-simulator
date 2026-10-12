@@ -1073,6 +1073,10 @@ class PipelineParameters(_original.PipelineParameters):
     collision_split_gap_multiplier: float = 1.0
     collision_split_min_relative_improvement: float = 0.03
     collision_split_candidate_attempts: int = 3
+    # Opt-in: inspect a promising but rejected first cut and up to N second
+    # cuts. Commit both only if the final state passes the ORIGINAL test.
+    collision_split_lookahead_enabled: bool = False
+    collision_split_lookahead_children: int = 2
     collision_split_forced_lines: tuple = ()
 
 
@@ -8541,14 +8545,18 @@ def build_onestring_design(
                 "Reference run recorded fallbacks and is therefore rejected: "
                 + "; ".join(str(value) for value in diagnostics["fallbacks_used"])
             )
-    # One cut, one full reoptimization, one acceptance decision. Failed
-    # candidate builds are rejected and the last accepted state is preserved.
+    # Normally one cut per accepted step. Optional bounded lookahead can
+    # inspect a temporarily rejected first cut followed by a second cut,
+    # but it publishes neither unless the pair passes baseline acceptance.
     if bool(getattr(active_params,'collision_split_enabled',False)):
         from .paper_collision_split import (
             rank_collision_split_candidates, collision_quality,
             collision_component_audit, accept_if_improved,
         )
         from .paper_collision_split_preview import capture_split_trial_geometry
+        from .paper_collision_split_lookahead import (
+            promising_rejected_first_cut, validate_real_split_trial,
+        )
         steps=[]
         # Rejected complete-build states may contain enormous optimizer
         # histories and caches. Store ONLY the four stage geometries needed
@@ -8557,12 +8565,15 @@ def build_onestring_design(
         # T2D metrics (which are also dumped in Streamlit and JSON exports).
         candidate_previews=[]
         accepted=list(getattr(active_params,'collision_split_forced_lines',()) or ())
+        original_cut_count=len(accepted)
         limit=int(getattr(active_params,'collision_split_max_additional',3))
+        lookahead=bool(getattr(active_params,'collision_split_lookahead_enabled',False))
+        lookahead_children=int(getattr(active_params,'collision_split_lookahead_children',2))
         attempts=int(getattr(active_params,'collision_split_candidate_attempts',3))
         weight=float(getattr(active_params,'collision_split_boundary_weight',1.))
         minimum=float(getattr(active_params,'collision_split_min_relative_improvement',.03))
         gap_multiplier=float(getattr(active_params,'collision_split_gap_multiplier',1.0))
-        max_attempts=max(1,limit*attempts)
+        max_attempts=max(1,limit*attempts*(1+lookahead_children if lookahead else 1))
         def split_progress(stage,fraction,detail="",attempt_index=0):
             if progress_callback is None:
                 return
@@ -8571,6 +8582,7 @@ def build_onestring_design(
             last_progress[0]=max(last_progress[0],min(.98,displayed))
             progress_callback(stage,last_progress[0],detail)
         if not (0<=limit<=10 and 1<=attempts<=16
+                and 1<=lookahead_children<=8
                 and np.isfinite([weight,minimum]).all()
                 and weight>=0 and 0<=minimum<=1
                 and np.isfinite(gap_multiplier)
@@ -8585,7 +8597,13 @@ def build_onestring_design(
         else:
             # A collision-free layout already has no reason for an extra cut.
             status='no_collisions' if baseline['collision_pairs']==0 else 'searching'
-            for cut_index in range(limit):
+            for _ in range(limit):
+                cut_index=len(accepted)-original_cut_count
+                # A successful two-cut lookahead consumes two slots at once.
+                if cut_index>=limit:
+                    status=('collision_free' if collision_quality(state)['collision_pairs']==0
+                            else 'split_limit_reached')
+                    break
                 before=collision_quality(state)
                 before['component_audit']=collision_component_audit(state)
                 if before['status']!='ok' or before['collision_pairs']==0:
@@ -8603,6 +8621,9 @@ def build_onestring_design(
                     status=proposal_metrics.get('status','no_valid_complete_grid_cut')
                     break
                 picked=False
+                # Keep at most ONE completed intermediate state in memory;
+                # full K3D/T2D states are much heavier than preview snapshots.
+                best_rejected_parent=None
                 try:
                     before_preview=capture_split_trial_geometry(state)
                 except Exception:
@@ -8652,48 +8673,9 @@ def build_onestring_design(
                             preview['snapshot_error']=(
                                 f"{type(snapshot_error).__name__}: {str(snapshot_error)[:140]}"
                             )
-                        # A candidate is not real unless the rebuilt M2D
-                        # actually contains ALL committed collision seams.
-                        from .simple_split_panel_patch import _edge_components
-                        split_mesh=trial_state.mesh_2d_initial
-                        split_metrics=split_mesh.metrics
-                        applied_count=int(split_metrics.get('collision_split_count',-1))
-                        final_cut_count=split_metrics.get(
-                            'collision_split_final_pass_applied_count',None
-                        )
-                        if applied_count!=len(next_forced):
-                            raise RuntimeError(
-                                'Collision Split topology not propagated through M2D: '
-                                f'expected={len(next_forced)}, initial_cuts={applied_count}'
-                            )
-                        if final_cut_count is not None and int(final_cut_count)!=len(next_forced):
-                            raise RuntimeError(
-                                'Collision Split lost during optional final M2D topology pass'
-                            )
-                        # The active dated launcher may use the Simple Split
-                        # pass without installing final_split_panel_pass. In
-                        # that case audit REAL source-face IDs and connected
-                        # components, rather than requiring an uninstalled
-                        # optional pass's metrics field.
-                        seam_records=split_metrics.get('collision_split_step_analysis',[])
-                        final_faces=np.asarray(split_mesh.faces,int)
-                        if len(seam_records)!=len(next_forced):
-                            raise RuntimeError('Collision Split source seam records missing')
-                        for seam in seam_records:
-                            if (not seam.get('complete_boundary_to_boundary',False)
-                                    or not seam.get('split_boundary_pairs')):
-                                raise RuntimeError('Collision Split was not a complete real source seam')
-                            for a,ea,b,eb in seam['split_boundary_pairs']:
-                                edge_a=set(map(int,final_faces[a,[ea,(ea+1)%4]]))
-                                edge_b=set(map(int,final_faces[b,[eb,(eb+1)%4]]))
-                                if edge_a==edge_b:
-                                    raise RuntimeError('Collision Split edge was rewelded')
-                        old_parts=len(_edge_components(np.asarray(state.mesh_2d_initial.faces,int)))
-                        new_parts=len(_edge_components(final_faces))
-                        if new_parts<=old_parts:
-                            raise RuntimeError(
-                                'Collision Split did not add a real disconnected M2D component'
-                            )
+                        # Audit true disconnected source mesh topology, not
+                        # only the loss of terms in the hinge objective.
+                        validate_real_split_trial(state,trial_state,len(next_forced))
                         after=collision_quality(trial_state)
                         after['component_audit']=collision_component_audit(trial_state)
                         improved,reason=accept_if_improved(
@@ -8722,6 +8704,20 @@ def build_onestring_design(
                         row['preview_index']=None
                     steps.append(row)
                     if not improved:
+                        if (lookahead and limit-cut_index>=2
+                                and trial_state is not None
+                                and promising_rejected_first_cut(before,after)):
+                            # The best energy-reducing rejected state is the
+                            # starting point for at most lookahead_children
+                            # second-cut attempts IF all ordinary cuts fail.
+                            if (best_rejected_parent is None or
+                                    after['collision_energy'] <
+                                    best_rejected_parent['quality']['collision_energy']):
+                                best_rejected_parent=dict(
+                                    state=trial_state, quality=dict(after),
+                                    proposal=dict(proposal), step_index=len(steps)-1,
+                                    preview_index=row['preview_index'],
+                                )
                         continue
                     state=trial_state
                     accepted=next_forced
@@ -8735,6 +8731,133 @@ def build_onestring_design(
                         attempt_index=max(0,len(steps)-1),
                     )
                     break
+                if not picked and best_rejected_parent is not None:
+                    # Explore ONE additional real M2D cut from the best
+                    # intermediate rejected state. The intermediate state is
+                    # NEVER published or written into a fabrication export.
+                    parent=best_rejected_parent
+                    parent_state=parent['state']
+                    parent_quality=parent['quality']
+                    parent_proposal=parent['proposal']
+                    parent_preview=(candidate_previews[parent['preview_index']]['after']
+                                    if parent['preview_index'] is not None else None)
+                    try:
+                        second_candidates,_=rank_collision_split_candidates(
+                            parent_state,boundary_weight=weight,
+                            max_candidates=max(lookahead_children*3,lookahead_children),
+                        )
+                    except Exception as exc:
+                        second_candidates=[]
+                        steps[parent['step_index']]['lookahead_error']=(
+                            f"{type(exc).__name__}: {str(exc)[:160]}"
+                        )
+                    for second in second_candidates[:lookahead_children]:
+                        next_forced=accepted+[parent_proposal,second]
+                        second_params=copy.copy(active_params)
+                        second_params.collision_split_enabled=False
+                        second_params.collision_split_forced_lines=tuple(next_forced)
+                        slot=len(steps)
+                        def second_progress(stage,fraction,detail='',k=cut_index+2,n=slot):
+                            split_progress(f'Collision lookahead cut {k}/{limit}: {stage}',
+                                           fraction,detail,attempt_index=n)
+                        second_row=dict(
+                            cut_number=cut_index+2,proposal=dict(second),
+                            before=dict(parent_quality),
+                            lookahead_baseline=dict(before),
+                            lookahead_first_proposal=dict(parent_proposal),
+                            acceptance_mode='lookahead_second_cut',
+                            status='pending',
+                        )
+                        second_preview=dict(
+                            cut_number=cut_index+2,proposal=dict(second),
+                            attempt_index=len(steps),before=parent_preview,after=None,
+                            lookahead_baseline_metrics=dict(before),
+                        )
+                        try:
+                            pair_state=_ORIGINAL_BUILD_ONESTRING_DESIGN(
+                                target,second_params,run_simulation=False,
+                                deployment_params=deployment_params,
+                                progress_callback=second_progress,
+                            )
+                            try:
+                                second_preview['after']=capture_split_trial_geometry(pair_state)
+                            except Exception as preview_exc:
+                                second_preview['snapshot_error']=(
+                                    f"{type(preview_exc).__name__}: {str(preview_exc)[:140]}"
+                                )
+                            validate_real_split_trial(
+                                parent_state,pair_state,len(next_forced)
+                            )
+                            pair_quality=collision_quality(pair_state)
+                            pair_quality['component_audit']=collision_component_audit(pair_state)
+                            # Crucial: compare TWO cuts against the original
+                            # accepted baseline, NOT against the rejected
+                            # intermediate candidate. All original guards
+                            # (hinge RMS, max penetration, energy, pair count)
+                            # remain active for the final outcome.
+                            pair_ok,pair_reason=accept_if_improved(
+                                before,pair_quality,
+                                minimum_relative_improvement=minimum,
+                            )
+                        except Exception as exc:
+                            pair_state=None
+                            pair_quality={'status':'build_failed'}
+                            pair_ok=False
+                            pair_reason=(
+                                f"rebuild_failed: {type(exc).__name__}: {str(exc)[:240]}"
+                            )
+                        second_row.update(
+                            after=dict(pair_quality),accepted=bool(pair_ok),
+                            decision_reason=str(pair_reason),
+                            status='accepted' if pair_ok else 'rejected',
+                        )
+                        if second_preview['after'] is not None:
+                            second_row['preview_index']=len(candidate_previews)
+                            second_preview.update(
+                                accepted=bool(pair_ok),
+                                decision_reason=str(pair_reason),
+                                before_metrics=dict(parent_quality),
+                                after_metrics=dict(pair_quality),
+                            )
+                            candidate_previews.append(second_preview)
+                        else:
+                            second_row['preview_index']=None
+                        steps.append(second_row)
+                        if not pair_ok:
+                            continue
+                        # Atomically commit both real cuts only after the
+                        # final state passes the ORIGINAL numerical checks.
+                        first_row=steps[parent['step_index']]
+                        first_row['single_step_decision_reason']=first_row['decision_reason']
+                        first_row.update(
+                            accepted=True,status='accepted',
+                            acceptance_mode='lookahead_first_cut',
+                            decision_reason='accepted_as_first_cut_of_validated_pair',
+                        )
+                        if parent['preview_index'] is not None:
+                            candidate_previews[parent['preview_index']].update(
+                                accepted=True,acceptance_mode='lookahead_first_cut',
+                                single_step_decision_reason=first_row['single_step_decision_reason'],
+                                decision_reason='accepted_as_first_cut_of_validated_pair',
+                            )
+                        second_row['decision_reason']='accepted_as_second_cut_of_validated_pair'
+                        if second_row['preview_index'] is not None:
+                            candidate_previews[second_row['preview_index']].update(
+                                decision_reason=second_row['decision_reason'],
+                                acceptance_mode='lookahead_second_cut',
+                            )
+                        state=pair_state
+                        accepted=next_forced
+                        picked=True
+                        status=('collision_free' if pair_quality['collision_pairs']==0
+                                else 'searching')
+                        split_progress(
+                            'Collision two-cut lookahead accepted',1.,
+                            f"2 cuts accepted atomically; collision pairs "
+                            f"{before['collision_pairs']} -> {pair_quality['collision_pairs']}",
+                            attempt_index=len(steps)-1,
+                        )
+                        break
                 if not picked:
                     status='no_candidate_improved_or_rebuilt'
                     break
@@ -8747,6 +8870,8 @@ def build_onestring_design(
             collision_split_boundary_weight=weight,
             collision_split_gap_multiplier=gap_multiplier,
             collision_split_min_relative_improvement=minimum,
+            collision_split_lookahead_enabled=lookahead,
+            collision_split_lookahead_children=lookahead_children,
             collision_split_attempted=len(steps),
             collision_split_accepted=len(accepted),
             collision_split_newly_accepted=sum(bool(step['accepted']) for step in steps),
@@ -8799,6 +8924,8 @@ def rerun_t2d_dual_hinge(state, params=None, progress_callback=None):
             'collision_split_boundary_weight',
             'collision_split_gap_multiplier',
             'collision_split_min_relative_improvement',
+            'collision_split_lookahead_enabled',
+            'collision_split_lookahead_children',
             'collision_split_final_component_audit',
             'collision_split_attempted',
             'collision_split_accepted',
