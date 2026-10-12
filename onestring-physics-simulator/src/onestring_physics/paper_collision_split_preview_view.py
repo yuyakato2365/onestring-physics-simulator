@@ -142,6 +142,7 @@ def render_split_candidate_previews(st, state, step_rows: list[dict]):
     after=p.get("after_metrics",{})
     decision=p.get("decision_reason","not evaluated")
     facts=rejection_comparison(before,after)
+    mode=p.get("acceptance_mode")
     if p.get("accepted",False):
         st.success(f"正式採用したSplit候補：{decision}")
     else:
@@ -150,6 +151,18 @@ def render_split_candidate_previews(st, state, step_rows: list[dict]):
             f"最終設計には採用されていません。棄却理由：{decision}"
         )
 
+    if mode=="lookahead_first_cut":
+        st.info(
+            "この1本は単独では棄却でした（理由："
+            f"{p.get('single_step_decision_reason','unknown')}）。"
+            "追加の2本目と合わせて元の採用条件を満たしたため、"
+            "2本まとめて正式採用されました。"
+        )
+    if p.get("lookahead_baseline_metrics"):
+        st.info(
+            "2本先読み候補です。下の前後比較は「1本目の仮配置→2本目の仮配置」。"
+            "正式採否は「最後の正式採用状態→2本目の仮配置」で評価しています。"
+        )
     d0=before.get("penetration_max")
     d1=after.get("penetration_max")
     h0=before.get("hinge_rms")
@@ -202,9 +215,30 @@ def render_split_candidate_previews(st, state, step_rows: list[dict]):
             "切断線が本当にメッシュへ適用されたか等のトポロジー監査は"
             "別途行い、その結果も棄却理由に反映されます。"
         )
+    baseline=p.get("lookahead_baseline_metrics")
+    if baseline:
+        st.markdown("**2本セット全体の評価：正式採用前 → 2本追加後**")
+        st.dataframe([{
+            "評価項目":name,"2本追加前":baseline.get(key),
+            "2本追加後":after.get(key),
+        } for name,key in (
+            ("SAT衝突ペア数","collision_pairs"),
+            ("貫通エネルギー（二乗深さ総和）","collision_energy"),
+            ("最大SAT貫通深さ","penetration_max"),
+            ("残存ヒンジRMS","hinge_rms"),
+        )],hide_index=True,use_container_width=True)
+        final_checks=acceptance_checklist(
+            baseline,after,min_relative_improvement=minimum,
+        )
+        if final_checks:
+            st.dataframe([{
+                "2本セットの正式判定条件":item["criterion"],
+                "実測値":item["observed"],"許容閾値":item["limit"],
+                "合否":"✓" if item["ok"] else "✕",
+            } for item in final_checks],hide_index=True,use_container_width=True)
     st.caption(
         "評価表は実際の仮Split再計算時に記録した値です。"
-        "以下の形状は診断専用コピーであり、最終採用STLは変更しません。"
+        "以下の形状は診断専用コピーであり、棄却候補は最終採用STLに反映しません。"
     )
 
     stage=st.selectbox(
