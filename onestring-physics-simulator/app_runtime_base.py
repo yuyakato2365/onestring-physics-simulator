@@ -1738,8 +1738,24 @@ if run_pipeline:
             new_grid_size=grid_size,
         )
         st.session_state.pop("actuation_key", None)
+        # A completed rebuild must not continue rendering inside the same
+        # Streamlit script run that still owns the "Building..." spinner.
+        # Persist the results and show them in a CLEAN display-only rerun.
+        st.session_state["onestring_just_completed_pipeline"] = True
+        progress_bar.empty()
+        progress_status.empty()
+
+    print(
+        f"[ONESTRING-UI] Completed and stored grid={grid_size}; "
+        "switching to display-only rerun without rebuilding.",
+        flush=True,
+    )
+    st.rerun()
 
 state = st.session_state.onestring_state
+_just_completed_pipeline = bool(
+    st.session_state.pop("onestring_just_completed_pipeline", False)
+)
 # A small, persistent result status is shown on EVERY subsequent UI rerun,
 # not just on the Run button event. This helps distinguish a missing rendered
 # figure from a lost session state after a grid change.
@@ -1751,12 +1767,12 @@ if _saved_grid_size is not None:
         f"セッション内の計算結果: grid={_saved_grid_size}×{_saved_grid_size}, "
         f"M2D四角形={_quad_count}, T2Dパネル={_tile_count}。"
     )
-    if run_pipeline:
+    if _just_completed_pipeline:
         st.success("計算結果をセッションに保持しました。 " + _result_text +
                    " 下の「View stage」で各工程を確認できます。")
     else:
         st.caption(_result_text)
-    if run_pipeline and _grid_view_reset:
+    if _just_completed_pipeline and st.session_state.get("onestring_grid_view_reset", False):
         st.info(
             "gridサイズが変わったため、古いパネル番号と表示状態をリセットし、"
             "軽量なPipeline Viewを表示しています。"
@@ -2171,15 +2187,32 @@ if view_stage not in {"Pipeline View", "S", "Split Map", "Mode Comparison", "Met
         )
 
 if view_stage == "Pipeline View":
-    try:
-        st.plotly_chart(figure_pipeline_overview(state),
-                        use_container_width=True, key="pipeline_overview")
-    except Exception as exc:
-        # Completed data remains available even if the overview visualizer
-        # fails on a new grid shape. Make the failure visible and actionable.
-        st.error("計算は完了していますが、Pipeline Viewの描画に失敗しました。"
-                 "View stageのMetricsなどから保存結果を確認できます。")
-        st.exception(exc)
+    # Always provide a lightweight useful result BEFORE any Plotly rendering.
+    st.subheader("計算済み工程の概要")
+    st.write({
+        "M2D四角形数": len(state.mesh_2d_initial.faces),
+        "K3D四角形数": len(state.mesh_3d_optimized.faces),
+        "T3Dパネル数": len(state.tiles_3d.vertices),
+        "T2Dパネル数": len(state.tiles_2d_dual_hinge.vertices),
+        "T2D残存衝突ペア": state.tiles_2d_dual_hinge.metrics.get("collision_pair_count", "unknown"),
+        "衝突回避Split採用数": state.tiles_2d_dual_hinge.metrics.get("collision_split_accepted", 0),
+    })
+    # The overview graph is small but can still trip browser-side Plotly
+    # rendering in some reruns. During a changed-grid rebuild show only
+    # non-Plotly results until the user explicitly requests the graphic.
+    _render_overview = st.checkbox(
+        "パイプライン図を描画する",
+        value=not st.session_state.get("onestring_grid_view_reset", False),
+        key="onestring_render_overview",
+    )
+    if _render_overview:
+        try:
+            st.plotly_chart(figure_pipeline_overview(state),
+                            use_container_width=True, key="pipeline_overview")
+        except Exception as exc:
+            st.error("計算は完了していますが、Pipeline Viewの描画に失敗しました。"
+                     "View stageのMetricsなどから保存結果を確認できます。")
+            st.exception(exc)
     selected_report = st.selectbox("stage report", list(state.stage_reports.keys()))
     report = state.stage_reports[selected_report]
     cols = st.columns(4)
