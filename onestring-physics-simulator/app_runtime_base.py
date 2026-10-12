@@ -1390,6 +1390,7 @@ def _smooth_browser_tile_animation(
     show_target: bool,
     fps: int,
     title: str,
+    string_path_frames: list[np.ndarray] | None = None,
 ) -> go.Figure:
     """Browser-side Plotly animation for smoother playback and movable camera."""
     safe_frames = [np.asarray(frame, dtype=float) for frame in frames if len(frame)]
@@ -1404,6 +1405,18 @@ def _smooth_browser_tile_animation(
     tile_mesh, tile_edges = _assembly_mesh_and_edge_traces(safe_frames[0], color="#2dd4bf", opacity=0.74, name="animated tiles")
     fig.add_trace(tile_mesh)
     fig.add_trace(tile_edges)
+    show_native_string=bool(string_path_frames and
+                            len(string_path_frames)==len(safe_frames))
+    if show_native_string:
+        polyline=np.asarray(string_path_frames[0],dtype=float)
+        fig.add_trace(go.Scatter3d(
+            x=polyline[:,0],y=polyline[:,1],z=polyline[:,2],
+            mode="lines+markers",
+            line=dict(color="#dc2626",width=6),
+            marker=dict(color="#f97316",size=2.5),
+            name="routed string (constraint)",
+            showlegend=True,
+        ))
     if show_target:
         target_mesh, target_edges = _assembly_mesh_and_edge_traces(target, color="#2563eb", opacity=0.16, name="T3D target")
         fig.add_trace(target_mesh)
@@ -1412,7 +1425,19 @@ def _smooth_browser_tile_animation(
     plotly_frames: list[go.Frame] = []
     for frame_id, vertices in enumerate(safe_frames):
         mesh, edges = _assembly_mesh_and_edge_traces(vertices, color="#2dd4bf", opacity=0.74, name="animated tiles")
-        plotly_frames.append(go.Frame(data=[mesh, edges], traces=[0, 1], name=str(frame_id)))
+        data=[mesh, edges]
+        indices=[0,1]
+        if show_native_string:
+            polyline=np.asarray(string_path_frames[frame_id],dtype=float)
+            data.append(go.Scatter3d(
+                x=polyline[:,0],y=polyline[:,1],z=polyline[:,2],
+                mode="lines+markers",
+                line=dict(color="#dc2626",width=6),
+                marker=dict(color="#f97316",size=2.5),
+                name="routed string (constraint)",showlegend=True,
+            ))
+            indices.append(2)
+        plotly_frames.append(go.Frame(data=data, traces=indices, name=str(frame_id)))
     fig.frames = plotly_frames
     fig.update_layout(
         title=title,
@@ -3337,6 +3362,17 @@ elif view_stage == "Assembly Animation":
                 title=f"{source_label} frame {frame_id + 1}/{max_frame + 1}",
                 hinge_graph=state.hinge_graph if show_hinges_preview and limit == total_tiles else None,
             )
+            if physics_backend == "native" and result is not None:
+                strings=getattr(result,"string_path_frames",[])
+                if 0 <= frame_id < len(strings):
+                    route=np.asarray(strings[frame_id],dtype=float)
+                    fig.add_trace(go.Scatter3d(
+                        x=route[:,0],y=route[:,1],z=route[:,2],
+                        mode="lines+markers",
+                        line=dict(color="#dc2626",width=6),
+                        marker=dict(color="#f97316",size=2.5),
+                        name="routed string (constraint)",
+                    ))
             if show_target_preview:
                 target_assembly = TileAssembly(
                     vertices=state.tiles_3d.vertices[:limit],
@@ -3360,6 +3396,11 @@ elif view_stage == "Assembly Animation":
                 show_target=show_target_preview,
                 fps=fps,
                 title=f"Smooth {source_label} ({len(frames)} frames)",
+                string_path_frames=(
+                    getattr(result,"string_path_frames",None)
+                    if physics_backend=="native" and result is not None
+                    else None
+                ),
             )
             st.plotly_chart(
                 smooth_fig,
@@ -3384,6 +3425,31 @@ elif view_stage == "Assembly Animation":
                 placeholder.plotly_chart(render_paper_pd_frame(current_frame), use_container_width=True, key="paper_pd_current")
 
         if result is not None:
+            if physics_backend == "native":
+                vals=result.metrics
+                m0,m1,m2,m3=st.columns(4)
+                m0.metric("T2Dからの最高点の上昇",f"{vals.get('rise_from_t2d',0.):.5g}")
+                m1.metric("ヒンジRMS",f"{vals.get('hinge_error',0.):.5g}")
+                m2.metric("残存3D接触ペア (OBB)",str(vals.get('collision_count','?')))
+                m3.metric("紐長の未達",f"{vals.get('constraint_violation',0.):.5g}")
+                if not vals.get("stable_state",False):
+                    st.warning(
+                        "この結果は物理的な組立て成功を示していません。"
+                        "ヒンジ誤差・衝突・紐長未達を確認してください。"
+                        "T2Dに初期衝突が多数ある場合は、初期配置の修正が先に必要です。"
+                    )
+                history_actual=getattr(result,"string_actual_history",[])
+                history_cmd=getattr(result,"string_command_history",[])
+                if history_actual and len(history_actual)==len(history_cmd):
+                    st.markdown("**紐長の時間変化（赤線は上の3Dビューで描画）**")
+                    st.line_chart({
+                        "実際の紐長":history_actual,
+                        "指定紐長（片側制約）":history_cmd,
+                    })
+                st.caption(
+                    "厳密な衝突判定・摩擦評価・製造可能性の証明ではありません。"
+                    "剛体PBDの近似シミュレーションです。元論文の著者実装とは異なります。"
+                )
             st.write(
                 {
                     "physics_backend": result.metrics.get("physics_backend"),
