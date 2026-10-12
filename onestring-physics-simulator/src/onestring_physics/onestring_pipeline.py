@@ -8769,6 +8769,8 @@ def rerun_t2d_dual_hinge(state, params=None, progress_callback=None):
         provisional=copy.copy(state)
         provisional.tiles_2d_dual_hinge=dual
         dual.metrics['collision_split_after']=collision_quality(provisional)
+        from .paper_collision_split import collision_component_audit
+        dual.metrics['collision_split_final_component_audit']=collision_component_audit(provisional)
     # Publish only after all dependent stages succeeded.
     state.tiles_2d_dual_hinge = dual
     state.hinge_graph = hinges
