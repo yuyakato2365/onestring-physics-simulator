@@ -8548,7 +8548,14 @@ def build_onestring_design(
             rank_collision_split_candidates, collision_quality,
             collision_component_audit, accept_if_improved,
         )
+        from .paper_collision_split_preview import capture_split_trial_geometry
         steps=[]
+        # Rejected complete-build states may contain enormous optimizer
+        # histories and caches. Store ONLY the four stage geometries needed
+        # to compare a rejected proposal with the preceding accepted layout.
+        # This list is deliberately an attribute on the state, NOT part of
+        # T2D metrics (which are also dumped in Streamlit and JSON exports).
+        candidate_previews=[]
         accepted=list(getattr(active_params,'collision_split_forced_lines',()) or ())
         limit=int(getattr(active_params,'collision_split_max_additional',3))
         attempts=int(getattr(active_params,'collision_split_candidate_attempts',3))
@@ -8596,6 +8603,7 @@ def build_onestring_design(
                     status=proposal_metrics.get('status','no_valid_complete_grid_cut')
                     break
                 picked=False
+                before_preview=capture_split_trial_geometry(state)
                 for proposal in candidates[:attempts]:
                     # Re-run source M2D -> target T2D, not an imaginary deleted
                     # hinge in only the dual-hinge solver. Rejected builds are
@@ -8616,12 +8624,29 @@ def build_onestring_design(
                         before=dict(before),
                         status='pending',
                     )
+                    preview=dict(
+                        cut_number=cut_index+1,
+                        proposal=dict(proposal),
+                        attempt_index=len(steps),
+                        before=before_preview,
+                        after=None,
+                    )
                     try:
                         trial_state=_ORIGINAL_BUILD_ONESTRING_DESIGN(
                             target,attempt_params,run_simulation=False,
                             deployment_params=deployment_params,
                             progress_callback=report,
                         )
+                        # Capture immediately, including a geometry that will
+                        # subsequently fail the topology audit. It is useful to
+                        # inspect precisely WHY it was rejected. A visualization
+                        # snapshot failure must not alter optimization decisions.
+                        try:
+                            preview['after']=capture_split_trial_geometry(trial_state)
+                        except Exception as snapshot_error:
+                            preview['snapshot_error']=(
+                                f"{type(snapshot_error).__name__}: {str(snapshot_error)[:140]}"
+                            )
                         # A candidate is not real unless the rebuilt M2D
                         # actually contains ALL committed collision seams.
                         from .simple_split_panel_patch import _edge_components
@@ -8678,6 +8703,18 @@ def build_onestring_design(
                                accepted=bool(improved),
                                decision_reason=str(reason),
                                status='accepted' if improved else 'rejected')
+                    # Snapshot arrays are retained only when some final T2D
+                    # geometry actually exists; failed solver builds remain
+                    # visible as textual rejections in the comparison table.
+                    if preview['after'] is not None:
+                        row['preview_index']=len(candidate_previews)
+                        preview['accepted']=bool(improved)
+                        preview['decision_reason']=str(reason)
+                        preview['before_metrics']=dict(before)
+                        preview['after_metrics']=dict(after)
+                        candidate_previews.append(preview)
+                    else:
+                        row['preview_index']=None
                     steps.append(row)
                     if not improved:
                         continue
@@ -8718,6 +8755,10 @@ def build_onestring_design(
         )
         state.tiles_2d_dual_hinge.metrics.update(summary)
         state.mesh_2d_initial.metrics.update(summary)
+        # Keep rejected and accepted candidate previews in the FINAL state,
+        # independent from authoritative M2D/T2D meshes and STL exports.
+        # They survive an ordinary Streamlit rerun and T2D-only reoptimization.
+        state.collision_split_candidate_previews=tuple(candidate_previews)
         if progress_callback:
             progress_callback('Collision-driven Split finished',1.,
                               f"{status}; accepted {len(accepted)} cut(s)")
