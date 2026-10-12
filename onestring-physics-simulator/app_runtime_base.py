@@ -2213,14 +2213,18 @@ if view_stage == "Pipeline View":
             st.error("計算は完了していますが、Pipeline Viewの描画に失敗しました。"
                      "View stageのMetricsなどから保存結果を確認できます。")
             st.exception(exc)
-    selected_report = st.selectbox("stage report", list(state.stage_reports.keys()))
-    report = state.stage_reports[selected_report]
-    cols = st.columns(4)
-    cols[0].metric("before error", f"{report.before_error:.4g}")
-    cols[1].metric("after error", f"{report.after_error:.4g}")
-    cols[2].metric("constraint violation", f"{report.constraint_violation:.4g}")
-    cols[3].metric("time", f"{report.computation_time:.3f}s")
-    st.write({"objective": report.objective, "counts": report.counts, "failed_constraints": report.failed_constraints})
+    if state.stage_reports:
+        selected_report = st.selectbox("stage report", list(state.stage_reports.keys()))
+        report = state.stage_reports[selected_report]
+        cols = st.columns(4)
+        cols[0].metric("before error", f"{report.before_error:.4g}")
+        cols[1].metric("after error", f"{report.after_error:.4g}")
+        cols[2].metric("constraint violation", f"{report.constraint_violation:.4g}")
+        cols[3].metric("time", f"{report.computation_time:.3f}s")
+        st.write({"objective": report.objective, "counts": report.counts, "failed_constraints": report.failed_constraints})
+    else:
+        st.warning("工程ごとのレポートが空です。パネル数は上に表示しています。"
+                   "View stageのMetricsから詳細を確認できます。")
 elif view_stage == "S":
     st.plotly_chart(figure_surface_mesh(state.target_surface), use_container_width=True, key="target_surface")
 elif view_stage == "Split Map":
