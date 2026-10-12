@@ -491,3 +491,75 @@ def test_split_requires_depth_metrics_for_acceptance():
     assert collision.accept_if_improved(before,after)==(
         False,"missing_collision_or_hinge_diagnostics"
     )
+
+
+
+def test_component_contact_audit_identifies_post_split_overlap_stage():
+    # M2D and K2D charts are well separated, but rigid T2D thick panels
+    # become overlapping. They are distinct connected M2D components.
+    sq=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+    sources=np.stack([sq,sq+np.array([2.,0.])])
+    xyz=np.concatenate(
+        [np.column_stack([tile,np.zeros(4)]) for tile in sources]
+    )
+    mesh_faces=np.arange(8).reshape(2,4)
+    flat=np.stack([np.column_stack([tile,np.zeros(4)]) for tile in sources])
+    displaced=sources.copy()
+    displaced[1,:,0]-=1.5
+    tt=np.concatenate((
+        np.concatenate((displaced,np.zeros((2,4,1))),axis=2),
+        np.concatenate((displaced,np.full((2,4,1),-.1)),axis=2),
+    ),axis=1)
+    state=SimpleNamespace(
+        mesh_2d_initial=SimpleNamespace(vertices=xyz,faces=mesh_faces),
+        mesh_2d_optimized=SimpleNamespace(vertices=xyz,faces=mesh_faces),
+        tiles_2d_top_hinge=SimpleNamespace(vertices=tt),
+        tiles_2d_dual_hinge=SimpleNamespace(vertices=tt.copy()),
+    )
+    out=collision.collision_component_audit(state)
+    assert out["component_count"]==2
+    assert out["M2D"]["between_split_component_pairs"]==0
+    assert out["K2D"]["between_split_component_pairs"]==0
+    assert out["T2D Top"]["between_split_component_pairs"]==1
+    assert out["T2D Top"]["within_split_component_pairs"]==0
+    assert out["T2D Dual"]["between_split_component_pairs"]==1
+
+
+def test_collision_gap_multiplier_affects_only_collision_cuts():
+    from onestring_physics.final_split_panel_pass import _complete_cut_once
+    from onestring_physics.simple_split_panel_patch import _open_split_gaps
+
+    vertices,faces=_grid(4)
+    vertices,faces,record=_complete_cut_once(vertices,faces,"col",2.0)
+    assert record is not None
+    record["face_ids"]=list(range(len(faces)))
+    record["collision_driven"]=True
+    grid=SimpleNamespace(tile_size=1.0,gap_size=0.05)
+    standard,_,_,offsets1,gap=_open_split_gaps(vertices,faces,[record],grid,1.0)
+    extra,_,_,offsets3,_=_open_split_gaps(vertices,faces,[record],grid,3.0)
+    x1=sorted(o[0] for o in offsets1)
+    x3=sorted(o[0] for o in offsets3)
+    assert len(x1)==len(x3)==2
+    assert np.isclose(x3[1]-x3[0],3*(x1[1]-x1[0]))
+    assert np.isclose(x1[1]-x1[0],gap)
+    pure_csf=dict(record,collision_driven=False)
+    original,_,_,orig_offsets,_=_open_split_gaps(vertices,faces,[pure_csf],grid,1.0)
+    unchanged,_,_,new_offsets,_=_open_split_gaps(vertices,faces,[pure_csf],grid,3.0)
+    np.testing.assert_allclose(original,unchanged)
+    np.testing.assert_allclose(orig_offsets,new_offsets)
+
+
+def test_final_panel_packing_gap_multiplier_works_when_opted_in():
+    from onestring_physics.final_split_panel_pass import _pack_panels
+    vertices,faces=_grid(4)
+    groups=[np.arange(10),np.arange(10,25)]
+    grid=SimpleNamespace(tile_size=1.,gap_size=.05)
+    _standard,offsets1=_pack_panels(vertices,groups,grid,
+                                   collision_gap_multiplier=1.)
+    _expanded,offsets3=_pack_panels(vertices,groups,grid,
+                                   collision_gap_multiplier=3.)
+    # Both components are translated intact; larger gutters increase their
+    # relative separation, never change the quads' local shape.
+    delta1=offsets1[1]-offsets1[0]
+    delta3=offsets3[1]-offsets3[0]
+    assert np.linalg.norm(delta3)>np.linalg.norm(delta1)
