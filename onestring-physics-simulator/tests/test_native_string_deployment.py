@@ -132,3 +132,49 @@ def test_native_uses_actual_geometry_not_t3d_goal():
     assert rb.metrics["final_deployment_error_to_T3D"] > (
         ra.metrics["final_deployment_error_to_T3D"]
     )
+
+
+def test_physics_steps_not_animation_frames_control_simulated_time():
+    state=_two_panel_state()
+    common=dict(physics_backend="native",steps=44,solver_iterations=5,
+                solver_substeps=1,gravity=0.,damping_ratio=.5,
+                native_timestep=.02,native_pull_fraction=.5,
+                native_pull_end_ratio=.8)
+    short=simulate_native_string_deployment(
+        state,DeploymentParameters(**common,max_animation_frames=6))
+    long=simulate_native_string_deployment(
+        state,DeploymentParameters(**common,max_animation_frames=12))
+    assert len(short.frames)==6
+    assert len(long.frames)==12
+    np.testing.assert_allclose(short.final_tiles,long.final_tiles,atol=1e-12)
+    np.testing.assert_array_equal(long.frames[0],state.tiles_2d_dual_hinge.vertices)
+    np.testing.assert_array_equal(long.frames[-1],long.final_tiles)
+    assert long.metrics["solver_steps"]==44
+    assert long.metrics["total_physical_duration_seconds"]==pytest.approx(.88)
+    assert long.metrics["pull_duration_seconds"]==pytest.approx(.44)
+    assert long.metrics["settle_duration_seconds"]==pytest.approx(.44)
+    assert len(long.string_path_frames)==len(long.frames)
+    assert len(long.string_command_history)==len(long.frames)
+    assert len(long.string_actual_history)==len(long.frames)
+    # No premature fill-and-jump: frames must span the entire run and
+    # visibly include the command-length hold after pull completion.
+    assert long.string_command_history[0] > long.string_command_history[3]
+    assert long.string_command_history[-1]==pytest.approx(
+        long.string_command_history[-3]
+    )
+
+
+def test_pull_fraction_one_has_no_settling_phase():
+    state=_two_panel_state()
+    p=DeploymentParameters(
+        physics_backend="native",steps=20,solver_iterations=4,
+        max_animation_frames=8,gravity=0.,
+        native_timestep=.02,native_pull_fraction=1.0,
+        native_pull_end_ratio=.9,
+    )
+    result=simulate_native_string_deployment(state,p)
+    assert result.metrics["pull_duration_seconds"]==pytest.approx(.4)
+    assert result.metrics["settle_duration_seconds"]==pytest.approx(0.)
+    assert result.string_command_history[-1]==pytest.approx(
+        result.metrics["commanded_string_length"]
+    )
