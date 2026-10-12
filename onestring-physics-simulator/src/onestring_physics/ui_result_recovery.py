@@ -20,6 +20,8 @@ def prepare_completed_pipeline_display(session_state, *, old_grid_size, new_grid
     # A selected trial from a previous run is not necessarily present now.
     session_state.pop("dual_hinge_inspection_trial", None)
     session_state.pop("dual_hinge_show_large_history", None)
+    session_state.pop("t2d_top_show_large_panel_inspector", None)
+    session_state.pop("t2d_dual_show_large_panel_inspector", None)
     # Panel identity and count can also change after Split even if nx stays
     # the same. Never retain an old keyed number_input value beyond its new max.
     for key in (
