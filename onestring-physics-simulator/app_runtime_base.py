@@ -1692,13 +1692,15 @@ if run_pipeline:
     # pipeline has actually returned. The old grid is used to reset stale
     # view/widget state after a successful topology-changing rebuild.
     _previous_successful_state = st.session_state.get("onestring_state")
-    _previous_grid = getattr(
-        getattr(getattr(_previous_successful_state, "mesh_2d_initial", None),
-                "grid", None),
-        "nx", None,
-    )
+    # Prefer the previously submitted UI grid size. mesh.grid.nx is only a
+    # fallback: some Omega overlay builders change the effective grid count.
+    _previous_grid = st.session_state.get("onestring_completed_grid_size")
     if _previous_grid is None:
-        _previous_grid = st.session_state.get("onestring_completed_grid_size")
+        _previous_grid = getattr(
+            getattr(getattr(_previous_successful_state, "mesh_2d_initial", None),
+                    "grid", None),
+            "nx", None,
+        )
     with st.spinner("Building OneString pipeline state"):
         progress_bar = st.progress(0.0, text="Preparing pipeline…")
         progress_status = st.empty()
