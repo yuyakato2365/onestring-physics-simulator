@@ -563,3 +563,40 @@ def test_final_panel_packing_gap_multiplier_works_when_opted_in():
     delta1=offsets1[1]-offsets1[0]
     delta3=offsets3[1]-offsets3[0]
     assert np.linalg.norm(delta3)>np.linalg.norm(delta1)
+
+
+
+def test_outer_progress_does_not_claim_100_percent_before_split_feedback(monkeypatch):
+    candidate=_fake_state(0,0)
+    progress=[]
+
+    def fake_full_build(target,params,**kwargs):
+        callback=kwargs.get("progress_callback")
+        if callback:
+            callback("one-pass Done",1.0,"underlying builder finished")
+        return candidate
+
+    monkeypatch.setattr(pipeline,"_ORIGINAL_BUILD_ONESTRING_DESIGN",fake_full_build)
+    monkeypatch.setattr(collision,"collision_quality",lambda state: dict(
+        status="ok",collision_pairs=0,collision_energy=0.,
+        penetration_max=0.,hinge_rms=.001,tile_scale=1.,
+    ))
+    params=SimpleNamespace(
+        collision_split_enabled=True,collision_split_max_additional=2,
+        collision_split_candidate_attempts=2,
+        collision_split_boundary_weight=1.,
+        collision_split_gap_multiplier=1.,
+        collision_split_min_relative_improvement=.03,
+        collision_split_forced_lines=(),
+        omega_parameterization_mode="",
+    )
+    result=pipeline.build_onestring_design(
+        object(),params,progress_callback=lambda stage,fraction,detail="":
+        progress.append((stage,float(fraction))),
+    )
+    assert result is candidate
+    assert len(progress)>=2
+    assert progress[0][1]==pytest.approx(0.5)
+    assert all(p<1.0 for _,p in progress[:-1])
+    assert progress[-1][1]==pytest.approx(1.0)
+    assert progress[-1][0]=="Collision-driven Split finished"
