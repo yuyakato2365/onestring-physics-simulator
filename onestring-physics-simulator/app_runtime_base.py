@@ -1748,11 +1748,11 @@ if _saved_grid_size is not None:
     _quad_count = len(state.mesh_2d_initial.faces)
     _tile_count = len(state.tiles_2d_dual_hinge.vertices)
     _result_text = (
-        f"保存済み結果: grid={_saved_grid_size}×{_saved_grid_size}, "
+        f"セッション内の計算結果: grid={_saved_grid_size}×{_saved_grid_size}, "
         f"M2D四角形={_quad_count}, T2Dパネル={_tile_count}。"
     )
     if run_pipeline:
-        st.success("計算結果を保存しました。 " + _result_text +
+        st.success("計算結果をセッションに保持しました。 " + _result_text +
                    " 下の「View stage」で各工程を確認できます。")
     else:
         st.caption(_result_text)
