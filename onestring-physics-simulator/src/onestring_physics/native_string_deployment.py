@@ -315,9 +315,12 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
     ratio = float(getattr(params, "native_pull_end_ratio", 0.45))
     anchor_height = float(getattr(params, "native_anchor_height_tiles", 2.0))
     timestep = float(getattr(params, "native_timestep", 0.02))
+    pull_fraction = float(getattr(params, "native_pull_fraction", 0.70))
     if not (0.05 <= ratio <= 1 and 0.1 <= anchor_height <= 20
-            and 1e-4 <= timestep <= 0.1):
-        raise NativeDeploymentError("Invalid native pull ratio, anchor height or timestep")
+            and 1e-4 <= timestep <= 0.1 and 0.1 <= pull_fraction <= 1.0):
+        raise NativeDeploymentError(
+            "Invalid native pull ratio, anchor height, timestep or pull fraction"
+        )
     m = _prepare(state, anchor_height_tiles=anchor_height)
     total = max(2, int(params.steps))
     iterations = max(1, int(params.solver_iterations))
@@ -327,6 +330,12 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
     hinge_strength = float(np.clip(params.hinge_weight, 0., 1.))
     collision_strength = float(np.clip(params.collision_weight, 0., 1.))
     nframes = max(2, int(getattr(params, "max_animation_frames", 40)))
+    # Sample the entire PHYSICAL duration uniformly. The old modulo sampling
+    # filled almost every requested frame at the beginning when steps>frames,
+    # skipped the rest, and caused an abrupt jump at the final frame.
+    save_at_steps = set(
+        np.unique(np.rint(np.linspace(0, total, num=nframes)).astype(int))[1:]
+    )
     frames = [m.rest.copy()]
     string_path_frames = [_string_world_points(m).copy()]
     string_command_history = [float(m.initial_length)]
@@ -337,7 +346,9 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
     gravity_vec = np.array([0., 0., -gravity])
     floor_touches = 0
     for step in range(total):
-        phase = (step + 1) / total
+        # Smoothly reel in during the early part of the run, then KEEP
+        # the commanded string length fixed while the mechanism settles.
+        phase = min(1.0, (step + 1) / (total * pull_fraction))
         pull_smooth = phase * phase * (3. - 2. * phase)
         command = m.initial_length * (1. - (1. - ratio) * pull_smooth)
         for substep in range(substeps):
@@ -376,8 +387,7 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
                 "Native rigid OneString pull", min(0.98, (step + 1) / total),
                 f"step {step + 1}/{total}; string command {command:.5g}",
             )
-        if (len(frames) < nframes - 1 and
-                (step + 1) % max(1, total // max(1, nframes - 2)) == 0):
+        if step + 1 in save_at_steps:
             frames.append(_vertices(m).copy())
             string_path_frames.append(_string_world_points(m).copy())
             string_command_history.append(float(command))
@@ -421,6 +431,13 @@ def simulate_native_string_deployment(state, params, progress_callback=None):
         "panel_count": int(len(m.rest)),
         "anchor_height_tiles": anchor_height,
         "rise_from_t2d": rise,
+        "solver_steps": int(total),
+        "timestep": float(timestep),
+        "total_physical_duration_seconds": float(total * timestep),
+        "pull_fraction": float(pull_fraction),
+        "pull_duration_seconds": float(total * timestep * pull_fraction),
+        "settle_duration_seconds": float(total * timestep * (1.0 - pull_fraction)),
+        "animation_frame_count": int(len(frames)),
         "final_deployment_error_to_T3D": target_error,
         "snap_error": float("nan"),
         "lift_error": float("nan"),
