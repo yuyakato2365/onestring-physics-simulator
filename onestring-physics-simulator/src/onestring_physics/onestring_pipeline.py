@@ -1067,6 +1067,10 @@ class PipelineParameters(_original.PipelineParameters):
     collision_split_enabled: bool = False
     collision_split_max_additional: int = 3
     collision_split_boundary_weight: float = 1.0
+    # Extra opening distance applied only when trial M2D actually contains a
+    # collision-driven seam. Helps distinguish insufficient seam clearance
+    # from intra-component clashes that larger Split gaps cannot repair.
+    collision_split_gap_multiplier: float = 1.0
     collision_split_min_relative_improvement: float = 0.03
     collision_split_candidate_attempts: int = 3
     collision_split_forced_lines: tuple = ()
@@ -8538,7 +8542,8 @@ def build_onestring_design(
     # candidate builds are rejected and the last accepted state is preserved.
     if bool(getattr(active_params,'collision_split_enabled',False)):
         from .paper_collision_split import (
-            rank_collision_split_candidates, collision_quality, accept_if_improved,
+            rank_collision_split_candidates, collision_quality,
+            collision_component_audit, accept_if_improved,
         )
         steps=[]
         accepted=list(getattr(active_params,'collision_split_forced_lines',()) or ())
@@ -8546,6 +8551,7 @@ def build_onestring_design(
         attempts=int(getattr(active_params,'collision_split_candidate_attempts',3))
         weight=float(getattr(active_params,'collision_split_boundary_weight',1.))
         minimum=float(getattr(active_params,'collision_split_min_relative_improvement',.03))
+        gap_multiplier=float(getattr(active_params,'collision_split_gap_multiplier',1.0))
         max_attempts=max(1,limit*attempts)
         def split_progress(stage,fraction,detail="",attempt_index=0):
             if progress_callback is None:
@@ -8556,7 +8562,9 @@ def build_onestring_design(
             progress_callback(stage,last_progress[0],detail)
         if not (0<=limit<=10 and 1<=attempts<=16
                 and np.isfinite([weight,minimum]).all()
-                and weight>=0 and 0<=minimum<=1):
+                and weight>=0 and 0<=minimum<=1
+                and np.isfinite(gap_multiplier)
+                and 1.0<=gap_multiplier<=10.0):
             raise ValueError('Invalid collision-driven Split limits/weights')
         status='already_feasible'
         baseline=collision_quality(state)
@@ -8569,6 +8577,7 @@ def build_onestring_design(
             status='no_collisions' if baseline['collision_pairs']==0 else 'searching'
             for cut_index in range(limit):
                 before=collision_quality(state)
+                before['component_audit']=collision_component_audit(state)
                 if before['status']!='ok' or before['collision_pairs']==0:
                     status='collision_free' if before['collision_pairs']==0 else 'invalid_T2D'
                     break
@@ -8653,6 +8662,7 @@ def build_onestring_design(
                                 'Collision Split did not add a real disconnected M2D component'
                             )
                         after=collision_quality(trial_state)
+                        after['component_audit']=collision_component_audit(trial_state)
                         improved,reason=accept_if_improved(
                             before,after,minimum_relative_improvement=minimum,
                         )
@@ -8690,6 +8700,7 @@ def build_onestring_design(
             collision_split_feedback_enabled=True,
             collision_split_status=status,
             collision_split_boundary_weight=weight,
+            collision_split_gap_multiplier=gap_multiplier,
             collision_split_attempted=len(steps),
             collision_split_accepted=len(accepted),
             collision_split_newly_accepted=sum(bool(step['accepted']) for step in steps),
@@ -8697,6 +8708,7 @@ def build_onestring_design(
             collision_split_accepted_lines=accepted,
             collision_split_before=baseline,
             collision_split_after=collision_quality(state),
+            collision_split_final_component_audit=collision_component_audit(state),
             collision_split_complete_boundary_to_boundary_only=True,
             collision_split_recompute_scope='full M2D through T2D, gap graph and string route',
             collision_split_auto_feasibility_proof=False,
@@ -8735,6 +8747,8 @@ def rerun_t2d_dual_hinge(state, params=None, progress_callback=None):
         keys=(
             'collision_split_feedback_enabled',
             'collision_split_boundary_weight',
+            'collision_split_gap_multiplier',
+            'collision_split_final_component_audit',
             'collision_split_attempted',
             'collision_split_accepted',
             'collision_split_newly_accepted',
