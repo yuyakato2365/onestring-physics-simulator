@@ -173,3 +173,49 @@ def rejection_comparison(before: dict, after: dict) -> dict:
         extra_pairs_allowance=allowed,
         hinge_rms_rejection_threshold=hinge_ceiling,
     )
+
+
+
+def acceptance_checklist(before: dict, after: dict, *,
+                         min_relative_improvement: float = 0.03) -> list[dict]:
+    """Expose the SAME numeric thresholds as collision Split acceptance.
+
+    This is diagnostic-only: the authoritative acceptance decision remains
+    accept_if_improved(), including its separate rebuild/topology checks.
+    """
+    try:
+        p0, p1 = int(before["collision_pairs"]), int(after["collision_pairs"])
+        e0, e1 = float(before["collision_energy"]), float(after["collision_energy"])
+        d0, d1 = float(before["penetration_max"]), float(after["penetration_max"])
+        h0, h1 = float(before["hinge_rms"]), float(after["hinge_rms"])
+        scale = float(before["tile_scale"])
+        required = float(min_relative_improvement)
+    except (KeyError,TypeError,ValueError,OverflowError):
+        return []
+    if not (np.isfinite((e0,e1,d0,d1,h0,h1,scale,required)).all()
+            and scale > 0 and 0 <= required <= 1):
+        return []
+    allowed_extra=max(2,int(np.ceil(.02*p0)))
+    reduction=(e0-e1)/e0 if e0>0 else 0.
+    hinge_ceiling=max(3*h0,.1*scale)
+    depth_tolerance=max(scale*1e-8,1e-12)
+    free=p1==0 and e1<=max(scale**2*1e-14,1e-24)
+    criteria=[
+        dict(criterion="残存ヒンジRMS上限",
+             observed=h1,limit=hinge_ceiling,ok=bool(h1<=hinge_ceiling)),
+        dict(criterion="最大SAT貫通深さの非悪化",
+             observed=d1,limit=d0+depth_tolerance,
+             ok=bool(d1<=d0+depth_tolerance)),
+        dict(criterion="貫通エネルギー改善率",
+             observed=100*reduction,limit=100*required,
+             ok=bool(free or (e0>0 and reduction>=required))),
+    ]
+    if p1>p0:
+        criteria.extend([
+            dict(criterion="衝突ペア増加数の上限",
+                 observed=p1-p0,limit=allowed_extra,ok=bool(p1-p0<=allowed_extra)),
+            dict(criterion="追加衝突がある場合の最低改善率(%)",
+                 observed=100*reduction,limit=100*max(.20,required),
+                 ok=bool(reduction>=max(.20,required))),
+        ])
+    return criteria
