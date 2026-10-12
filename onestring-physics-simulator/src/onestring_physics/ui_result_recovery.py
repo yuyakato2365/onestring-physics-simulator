@@ -36,6 +36,10 @@ def prepare_completed_pipeline_display(session_state, *, old_grid_size, new_grid
         # Don't immediately attempt huge 3D plots from the old stage. Display
         # the lightweight pipeline summary first, preserving the new result.
         session_state["onestring_view_stage"] = "Pipeline View"
+        # Streamlit keyed widgets ignore a newly supplied default when an old
+        # value is still in session_state. Clear this opt-in explicitly so the
+        # new grid starts in lightweight/no-Plotly overview mode.
+        session_state.pop("onestring_render_overview", None)
     session_state["onestring_completed_grid_size"] = new_size
     session_state["onestring_grid_view_reset"] = bool(changed)
     return bool(changed)
