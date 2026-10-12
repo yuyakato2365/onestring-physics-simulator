@@ -8479,11 +8479,24 @@ def build_onestring_design(
     progress_callback=None,
 ):
     active_params = params or PipelineParameters()
-    if bool(getattr(active_params, 'collision_split_enabled', False)) and run_simulation:
+    split_feedback_enabled=bool(getattr(active_params, 'collision_split_enabled', False))
+    if split_feedback_enabled and run_simulation:
         raise ValueError(
             'Collision-driven Split requires run_simulation=False: '
             'the final accepted geometry must be built before simulating deployment.'
         )
+    # The underlying one-pass pipeline reports 100% when its own T2D finishes,
+    # but collision-driven Split can still run many complete trial pipelines.
+    # Reserve a separate part of the progress bar for Split candidate rebuilds:
+    # NO callback may emit 100% until the outer feedback loop really returns.
+    last_progress=[0.]
+    def initial_pipeline_progress(stage, fraction, detail=""):
+        if progress_callback is None:
+            return
+        fraction=float(np.clip(fraction,0.,1.))
+        displayed=(.50*fraction if split_feedback_enabled else fraction)
+        last_progress[0]=max(last_progress[0],displayed)
+        progress_callback(stage,last_progress[0],detail)
     progress_attribute = "_bijective_free_boundary_progress_callback"
     missing_progress = object()
     previous_progress = getattr(active_params, progress_attribute, missing_progress)
@@ -8491,7 +8504,7 @@ def build_onestring_design(
         setattr(
             active_params,
             progress_attribute,
-            _original._subprogress(progress_callback, 0.08, 0.16, "S -> Omega: "),
+            _original._subprogress(initial_pipeline_progress, 0.08, 0.16, "S -> Omega: "),
         )
     try:
         state = _ORIGINAL_BUILD_ONESTRING_DESIGN(
@@ -8499,7 +8512,7 @@ def build_onestring_design(
             active_params,
             run_simulation=run_simulation,
             deployment_params=deployment_params,
-            progress_callback=progress_callback,
+            progress_callback=initial_pipeline_progress,
         )
     finally:
         if previous_progress is missing_progress:
@@ -8533,6 +8546,14 @@ def build_onestring_design(
         attempts=int(getattr(active_params,'collision_split_candidate_attempts',3))
         weight=float(getattr(active_params,'collision_split_boundary_weight',1.))
         minimum=float(getattr(active_params,'collision_split_min_relative_improvement',.03))
+        max_attempts=max(1,limit*attempts)
+        def split_progress(stage,fraction,detail="",attempt_index=0):
+            if progress_callback is None:
+                return
+            phase=float(np.clip(fraction,0.,1.))
+            displayed=.50+.48*(attempt_index+phase)/max_attempts
+            last_progress[0]=max(last_progress[0],min(.98,displayed))
+            progress_callback(stage,last_progress[0],detail)
         if not (0<=limit<=10 and 1<=attempts<=16
                 and np.isfinite([weight,minimum]).all()
                 and weight>=0 and 0<=minimum<=1):
@@ -8573,12 +8594,10 @@ def build_onestring_design(
                     attempt_params.collision_split_forced_lines=tuple(next_forced)
                     # Progress is labelled so users can see each re-run is a
                     # full rebuild, rather than T2D-only reoptimization.
-                    def report(stage,fraction,detail='',k=cut_index+1):
-                        if progress_callback:
-                            progress_callback(
-                                f'Collision Split {k}/{limit}: {stage}',
-                                min(.99,max(0.,float(fraction))),detail,
-                            )
+                    candidate_slot=len(steps)
+                    def report(stage,fraction,detail='',k=cut_index+1,slot=candidate_slot):
+                        split_progress(f'Collision Split {k}/{limit}: {stage}',
+                                       fraction,detail,attempt_index=slot)
                     row=dict(
                         cut_number=cut_index+1,
                         proposal=dict(proposal),
@@ -8653,13 +8672,13 @@ def build_onestring_design(
                     accepted=next_forced
                     picked=True
                     status='collision_free' if after['collision_pairs']==0 else 'searching'
-                    if progress_callback:
-                        progress_callback(
-                            'Collision Split accepted',.99,
-                            f"cut #{cut_index+1} {proposal['axis']}={proposal['value']:.5g}; "
-                            f"collisions {before['collision_pairs']} -> {after['collision_pairs']}; "
-                            f"boundary distance {proposal['boundary_distance_tiles']:.3g} tiles",
-                        )
+                    split_progress(
+                        'Collision Split accepted',1.,
+                        f"cut #{cut_index+1} {proposal['axis']}={proposal['value']:.5g}; "
+                        f"collisions {before['collision_pairs']} -> {after['collision_pairs']}; "
+                        f"boundary distance {proposal['boundary_distance_tiles']:.3g} tiles",
+                        attempt_index=max(0,len(steps)-1),
+                    )
                     break
                 if not picked:
                     status='no_candidate_improved_or_rebuilt'
