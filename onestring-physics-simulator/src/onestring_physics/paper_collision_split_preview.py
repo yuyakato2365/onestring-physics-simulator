@@ -76,10 +76,17 @@ def capture_split_trial_geometry(state) -> dict | None:
         if 0 <= a < panel_count and 0 <= b < panel_count and 0 <= ca < 8 and 0 <= cb < 8:
             joint_records.append((a, ca, b, cb))
     joints = np.asarray(joint_records, dtype=np.int32).reshape(-1, 4)
+    # Top Hinge uses the SAME corner pairs as Dual Hinge, but all joints
+    # refer to the top surface. Dual Hinge may choose local corners 4..7
+    # on negative-curvature pairs. Mixing them would draw fictitious gaps.
+    top_joints=joints.copy()
+    top_joints[:, 1] %= 4
+    top_joints[:, 3] %= 4
 
     return {
         "stages": captured,
         "hinges": joints,
+        "top_hinges": top_joints,
         "tile_count": int(panel_count),
         "geometry_only": True,
         "valid_for_fabrication_export": False,
