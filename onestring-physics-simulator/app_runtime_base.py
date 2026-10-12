@@ -3134,11 +3134,17 @@ elif view_stage == "T2D Dual Hinge":
     # Diagnostic counterfactual: rigidly put ACTUAL T2D fabricated solids at
     # their corresponding T3D tile poses. This does not claim that a string
     # can move through a collision-free path to these poses.
-    st.subheader("T2Dパネルを再び3Dへ組み立てた場合（剛体再配置）")
+    st.subheader("T2Dのパネルそのものを剛体移動・回転した3Dモデル")
+    st.markdown(
+        "**青緑色の全パネルはT2D由来です。** "
+        "T2D Dual Hingeの8頂点を各パネルにつき同じ回転・平行移動で変換し、"
+        "**曲げず・伸ばさず・変形させず**3Dへ配置します。"
+    )
     st.caption(
-        "下の3DモデルはT3Dの各パネル位置・姿勢に、T2D実体を剛体変換して"
-        "配置したものです。T3Dパネルへの置換・変形ではありません。"
-        "物理的な組立て軌道や紐だけで到達可能かどうかを示すものでもありません。"
+        "どの位置・方向へ動かすかだけを対応するT3Dパネルの位置・姿勢から決めます。"
+        "T3Dのパネル形状は一切流用していません。"
+        "ヒンジを物理的に閉じながら移動させた軌道ではなく、"
+        "設計した3D姿勢へT2Dパネルを剛体再配置した結果です。"
     )
     from onestring_physics.t2d_rigid_reassembly import rigid_reassemble_t2d
     try:
@@ -3151,19 +3157,27 @@ elif view_stage == "T2D Dual Hinge":
         c_r2.metric("ヒンジRMS", f"{_reassembled_metrics['hinge_rms']:.4g}")
         c_r3.metric("再組立て3D交差ペア(近似)", str(_reassembled_metrics["reassembled_3d_obb_pairs"]))
         c_r4.metric("T2D初期3D交差ペア(近似)", str(_reassembled_metrics["initial_t2d_3d_obb_pairs"]))
+        st.caption(
+            "形状不変の確認：パネル内頂点間距離の最大変化 "
+            f"{_reassembled_metrics['max_internal_distance_change']:.3e}。"
+            "（理論上は0、数値誤差のみ）"
+        )
         _reassembly_view = TileAssembly(
             vertices=_reassembled_tiles,
             top_faces=state.tiles_2d_dual_hinge.top_faces,
             bottom_faces=state.tiles_2d_dual_hinge.bottom_faces,
             side_faces=state.tiles_2d_dual_hinge.side_faces,
-            stage="T2D actual solids at target T3D tile poses (rigid SE3)",
+            stage="Only moved and rotated T2D rigid panels (no T3D geometry)",
         )
         _reassembly_fig = figure_tile_assembly(
             _reassembly_view,
-            title="Rigid T2D panel reassembly at T3D designed poses",
+            title="T2D rigid panels moved into 3D (no deformation)",
         )
-        if st.checkbox("半透明のT3D設計形状を重ねる", value=True,
-                       key="rigid_reassembly_show_target"):
+        if st.checkbox(
+            "比較用にT3D設計形状を半透明で重ねる（初期状態は非表示）",
+            value=False,
+            key="rigid_reassembly_show_target",
+        ):
             add_tile_assembly(
                 _reassembly_fig, state.tiles_3d,
                 color="#2563eb", opacity=0.16, name="T3D target (reference)",
