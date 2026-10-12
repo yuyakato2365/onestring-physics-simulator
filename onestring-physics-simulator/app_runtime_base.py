@@ -3432,6 +3432,14 @@ elif view_stage == "Assembly Animation":
                 m1.metric("ヒンジRMS",f"{vals.get('hinge_error',0.):.5g}")
                 m2.metric("残存3D接触ペア (OBB)",str(vals.get('collision_count','?')))
                 m3.metric("紐長の未達",f"{vals.get('constraint_violation',0.):.5g}")
+                initial_overlap=int(vals.get("initial_collision_count",0))
+                if initial_overlap:
+                    st.warning(
+                        f"初期T2Dに {initial_overlap} 件の3D近似接触があります。"
+                        "物理的には貫通した剛体配置から開始しているため、"
+                        "途中の軌道を信頼できる状態にするには、先にT2Dの衝突を修正する必要があります。"
+                        "計算は診断目的で継続しています。"
+                    )
                 if not vals.get("stable_state",False):
                     st.warning(
                         "この結果は物理的な組立て成功を示していません。"
