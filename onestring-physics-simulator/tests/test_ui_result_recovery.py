@@ -83,7 +83,7 @@ def test_result_is_published_before_costly_stage_rendering():
     assert source.index('_saved_grid_size = st.session_state.get(') < (
         source.index('view_stage = st.selectbox(')
     )
-    assert source.index('st.success("計算結果を保存しました。 "') < (
+    assert source.index('st.success("計算結果をセッションに保持しました。 "') < (
         source.index('view_stage = st.selectbox(')
     )
     assert 'st.caption(_result_text)' in source
