@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 
 from .paper_collision_split_preview import (
     collision_tile_severity, hinge_gap_segments, rejection_comparison,
+    acceptance_checklist,
 )
 from .visualization import figure_tile_assembly, figure_quad_mesh
 from .panel_quality_visualization import add_t2d_collision_overlay
@@ -180,6 +181,25 @@ def render_split_candidate_previews(st, state, step_rows: list[dict]):
                    f" ヒンジRMS棄却閾値：{facts.get('hinge_rms_rejection_threshold'):.5g}"
                    if facts.get("hinge_rms_rejection_threshold") is not None
                    else f"貫通エネルギー改善率：{improvement:+.2f}%")
+    minimum=float(state.tiles_2d_dual_hinge.metrics.get(
+        "collision_split_min_relative_improvement",.03
+    ))
+    checklist=acceptance_checklist(
+        before,after,min_relative_improvement=minimum,
+    )
+    if checklist:
+        st.markdown("**採否に使われる閾値と実測値の比較**")
+        st.dataframe([{
+            "判定項目":item["criterion"],
+            "実測値":item["observed"],
+            "許容閾値":item["limit"],
+            "閾値を満たすか":"✓" if item["ok"] else "✕",
+        } for item in checklist],hide_index=True,use_container_width=True)
+        st.caption(
+            "この表は数値条件の評価です。"
+            "切断線が本当にメッシュへ適用されたか等のトポロジー監査は"
+            "別途行い、その結果も棄却理由に反映されます。"
+        )
     st.caption(
         "評価表は実際の仮Split再計算時に記録した値です。"
         "以下の形状は診断専用コピーであり、最終採用STLは変更しません。"
