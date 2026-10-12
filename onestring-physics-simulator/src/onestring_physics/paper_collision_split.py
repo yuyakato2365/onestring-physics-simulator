@@ -298,7 +298,7 @@ def collision_component_audit(state) -> dict:
         ("T2D Dual",getattr(state,"tiles_2d_dual_hinge",None),"tiles"),
     )
     for name,stage,kind in models:
-        if stage is None:
+        if stage is None or not hasattr(stage, "vertices"):
             summary[name]={"status":"missing_stage"}
             continue
         try:
@@ -332,6 +332,6 @@ def collision_component_audit(state) -> dict:
                 within_component_max_depth=float(np.max(depth[inner],initial=0.)),
                 tile_size=tile_size,
             )
-        except (ValueError, IndexError, FloatingPointError) as exc:
+        except (ValueError, IndexError, TypeError, FloatingPointError) as exc:
             summary[name]={"status":f"audit_failed: {type(exc).__name__}: {str(exc)[:120]}"}
     return summary
