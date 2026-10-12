@@ -22,6 +22,14 @@ def prepare_completed_pipeline_display(session_state, *, old_grid_size, new_grid
     session_state.pop("dual_hinge_show_large_history", None)
     session_state.pop("t2d_top_show_large_panel_inspector", None)
     session_state.pop("t2d_dual_show_large_panel_inspector", None)
+    for key in (
+        "collision_split_preview_selected",
+        "collision_split_preview_stage",
+        "collision_split_preview_red_overlay",
+        "collision_split_preview_hinges",
+        "collision_split_preview_show_large",
+    ):
+        session_state.pop(key, None)
     # Panel identity and count can also change after Split even if nx stays
     # the same. Never retain an old keyed number_input value beyond its new max.
     for key in (
