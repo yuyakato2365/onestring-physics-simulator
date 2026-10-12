@@ -2659,6 +2659,24 @@ elif view_stage == "T2D Dual Hinge":
                    "1本ごとにM2D→M3D→K3D→K2D→T3D→T2Dを再計算し、"
                    "改善しない候補は棄却します。"
                    f" Collision Split初期離隔倍率: {audit_metrics.get('collision_split_gap_multiplier', 1.):.2g}。")
+        final_component_audit = audit_metrics.get("collision_split_final_component_audit", {})
+        if final_component_audit:
+            with st.expander("最終採用T2Dの領域間・領域内衝突（工程別）", expanded=True):
+                summary_rows=[]
+                for label in ("M2D","K2D","T2D Top","T2D Dual"):
+                    stage=final_component_audit.get(label,{})
+                    summary_rows.append({
+                        "工程":label,
+                        "衝突総数":stage.get("collision_pairs"),
+                        "別領域間衝突":stage.get("between_split_component_pairs"),
+                        "同領域内衝突":stage.get("within_split_component_pairs"),
+                        "別領域間貫通エネルギー":stage.get("between_component_depth_squared"),
+                        "同領域内貫通エネルギー":stage.get("within_component_depth_squared"),
+                        "状態":stage.get("status"),
+                    })
+                st.dataframe(summary_rows,use_container_width=True,hide_index=True)
+                st.caption("M2D/K2Dには厚みがなく、T2Dはパネル全8頂点のXY凸包で判定。"
+                           "M2Dで分離できてもT2Dの厚みにより再衝突する場合があります。")
         if split_history:
             st.markdown("**Split前後の工程別衝突診断（同じ連結領域内 / 別々の連結領域間）**")
             rows=[]
