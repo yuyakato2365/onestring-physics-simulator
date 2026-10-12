@@ -1007,6 +1007,14 @@ with st.sidebar:
         lambda: st.slider("Collision Split boundary-distance weight", 0.0, 4.0,
                           1.0, 0.1, disabled=not collision_split_enabled),
     ))
+    collision_split_gap_multiplier = float(_param_row(
+        "Collision-driven Splitのみ切断領域間の初期離隔を増やす倍率。"
+        "CSF Splitは元の距離のまま。後続のK2D/T2D最適化では"
+        "再び近づくことがあるため、診断表で各工程を比較してください。",
+        lambda: st.slider("Collision Split gap multiplier (experimental)",
+                          1.0, 8.0, 1.0, 0.5,
+                          disabled=not collision_split_enabled),
+    ))
     collision_split_candidate_attempts = int(_param_row(
         "1本のSplitを決める前に試せる候補数。各候補でM2D以降を再計算し、"
         "衝突改善が確認できなければ棄却します。",
@@ -1532,6 +1540,7 @@ def current_pipeline_key() -> tuple:
         collision_split_enabled,
         collision_split_max_additional,
         collision_split_boundary_weight,
+        collision_split_gap_multiplier,
         collision_split_candidate_attempts,
         collision_split_min_improvement,
         hinge_layout_max_candidate_pairs,
@@ -1657,6 +1666,7 @@ pipeline_params = PipelineParameters(
     collision_split_enabled=collision_split_enabled,
     collision_split_max_additional=collision_split_max_additional,
     collision_split_boundary_weight=collision_split_boundary_weight,
+    collision_split_gap_multiplier=collision_split_gap_multiplier,
     collision_split_candidate_attempts=collision_split_candidate_attempts,
     collision_split_min_relative_improvement=collision_split_min_improvement,
     hinge_layout_max_candidate_pairs=hinge_layout_max_candidate_pairs,
@@ -2647,8 +2657,35 @@ elif view_stage == "T2D Dual Hinge":
         )
         st.caption("候補はM2Dの境界距離とT2DのSAT貫通深さから選択。"
                    "1本ごとにM2D→M3D→K3D→K2D→T3D→T2Dを再計算し、"
-                   "改善しない候補は棄却します。")
+                   "改善しない候補は棄却します。"
+                   f" Collision Split初期離隔倍率: {audit_metrics.get('collision_split_gap_multiplier', 1.):.2g}。")
         if split_history:
+            st.markdown("**Split前後の工程別衝突診断（同じ連結領域内 / 別々の連結領域間）**")
+            rows=[]
+            for entry in split_history:
+                for period in ("before","after"):
+                    audit=entry.get(period,{}).get("component_audit",{})
+                    for stage in ("M2D","K2D","T2D Top","T2D Dual"):
+                        stage_audit=audit.get(stage,{})
+                        rows.append({
+                            "Split候補":f"#{entry['cut_number']} {entry['proposal']['axis']}={entry['proposal']['value']:.4g}",
+                            "段階":"追加前" if period=="before" else "仮Split再計算後",
+                            "工程":stage,
+                            "連結領域数":audit.get("component_count"),
+                            "衝突総数":stage_audit.get("collision_pairs"),
+                            "別領域間衝突":stage_audit.get("between_split_component_pairs"),
+                            "同領域内衝突":stage_audit.get("within_split_component_pairs"),
+                            "別領域間貫通エネルギー":stage_audit.get("between_component_depth_squared"),
+                            "同領域内貫通エネルギー":stage_audit.get("within_component_depth_squared"),
+                            "診断状態":stage_audit.get("status"),
+                        })
+            with st.expander("どの工程でSplit間の衝突が発生したか", expanded=True):
+                st.dataframe(rows,use_container_width=True,hide_index=True)
+                st.caption(
+                    "M2D・K2Dは薄い四角形、T2Dは厚みを持つパネルのXY射影で判定。"
+                    "別領域間の衝突が増えていれば離隔不足を疑えます。"
+                    "同領域内だけの衝突ならSplit間隔の増加だけでは解消しません。"
+                )
             def _format_split_result(row):
                 before = row["before"]
                 after = row["after"]
