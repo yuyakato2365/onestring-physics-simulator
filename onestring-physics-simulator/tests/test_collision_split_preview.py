@@ -121,34 +121,67 @@ def test_rejection_details_reproduce_reason_thresholds():
 
 
 def test_rejected_full_rebuild_keeps_viewable_trial_but_not_authoritative_state(monkeypatch):
-    from tests.test_collision_driven_sequential_split import _fake_state
-    original=_fake_state(9,0)
-    rejected=_fake_state(12,1)
-    for state in (original,rejected):
-        extra=_pair()
-        state.mesh_2d_initial.vertices=np.asarray(
-            extra.mesh_2d_initial.vertices).copy()
-        # Preserve actual synthetic detached source topology and its vertex
-        # count: the preview must use the SAME faces as the completed rebuild.
-        if np.max(state.mesh_2d_initial.faces)>=len(state.mesh_2d_initial.vertices):
-            # This test models a bigger regular grid instead of only two quads.
-            faces=state.mesh_2d_initial.faces
-            vertices=np.zeros((int(faces.max())+1,3),float)
-            for row in range(len(vertices)):
-                vertices[row,:2]=(row%6,row//6)
-            state.mesh_2d_initial.vertices=vertices
-        state.mesh_2d_optimized=SimpleNamespace(
-            vertices=state.mesh_2d_initial.vertices.copy(),
-            faces=state.mesh_2d_initial.faces.copy(),
+    # Two independent synthetic completed full-pipeline states with a genuine
+    # disconnected seam in the rejected one. Avoid importing another test file
+    # or building actual heavy K3D/OptCuts stages in the preview regression.
+    from collections import defaultdict
+    from onestring_physics.final_split_panel_pass import _complete_cut_once
+
+    side=4
+    verts=np.array([[float(i),float(j),0.]
+                    for j in range(side+1) for i in range(side+1)],float)
+    faces=np.array([
+        [j*(side+1)+i,j*(side+1)+i+1,
+         (j+1)*(side+1)+i+1,(j+1)*(side+1)+i]
+        for j in range(side) for i in range(side)
+    ],dtype=np.int32)
+    v_cut, f_cut, cut_record=_complete_cut_once(verts,faces,"col",2.)
+    assert cut_record is not None
+    edge_owners=defaultdict(list)
+    for fi,face in enumerate(faces):
+        for k in range(4):
+            edge=tuple(sorted((int(face[k]),int(face[(k+1)%4]))))
+            edge_owners[edge].append((fi,k))
+    broken=[]
+    for adjacent in edge_owners.values():
+        if len(adjacent)!=2:
+            continue
+        (a,ea),(b,eb)=adjacent
+        if set(f_cut[a,[ea,(ea+1)%4]])!=set(f_cut[b,[eb,(eb+1)%4]]):
+            broken.append([a,ea,b,eb])
+    assert broken
+
+    def fake_state(vertex_array,face_array,collision_count,cut_count):
+        quads=np.asarray(vertex_array,dtype=float)[face_array]
+        panels=np.concatenate((
+            quads,
+            quads+np.array([0.,0.,-.1]),
+        ),axis=1)
+        records=([dict(
+            collision_source_face_id=5,
+            complete_boundary_to_boundary=True,
+            split_boundary_pairs=broken,
+        )] if cut_count else [])
+        return SimpleNamespace(
+            conformal_domain=SimpleNamespace(paper_split_policy=True),
+            mesh_2d_initial=SimpleNamespace(
+                vertices=vertex_array.copy(), faces=face_array.copy(),
+                metrics=dict(
+                    collision_split_count=cut_count,
+                    collision_split_final_pass_applied_count=cut_count,
+                    collision_split_step_analysis=records,
+                ),
+            ),
+            mesh_2d_optimized=SimpleNamespace(
+                vertices=vertex_array.copy(),faces=face_array.copy(),
+            ),
+            tiles_2d_top_hinge=SimpleNamespace(vertices=panels.copy()),
+            tiles_2d_dual_hinge=SimpleNamespace(vertices=panels.copy(),metrics={}),
+            hinge_graph=SimpleNamespace(hinges=[]),
+            collision_pair_count=collision_count,
         )
-        n=len(state.mesh_2d_initial.faces)
-        tiles=np.zeros((n,8,3),float)
-        for i,face in enumerate(state.mesh_2d_initial.faces):
-            tiles[i,:4]=state.mesh_2d_initial.vertices[face]
-            tiles[i,4:]=tiles[i,:4]
-            tiles[i,4:,2]=-.1
-        state.tiles_2d_top_hinge=SimpleNamespace(vertices=tiles.copy())
-        state.tiles_2d_dual_hinge.vertices=tiles.copy()
+    original=fake_state(verts,faces,9,0)
+    rejected=fake_state(v_cut,f_cut,12,1)
 
     def fake_build(_target,params,**kwargs):
         forced=getattr(params,"collision_split_forced_lines",())
@@ -183,3 +216,6 @@ def test_rejected_full_rebuild_keeps_viewable_trial_but_not_authoritative_state(
     assert candidates[0]["after"]["stages"]["T2D Dual"]["vertices"].shape[0]==16
     assert not candidates[0]["accepted"]
     assert "collision_split_candidate_previews" not in result.tiles_2d_dual_hinge.metrics
+    # The authoritative topology is unchanged after a rejected trial.
+    np.testing.assert_array_equal(result.mesh_2d_initial.faces,faces)
+    assert candidates[0]["after"]["stages"]["M2D"]["faces"].max()>faces.max()
