@@ -1083,10 +1083,40 @@ with st.sidebar:
     st.header("Actuation Simulation")
     physics_backend = st.selectbox(
         "physics backend",
-        ["legacy", "abd"],
+        ["native", "legacy", "abd"],
         index=0,
-        help="legacy uses the existing rigid/SAT projection. abd invokes an external Autodesk affine-body-dynamics executable and never falls back to SAT.",
+        format_func=lambda name: {
+            "native": "Native rigid-body + routed string (experimental, CPU)",
+            "legacy": "Legacy snap/lift + target guidance (not physical string)",
+            "abd": "Autodesk ABD + IPC/CCD (external executable required)",
+        }[name],
+        help="Native: T2D-start rigid tile dynamics, point hinges, gravity, "
+             "one tension-only routed string, approximate discrete 3D OBB contact. "
+             "This is an experimental solver, not the paper's validated implementation.",
     )
+    native_pull_end_ratio = 0.45
+    native_anchor_height_tiles = 2.0
+    native_timestep = 0.02
+    if physics_backend == "native":
+        st.info(
+            "T2D Dualのパネルをそのまま剛体として使用し、ヒンジを保ちながら"
+            "紐の全長を短縮して引き上げます。T3Dへの直接吸引はしません。"
+            "ただし3D接触は近似OBB、時間積分はPBDで、元論文の物理エンジンを"
+            "忠実に再現したものではありません。"
+        )
+        with st.expander("Native string-pull parameters", expanded=True):
+            native_pull_end_ratio = st.slider(
+                "end string length / initial length", 0.1, 1.0, 0.45, 0.05,
+                help="1.0 means no pulling; lower values reel in more string.",
+            )
+            native_anchor_height_tiles = st.slider(
+                "string anchor height (tile edges)", 0.5, 10.0, 2.0, 0.5,
+                help="Fixed world anchor directly above first string guide.",
+            )
+            native_timestep = st.number_input(
+                "native timestep (seconds)", min_value=0.001,
+                max_value=0.05, value=0.02, step=0.005, format="%.3f",
+            )
     abd_executable = ""
     abd_timestep = 0.01
     abd_density = 1000.0
@@ -1152,8 +1182,12 @@ with st.sidebar:
             abd_shake_start_time = float(time_cols[0].number_input("shake start time", min_value=0.0, value=0.0, step=0.1))
             abd_shake_end_time = float(time_cols[1].number_input("shake end time", min_value=0.0, value=0.0, step=0.1))
     run_actuation = _param_row(
-        "現在のT2Dから snap/lift のProjective Dynamics風シミュレーションを実行する。",
-        lambda: st.button("Run ABD OneString assembly" if physics_backend == "abd" else "Run snap/lift actuation"),
+        "現在のT2Dから選択中の物理方式を実行。Nativeは紐全長の片側拘束による引き上げ。",
+        lambda: st.button({
+            "native": "Run native rigid string-pull",
+            "legacy": "Run snap/lift actuation",
+            "abd": "Run ABD OneString assembly",
+        }[physics_backend]),
         tight_note=True,
     )
     sim_steps = _param_row(
@@ -1573,6 +1607,9 @@ def current_actuation_key() -> tuple:
     return (
         current_pipeline_key(),
         physics_backend,
+        native_pull_end_ratio,
+        native_anchor_height_tiles,
+        native_timestep,
         abd_executable,
         abd_timestep,
         abd_density,
@@ -1889,6 +1926,9 @@ if rerun_t2d_only and not run_pipeline:
 
 deployment_params = DeploymentParameters(
     physics_backend=physics_backend,
+    native_pull_end_ratio=native_pull_end_ratio,
+    native_anchor_height_tiles=native_anchor_height_tiles,
+    native_timestep=native_timestep,
     abd_executable=abd_executable or None,
     abd_timestep=abd_timestep,
     abd_density=abd_density,
@@ -1940,12 +1980,16 @@ deployment_params = DeploymentParameters(
 
 actuation_key = current_actuation_key()
 if state.simulation_result is None:
-    st.info("Run snap/lift actuation to simulate deployment against T3D. Central tendon and debug goal attraction are not used in this mode.")
+    st.info("Run the selected deployment solver to animate T2D. Native mode uses the routed string without T3D target guidance.")
 elif st.session_state.get("actuation_key") != actuation_key:
     st.warning("Actuation settings changed. Run snap/lift actuation again to refresh the simulation.")
 
 if run_actuation:
-    run_label = "Autodesk ABD OneString assembly" if physics_backend == "abd" else "Projective-Dynamics-style snap/lift actuation"
+    run_label = {
+        "native": "Native rigid panels + unilateral routed-string pulling",
+        "legacy": "Projective-Dynamics-style snap/lift actuation",
+        "abd": "Autodesk ABD OneString assembly",
+    }[physics_backend]
     with st.spinner(f"Solving {run_label}"):
         progress_bar = st.progress(0.0, text="Preparing deployment simulation…")
         progress_status = st.empty()
@@ -3078,7 +3122,11 @@ elif view_stage in {"Lift Points", "String Path"}:
 elif view_stage == "Assembly Animation":
     st.subheader("Assembly Animation")
     total_tiles = int(state.tiles_2d_dual_hinge.tile_count)
-    selected_simulation_name = "Autodesk ABD + IPC/CCD + unilateral OneString constraint" if physics_backend == "abd" else "legacy Projective Dynamics + SAT"
+    selected_simulation_name = {
+        "native": "Native rigid-body + tension-only string (experimental PBD)",
+        "legacy": "Legacy Projective Dynamics + 2D SAT/target guidance",
+        "abd": "Autodesk ABD + IPC/CCD + unilateral OneString constraint",
+    }[physics_backend]
     st.caption(f"Selected simulation: {selected_simulation_name}. This view displays solver output frames, not design interpolation.")
     if physics_backend == "abd":
         st.info(
@@ -3116,11 +3164,22 @@ elif view_stage == "Assembly Animation":
     else:
         st.success("T2D and T3D are nearly congruent under the current metric.")
 
-    source_label = "Autodesk ABD simulation" if physics_backend == "abd" else "Paper Projective Dynamics simulation"
+    source_label = {
+        "native": "T2D-origin rigid-body PBD with one routed string (experimental)",
+        "legacy": "Legacy target-guided Projective Dynamics",
+        "abd": "Autodesk ABD simulation",
+    }[physics_backend]
     st.caption(f"Animation source: {source_label}.")
 
-    if physics_backend in {"legacy", "abd"}:
-        if physics_backend == "abd":
+    if physics_backend in {"native", "legacy", "abd"}:
+        if physics_backend == "native":
+            st.info(
+                "Native: 各タイルは6自由度の剛体、ヒンジは点接続。"
+                "床面支持・重力・3D OBB接触を使い、紐経路の総長だけを"
+                "一方向に短縮します。T3Dは結果比較専用です。"
+                "近似PBDであり、CCD/IPC・滑車摩擦はありません。"
+            )
+        elif physics_backend == "abd":
             st.info(
                 "Physical model used here: affine bodies with IPC/CCD contact, pin-joint hinges, gravity and friction. "
                 "The routed guide points are coupled by a unilateral total-length constraint, and its commanded length decreases over time."
@@ -3147,7 +3206,11 @@ elif view_stage == "Assembly Animation":
             or len(getattr(state.simulation_result, "frames", [])) < 2
             or (physics_backend != "abd" and st.session_state.get("paper_pd_animation_key") != paper_sim_key)
         )
-        refresh_label = "Run / refresh ABD simulation" if physics_backend == "abd" else "Run / refresh paper simulation"
+        refresh_label = {
+            "native": "Run / refresh native string simulation",
+            "legacy": "Run / refresh legacy PD",
+            "abd": "Run / refresh ABD simulation",
+        }[physics_backend]
         refresh_sim = c0.button(refresh_label, type="primary")
         player_mode = c1.radio(
             "player mode",
@@ -3182,6 +3245,19 @@ elif view_stage == "Assembly Animation":
                         "legacy_fallback": False,
                     }
                 )
+            elif physics_backend == "native":
+                st.write({
+                    "physics_backend": "native",
+                    "initial_geometry": "exact T2D Dual rigid panels",
+                    "string_model": "unilateral routed path length",
+                    "initial_anchor_height_tiles": paper_params.native_anchor_height_tiles,
+                    "end_string_length_ratio": paper_params.native_pull_end_ratio,
+                    "timestep": paper_params.native_timestep,
+                    "steps": paper_params.steps,
+                    "solver_iterations": paper_params.solver_iterations,
+                    "substeps": paper_params.solver_substeps,
+                    "contact": "discrete 3D OBB-SAT approximation (not CCD/IPC)",
+                })
             else:
                 backend_info = compute_backend_info(paper_params.compute)
                 st.write(
@@ -3211,7 +3287,7 @@ elif view_stage == "Assembly Animation":
                         paper_params,
                         progress_callback=_paper_sim_progress,
                     )
-                except RuntimeError as exc:
+                except (RuntimeError, ValueError) as exc:
                     st.error(str(exc))
                     st.stop()
             progress_bar.progress(1.0)
@@ -3311,7 +3387,11 @@ elif view_stage == "Assembly Animation":
             st.write(
                 {
                     "physics_backend": result.metrics.get("physics_backend"),
-                    "simulation_model": "Autodesk ABD affine bodies + IPC/CCD + unilateral total-path-length string" if physics_backend == "abd" else "paper-style Projective Dynamics: E = w_rigid E_rigid + w_collision E_collision + w_actuation(E_snap + E_lift)",
+                    "simulation_model": {
+                        "native": "Approximate rigid-body PBD: hinge + 3D OBB contact + floor + unilateral total string length; T3D NOT an actuator",
+                        "legacy": "Legacy target-guided snap/lift Projective Dynamics",
+                        "abd": "Autodesk ABD affine bodies + IPC/CCD + unilateral total-path-length string",
+                    }[physics_backend],
                     "actual_backend": result.metrics.get("actual_backend"),
                     "dominant_backend": result.metrics.get("dominant_backend"),
                     "elapsed_time": result.metrics.get("elapsed_time"),
