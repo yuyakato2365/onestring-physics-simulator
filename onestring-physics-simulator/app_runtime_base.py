@@ -2659,6 +2659,14 @@ elif view_stage == "T2D Dual Hinge":
                    "1本ごとにM2D→M3D→K3D→K2D→T3D→T2Dを再計算し、"
                    "改善しない候補は棄却します。"
                    f" Collision Split初期離隔倍率: {audit_metrics.get('collision_split_gap_multiplier', 1.):.2g}。")
+        with st.expander(
+            "棄却・採用した仮Split候補を3Dで描画して比較",
+            expanded=True,
+        ):
+            from onestring_physics.paper_collision_split_preview_view import (
+                render_split_candidate_previews,
+            )
+            render_split_candidate_previews(st, state, split_history)
         final_component_audit = audit_metrics.get("collision_split_final_component_audit", {})
         if final_component_audit:
             with st.expander("最終採用T2Dの領域間・領域内衝突（工程別）", expanded=True):
