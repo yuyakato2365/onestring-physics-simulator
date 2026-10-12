@@ -8500,6 +8500,9 @@ def build_onestring_design(
         fraction=float(np.clip(fraction,0.,1.))
         displayed=(.50*fraction if split_feedback_enabled else fraction)
         last_progress[0]=max(last_progress[0],displayed)
+        if split_feedback_enabled and fraction>=1.0:
+            stage="Initial pipeline complete; evaluating Collision-driven Splits"
+            detail="T2D baseline ready; collision-Split feedback still running"
         progress_callback(stage,last_progress[0],detail)
     progress_attribute = "_bijective_free_boundary_progress_callback"
     missing_progress = object()
