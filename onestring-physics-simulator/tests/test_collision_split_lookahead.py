@@ -70,7 +70,10 @@ def test_promising_first_cut_allows_local_max_worsening_but_not_bad_energy():
                  penetration_max=.21)
     assert promising_rejected_first_cut(before, after)
     assert not promising_rejected_first_cut(before, dict(after, collision_energy=10.))
-    assert not promising_rejected_first_cut(before, dict(after, collision_pairs=10))
+    # The original accept_if_improved allows up to max(2, ceil(0.02*p0))
+    # additional pairs. Temporary lookahead parents should use that allowance.
+    assert promising_rejected_first_cut(before, dict(after, collision_pairs=10))
+    assert not promising_rejected_first_cut(before, dict(after, collision_pairs=12))
     # A zero-contact result with disconnected hinges has no collision hotspot
     # from which to propose the second cut. Do not starve viable parents.
     assert not promising_rejected_first_cut(before, dict(after, collision_pairs=0,
@@ -231,4 +234,81 @@ def test_collision_free_but_hinge_broken_candidate_does_not_starve_lookahead(mon
     assert not steps[0]["accepted"]
     assert steps[1]["single_step_decision_reason"]=="max_penetration_worsened"
     assert steps[1]["accepted"] and steps[2]["accepted"]
+    assert len(result.tiles_2d_dual_hinge.metrics["collision_split_accepted_lines"])==2
+
+
+def test_observed_243_to_245_pair_growth_is_eligible_for_lookahead():
+    """Observed regression: ~18% lower penetration energy, +2 pairs."""
+    before=dict(status="ok", collision_pairs=243, collision_energy=.0064)
+    after=dict(status="ok", collision_pairs=245, collision_energy=.0053,
+               penetration_max=.0214, hinge_rms=.0094)
+    assert promising_rejected_first_cut(before, after)
+    # Bound temporary pair growth to the original 2% allowance (ceil(4.86)=5).
+    assert promising_rejected_first_cut(
+        before,dict(after, collision_pairs=248)
+    )
+    assert not promising_rejected_first_cut(
+        before,dict(after, collision_pairs=249)
+    )
+
+
+def test_lookahead_picks_minor_pair_growth_parent_if_energy_is_lower(monkeypatch):
+    """Two rejected first cuts: select lower-energy intermediate with +1 pair
+    even though it misses the single-cut >=20% extra-pair improvement rule.
+    """
+    import copy
+    original, parent, second=_grid_states()
+    worse_max=copy.deepcopy(parent)
+    worse_max.fixture_quality.update(collision_pairs=7,collision_energy=8.5,
+                                      penetration_max=.21,hinge_rms=.05)
+    extra_pair=parent
+    extra_pair.fixture_quality.update(collision_pairs=10,collision_energy=7.7,
+                                      penetration_max=.19,hinge_rms=.05)
+    second.fixture_quality.update(hinge_rms=.05)
+    built=[]
+
+    def make(name):
+        return dict(name=name,axis="col",value=1.,source_face_id=0,
+                    boundary_distance_tiles=1.,score=1.)
+
+    def fake_build(_target,params,**_kwargs):
+        forced=tuple(getattr(params,"collision_split_forced_lines",()))
+        built.append(tuple(c["name"] for c in forced))
+        if not forced:
+            return original
+        if len(forced)==1:
+            return worse_max if forced[0]["name"]=="worse_max" else extra_pair
+        return second
+
+    def fake_rank(state,**_kwargs):
+        if state is original:
+            return [make("worse_max"), make("extra_pair")],dict(status="ok")
+        return [make("next_cut")],dict(status="ok")
+
+    monkeypatch.setattr(pipeline,"_ORIGINAL_BUILD_ONESTRING_DESIGN",fake_build)
+    monkeypatch.setattr(collision,"rank_collision_split_candidates",fake_rank)
+    monkeypatch.setattr(collision,"collision_quality",
+                        lambda st:dict(st.fixture_quality))
+    monkeypatch.setattr(collision,"collision_component_audit",
+                        lambda st:dict(status="ok"))
+    params=SimpleNamespace(
+        omega_parameterization_mode="",
+        collision_split_enabled=True,collision_split_max_additional=2,
+        collision_split_candidate_attempts=2,
+        collision_split_boundary_weight=1.,
+        collision_split_min_relative_improvement=.03,
+        collision_split_gap_multiplier=1.,
+        collision_split_forced_lines=(),
+        collision_split_lookahead_enabled=True,
+        collision_split_lookahead_children=1,
+    )
+    result=pipeline.build_onestring_design(object(),params)
+    assert result is second
+    assert built==[(),("worse_max",),("extra_pair",),
+                   ("extra_pair","next_cut")]
+    steps=result.tiles_2d_dual_hinge.metrics["collision_split_feedback_steps"]
+    assert steps[0]["decision_reason"]=="max_penetration_worsened"
+    assert steps[1]["single_step_decision_reason"]=="insufficient_reduction_for_extra_pairs"
+    assert steps[1]["acceptance_mode"]=="lookahead_first_cut"
+    assert steps[2]["accepted"] is True
     assert len(result.tiles_2d_dual_hinge.metrics["collision_split_accepted_lines"])==2
