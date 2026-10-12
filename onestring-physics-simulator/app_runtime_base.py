@@ -2659,6 +2659,12 @@ elif view_stage == "T2D Dual Hinge":
                    "1本ごとにM2D→M3D→K3D→K2D→T3D→T2Dを再計算し、"
                    "改善しない候補は棄却します。"
                    f" Collision Split初期離隔倍率: {audit_metrics.get('collision_split_gap_multiplier', 1.):.2g}。")
+        if status == "T2D_reoptimized_on_existing_split_topology":
+            st.info(
+                "この画面のSplit候補プレビューは、最後にRun OneString pipelineで"
+                "各Split候補を仮計算した時点の形状です。"
+                "その後にT2Dのみ再最適化した現在の最終配置とは異なる場合があります。"
+            )
         with st.expander(
             "棄却・採用した仮Split候補を3Dで描画して比較",
             expanded=True,
