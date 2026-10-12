@@ -80,9 +80,14 @@ def test_result_is_published_before_costly_stage_rendering():
     assert source.index('prepare_completed_pipeline_display(') < (
         source.index('view_stage = st.selectbox(')
     )
-    assert source.index('st.success(\n        f"計算結果を保存しました') < (
+    assert source.index('_saved_grid_size = st.session_state.get(') < (
         source.index('view_stage = st.selectbox(')
     )
+    assert source.index('st.success("計算結果を保存しました。 "') < (
+        source.index('view_stage = st.selectbox(')
+    )
+    assert 'st.caption(_result_text)' in source
+    assert 'Pipeline Viewの描画に失敗しました' in source
     assert '_large_history = _history_tile_count * _history_frame_count > 12000' in source
     assert 'if pose_history and _render_history:' in source
     assert 'if common > 200:' in source
