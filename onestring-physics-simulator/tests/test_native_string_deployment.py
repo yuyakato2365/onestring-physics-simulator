@@ -72,6 +72,16 @@ def test_native_frame_zero_is_exact_t2d_and_panels_stay_rigid():
         result.metrics["initial_string_length"] + 1e-6
     )
     assert result.metrics["collision_model"]=="3d_obb_sat_discrete"
+    # This elementary pin-hinged test must physically rise with routed pull:
+    # an animation that remains exactly flat would not meet the main request.
+    assert result.metrics["rise_from_t2d"] > 1e-4
+    assert len(result.string_path_frames)==len(result.frames)
+    assert len(result.string_command_history)==len(result.frames)
+    np.testing.assert_allclose(
+        result.string_path_frames[0][1:],
+        [state.tiles_2d_dual_hinge.vertices[0,0],
+         state.tiles_2d_dual_hinge.vertices[1,2]],
+    )
 
 
 def test_string_actuation_is_tension_only_and_shortens_length():
