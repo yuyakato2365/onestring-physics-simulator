@@ -22,6 +22,11 @@ def _previous_state():
         "dual_hinge_show_large_history": True,
         "t2d_dual_show_large_panel_inspector": True,
         "t2d_top_show_large_panel_inspector": True,
+        "collision_split_preview_selected": 6,
+        "collision_split_preview_stage": "K2D",
+        "collision_split_preview_red_overlay": True,
+        "collision_split_preview_hinges": True,
+        "collision_split_preview_show_large": True,
         "onestring_render_overview": True,
         "unrelated_user_preference": "untouched",
     }
@@ -42,6 +47,11 @@ def test_changed_grid_resets_heavy_stage_and_stale_panel_ids():
         "dual_hinge_inspection_trial", "dual_hinge_show_large_history",
         "t2d_top_show_large_panel_inspector",
         "t2d_dual_show_large_panel_inspector",
+        "collision_split_preview_selected",
+        "collision_split_preview_stage",
+        "collision_split_preview_red_overlay",
+        "collision_split_preview_hinges",
+        "collision_split_preview_show_large",
         "onestring_render_overview",
     ):
         assert key not in state
@@ -94,6 +104,8 @@ def test_result_is_published_before_costly_stage_rendering():
     assert '_large_history = _history_tile_count * _history_frame_count > 12000' in source
     assert 'if pose_history and _render_history:' in source
     assert 'if common > 200:' in source
+    assert 'render_split_candidate_previews(st, state, split_history)' in source
+    assert '棄却・採用した仮Split候補を3Dで描画して比較' in source
     assert source.index('st.session_state["onestring_just_completed_pipeline"] = True') < (
         source.index('    st.rerun()\n\nstate = st.session_state.onestring_state')
     )
