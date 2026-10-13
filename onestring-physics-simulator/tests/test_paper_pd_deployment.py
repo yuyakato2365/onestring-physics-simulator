@@ -25,9 +25,11 @@ def _state(extra_four=False):
     target[:,:,2]+=.5
     tiles=list(range(len(rest)))
     def gap(gid,owner,boundary,xy):
+        edges={tile:((1,2) if tile%2==0 else (3,0)) for tile in owner}
         return SimpleNamespace(id=gid,surrounding_tiles=owner,boundary=boundary,
                                centroid_2d=np.array([*xy,0.]),
-                               centroid_3d=np.array([*xy,.5]))
+                               centroid_3d=np.array([*xy,.5]),
+                               material_side_edges=edges)
     gaps=[
         gap(0,[0],True,(-.1,.5)),
         gap(1,tiles,False,(1.3,.5) if not extra_four else (1.5,1.5)),
@@ -138,3 +140,21 @@ def test_rigid_batch_kabsch_guards_against_reflections():
     p,_,rot=_rigid_fit(rest,target)
     np.testing.assert_allclose(np.linalg.det(rot),np.ones(len(rest)),atol=1e-9)
     assert np.isfinite(p).all()
+
+
+def test_missing_material_channel_face_is_reported_not_silently_guessed():
+    state=_state()
+    del state.gap_graph.gaps[1].material_side_edges
+    with pytest.raises(PaperPDInputError,match="MISSING_MATERIAL_SIDE_EDGE"):
+        simulate_paper_pd(state,_params())
+
+
+def test_prescribed_material_side_faces_are_used_not_nearest_corner():
+    state=_state()
+    # Deliberately choose the farther top edge to verify topology, not nearest
+    # geometric centroid, determines the Snap correspondence.
+    state.gap_graph.gaps[1].material_side_edges={0:(3,0),1:(1,2)}
+    snaps,_,info=_validate_route(state)
+    assert snaps[0].face_a==(3,0,4,7)
+    assert snaps[0].face_b==(1,2,6,5)
+    assert "topology-derived" in info["snap_geometry"]
