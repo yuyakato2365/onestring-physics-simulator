@@ -1,8 +1,8 @@
-"""The former hierarchical CSF Split rule must not fragment a fixed chart indefinitely.
+"""Paper Split: CSF > 2 -> highest-Gaussian-curvature complete cut -> repeat.
 
-Regression for a real reported failure: 64/64 cuts and 65 islands while
-multiple components still exceed CSF 2. These synthetic charts test the
-decision rule, not a claim about Lilium/SIGGRAPH reproduction.
+The earlier user instruction was NOT to veto cuts based on immediate CSF
+improvement. Failed geometrical cuts/budget must be reported as unresolved.
+These are synthetic checks, not a claim about Lilium reproduction.
 """
 from types import SimpleNamespace
 
@@ -41,34 +41,49 @@ def setup(monkeypatch, lo, hi, vertices, faces):
     monkeypatch.setattr(split,"gaussian_curvature",lambda *a:curvature)
 
 
-def test_restore_stops_when_no_cut_can_improve_even_with_budget_64(monkeypatch):
+def test_paper_accepts_complete_cut_even_without_immediate_csf_gain(monkeypatch):
     vertices,faces=grid()
     lo=np.ones(len(faces))
     hi=np.full(len(faces),4.2)
     setup(monkeypatch,lo,hi,vertices,faces)
     params=SimpleNamespace(paper_fidelity_mode=True,collision_split_forced_lines=())
     v,f,records,metrics=split._split_mesh_single(vertices,faces,domain(vertices,params),params)
-    assert not records
-    assert metrics["number_of_splits"]==0
-    assert metrics["csf_split_step_count"]==0
-    assert metrics["csf_split_unresolved_component_count"]==1
-    assert not metrics["csf_split_budget_exhausted"]
-    assert metrics["csf_split_rejected_components"][0]["reason"]=="within_quad_distortion_floor"
-    np.testing.assert_array_equal(f,faces)
-    np.testing.assert_array_equal(v,vertices)
+    # A valid complete cut is accepted even when every tile has CSF=4.2.
+    assert records, "Paper mode must not veto a legal curvature cut for no CSF gain"
+    assert all(r["gaussian_curvature"] == 10. for r in records)
+    assert len(records) < 64  # geometric impossibility stops futile recuts
+    assert metrics["max_csf_after_split"]>2.
+    assert metrics["csf_split_unresolved_component_count"]>0
+    assert metrics["csf_split_stopping_reason"] == "no_admissible_cut_remaining"
+    assert not metrics["csf_split_bound_certified"]
+    assert len(f)==len(faces)
+    assert len(v)>len(vertices)
 
 
-def test_restore_only_accepts_real_child_csf_improvement(monkeypatch):
+def test_paper_stops_as_soon_as_all_component_csf_values_are_at_most_two(monkeypatch):
     vertices,faces=grid()
-    # Every quad individually has CSF 1.1. Left/right halves have distinct
-    # absolute area scales: split at x=2 reduces the component max/min span.
+    lo=np.ones(len(faces))
+    hi=np.full(len(faces),1.9)
+    setup(monkeypatch,lo,hi,vertices,faces)
+    params=SimpleNamespace(paper_fidelity_mode=True,collision_split_forced_lines=())
+    _,_,records,metrics=split._split_mesh_single(vertices,faces,domain(vertices,params),params)
+    assert records==[]
+    assert metrics["csf_split_stopping_reason"]=="threshold_met"
+    assert metrics["csf_split_unresolved_component_count"]==0
+
+
+def test_paper_keeps_cutting_until_component_spans_fall_below_two(monkeypatch):
+    vertices,faces=grid()
+    # Every quad individually has area span 1.1, while the two halves
+    # use strongly different absolute scales. The first x=2 cut
+    # establishes two components, both with CSF 1.1.
     lo=np.array([1. if k%4<2 else 4. for k in range(len(faces))])
     hi=lo*1.1
     setup(monkeypatch,lo,hi,vertices,faces)
     params=SimpleNamespace(paper_fidelity_mode=True,collision_split_forced_lines=())
     _,_,records,metrics=split._split_mesh_single(vertices,faces,domain(vertices,params),params)
     assert records
-    assert len(records)<64
-    assert all(r["worst_sigma_reduction"]>1e-10 for r in records)
-    assert metrics["max_csf_after_split"]<metrics["max_csf_before_split"]
+    assert len(records) < 64
+    assert metrics["csf_split_stopping_reason"]=="threshold_met"
+    assert metrics["max_csf_after_split"]<=2.0
     assert not metrics["csf_split_budget_exhausted"]
