@@ -1083,9 +1083,10 @@ with st.sidebar:
     st.header("Actuation Simulation")
     physics_backend = st.selectbox(
         "physics backend",
-        ["native", "legacy", "abd"],
+        ["paper_pd", "native", "legacy", "abd"],
         index=0,
         format_func=lambda name: {
+            "paper_pd": "Paper Sec 5.4 / Appendix E — Snap + Lift PD (reference)",
             "native": "Native rigid-body + routed string (experimental, CPU)",
             "legacy": "Legacy snap/lift + target guidance (not physical string)",
             "abd": "Autodesk ABD + IPC/CCD (external executable required)",
@@ -1094,6 +1095,24 @@ with st.sidebar:
              "one tension-only routed string, approximate discrete 3D OBB contact. "
              "This is an experimental solver, not the paper's validated implementation.",
     )
+    paper_pd_steps = 120
+    paper_pd_timestep = 0.015
+    if physics_backend == "paper_pd":
+        st.info(
+            "元論文 Section 5.4 / Supplement Appendix E の Snap（紐が通る"
+            "ギャップ側面中央の一致）と Lift（選択ギャップを目標高さへ）を"
+            "使います。T3Dパネル姿勢への追加吸引や仮想紐長短縮は使いません。"
+            "剛体PDの反復と3D接触には独立実装の近似が残ります。"
+        )
+        with st.expander("Paper PD timing / numerical approximation",expanded=True):
+            paper_pd_steps = st.slider(
+                "Paper PD integration steps",20,480,120,20,
+                help="Physical integration steps, independent from saved display frames.",
+            )
+            paper_pd_timestep = st.number_input(
+                "Paper PD timestep (s)",min_value=0.001,max_value=0.050,
+                value=0.015,step=0.005,format="%.3f",
+            )
     native_pull_end_ratio = 0.45
     native_anchor_height_tiles = 2.0
     native_timestep = 0.02
@@ -1217,6 +1236,7 @@ with st.sidebar:
     run_actuation = _param_row(
         "現在のT2Dから選択中の物理方式を実行。Nativeは紐全長の片側拘束による引き上げ。",
         lambda: st.button({
+            "paper_pd": "Run Paper Snap/Lift PD",
             "native": "Run native rigid string-pull",
             "legacy": "Run snap/lift actuation",
             "abd": "Run ABD OneString assembly",
@@ -1665,6 +1685,8 @@ def current_actuation_key() -> tuple:
     return (
         current_pipeline_key(),
         physics_backend,
+        paper_pd_steps,
+        paper_pd_timestep,
         native_pull_end_ratio,
         native_anchor_height_tiles,
         native_timestep,
@@ -1987,6 +2009,7 @@ if rerun_t2d_only and not run_pipeline:
 
 deployment_params = DeploymentParameters(
     physics_backend=physics_backend,
+    paper_pd_timestep=paper_pd_timestep,
     native_pull_end_ratio=native_pull_end_ratio,
     native_anchor_height_tiles=native_anchor_height_tiles,
     native_timestep=native_timestep,
@@ -2009,7 +2032,9 @@ deployment_params = DeploymentParameters(
     abd_shake_direction_z=abd_shake_direction[2],
     abd_shake_start_time=abd_shake_start_time,
     abd_shake_end_time=abd_shake_end_time,
-    steps=native_solver_steps if physics_backend == "native" else sim_steps,
+    steps=(paper_pd_steps if physics_backend == "paper_pd"
+           else native_solver_steps if physics_backend == "native"
+           else sim_steps),
     solver_iterations=solver_iterations,
     rigid_weight=rigid_weight,
     rigid_projection_passes=rigid_projection_passes,
@@ -2049,6 +2074,7 @@ elif st.session_state.get("actuation_key") != actuation_key:
 
 if run_actuation:
     run_label = {
+        "paper_pd": "Paper Section 5.4 Snap/Lift actuation PD",
         "native": "Native rigid panels + unilateral routed-string pulling",
         "legacy": "Projective-Dynamics-style snap/lift actuation",
         "abd": "Autodesk ABD OneString assembly",
@@ -3251,6 +3277,7 @@ elif view_stage == "Assembly Animation":
     st.subheader("Assembly Animation")
     total_tiles = int(state.tiles_2d_dual_hinge.tile_count)
     selected_simulation_name = {
+        "paper_pd": "Paper Appendix E Snap/Lift projective reference (3D contact approximation)",
         "native": "Native rigid-body + tension-only string (experimental PBD)",
         "legacy": "Legacy Projective Dynamics + 2D SAT/target guidance",
         "abd": "Autodesk ABD + IPC/CCD + unilateral OneString constraint",
@@ -3297,14 +3324,22 @@ elif view_stage == "Assembly Animation":
         st.success("T2D and T3D are nearly congruent under the current metric.")
 
     source_label = {
+        "paper_pd": "Section 5.4 / Supplement E Snap+Lift (independent approximate solver)",
         "native": "T2D-origin rigid-body PBD with one routed string (experimental)",
         "legacy": "Legacy target-guided Projective Dynamics",
         "abd": "Autodesk ABD simulation",
     }[physics_backend]
     st.caption(f"Animation source: {source_label}.")
 
-    if physics_backend in {"native", "legacy", "abd"}:
-        if physics_backend == "native":
+    if physics_backend in {"paper_pd", "native", "legacy", "abd"}:
+        if physics_backend == "paper_pd":
+            st.info(
+                "論文準拠の駆動拘束：MILPで最適化された有効な閉経路上の"
+                "実パネル側面中央をSnapし、指定Lift Pointを目標位置へ動かす。"
+                "全パネルのT3D姿勢への吸引はありません。"
+                "PDの反復解法と3D接触は近似で、著者の数値実装の完全再現ではありません。"
+            )
+        elif physics_backend == "native":
             st.info(
                 "Native: 各タイルは6自由度の剛体、ヒンジは点接続。"
                 "床面支持・重力・3D OBB接触を使い、紐経路の総長だけを"
@@ -3339,6 +3374,7 @@ elif view_stage == "Assembly Animation":
             or (physics_backend != "abd" and st.session_state.get("paper_pd_animation_key") != paper_sim_key)
         )
         refresh_label = {
+            "paper_pd": "Run / refresh Paper Appendix E PD",
             "native": "Run / refresh native string simulation",
             "legacy": "Run / refresh legacy PD",
             "abd": "Run / refresh ABD simulation",
@@ -3360,6 +3396,7 @@ elif view_stage == "Assembly Animation":
             paper_params = replace(
                 deployment_params,
                 steps=(native_solver_steps if physics_backend == "native"
+                       else paper_pd_steps if physics_backend == "paper_pd"
                        else max(sim_steps, frame_count)),
                 store_animation_frames=True,
                 max_animation_frames=frame_count,
@@ -3378,6 +3415,17 @@ elif view_stage == "Assembly Animation":
                         "legacy_fallback": False,
                     }
                 )
+            elif physics_backend == "paper_pd":
+                st.write({
+                    "physics_backend":"paper_pd",
+                    "string_route_model":state.string_path.metrics.get("string_path_model"),
+                    "route_status":state.string_path.metrics.get("string_path_status"),
+                    "drive":"side-face midpoint Snap + selected Lift targets",
+                    "no_direct_target_pose_fit":True,
+                    "integration_steps":paper_params.steps,
+                    "integration_timestep":paper_params.paper_pd_timestep,
+                    "contact":"approximate discrete 3D OBB SAT (not authors exact collision solver)",
+                })
             elif physics_backend == "native":
                 st.write({
                     "physics_backend": "native",
@@ -3549,6 +3597,29 @@ elif view_stage == "Assembly Animation":
                 placeholder.plotly_chart(render_paper_pd_frame(current_frame), use_container_width=True, key="paper_pd_current")
 
         if result is not None:
+            if physics_backend == "paper_pd":
+                vals=result.metrics
+                m0,m1,m2,m3=st.columns(4)
+                m0.metric("Snap側面ギャップRMS",f"{vals.get('snap_error',0.):.5g}")
+                m1.metric("Lift位置RMS",f"{vals.get('lift_error',0.):.5g}")
+                m2.metric("ヒンジRMS",f"{vals.get('hinge_error',0.):.5g}")
+                m3.metric("残存3D交差 (近似)",str(vals.get("collision_count","?")))
+                st.caption(
+                    "Snap対象 {0}組、Lift対象 {1}箇所。紐の実体・滑車摩擦はPD内で"
+                    "解かず、Appendix Eの幾何拘束としてモデル化。"
+                    .format(vals.get("actuated_snap_gap_count",0),
+                            vals.get("actuated_lift_gap_count",0))
+                )
+                if vals.get("status") != "constraints_satisfied":
+                    st.warning(
+                        "計算は終了しましたが、Snap/Lift/ヒンジ/非衝突の"
+                        "拘束残差が残っています。論文の組立て成功と解釈しないでください。"
+                    )
+                st.line_chart({
+                    "Snap midpoint RMS":getattr(result,"snap_error_history",[]),
+                    "Lift RMS":getattr(result,"lift_error_history",[]),
+                    "Hinge RMS":getattr(result,"hinge_error_history",[]),
+                })
             if physics_backend == "native":
                 vals=result.metrics
                 m0,m1,m2,m3=st.columns(4)
@@ -3612,6 +3683,7 @@ elif view_stage == "Assembly Animation":
                 {
                     "physics_backend": result.metrics.get("physics_backend"),
                     "simulation_model": {
+                        "paper_pd": "Section 5.4 Appendix E PD: route Snap and selected Lift; discrete 3D contact approximation",
                         "native": "Approximate rigid-body PBD: hinge + 3D OBB contact + floor + unilateral total string length; T3D NOT an actuator",
                         "legacy": "Legacy target-guided snap/lift Projective Dynamics",
                         "abd": "Autodesk ABD affine bodies + IPC/CCD + unilateral total-path-length string",
