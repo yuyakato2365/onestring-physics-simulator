@@ -1,8 +1,7 @@
-"""The Paper checkbox must NOT alter the OFF-mode Split processing.
+"""ON/OFF share one Split rule: CSF>threshold + highest Gaussian curvature.
 
-Run the same synthetic M2D chart through both modes and assert identical
-mesh topology, cuts, peak selection, CSF diagnostics and stopping conditions.
-The OFF algorithm deliberately has an invariant fixed-chart CSF floor.
+Use the original OFF-mode CSF estimator and parameters in both UI modes,
+but accept complete curvature-priority cuts even without immediate CSF gain.
 """
 from types import SimpleNamespace
 
@@ -75,13 +74,18 @@ def test_split_solver_and_stopping_are_identical_in_both_modes(
     off=_run(monkeypatch, False, lo, hi)
     on=_run(monkeypatch, True, lo, hi)
     _assert_identical(off, on)
-    # Under the CURRENT OFF rule, worst-quad CSF is an invariant lower
-    # bound and halts the candidate before any cuts are made.
-    assert off[3]["number_of_splits"]==0
-    assert off[3]["csf_split_stopping_reason"]==(
-        "threshold_met" if peak_jacobian<=4.0 else
-        "no_admissible_cut_remaining"
-    )
+    if peak_jacobian<=4.0:
+        assert off[3]["number_of_splits"]==0
+        assert off[3]["csf_split_stopping_reason"]=="threshold_met"
+    else:
+        assert off[3]["number_of_splits"]>0
+        # A fixed chart with identical elevated CSF per quad cannot
+        # improve that CSF by cutting connectivity, yet cuts are accepted.
+        assert off[2][0]["worst_sigma_reduction"]==pytest.approx(0.)
+        assert off[3]["csf_split_unresolved_component_count"]>0
+        assert off[3]["csf_split_stopping_reason"] in (
+            "no_admissible_cut_remaining","budget_exhausted"
+        )
 
 
 def test_split_parity_preserves_custom_threshold_and_budget(monkeypatch):
@@ -103,3 +107,52 @@ def test_split_parity_includes_explicit_collision_feedback_cut(monkeypatch):
     _assert_identical(off,on)
     assert on[3]["collision_split_count"]==1
     assert on[3]["csf_split_step_count"]==0
+
+
+def test_highest_curvature_in_violating_tiles_trumps_larger_csf(monkeypatch):
+    vertices,faces=_grid()
+    lo=np.ones(len(faces))
+    hi=np.ones(len(faces))
+    hi[5]=6.25   # local CSF 2.5, at source vertex 6
+    hi[7]=20.25  # local CSF 4.5, at source vertex 8
+    # A very high curvature in a NON-violating tile must be ignored.
+    sources=[np.array([0],dtype=int) for _ in faces]
+    sources[5]=np.array([6],dtype=int)
+    sources[7]=np.array([8],dtype=int)
+    sources[11]=np.array([13],dtype=int)
+    curvature=np.full(len(vertices),-1.)
+    curvature[6]=100.
+    curvature[8]=10.
+    curvature[13]=1000.
+    monkeypatch.setattr(split,"_face_samples",lambda *a:(lo,hi,sources))
+    monkeypatch.setattr(split,"gaussian_curvature",lambda *a:curvature)
+
+    outputs=[]
+    for paper_mode in (False,True):
+        domain=SimpleNamespace(
+            parameterization=SimpleNamespace(
+                metrics={},uv_vertices_2d=vertices[:,:2]),
+            csf_split_enabled=True,csf_split_threshold=2.,
+            max_csf_splits=1,reference_grid_rotation_degrees=0.,
+        )
+        params=SimpleNamespace(paper_fidelity_mode=paper_mode,
+                               collision_split_forced_lines=())
+        outputs.append(split._split_mesh_single(vertices,faces,domain,params))
+    _assert_identical(*outputs)
+    assert outputs[0][2][0]["curvature_vertex_id"]==6
+    assert outputs[0][3]["csf_split_stopping_reason"]=="budget_exhausted"
+
+
+def test_no_improvement_is_not_a_rejection_in_either_mode(monkeypatch):
+    lo=np.ones(16)
+    hi=np.full(16,9.)
+    results=[_run(monkeypatch,mode,lo,hi,budget=1) for mode in (False,True)]
+    _assert_identical(*results)
+    out=results[0]
+    assert len(out[2])==1
+    assert out[2][0]["worst_sigma_reduction"]==pytest.approx(0.)
+    assert out[3]["max_csf_before_split"]==pytest.approx(3.)
+    assert out[3]["max_csf_after_split"]==pytest.approx(3.)
+    assert out[3]["csf_split_stopping_reason"]=="budget_exhausted"
+    assert out[3]["csf_split_unresolved_component_count"]==2
+    assert not out[3]["csf_split_bound_certified"]
