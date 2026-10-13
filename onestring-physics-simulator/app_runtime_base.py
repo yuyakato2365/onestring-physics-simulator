@@ -606,6 +606,11 @@ with st.sidebar:
         lambda: st.selectbox(
             "Omega parameterization mode",
             ["rectangular_harmonic_legacy", "lscm_free_boundary", "paper_reference_bff", "bff", "boundary_sliding_lscm", "pca_debug"],
+            format_func=lambda mode: {
+                "bff":"bff — LEGACY harmonic, NOT official BFF",
+                "paper_reference_bff":"paper_reference_bff — official BFF CLI",
+                "rectangular_harmonic_legacy":"rectangular_harmonic_legacy — NOT BFF",
+            }.get(mode,mode),
             index=2 if selected_model_version["id"] == "0.2.0-paper-reference-bff" else 0,
             help="bff is a deprecated alias of rectangular_harmonic_legacy. paper_reference_bff requires the official CLI.",
         ),
@@ -1882,6 +1887,7 @@ if run_pipeline:
         _build_progress("Done", 1.0, "Pipeline state stored")
         st.session_state.pipeline_progress_log = progress_log
         st.session_state.pipeline_key = pipeline_key
+        st.session_state.onestring_last_completed_params = pipeline_params
         from onestring_physics.ui_result_recovery import prepare_completed_pipeline_display
         _grid_view_reset = prepare_completed_pipeline_display(
             st.session_state,
@@ -2790,6 +2796,51 @@ elif view_stage == "T2D Top Hinge":
     state.tiles_2d_top_hinge.metrics.update(t2d_top_export_metrics)
     st.write(state.tiles_2d_top_hinge.metrics)
 elif view_stage == "T2D Dual Hinge":
+    from onestring_physics.paper_reproduction_audit import audit_paper_reproduction
+    _audit_params = st.session_state.get(
+        "onestring_last_completed_params", pipeline_params
+    )
+    _paper_audit = audit_paper_reproduction(state, _audit_params)
+    with st.expander(
+        "論文との一致条件：Ω / CSF Split / T2D配置診断",
+        expanded=(_paper_audit["verdict"]=="NOT_PAPER_REPRODUCTION"),
+    ):
+        st.write(
+            "この診断は計算を変更しません。"
+            "論文のFigure 6に対応するCSF Splitと、"
+            "T2D Dual Hingeの非貫通配置を別々に評価します。"
+        )
+        if "onestring_last_completed_params" not in st.session_state:
+            st.caption(
+                "この結果は以前のUIで計算されたため、Ω方式の表示は現在の"
+                "サイドバー設定から推定しています。パイプライン再計算で確定してください。"
+            )
+        a1,a2,a3,a4=st.columns(4)
+        a1.metric("CSF Split本数",str(_paper_audit["csf_split_count"]))
+        a2.metric("Collision Split本数",str(_paper_audit["collision_split_count"]))
+        a3.metric("Split前CSF",str(_paper_audit["csf_before"]))
+        a4.metric("Split後CSF",str(_paper_audit["csf_after"]))
+        st.write({
+            "Ω parameterization":_paper_audit["omega_mode"],
+            "CSF limit":_paper_audit["csf_limit"],
+            "CSF split status":_paper_audit["csf_split_status"],
+            "T2D collision mode":_paper_audit["collision_mode"],
+            "T2D SAT collision pairs":_paper_audit["t2d_collision_count"],
+            "T2D hinge RMS":_paper_audit["t2d_hinge_rms"],
+        })
+        if _paper_audit["warnings"]:
+            for item in _paper_audit["warnings"]:
+                st.warning(f"[{item['stage']}] {item['code']}：{item['detail']}")
+        else:
+            st.info(
+                "この簡易チェックでは明白な設定不一致は検出しませんでした。"
+                "論文の同一メッシュ・境界条件・ソルバー・紐経路である証明ではありません。"
+            )
+        st.caption(
+            "重要：Splitを入れても、同じUV上の点ごとのCSFは変わりません。"
+            "現行実装に追加の再パラメータ化がない場合、切断による変形率改善は"
+            "実証されていません。Split本数だけで論文への一致を判定しないでください。"
+        )
     audit_metrics = state.tiles_2d_dual_hinge.metrics
     # Animate accepted SE(2) poses as actual 3D rigid solids. Z is fixed by
     # the solver; this visualization must not suggest out-of-plane motion.
