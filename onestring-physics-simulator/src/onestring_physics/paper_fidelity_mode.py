@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from math import isfinite
+from numbers import Real
 
 
 MODE_ID = "paper_reference_2025_strict"
@@ -99,7 +100,7 @@ def check_paper_fidelity(state, params) -> FidelityOutcome:
     if collisions is None:
         stages["T2D contact"]="unknown"
         reasons.append("T2D SAT contact result was not recorded")
-    elif not isinstance(collisions,(int,float)) or not isfinite(float(collisions)):
+    elif not isinstance(collisions,Real) or not isfinite(float(collisions)):
         stages["T2D contact"]="invalid"
         reasons.append("T2D collision result is nonfinite")
     elif int(collisions)>0:
@@ -107,6 +108,15 @@ def check_paper_fidelity(state, params) -> FidelityOutcome:
         reasons.append(f"{int(collisions)} colliding pairs remain in the flat layout")
     else:
         stages["T2D contact"]="no detected flat SAT intersections"
+    solids=t.get("solid_collision_pair_count",None)
+    if solids is None:
+        stages["T2D solid contact"]="unmeasured"
+        reasons.append("Thick solid 3D contact audit was not provided")
+    elif isinstance(solids,Real) and isfinite(float(solids)) and float(solids)==0.:
+        stages["T2D solid contact"]="zero detected solid overlaps"
+    else:
+        stages["T2D solid contact"]="failed"
+        reasons.append(f"Thick T2D solid collision audit found {solids} overlaps")
     hard=t.get("hard_collision_feasible",False)
     if not hard:
         stages["T2D feasible"]="not demonstrated"
