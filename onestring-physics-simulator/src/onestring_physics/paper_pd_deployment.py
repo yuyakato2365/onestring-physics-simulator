@@ -261,20 +261,29 @@ def _hinge_rms(p:np.ndarray,links:list)->float:
     return float(np.sqrt(np.mean(e))) if e else 0.
 
 
-def _contact_proxy(rest:np.ndarray,p:np.ndarray):
+def _contact_proxy(rest:np.ndarray,p:np.ndarray,rest_properties=None):
     """Rigid 3D OBB proxy with rotational collision response (discrete)."""
     _,centers,rot=_rigid_fit(rest,p)
-    local=rest-rest.mean(axis=1)[:,None,:]
-    moments=np.zeros((len(rest),3,3))
-    axes=np.asarray([_physical_frame(tile[:4]) for tile in local])
-    for k in range(len(rest)):
-        inertia=(np.sum(local[k]*local[k])*np.eye(3)-local[k].T@local[k])/8
-        moments[k]=np.linalg.pinv(inertia,rcond=1e-8)
+    if rest_properties is not None:
+        local=rest_properties.local
+        moments=rest_properties.inv_inertia_local
+        axes=rest_properties.axes_local
+        radii=rest_properties.circumradius
+        tile_scale=rest_properties.tile_scale
+    else:
+        local=rest-rest.mean(axis=1)[:,None,:]
+        moments=np.zeros((len(rest),3,3))
+        axes=np.asarray([_physical_frame(tile[:4]) for tile in local])
+        for k in range(len(rest)):
+            inertia=(np.sum(local[k]*local[k])*np.eye(3)-local[k].T@local[k])/8
+            moments[k]=np.linalg.pinv(inertia,rcond=1e-8)
+        radii=np.max(np.linalg.norm(local,axis=2),axis=1)
+        tile_scale=float(np.median(np.linalg.norm(rest[:,1]-rest[:,0],axis=1)))
     m=SimpleNamespace(
         rest=rest,centers=centers.copy(),local=local,rotations=rot.copy(),
         inv_inertia_local=moments,axes_local=axes,
-        circumradius=np.max(np.linalg.norm(local,axis=2),axis=1),
-        tile_scale=float(np.median(np.linalg.norm(rest[:,1]-rest[:,0],axis=1))),
+        circumradius=radii,
+        tile_scale=tile_scale,
         floor_z=float(np.min(rest[:,:,2])),
     )
     return m
@@ -306,6 +315,15 @@ def simulate_paper_pd(state,params,progress_callback=None):
     frames=[current.copy()]
     save_at=set(np.unique(np.rint(np.linspace(0,steps,fps)).astype(int))[1:])
     links=list(state.hinge_graph.hinges)
+    from .paper_pd_global import PaperPDGlobal
+    global_solver=PaperPDGlobal(
+        len(rest),links,snaps,lifts,
+        rigid_weight=params.rigid_weight,
+        hinge_weight=params.hinge_weight,
+        snap_weight=params.snap_weight,
+        lift_weight=params.lift_weight,
+    )
+    # Reuse collision rest geometry/inertia between PD sweeps.
     c0=_contact_proxy(rest,current)
     collisions=[_contacts(c0,apply=False,strength=0.)]
     hinge_curve=[_hinge_rms(current,links)]
@@ -318,17 +336,22 @@ def simulate_paper_pd(state,params,progress_callback=None):
         # Appendix E: predicted location = x + dt*v + dt²*a.
         predicted=current+dt*velocity+(dt**2)*gravity
         p=predicted.copy()
+        lift_targets=np.asarray(
+            [(1.-phase)*lift.reference+phase*lift.target for lift in lifts],
+            dtype=float,
+        )
         for j in range(iterations):
-            # PD-like local projections of explicit Appendix E energies.
-            _project_hinges(p,links,float(np.clip(params.hinge_weight,0.,1.)))
-            _project_snaps(p,snaps,float(np.clip(params.snap_weight,0.,1.))*phase)
-            _project_lifts(p,lifts,phase,float(np.clip(params.lift_weight,0.,1.)))
-            p,_,_=_rigid_fit(rest,p)
+            # Local rigid Kabsch fit, then Appendix-E sparse global solve.
+            # Snap, Lift and hinge terms all enter the SAME normal matrix.
+            rigid_projected,_,_=_rigid_fit(rest,p)
+            p=global_solver.step(predicted,rigid_projected,lift_targets)
+            # Contact is an external nonlinear constraint projection, since
+            # the authors' specific nonpenetration energy/solver is unavailable.
+            m=_contact_proxy(rest,p,rest_properties=c0)
             if contact_strength>0.:
-                m=_contact_proxy(rest,p)
                 _contacts(m,apply=True,strength=contact_strength)
-                _floor_constraint(m)
-                p=_vertices(m)
+            _floor_constraint(m)
+            p=_vertices(m)
         p,_,_=_rigid_fit(rest,p)
         # Appendix E reports a damped velocity update with external acceleration.
         # No arbitrary target-pose attraction or explicit string-length contraction.
@@ -368,7 +391,7 @@ def simulate_paper_pd(state,params,progress_callback=None):
             "physics_backend":"paper_pd",
             "actual_backend":"cpu_paper_appendix_e_projective_approx",
             "simulation_model":"Sec5.4_SuppE_snap_lift_PD",
-            "paper_alignment":"actuation objectives and topology paper-aligned; numerical solver/contact approximated",
+            "paper_alignment":"Sec5.4 global PD Snap/Lift/hinges/rigid objectives; collision and weights approximated",
             "initial_layout":"exact_T2D_Dual",
             "route_model":route_info["routing_model"],
             "route_optimization_status":route_info["route_optimization_status"],
@@ -382,6 +405,7 @@ def simulate_paper_pd(state,params,progress_callback=None):
             "target_contact_guard_weight":0.,
             "t3d_target_tile_pose_actuator":False,
             "time_integration":"Appendix_E_prediction_and_velocity_update",
+            "optimization_model":"sparse_global_projective_dynamics_inertial_rigid_hinge_snap_lift",
             "collision_model":"discrete_3D_15_axis_OBB_SAT_rotation_correction_not_IPC",
             "collision_count":int(final_contacts),
             "initial_collision_count":int(collisions[0]),
