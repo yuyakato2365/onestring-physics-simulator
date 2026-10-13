@@ -1,0 +1,42 @@
+name: Paper fidelity computation mode regression
+on:
+  push:
+    branches: [agent/paper-fidelity-computation-mode-20261013]
+    paths:
+      - "onestring-physics-simulator/src/onestring_physics/paper_fidelity_mode.py"
+      - "onestring-physics-simulator/src/onestring_physics/paper_mesh_splitting.py"
+      - "onestring-physics-simulator/src/onestring_physics/onestring_pipeline.py"
+      - "onestring-physics-simulator/app_runtime_base.py"
+      - "onestring-physics-simulator/tests/test_paper_fidelity_computation_mode.py"
+      - ".github/workflows/paper-fidelity-computation.yml"
+  workflow_dispatch:
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev]"
+      - name: Syntax
+        run: |
+          python -m py_compile \
+            src/onestring_physics/paper_fidelity_mode.py \
+            src/onestring_physics/paper_mesh_splitting.py \
+            src/onestring_physics/onestring_pipeline.py \
+            app_runtime_base.py \
+            tests/test_paper_fidelity_computation_mode.py
+      - name: Reference compute, paper PD, Split and T2D regression
+        run: |
+          python -m pytest -q \
+            tests/test_paper_fidelity_computation_mode.py \
+            tests/test_paper_reproduction_audit.py \
+            tests/test_paper_pd_deployment.py \
+            tests/test_paper_t2d.py \
+            tests/test_split_and_hinge_audit.py \
+            tests/test_t2d_pipeline_ui_wiring.py
