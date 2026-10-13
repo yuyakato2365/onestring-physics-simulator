@@ -322,11 +322,12 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     parameterization = domain.parameterization
     threshold = float(getattr(domain, 'csf_split_threshold', 2.))
     lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
-    # Restore the pre-2026-10-11 Split acceptance rule: do not keep
-    # fracturing the M2D grid when no existing-chart CSF improvement occurs.
-    # The fixed chart's worst per-quad area span is a hard lower bound on
-    # what separating existing quads can achieve; passing a fixed budget
-    # is NOT evidence that the remaining CSF has become acceptable.
+    # Paper mode follows the original SIMPLE user-requested rule:
+    # while any connected component has CSF > 2, split at the highest
+    # source Gaussian-curvature peak lying in an offending area.
+    # Recompute all component CSFs after each cut; no immediate
+    # child-CSF-improvement acceptance test. The finite budget and
+    # geometric impossibility are honest failure stops, not success.
     paper_fidelity=bool(getattr(params,"paper_fidelity_mode",False))
     irreducible = (hi / lo if paper_fidelity else np.sqrt(hi))
     uv = np.asarray(parameterization.uv_vertices_2d, float)
@@ -348,24 +349,46 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         return float(np.sqrt(hi[component].max()))
     initial_components = _edge_components(faces)
     before = max(map(ratio, initial_components), default=1.)
+    def violating_peak_ids(component):
+        # Evaluate high-CSF tiles relative to THIS component's minimum
+        # retained-chart area Jacobian. Never use the globally normalized
+        # chart or the curvature peak of an unrelated low-CSF component.
+        offending = (component[hi[component] / np.min(lo[component]) >
+                               threshold + 1e-10] if paper_fidelity
+                     else component[hi[component] ** .5 > threshold + 1e-10])
+        # If the component's span exceeds 2 only because of its overall
+        # scale range, at least its high-end tile must be offending.
+        if not len(offending):
+            offending = component
+        candidates = np.unique(np.concatenate([samples[i] for i in offending]))
+        candidates = candidates[np.isfinite(curvature[candidates])]
+        return candidates[np.argsort(-curvature[candidates], kind='stable')]
+
     while enabled and len(records) < budget:
         components = _edge_components(faces)
-        # Continue splitting every over-threshold connected component.
-        bad = [c for c in components if ratio(c) > threshold + 1e-10 and tuple(c) not in blocked]
+        bad = [c for c in components
+               if ratio(c) > threshold + 1e-10 and tuple(c) not in blocked]
         if not bad:
             break
-        # Round only the ordering key: rotating Omega can introduce last-bit
-        # differences in equivalent area ratios. Keep all reported CSFs raw.
-        component = max(bad, key=lambda c: (round(ratio(c), 10), len(c)))
-        ids = np.unique(np.concatenate([samples[i] for i in component]))
-        # Intrinsic source curvature remains valid at artificial split seams.
-        ids = ids[np.isfinite(curvature[ids])]
-        ids = ids[np.argsort(-curvature[ids], kind='stable')]
+        # In paper mode, order offending components by their largest
+        # admissible curvature peak, not by the largest CSF value.
+        if paper_fidelity:
+            component = max(bad, key=lambda c: (
+                float(curvature[violating_peak_ids(c)[0]])
+                if len(violating_peak_ids(c)) else -np.inf,
+                round(ratio(c), 10), len(c)))
+            ids = violating_peak_ids(component)
+        else:
+            component = max(bad, key=lambda c: (round(ratio(c), 10), len(c)))
+            ids = np.unique(np.concatenate([samples[i] for i in component]))
+            ids = ids[np.isfinite(curvature[ids])]
+            ids = ids[np.argsort(-curvature[ids], kind='stable')]
         component_before = ratio(component)
-        # Previous Split logic: stop when the component's worst distortion
-        # is already contained within one or more indivisible quads.
+        # The quad floor is ONLY a diagnostic for paper mode; the user
+        # requested cuts whenever CSF exceeds 2, even if a cut cannot
+        # immediately improve the worst child's distortion.
         component_floor = float(irreducible[component].max())
-        if component_before <= component_floor * (1. + 1e-10):
+        if not paper_fidelity and component_before <= component_floor * (1. + 1e-10):
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(),
                              'sigma': component_before,
@@ -409,13 +432,13 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 imbalance = abs(len(children[0])-len(children[1]))
                 child_sigmas = [ratio(component[c]) for c in children]
                 complete_candidate_seen = True
-                # Revert to the previous criterion: curvature decides the
-                # candidate location, but only a strict reduction of the
-                # worst child CSF justifies actually introducing a seam.
+                # Paper mode: curvature controls the split location and
+                # no CSF-improvement test rejects a geometrically valid cut.
+                # Non-paper mode retains its previous conservative rule.
                 worst_child = max(child_sigmas)
-                if worst_child >= component_before - 1e-10:
+                if not paper_fidelity and worst_child >= component_before - 1e-10:
                     continue
-                score = (worst_child, imbalance, axis)
+                score = (imbalance, axis) if paper_fidelity else (worst_child, imbalance, axis)
                 candidates.append((score, v2, subset, record))
             if candidates:
                 selected = min(candidates, key=lambda x: x[0])
@@ -424,9 +447,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         if selected is None:
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(), 'sigma': component_before,
-                             'reason': ('no_distortion_reducing_grid_cut'
-                                        if complete_candidate_seen else
-                                        'no_complete_grid_cut_near_source_curvature_sample'),
+                             'reason': ('no_complete_grid_cut_near_source_curvature_sample'
+                                        if paper_fidelity or not complete_candidate_seen
+                                        else 'no_distortion_reducing_grid_cut'),
                              'irreducible_sigma': component_floor})
             continue
         _, vertices, subset, record = selected
@@ -513,6 +536,12 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     unresolved = sum(v > threshold+1e-10 for v in values)
     unresolved_mixed = 0  # legacy metric retained for dashboard compatibility
     exhausted = bool(enabled and unresolved and csf_count >= budget)
+    stopping_reason = (
+        'disabled' if not enabled else
+        'threshold_met' if not unresolved else
+        'budget_exhausted' if exhausted else
+        'no_admissible_cut_remaining'
+    )
     after = max(values, default=1.)
     face_sigma = (hi / np.maximum(lo, np.finfo(float).tiny)
                   if paper_fidelity else np.sqrt(hi).copy())
@@ -540,7 +569,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         collision_split_step_analysis=collision_records,
         collision_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in collision_records),
         collision_split_grid_seam_model='complete boundary-to-boundary M2D cut; full downstream rebuild',
-        csf_split_budget_exhausted=exhausted, csf_split_unresolved_component_count=unresolved, csf_split_unresolved_mixed_edges=unresolved_mixed,
+        csf_split_budget_exhausted=exhausted, csf_split_unresolved_component_count=unresolved,
+        csf_split_stopping_reason=stopping_reason,
+        csf_split_unresolved_mixed_edges=unresolved_mixed,
         csf_split_status=(
             'candidate_area_bound_only_unscaled' if paper_fidelity and not unresolved and not invalid_uv_count
             else 'candidate_area_bound_unmet' if paper_fidelity and unresolved
@@ -574,9 +605,11 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             exhausted and not all(r['reason'] == 'within_quad_distortion_floor' for r in rejected)
         ),
         csf_split_stopping_rule=(
-            'restored: at maximum Gaussian-curvature admissible grid cut, accept only '
-            'if worst child component CSF strictly improves; stop at within-quad '
-            'floor, no improving cut, bound or budget; collision cuts separate'
+            'paper: while any component CSF > 2, cut at its highest admissible '
+            'source Gaussian-curvature peak; stop only when all <= 2, when '
+            'no complete grid cut exists, or when the safety budget is exhausted'
+            if paper_fidelity else
+            'nonpaper: require decreasing worst-child CSF for each cut'
         ),
         csf_split_conformal_anisotropy_max=parameterization.metrics.get('split_conformal_anisotropy_max'),
         csf_split_area_bound_requires_conformal_map=True,
