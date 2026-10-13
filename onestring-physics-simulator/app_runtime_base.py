@@ -10,6 +10,10 @@ import importlib
 from types import SimpleNamespace
 
 import numpy as np
+# Guarantee pandas is fully initialized before any Plotly trace validation.
+# Streamlit may lazily import pandas while other rendering code is running.
+import pandas as pd
+_ = (pd.Series, pd.Index)
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
