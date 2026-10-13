@@ -3247,6 +3247,53 @@ elif view_stage in {"Lift Points", "String Path"}:
         use_container_width=True,
         key="gap_lift_string",
     )
+    if physics_backend == "paper_pd":
+        with st.expander("Paper PD: 実際にSnap拘束するT2D側面とLiftの確認",expanded=False):
+            from onestring_physics.paper_pd_deployment import (
+                _validate_route, PaperPDInputError,
+            )
+            try:
+                _snap_faces,_lift_faces,_route_check=_validate_route(state)
+            except (PaperPDInputError,ValueError) as exc:
+                st.error(
+                    f"論文準拠の拘束幾何を作れません: {exc}。"
+                    "T2D・Gap Graph・String Pathを更新した最新版で"
+                    "Run OneString pipelineから再計算してください。"
+                )
+            else:
+                st.caption(
+                    "赤線は各ギャップで一致させる2枚のT2D側面中央同士を結ぶ"
+                    "診断線です。物理的にその線に紐が通るという意味ではありません。"
+                    "経路の順序自体は上のString Pathで確認してください。"
+                )
+                _constrained_view=figure_tile_assembly(
+                    state.tiles_2d_dual_hinge,
+                    title="Actual T2D material side-face Snap pairs (red)",
+                )
+                _snap_coords=np.asarray(state.tiles_2d_dual_hinge.vertices,float)
+                _xx,_yy,_zz=[],[],[]
+                for snap in _snap_faces:
+                    pa=_snap_coords[snap.a,list(snap.face_a)].mean(axis=0)
+                    pb=_snap_coords[snap.b,list(snap.face_b)].mean(axis=0)
+                    _xx.extend([pa[0],pb[0],None])
+                    _yy.extend([pa[1],pb[1],None])
+                    _zz.extend([pa[2],pb[2],None])
+                _constrained_view.add_trace(go.Scatter3d(
+                    x=_xx,y=_yy,z=_zz,mode="lines+markers",
+                    line=dict(color="#ef4444",width=5),
+                    marker=dict(color="#ef4444",size=2),
+                    name="Snap material face midpoints",
+                ))
+                st.plotly_chart(_constrained_view,use_container_width=True,
+                                key="paper_snap_actual_material_faces")
+                st.write({
+                    **_route_check,
+                    "snap_material_face_pairs":[{
+                        "gap_id":int(q.gap_id),
+                        "tile_a":int(q.a),"tile_b":int(q.b),
+                        "face_a":list(q.face_a),"face_b":list(q.face_b),
+                    } for q in _snap_faces],
+                })
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("gaps", state.gap_graph.metrics["gap_count"])
     c2.metric("lift points", len(state.lift_points))
