@@ -53,6 +53,7 @@ def main() -> None:
         "cmake", "-S", str(PROJECT/"tools/bff_rectangle"), "-B", str(build_dir),
         "-DONESTRING_BFF_SOURCE="+str(src),
         "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     ], check=True)
     subprocess.run([
         "cmake","--build",str(build_dir),
