@@ -88,6 +88,10 @@ int main(int argc, char** argv) {
         previous=best;
     }
 
+    // The original BFF::flatten(..., false) consults meanScaling to
+    // fix its additive scale gauge. The headless CLI has no GUI state:
+    // initialize it explicitly rather than using an uninitialized double.
+    bff.meanScaling=0.0;
     DenseMatrix exterior(bff.data->bN);
     for (int k=0; k<4; ++k) {
         const int idx=bff.data->bIndex[boundary[corners[k]]];
