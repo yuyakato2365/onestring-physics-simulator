@@ -1,4 +1,4 @@
-"""Regression: paper mode changes REAL pipeline parameters and Split logic.
+"""Regression: paper mode alters other pipeline stages but NEVER Split settings.
 
 Tests do not claim the paper's original implementation or exact BFF output.
 """
@@ -31,18 +31,22 @@ def test_reference_preset_is_independent_and_sets_actual_compute_options():
     assert selected.paper_fidelity_mode
     assert selected.omega_parameterization_mode=="paper_reference_bff"
     assert selected.bff_boundary_policy=="target_rectangle"
-    assert selected.csf_split_threshold==2.0
-    assert selected.max_csf_splits>=32
+    assert selected.csf_split_threshold==original.csf_split_threshold
+    assert selected.max_csf_splits==original.max_csf_splits
+    assert selected.enable_csf_splits==original.enable_csf_splits
     assert selected.hinge_layout_collision_mode=="hard"
     assert selected.hinge_layout_iterations>=700
     assert selected.hinge_layout_time_budget_sec>=30.
-    assert selected.localize_csf_splits is False
+    assert selected.localize_csf_splits==original.localize_csf_splits
     assert selected.collision_split_enabled is False
     assert selected.collision_split_forced_lines==()
     assert not selected.t3d_variable_topology_enabled
     assert not selected.allow_legacy_normal_prism_emergency_fallback
     assert "omega_parameterization_mode" in overrides
     assert "paper_fidelity_mode" in overrides
+    assert "csf_split_threshold" not in overrides
+    assert "max_csf_splits" not in overrides
+    assert "enable_csf_splits" not in overrides
 
 
 def test_split_candidate_area_expansion_is_componentwise_not_global_sqrt():
