@@ -9,6 +9,11 @@ if(NOT EXISTS "${ONESTRING_BFF_SOURCE}/include/bff/project/Bff.h")
 endif()
 set(BFF_BUILD_CLI OFF CACHE BOOL "No need to rebuild official CLI" FORCE)
 set(BFF_BUILD_GUI OFF CACHE BOOL "Headless adapter" FORCE)
+# Compatibility with CMake >=4, where the official upstream 3.1 minimum
+# is no longer accepted. This changes only CMake's policy interpretation,
+# not any source file in the BFF checkout.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING
+    "Minimum compatibility policy for the legacy upstream BFF project" FORCE)
 add_subdirectory("${ONESTRING_BFF_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/bff-upstream-build")
 # Upstream predates stricter standard-library header dependency enforcement.
 # Include the standard uint8_t definition while compiling the original
