@@ -1,0 +1,38 @@
+name: OneString Section 5.4 Appendix E reference PD checks
+on:
+  push:
+    branches: [agent/paper-section54-pd-20261013]
+    paths:
+      - "onestring-physics-simulator/src/onestring_physics/paper_pd_deployment.py"
+      - "onestring-physics-simulator/src/onestring_physics/onestring_pipeline.py"
+      - "onestring-physics-simulator/app_runtime_base.py"
+      - "onestring-physics-simulator/tests/test_paper_pd_deployment.py"
+      - ".github/workflows/paper-pd-regression.yml"
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev]"
+      - name: Syntax
+        run: |
+          python -m py_compile \
+            src/onestring_physics/paper_pd_deployment.py \
+            src/onestring_physics/onestring_pipeline.py \
+            app_runtime_base.py \
+            tests/test_paper_pd_deployment.py
+      - name: Routing, actuation and existing animation regressions
+        run: |
+          python -m pytest -q \
+            tests/test_paper_pd_deployment.py \
+            tests/test_native_string_deployment.py \
+            tests/test_fast_assembly_animation.py \
+            tests/test_t2d_pipeline_ui_wiring.py
