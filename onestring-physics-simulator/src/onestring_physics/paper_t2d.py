@@ -217,6 +217,25 @@ def build_gap_graph(t2d, t3d, pipeline):
             extent = np.ptp(p2[:, :2], axis=0)
             kind, label = ('vertical', 0) if extent[1] >= extent[0] else ('horizontal', 1)
         gap = pipeline.Gap(len(gaps), tiles, p2.mean(axis=0), p3.mean(axis=0), kind, boundary, label)
+        # Each dart (tile, corner) is the reverse border edge
+        # ((corner-1)%4 -> corner). Preserve its MATERIAL side face so the
+        # Appendix-E Snap constraint does not guess an arbitrary nearest
+        # corner from a geometric centroid.
+        side_by_tile = {}
+        for tile_id, corner_id in corners:
+            tile_id, corner_id = int(tile_id), int(corner_id)
+            edge=((corner_id-1)%4,corner_id)
+            side_by_tile.setdefault(tile_id,[]).append(edge)
+        chosen={}
+        gap_xy=np.asarray(p2.mean(axis=0),float)[:2]
+        for tile_id, candidates in side_by_tile.items():
+            def distance(pair):
+                m=np.asarray(t2d.vertices[tile_id,list(pair),:2],float).mean(axis=0)
+                return float(np.linalg.norm(m-gap_xy))
+            chosen[tile_id]=tuple(map(int,min(candidates,key=distance)))
+        gap.material_side_edges=chosen
+        gap.boundary_perimeter_darts=[(int(tile_id),int(corner_id))
+                                      for tile_id,corner_id in corners]
         gaps.append(gap)
         for tile in tiles:
             tile_to_gaps.setdefault(tile, []).append(gap.id)
