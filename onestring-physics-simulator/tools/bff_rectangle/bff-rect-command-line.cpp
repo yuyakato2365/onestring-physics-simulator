@@ -8,6 +8,7 @@
 //
 // Source API: https://github.com/GeometryCollective/boundary-first-flattening
 // OneString adapter under the parent project's license.
+#include <cstdint>
 #include "bff/project/Bff.h"
 #include "bff/mesh/MeshIO.h"
 
