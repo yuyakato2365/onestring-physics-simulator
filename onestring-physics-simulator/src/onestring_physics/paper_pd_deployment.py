@@ -63,13 +63,31 @@ def _closest_side_face(rest_tile: np.ndarray, gap_xy: np.ndarray) -> tuple[int, 
     return (ia, ib, ib + 4, ia + 4)
 
 
-def _opposite_side_pairs(rest: np.ndarray, tiles: list[int], xy: np.ndarray):
+def _material_gap_face(gap, tile_id: int) -> tuple[int,int,int,int]:
+    """Return the side face recorded by the explicit gap-boundary dart walk."""
+    edges=getattr(gap,"material_side_edges",None)
+    if not isinstance(edges,dict) or tile_id not in edges:
+        raise PaperPDInputError(
+            f"PAPER_PD_MISSING_MATERIAL_SIDE_EDGE: gap {gap.id}, tile {tile_id}; "
+            "rebuild the gap graph from the updated T2D pipeline"
+        )
+    a,b=tuple(map(int,edges[tile_id]))
+    if not 0<=a<4 or not 0<=b<4 or (b-a)%4!=1:
+        raise PaperPDInputError(f"PAPER_PD_INVALID_SIDE_EDGE: gap {gap.id}, tile {tile_id}")
+    return a,b,b+4,a+4
+
+
+def _opposite_side_pairs(rest: np.ndarray, tiles: list[int], xy: np.ndarray,
+                         faces:dict[int,tuple[int,int,int,int]] | None=None):
     """Opposite T2D side-face pairs in a 2- or 4-tile auxetic gap.
 
     This discrete proxy cannot reconstruct the authors' exact channel.
     It explicitly handles four-tile voids instead of silently skipping them.
     """
-    faces={t:_closest_side_face(rest[t],xy) for t in tiles}
+    if faces is None:
+        # For isolated tests; the production _validate_route always supplies
+        # explicit topology-derived material faces, never centroid guesses.
+        faces={t:_closest_side_face(rest[t],xy) for t in tiles}
     if len(tiles)==2:
         a,b=tiles
         return [(a,b,faces[a],faces[b])]
@@ -128,7 +146,8 @@ def _validate_route(state) -> tuple[list[_Snap], list[_Lift], dict]:
         if min(tiles) < 0 or max(tiles) >= n:
             raise PaperPDInputError(f"PAPER_PD_BAD_GAP_OWNER: {gid}")
         xy = np.asarray(gap.centroid_2d, float)[:2]
-        for a,b,face_a,face_b in _opposite_side_pairs(rest,tiles,xy):
+        material={t:_material_gap_face(gap,t) for t in tiles}
+        for a,b,face_a,face_b in _opposite_side_pairs(rest,tiles,xy,material):
             snaps.append(_Snap(gid,a,b,face_a,face_b))
     if not snaps:
         raise PaperPDInputError("PAPER_PD_NO_SNAP_GAPS: routed cycle lacks paired internal side faces")
@@ -143,7 +162,7 @@ def _validate_route(state) -> tuple[list[_Snap], list[_Lift], dict]:
         if not owned or min(owned) < 0 or max(owned) >= n:
             raise PaperPDInputError(f"PAPER_PD_INVALID_LIFT_OWNER: gap {gid}")
         xy = np.asarray(gap.centroid_2d,float)[:2]
-        faces = tuple(_closest_side_face(rest[t],xy)[:2] for t in owned)
+        faces = tuple(_material_gap_face(gap,t)[:2] for t in owned)
         reference = np.mean(
             [rest[t,list(face)].mean(axis=0) for t,face in zip(owned,faces)],axis=0
         )
@@ -155,8 +174,8 @@ def _validate_route(state) -> tuple[list[_Snap], list[_Lift], dict]:
         raise PaperPDInputError("PAPER_PD_NO_LIFT_POINTS: Section 5.2 has no selected lift gaps")
     return snaps,lifts,dict(
         routing_model=route_meta["string_path_model"],
-        snap_geometry="nearest actual T2D side-face midpoints; geometry proxy",
-        lift_geometry="nearest side top-edge midpoint; geometry proxy",
+        snap_geometry="topology-derived actual T2D side-face midpoint; quad-void pairing approximate",
+        lift_geometry="topology-derived top side-edge midpoint; lift channel exit position approximate",
         route_nodes=len(ids)-1,route_closed=True,
         routed_snap_gaps=len(snaps),routed_lift_gaps=len(lifts),
         route_optimization_status=route_meta.get("string_path_status","unknown"),
