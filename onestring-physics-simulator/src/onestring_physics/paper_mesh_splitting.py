@@ -293,6 +293,27 @@ def split_mesh(vertices, faces, domain, params=None):
     return _split_mesh_single(vertices,faces,domain,params)
 
 
+def _component_area_span(lo, hi, component):
+    """Minimum achievable max area expansion after independent UNIFORM rescale.
+
+    For positive Jacobian determinants J over a separated component, every
+    uniform 2D rescale changes J by the same factor. Normalize min(J)=1:
+    max(J)/min(J) is the remaining expansion factor. This ratio is only a
+    *potential bound* until the component's UV/tiles are actually rescaled;
+    never label this alone as fabrication-certified.
+    """
+    lo=np.asarray(lo,float)
+    hi=np.asarray(hi,float)
+    c=np.asarray(component,int)
+    if not len(c) or not np.isfinite(lo[c]).all() or not np.isfinite(hi[c]).all():
+        raise ValueError("Cannot evaluate component CSF: empty/nonfinite area Jacobian")
+    amin=float(lo[c].min())
+    amax=float(hi[c].max())
+    if amin<=0 or amax<amin:
+        raise ValueError("Invalid Jacobian range in CSF component")
+    return amax/amin
+
+
 def _split_mesh_single(vertices, faces, domain, params=None):
     from .simple_split_panel_patch import _edge_components
     from .final_split_panel_pass import _complete_cut_once
@@ -304,6 +325,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     # The source chart is fixed; a grid-edge cut cannot reduce local CSF.
     # Nevertheless, valid cuts must not be suppressed by this invariance.
     # Local inverse length scale from Omega to S (conformal assumption).
+    paper_fidelity=bool(getattr(params,"paper_fidelity_mode",False))
     irreducible = np.sqrt(hi)
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     curvature = gaussian_curvature(parameterization)
@@ -316,7 +338,11 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     enabled = bool(getattr(domain, 'csf_split_enabled', True))
     records, rejected, pairs, blocked = [], [], [], set()
     def ratio(component):
-        # Absolute local S/Omega inverse length scale, not max/min spread.
+        if paper_fidelity:
+            # Paper Fig.18 caps QUAD AREA expansion at 2, not linear
+            # stretch at 2. Per-piece constant renormalization can
+            # change the physical bound only if actually applied.
+            return _component_area_span(lo,hi,component)
         return float(np.sqrt(hi[component].max()))
     initial_components = _edge_components(faces)
     before = max(map(ratio, initial_components), default=1.)
@@ -479,13 +505,22 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     unresolved_mixed = 0  # legacy metric retained for dashboard compatibility
     exhausted = bool(enabled and unresolved and csf_count >= budget)
     after = max(values, default=1.)
-    face_sigma = np.sqrt(hi).copy()
+    face_sigma = (hi / np.maximum(lo, np.finfo(float).tiny)
+                  if paper_fidelity else np.sqrt(hi).copy())
     domain.csf_before, domain.csf_after_split = before, after
     domain.split_lines = [('row' if r['axis'] == 'row' else 'col', r['snapped_value']) for r in records]
     domain.localized_split_segments = list(domain.split_lines)
     metrics = dict(
-        csf_model='local inverse length scale sqrt(dA_S/dA_Omega); retained UV chart',
-        csf_split_exactness_label='fixed-chart inverse-length CSF; no reparameterization, not Fig. 6 reproduction',
+        csf_model=(
+            'Sec4.5 candidate area Jacobian span per independently rescalable component'
+            if paper_fidelity else
+            'local inverse length scale sqrt(dA_S/dA_Omega); retained UV chart'
+        ),
+        csf_split_exactness_label=(
+            'candidate only: independent component scale un-applied; no UV remap; not certified'
+            if paper_fidelity else
+            'fixed-chart inverse-length CSF; no reparameterization, not Fig. 6 reproduction'
+        ),
         csf_split_applied=bool(csf_count), csf_split_threshold=threshold, max_csf_splits=budget,
         max_csf_before_split=before, max_csf_after_split=after, number_of_splits=len(records),
         split_locations=[list(x) for x in domain.split_lines],
@@ -497,12 +532,25 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         collision_split_duplicated_vertex_count=sum(r['duplicated_vertices'] for r in collision_records),
         collision_split_grid_seam_model='complete boundary-to-boundary M2D cut; full downstream rebuild',
         csf_split_budget_exhausted=exhausted, csf_split_unresolved_component_count=unresolved, csf_split_unresolved_mixed_edges=unresolved_mixed,
-        csf_split_status='uncertified_uv_degeneracy' if invalid_uv_count else 'satisfied' if not unresolved else ('disabled' if not enabled else 'budget_exhausted' if exhausted else 'no_admissible_curvature_guided_grid_cut'),
+        csf_split_status=(
+            'candidate_area_bound_only_unscaled' if paper_fidelity and not unresolved and not invalid_uv_count
+            else 'candidate_area_bound_unmet' if paper_fidelity and unresolved
+            else 'uncertified_uv_degeneracy' if invalid_uv_count
+            else 'satisfied' if not unresolved else
+            ('disabled' if not enabled else 'budget_exhausted'
+             if exhausted else 'no_admissible_curvature_guided_grid_cut')
+        ),
         csf_split_step_analysis=records[:csf_count], csf_split_step_count=csf_count,
         csf_split_locations=[['row' if r['axis']=='row' else 'col',r['snapped_value']]
                              for r in records[:csf_count]],
         csf_split_initial_components=[{'face_ids': c.tolist(), 'sigma': ratio(c)} for c in initial_components],
-        csf_split_bound_certified=not bool(unresolved or invalid_uv_count),
+        csf_split_bound_certified=(not bool(unresolved or invalid_uv_count)
+                                    and not paper_fidelity),
+        csf_split_candidate_area_bound_satisfied=bool(
+            paper_fidelity and not (unresolved or invalid_uv_count)
+        ),
+        csf_split_component_rescale_applied=False,
+        csf_split_paper_area_span_active=paper_fidelity,
         csf_split_degenerate_uv_face_count=invalid_uv_count,
         csf_split_parameterization_repair_required=bool(invalid_uv_count),
         csf_split_evaluation_scope='usable source triangles only' if invalid_uv_count else 'all source triangles',
