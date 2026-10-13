@@ -2482,6 +2482,16 @@ elif view_stage == "Split Map":
             st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
         st.dataframe(_split_rows, hide_index=True, width="stretch")
         st.caption("CSFは現在のUV写像に基づく評価値です。")
+        _split_metrics = state.mesh_2d_initial.metrics
+        _split_unresolved = int(_split_metrics.get("csf_split_unresolved_component_count", 0) or 0)
+        if _split_unresolved:
+            _split_reason = _split_metrics.get("csf_split_stopping_reason", "unknown")
+            _split_threshold = float(_split_metrics.get("csf_split_threshold", 2.))
+            st.warning(
+                f"Split未完了：CSFが{_split_threshold:g}を超える領域が"
+                f"{_split_unresolved}個残っています。終了理由：{_split_reason}。"
+                " 分割回数の上限や格子上の切断不能は、CSF条件の達成を意味しません。"
+            )
     if state.mesh_2d_initial.metrics.get("csf_split_parameterization_repair_required"):
         st.warning(
             "UVに退化した三角形があるため、有効な領域で処理を継続しています。"
