@@ -87,3 +87,29 @@ def test_paper_keeps_cutting_until_component_spans_fall_below_two(monkeypatch):
     assert metrics["csf_split_stopping_reason"]=="threshold_met"
     assert metrics["max_csf_after_split"]<=2.0
     assert not metrics["csf_split_budget_exhausted"]
+
+
+def test_paper_prioritizes_highest_curvature_within_over_two_area(monkeypatch):
+    vertices,faces=grid()
+    lo=np.ones(len(faces))
+    hi=np.full(len(faces),1.1)
+    # Left hotspot CSF 2.5, right hotspot CSF 4.5, but curvature
+    # is greater at the left hotspot. The curvature controls cut order.
+    hi[5]=2.5
+    hi[7]=4.5
+    sources=[np.array([0],dtype=int) for _ in faces]
+    sources[5]=np.array([6],dtype=int)  # at (1,1)
+    sources[7]=np.array([8],dtype=int)  # at (3,1)
+    curvature=np.full(len(vertices),-1.)
+    curvature[6]=100.
+    curvature[8]=10.
+    monkeypatch.setattr(split,"_face_samples",lambda *a:(lo,hi,sources))
+    monkeypatch.setattr(split,"gaussian_curvature",lambda *a:curvature)
+    params=SimpleNamespace(paper_fidelity_mode=True,collision_split_forced_lines=())
+    d=domain(vertices,params)
+    d.max_csf_splits=1
+    _,_,records,metrics=split._split_mesh_single(vertices,faces,d,params)
+    assert len(records)==1
+    assert records[0]["curvature_vertex_id"]==6
+    assert metrics["csf_split_stopping_reason"]=="budget_exhausted"
+    assert metrics["csf_split_unresolved_component_count"]>0
