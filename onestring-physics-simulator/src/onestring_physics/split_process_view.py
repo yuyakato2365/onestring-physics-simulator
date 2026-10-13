@@ -1,5 +1,9 @@
 """Replay recorded Split decisions without rerunning or changing the solver."""
 import numpy as np
+# Plotly's validator inspects pandas.Series and pandas.Index; an in-progress
+# lazy pandas import can otherwise cause AttributeError during Split replay.
+import pandas as pd
+_ = (pd.Series, pd.Index)
 import plotly.graph_objects as go
 from plotly.colors import qualitative
 
