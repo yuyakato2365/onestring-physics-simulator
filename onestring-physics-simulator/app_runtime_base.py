@@ -414,8 +414,8 @@ with st.sidebar:
     )
     if paper_fidelity_enabled:
         st.info(
-            "論文寄りの計算条件を強制します：公式BFF、CSF面積上限2の"
-            "領域別Split候補評価、8頂点剛体、T2D非貫通修復、"
+            "論文寄りの計算条件を強制します：公式BFFの4つの90°外角による矩形Ω、"
+            "CSF面積上限2の領域別Split候補評価、8頂点剛体、T2D非貫通修復、"
             "Sec.5.3閉経路、Snap/Lift PD。"
             "CSF領域再スケーリングと厳密接触は未再現です。"
         )
@@ -650,14 +650,25 @@ with st.sidebar:
         bff_boundary_policy = st.selectbox(
             "BFF boundary policy",
             ["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle", "custom_boundary_curvature"],
-            index=0,
-            help="OneStringの正確な境界条件はUNSPECIFIED_IN_PAPER。CLI非対応のpolicyは明示失敗します。",
+            index=3 if paper_fidelity_enabled else 0,
+            disabled=paper_fidelity_enabled,
+            help="target_rectangle uses an independent CLI linked to the official BFF library. Four 90-degree exterior angles are assigned at ordered arclength quartiles. Authors' exact corner positions are not specified.",
         )
         bff_executable = st.text_input(
-            "official bff-command-line path",
+            "official bff-command-line path (nonrectangle)",
             value=os.environ.get("ONESTRING_BFF_EXECUTABLE", ""),
-            help="空ならONESTRING_BFF_EXECUTABLE、third_party、PATHの順に探索します。",
+            help="Used for automatic/disk BFF only.",
         )
+        bff_rectangle_executable = st.text_input(
+            "official BFF rectangle adapter executable",
+            value=os.environ.get("ONESTRING_BFF_RECTANGLE_EXECUTABLE", ""),
+            help="Build once: python3 scripts/setup_bff_rectangle.py. Default: third_party/bff_rectangle_build/bff-rect-command-line.",
+        )
+        if paper_fidelity_enabled:
+            st.caption(
+                "矩形用BFFは既存の通常CLIと異なります。公式BFFライブラリを用いた"
+                "専用アダプタがない場合は、矩形調和写像に切り替えず停止します。"
+            )
         reference_grid_spacing_value = float(st.number_input("reference grid spacing (0 = derive hypothesis_a)", min_value=0.0, value=0.0, step=0.05))
         reference_grid_rotation_degrees = float(st.number_input("reference grid rotation (degrees)", value=0.0, step=1.0))
         reference_grid_origin_u = float(st.number_input("reference grid origin u", value=0.0, step=0.05))
@@ -1649,6 +1660,7 @@ def current_pipeline_key() -> tuple:
         omega_parameterization_mode,
         bff_boundary_policy,
         bff_executable,
+        bff_rectangle_executable,
         reference_grid_spacing_value,
         reference_grid_rotation_degrees,
         reference_grid_origin_u,
@@ -1790,6 +1802,7 @@ pipeline_params = PipelineParameters(
     omega_boundary_mode=omega_boundary_mode,
     omega_parameterization_mode=omega_parameterization_mode,
     bff_executable=bff_executable or None,
+    bff_rectangle_executable=bff_rectangle_executable or None,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
     reference_grid_spacing=reference_grid_spacing_value if reference_grid_spacing_value > 0.0 else None,
@@ -2640,6 +2653,7 @@ elif view_stage == "Mode Comparison":
         reference_grid_origin_v,
         bff_boundary_policy,
         bff_executable,
+        bff_rectangle_executable,
     )
     if st.session_state.get("mode_comparison_key") != comparison_key:
         comparison_states = {}
