@@ -411,17 +411,19 @@ with st.sidebar:
     paper_fidelity_enabled = st.checkbox(
         "Paper-oriented computation mode (2025 Sec.4–5)",
         value=True,
-        help="Selects official BFF, curvature-driven full-grid Split, "
-             "rigid eight-vertex frustum tiles, enhanced T2D nonpenetration "
-             "search, and Paper Snap/Lift PD. Author solver NOT identical.",
+        help="Selects official rectangular BFF, rigid eight-vertex tiles, "
+             "enhanced T2D refinement, and Paper Snap/Lift PD. "
+             "Split algorithm AND user Split controls match the checkbox-OFF "
+             "mode exactly. Original paper's area-bound Split is NOT reproduced.",
         key="paper_fidelity_computation_mode",
     )
     if paper_fidelity_enabled:
         st.info(
-            "論文寄りの計算条件を強制します：公式BFFの4つの90°外角による矩形Ω、"
-            "CSF面積上限2の領域別Split候補評価、8頂点剛体、T2D非貫通修復、"
-            "Sec.5.3閉経路、Snap/Lift PD。"
-            "CSF領域再スケーリングと厳密接触は未再現です。"
+            "Paperモード：公式BFFの4つの90°外角による矩形Ω、"
+            "8頂点剛体、T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
+            "SplitはチェックボックスOFFと同一のCSF計算・曲率点選択・"
+            "採否条件・停止条件を使用し、閾値と最大分割数も引き継ぎます。"
+            "これは論文の面積拡張率上限2の完全再現ではありません。"
         )
     st.header("Version")
     # Experimental 2026-09-21 deployability-aware K3D variant.
@@ -691,7 +693,7 @@ with st.sidebar:
                 value=2.0,
                 step=0.05,
                 format="%.3f",
-                help="論文 Supplement Fig. 18 の面積拡張率。論文の上限は2。各成分を再評価して完全分割します。",
+                help="SplitはON/OFFともに固定UVでの線形CSF（面積ヤコビアン平方根）を評価。論文の面積拡張率上限の厳密再現ではありません。",
             )
         )
     else:
