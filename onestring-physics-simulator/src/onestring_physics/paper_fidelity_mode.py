@@ -41,10 +41,10 @@ def configure_paper_fidelity(params):
         "omega_boundary_mode": "paper_default",
         "bff_boundary_policy": "target_rectangle",
         "m2d_crop_policy": "strict_vertices",
-        # Do NOT override any Split-related settings in Paper mode.
-        # The user requested exactly the OFF checkbox's Split processing,
-        # including enablement, threshold and max-cut budget. The actual
-        # Split algorithm is shared in paper_mesh_splitting.py.
+        # Keep OFF-mode Split controls, threshold, budget and CSF estimator.
+        # paper_mesh_splitting.py applies only the requested Paper exceptions:
+        # curvature-first violating-region selection and accepting valid cuts
+        # even if the worst child CSF does not decrease. OFF stays unchanged.
         "collision_split_enabled": False,
         "collision_split_lookahead_enabled": False,
         "collision_split_forced_lines": (),
