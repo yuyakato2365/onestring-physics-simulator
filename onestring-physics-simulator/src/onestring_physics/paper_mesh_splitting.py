@@ -322,11 +322,13 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     parameterization = domain.parameterization
     threshold = float(getattr(domain, 'csf_split_threshold', 2.))
     lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
-    # The source chart is fixed; a grid-edge cut cannot reduce local CSF.
-    # Nevertheless, valid cuts must not be suppressed by this invariance.
-    # Local inverse length scale from Omega to S (conformal assumption).
+    # Restore the pre-2026-10-11 Split acceptance rule: do not keep
+    # fracturing the M2D grid when no existing-chart CSF improvement occurs.
+    # The fixed chart's worst per-quad area span is a hard lower bound on
+    # what separating existing quads can achieve; passing a fixed budget
+    # is NOT evidence that the remaining CSF has become acceptable.
     paper_fidelity=bool(getattr(params,"paper_fidelity_mode",False))
-    irreducible = np.sqrt(hi)
+    irreducible = (hi / lo if paper_fidelity else np.sqrt(hi))
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     curvature = gaussian_curvature(parameterization)
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
@@ -360,10 +362,16 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         ids = ids[np.isfinite(curvature[ids])]
         ids = ids[np.argsort(-curvature[ids], kind='stable')]
         component_before = ratio(component)
-        # A fixed S -> Omega map keeps pointwise CSF unchanged after cutting.
-        # Do not block valid curvature-guided cuts on the false premise that
-        # the worst child must have lower CSF. Report unresolved CSF honestly.
+        # Previous Split logic: stop when the component's worst distortion
+        # is already contained within one or more indivisible quads.
         component_floor = float(irreducible[component].max())
+        if component_before <= component_floor * (1. + 1e-10):
+            blocked.add(tuple(component))
+            rejected.append({'face_ids': component.tolist(),
+                             'sigma': component_before,
+                             'reason': 'within_quad_distortion_floor',
+                             'irreducible_sigma': component_floor})
+            continue
         selected = None
         selected_peak = None
         used = np.unique(faces[component])
@@ -401,13 +409,12 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 imbalance = abs(len(children[0])-len(children[1]))
                 child_sigmas = [ratio(component[c]) for c in children]
                 complete_candidate_seen = True
-                # Gaussian curvature determines the location; child CSF only
-                # breaks the tie between the two grid-aligned directions.
-                # Do not move to a lower-curvature peak merely because this
-                # particular split fails to improve the estimated CSF.
+                # Revert to the previous criterion: curvature decides the
+                # candidate location, but only a strict reduction of the
+                # worst child CSF justifies actually introducing a seam.
                 worst_child = max(child_sigmas)
-                # Worst-child CSF is a direction tie-break only, not an
-                # admissibility criterion (it is invariant under a fixed map).
+                if worst_child >= component_before - 1e-10:
+                    continue
                 score = (worst_child, imbalance, axis)
                 candidates.append((score, v2, subset, record))
             if candidates:
@@ -417,7 +424,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         if selected is None:
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(), 'sigma': component_before,
-                             'reason': 'no_complete_grid_cut_near_source_curvature_sample',
+                             'reason': ('no_distortion_reducing_grid_cut'
+                                        if complete_candidate_seen else
+                                        'no_complete_grid_cut_near_source_curvature_sample'),
                              'irreducible_sigma': component_floor})
             continue
         _, vertices, subset, record = selected
@@ -561,8 +570,14 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_quad_coverage_floor_sweep=parameterization.metrics.get('split_quad_coverage_floor_sweep'),
         csf_split_face_sigma=face_sigma.tolist(),
         csf_split_residual_high_face_count=int(np.count_nonzero(face_sigma > threshold+1e-10)),
-        csf_split_additional_split_recommended_after_all=bool(exhausted),
-        csf_split_stopping_rule='CSF cuts are curvature-guided and limited by the CSF budget; optional collision cuts are independently ranked after T2D feedback',
+        csf_split_additional_split_recommended_after_all=bool(
+            exhausted and not all(r['reason'] == 'within_quad_distortion_floor' for r in rejected)
+        ),
+        csf_split_stopping_rule=(
+            'restored: at maximum Gaussian-curvature admissible grid cut, accept only '
+            'if worst child component CSF strictly improves; stop at within-quad '
+            'floor, no improving cut, bound or budget; collision cuts separate'
+        ),
         csf_split_conformal_anisotropy_max=parameterization.metrics.get('split_conformal_anisotropy_max'),
         csf_split_area_bound_requires_conformal_map=True,
         csf_split_residual_max_after_all=after,
