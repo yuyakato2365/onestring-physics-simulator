@@ -991,6 +991,7 @@ class PipelineParameters(_original.PipelineParameters):
         "paper_like_unimplemented",
     ] = "bff"
     bff_executable: str | None = None
+    bff_rectangle_executable: str | None = None
     optcuts_distortion_bound: float = 4.1
     optcuts_try_alternative_initial_cut: bool = True
     bff_boundary_policy: Literal[
@@ -2691,6 +2692,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             surface_vertices,
             surface_faces,
             executable=getattr(params, "bff_executable", None),
+            rectangle_executable=getattr(params, "bff_rectangle_executable", None),
             boundary_policy=boundary_policy,
             timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
         )
@@ -2714,7 +2716,13 @@ def _build_surface_parameterization(surface, target, grid, params):
             **result.metrics,
             "parameterization_method": "paper_reference_bff",
             "parameterization_exactness_label": "official_bff_backend",
-            "parameterization_warning": "OneString boundary condition is UNSPECIFIED_IN_PAPER; official BFF CLI policy is recorded explicitly.",
+            "parameterization_warning": (
+                "BFF rectangle with four prescribed 90-degree exterior angles; "
+                "the four corner locations are selected by boundary arclength "
+                "and are not specified by the OneString authors."
+                if boundary_policy=="target_rectangle" else
+                "OneString boundary condition is UNSPECIFIED_IN_PAPER; official BFF CLI policy is recorded explicitly."
+            ),
             "omega_boundary_mode": "paper_default",
             "omega_parameterization_mode": "paper_reference_bff",
             "requested_omega_parameterization_mode": "paper_reference_bff",
@@ -2733,8 +2741,10 @@ def _build_surface_parameterization(surface, target, grid, params):
             "bff_backend_used": str(result.metrics["parameterization_backend_name"]),
             "flattening_backend": str(result.metrics["parameterization_backend_name"]),
             "omega_boundary_fixed": boundary_policy in {"target_disk"},
-            "omega_boundary_forced_rectangle": False,
-            "omega_boundary_shape": "disk" if boundary_policy == "target_disk" else "free",
+            "omega_boundary_forced_rectangle": boundary_policy=="target_rectangle",
+            "omega_boundary_shape": ("rectangle" if boundary_policy=="target_rectangle"
+                                     else "disk" if boundary_policy=="target_disk"
+                                     else "free"),
             "omega_boundary_constraint_model": str(result.metrics["bff_boundary_policy_effective"]),
             "uv_triangle_flip_count": int(differential["uv_triangle_flip_count"]),
             "uv_degenerate_triangle_count": int(differential["uv_degenerate_triangle_count"]),
