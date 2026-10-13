@@ -10,6 +10,7 @@ on:
       - "onestring-physics-simulator/src/onestring_physics/onestring_pipeline.py"
       - "onestring-physics-simulator/src/onestring_physics/paper_fidelity_mode.py"
       - "onestring-physics-simulator/app_runtime_base.py"
+      - "onestring-physics-simulator/pyproject.toml"
       - "onestring-physics-simulator/tests/test_rectangular_bff.py"
       - "onestring-physics-simulator/tests/test_paper_fidelity_computation_mode.py"
       - ".github/workflows/rectangular-bff.yml"
@@ -27,6 +28,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install -e ".[dev]"
+      - name: UI dependency smoke test
+        run: python -c "from streamlit_plotly_events import plotly_events; print('streamlit_plotly_events import OK')"
       - name: Syntax
         run: |
           python -m py_compile \
