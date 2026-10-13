@@ -22,8 +22,14 @@ must produce an error; there is no silent substitute.
 
 Stages actually selected:
 
-- S→Ω: official reference BFF (boundary policy
-  `automatic_reference`); no fallback to harmonic/PCA.
+- S→Ω: official BFF library with `target_rectangle` boundary.
+  Four ordered boundary vertices approximately spaced by 3D perimeter
+  quarters have prescribed external angle +pi/2; all others receive zero.
+  This invokes the **independently compiled** `bff-rect-command-line`
+  linked against the unmodified official BFF C++ library. The normal
+  `bff-command-line` cannot prescribe these curvature constraints.
+  The output's 4 straight sides and 4 corners are checked geometrically.
+  No harmonic/LSCM/PCA fallback is allowed.
 - M2D grid: regular fixed-size grid, strict vertex crop, no additional
   speculative expansion or heuristic collision split.
 - Sec.4.5 Split: high Gaussian curvature, complete grid-direction
@@ -97,3 +103,33 @@ python3 -m pytest -q tests/test_paper_fidelity_computation_mode.py \
 
 These are regressions for parameter wiring and toy geometry. They are
 not a whole-Lilium numerical reproduction test.
+
+
+## Rectangular BFF initial installation (macOS)
+
+The ordinary CLI previously used for `automatic_reference` is NOT able
+to accept prescribed exterior-angle boundary data. It cannot be used
+for `target_rectangle`. The extra adapter must be built once, using
+the official BFF C++ source already installed in the previous OneString
+checkout. From the new worktree's `onestring-physics-simulator` folder:
+
+```bash
+python3 scripts/setup_bff_rectangle.py --jobs 4
+python3 scripts/verify_rectangular_bff.py
+```
+
+If its source is elsewhere, specify
+`--source /absolute/path/to/boundary-first-flattening`.
+Setup generates
+`third_party/bff_rectangle_build/bff-rect-command-line`
+and leaves the original official source checkout untouched.
+The adapter is auto-discovered. Alternatively set
+`ONESTRING_BFF_RECTANGLE_EXECUTABLE` to its absolute path.
+If Xcode's C++ tools/CMake/SuiteSparse are missing, install the relevant
+build dependencies first. A prebuilt ordinary `bff-command-line` is NOT a
+substitute for the C++ library source.
+
+The paper does not specify which four source boundary vertices are used
+as rectangle corners for a particular Lilium input. The equal-arclength
+choice is an explicitly labeled reproducibility hypothesis, not an
+identical reproduction of the paper author's four corners.
