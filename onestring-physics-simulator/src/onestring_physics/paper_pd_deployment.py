@@ -63,6 +63,31 @@ def _closest_side_face(rest_tile: np.ndarray, gap_xy: np.ndarray) -> tuple[int, 
     return (ia, ib, ib + 4, ia + 4)
 
 
+def _opposite_side_pairs(rest: np.ndarray, tiles: list[int], xy: np.ndarray):
+    """Opposite T2D side-face pairs in a 2- or 4-tile auxetic gap.
+
+    This discrete proxy cannot reconstruct the authors' exact channel.
+    It explicitly handles four-tile voids instead of silently skipping them.
+    """
+    faces={t:_closest_side_face(rest[t],xy) for t in tiles}
+    if len(tiles)==2:
+        a,b=tiles
+        return [(a,b,faces[a],faces[b])]
+    if len(tiles)!=4:
+        return []
+    mids={t:rest[t,list(faces[t])].mean(axis=0)[:2] for t in tiles}
+    a,b,c,d=tiles
+    matchings=(((a,b),(c,d)),((a,c),(b,d)),((a,d),(b,c)))
+    def score(matching):
+        total=0.
+        for x,y in matching:
+            vx=mids[x]-xy
+            vy=mids[y]-xy
+            total+=float(vx@vy/max(1e-12,np.linalg.norm(vx)*np.linalg.norm(vy)))
+        return total
+    return [(x,y,faces[x],faces[y]) for x,y in min(matchings,key=score)]
+
+
 def _validate_route(state) -> tuple[list[_Snap], list[_Lift], dict]:
     graph = state.gap_graph
     route = state.string_path
@@ -98,16 +123,13 @@ def _validate_route(state) -> tuple[list[_Snap], list[_Lift], dict]:
         if gap.boundary:
             continue
         tiles = sorted(set(map(int, gap.surrounding_tiles)))
-        if len(tiles) != 2:
-            # A non-two-panel internal gap is not a paired side-face snap.
-            # Do not invent a contraction between arbitrary bodies.
-            continue
-        a, b = tiles
-        if min(a,b) < 0 or max(a,b) >= n:
+        if not tiles:
+            raise PaperPDInputError(f"PAPER_PD_GAP_WITHOUT_TILES: {gid}")
+        if min(tiles) < 0 or max(tiles) >= n:
             raise PaperPDInputError(f"PAPER_PD_BAD_GAP_OWNER: {gid}")
         xy = np.asarray(gap.centroid_2d, float)[:2]
-        snaps.append(_Snap(gid,a,b,_closest_side_face(rest[a],xy),
-                           _closest_side_face(rest[b],xy)))
+        for a,b,face_a,face_b in _opposite_side_pairs(rest,tiles,xy):
+            snaps.append(_Snap(gid,a,b,face_a,face_b))
     if not snaps:
         raise PaperPDInputError("PAPER_PD_NO_SNAP_GAPS: routed cycle lacks paired internal side faces")
     lifts = []
