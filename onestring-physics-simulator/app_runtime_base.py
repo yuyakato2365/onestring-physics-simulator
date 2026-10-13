@@ -403,6 +403,22 @@ def _compute_setting_meters(
 
 
 with st.sidebar:
+    st.header("Paper reproduction workflow")
+    paper_fidelity_enabled = st.checkbox(
+        "Paper-oriented computation mode (2025 Sec.4–5)",
+        value=True,
+        help="Selects official BFF, curvature-driven full-grid Split, "
+             "rigid eight-vertex frustum tiles, enhanced T2D nonpenetration "
+             "search, and Paper Snap/Lift PD. Author solver NOT identical.",
+        key="paper_fidelity_computation_mode",
+    )
+    if paper_fidelity_enabled:
+        st.info(
+            "論文寄りの計算条件を強制します：公式BFF、CSF面積上限2の"
+            "領域別Split候補評価、8頂点剛体、T2D非貫通修復、"
+            "Sec.5.3閉経路、Snap/Lift PD。"
+            "CSF領域再スケーリングと厳密接触は未再現です。"
+        )
     st.header("Version")
     # Experimental 2026-09-21 deployability-aware K3D variant.
     _deploy_version = {
@@ -422,6 +438,15 @@ with st.sidebar:
         format_func=lambda version: version["label"],
         help="実装バージョンを選択します。今後バージョン追加指示があれば、この一覧に追記します。",
     )
+    if paper_fidelity_enabled:
+        selected_model_version = next(
+            v for v in MODEL_VERSIONS
+            if v.get("id")=="2026-09-23-extrusion-aware"
+        )
+        st.caption(
+            "Paper modeでは8頂点frustumのT3D版を計算に使用します。"
+            "通常のVersion選択はPaper modeがOFFの場合のみ有効です。"
+        )
     st.caption(selected_model_version["description"])
     experiment_options = {}
     if selected_model_version["id"] == "2026-09-23-extrusion-aware":
@@ -589,6 +614,7 @@ with st.sidebar:
             "M2D crop policy",
             ["center", "strict_vertices"],
             index=1,
+            disabled=paper_fidelity_enabled,
             help="center keeps boundary-crossing quads whose centers lie inside Ω. strict_vertices keeps only quads fully inside Ω.",
         ),
     )
@@ -598,6 +624,7 @@ with st.sidebar:
             "Omega boundary mode",
             ["paper_default", "shape_preserving_experimental", "rectangular_debug"],
             index=0,
+            disabled=paper_fidelity_enabled,
             help="shape_preserving_experimental is PCA-based and not paper-default. paper_default fails explicitly when unimplemented.",
         ),
     )
@@ -611,8 +638,10 @@ with st.sidebar:
                 "paper_reference_bff":"paper_reference_bff — official BFF CLI",
                 "rectangular_harmonic_legacy":"rectangular_harmonic_legacy — NOT BFF",
             }.get(mode,mode),
-            index=2 if selected_model_version["id"] == "0.2.0-paper-reference-bff" else 0,
-            help="bff is a deprecated alias of rectangular_harmonic_legacy. paper_reference_bff requires the official CLI.",
+            index=2 if (paper_fidelity_enabled
+                        or selected_model_version["id"]=="0.2.0-paper-reference-bff") else 0,
+            disabled=paper_fidelity_enabled,
+            help="Paper mode always uses official BFF CLI. bff is a legacy harmonic alias.",
         ),
     )
     if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
@@ -965,7 +994,8 @@ with st.sidebar:
             "T2D collision constraint (soft / hard)",
             ["soft", "hard"],
             format_func=lambda value: "Soft collision (original)" if value == "soft" else "Hard nonpenetration (repair + feasible refinement)",
-            index=0,
+            index=1 if paper_fidelity_enabled else 0,
+            disabled=paper_fidelity_enabled,
         ),
     )
     t2d_restart_count = int(_param_row(
@@ -998,6 +1028,7 @@ with st.sidebar:
         lambda: st.checkbox(
             "Enable sequential collision-driven Split (full pipeline)",
             value=False,
+            disabled=paper_fidelity_enabled,
             help="EXPERIMENTAL: can rebuild the full pipeline several times. "
                  "Requires a paper-style M2D Split topology. No T2D-only fake hinge deletion.",
         ),
@@ -1828,7 +1859,16 @@ pipeline_params = PipelineParameters(
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
 
-pipeline_key = current_pipeline_key()
+from onestring_physics.paper_fidelity_mode import (
+    configure_paper_fidelity,
+    check_paper_fidelity,
+)
+_paper_overrides = {}
+if paper_fidelity_enabled:
+    pipeline_params, _paper_overrides = configure_paper_fidelity(pipeline_params)
+    with st.expander("Paper modeが計算に適用する設定",expanded=False):
+        st.json(_paper_overrides)
+pipeline_key = (current_pipeline_key(), paper_fidelity_enabled)
 if "onestring_state" not in st.session_state and not run_pipeline:
     st.info("Set parameters, then click Run OneString pipeline. The paper-default path stops at unimplemented stages; enable the experimental pipeline explicitly to run the old prototype path.")
     st.stop()
@@ -1884,6 +1924,15 @@ if run_pipeline:
             st.session_state.pipeline_progress_log = progress_log
             st.exception(exc)
             st.stop()
+        if paper_fidelity_enabled:
+            outcome=check_paper_fidelity(st.session_state.onestring_state,pipeline_params)
+            st.session_state.onestring_state.tiles_2d_dual_hinge.metrics.update({
+                "paper_fidelity_mode":True,
+                "paper_fidelity_mode_id":outcome.mode,
+                "paper_fidelity_stage_results":outcome.stages,
+                "paper_fidelity_verified":outcome.verified,
+                "paper_fidelity_residual_reasons":list(outcome.reasons),
+            })
         _build_progress("Done", 1.0, "Pipeline state stored")
         st.session_state.pipeline_progress_log = progress_log
         st.session_state.pipeline_key = pipeline_key
@@ -2842,6 +2891,11 @@ elif view_stage == "T2D Dual Hinge":
             "実証されていません。Split本数だけで論文への一致を判定しないでください。"
         )
     audit_metrics = state.tiles_2d_dual_hinge.metrics
+    if audit_metrics.get("paper_fidelity_mode"):
+        st.subheader("Paper fidelity — 実際の計算経路と未達成条件")
+        st.write(audit_metrics.get("paper_fidelity_stage_results",{}))
+        for problem in audit_metrics.get("paper_fidelity_residual_reasons",[]):
+            st.warning(problem)
     # Animate accepted SE(2) poses as actual 3D rigid solids. Z is fixed by
     # the solver; this visualization must not suggest out-of-plane motion.
     trial_summaries = audit_metrics.get("dual_hinge_trial_summary", [])
