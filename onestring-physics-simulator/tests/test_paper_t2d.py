@@ -109,7 +109,9 @@ def test_t2d_preserves_actual_frustum_rigidity_and_reports_k2d_fit_inexactness(l
     # actual frustum geometry to make that fit bitwise exact.
     assert t.metrics['t2d_t3d_congruent_tile_geometry']
     assert t.metrics['tile_shape_max_error_to_T3D']<1e-8
-    assert t.metrics['top_vertices_match_k2d_max_error']>1e-5
+    # The top is still congruent with K2D; the reported non-rigid
+    # top-to-bottom mapping error is about the ALTERED BOTTOM geometry.
+    assert t.metrics['top_vertices_match_k2d_max_error']<1e-10
 
 
 def test_t2d_dual_solve_preserves_k2d_edge_lengths(linkage):
