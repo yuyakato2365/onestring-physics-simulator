@@ -10,6 +10,10 @@ endif()
 set(BFF_BUILD_CLI OFF CACHE BOOL "No need to rebuild official CLI" FORCE)
 set(BFF_BUILD_GUI OFF CACHE BOOL "Headless adapter" FORCE)
 add_subdirectory("${ONESTRING_BFF_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/bff-upstream-build")
+# Upstream predates stricter standard-library header dependency enforcement.
+# Include the standard uint8_t definition while compiling the original
+# library, without patching the user's BFF checkout.
+target_compile_options(bff PRIVATE -include cstdint)
 add_executable(bff-rect-command-line bff-rect-command-line.cpp)
 target_link_libraries(bff-rect-command-line PRIVATE bff)
 set_target_properties(bff-rect-command-line PROPERTIES
