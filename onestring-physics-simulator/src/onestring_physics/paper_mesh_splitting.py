@@ -326,7 +326,6 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     # algorithm: the original OFF path. Do not branch Split decisions,
     # threshold interpretation or CSF estimator on paper_fidelity_mode.
     # Other Paper preset stages (e.g. official BFF) remain independent.
-    paper_fidelity=bool(getattr(params,"paper_fidelity_mode",False))
     irreducible = np.sqrt(hi)
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     curvature = gaussian_curvature(parameterization)
