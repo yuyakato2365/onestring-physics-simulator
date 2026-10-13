@@ -43,7 +43,11 @@ def linkage(): return fixture()
 def test_t2d_preserves_tile_identity(linkage):
     k,t,_=linkage
     assert t.metrics['tile_ids']==list(range(len(k.faces)))
-    np.testing.assert_array_equal(t.vertices[:,:4],k.vertices[k.faces])
+    # The top face is a rigid fit to K2D, with only roundoff in this
+    # congruent reference fixture. Raw bitwise equality is not guaranteed by
+    # the proper SO(3) SVD projection.
+    np.testing.assert_allclose(t.vertices[:,:4],k.vertices[k.faces],atol=1e-14)
+    assert t.metrics['top_vertices_match_k2d_max_error']<1e-14
 
 
 def test_t2d_preserves_hinge_topology(linkage):
@@ -93,14 +97,19 @@ def test_t2d_rejects_broken_hinge_even_without_collision(linkage):
     assert check['hinge_connection_max_error']>1.
 
 
-def test_t2d_noncongruent_frustum_is_not_claimed_exact(linkage):
+def test_t2d_preserves_actual_frustum_rigidity_and_reports_k2d_fit_inexactness(linkage):
     k,_,t3=linkage
     t3.vertices[:,4:,:2]*=.9
     m=copy.copy(k);m.faces=k.linkage_topology.source_faces
     t,_=p._make_t2d_from_transforms(k,p._make_flat_tile_layout(k),m,t3,'T2D')
     assert t.metrics['top_to_bottom_rigid_fit_max_error']>1e-3
     assert not t.metrics['fabrication_feasible']
-    assert not t.metrics['t2d_t3d_congruent_tile_geometry']
+    # T2D is a proper SE(3) copy of each entire 8-vertex T3D solid.
+    # The imperfect K2D top fit is a separate quantity; do not distort
+    # actual frustum geometry to make that fit bitwise exact.
+    assert t.metrics['t2d_t3d_congruent_tile_geometry']
+    assert t.metrics['tile_shape_max_error_to_T3D']<1e-8
+    assert t.metrics['top_vertices_match_k2d_max_error']>1e-5
 
 
 def test_t2d_dual_solve_preserves_k2d_edge_lengths(linkage):
