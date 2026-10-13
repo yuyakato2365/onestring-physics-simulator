@@ -2,6 +2,18 @@
 """Integration check for the prescribed-corner official BFF rectangle solver."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Allow running this script without an editable pip install. The full
+# simulator itself requires Python 3.11+ (see pyproject.toml).
+if sys.version_info < (3, 11):
+    raise SystemExit(
+        f"OneString requires Python 3.11+, but this is {sys.version.split()[0]}. "
+        "Run with your project virtualenv or python3.11."
+    )
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 import numpy as np
 
 from onestring_physics.reference_bff import run_official_bff
