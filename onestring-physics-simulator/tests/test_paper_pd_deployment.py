@@ -158,3 +158,36 @@ def test_prescribed_material_side_faces_are_used_not_nearest_corner():
     assert snaps[0].face_a==(3,0,4,7)
     assert snaps[0].face_b==(1,2,6,5)
     assert "topology-derived" in info["snap_geometry"]
+
+
+def test_sparse_global_pd_satisfies_exact_linear_snap_and_lift_energy_system():
+    from onestring_physics.paper_pd_global import PaperPDGlobal
+    from onestring_physics.paper_pd_deployment import _Snap, _Lift
+    snap=_Snap(1,0,1,(1,2,6,5),(3,0,4,7))
+    lift=_Lift(1,(0,),((0,1),),
+               np.array([.5,0.,0.]),np.array([.5,0.,2.]))
+    system=PaperPDGlobal(2,[],[snap],[lift],
+                        rigid_weight=0.,hinge_weight=0.,
+                        snap_weight=1.,lift_weight=1.)
+    source=np.stack((_tile(0.,0.),_tile(1.6,0.)))
+    solved=system.step(source,source,np.array([[.5,0.,2.]]))
+    midpoint_before=(source[0,list(snap.face_a)].mean(axis=0)-
+                     source[1,list(snap.face_b)].mean(axis=0))
+    midpoint_after=(solved[0,list(snap.face_a)].mean(axis=0)-
+                    solved[1,list(snap.face_b)].mean(axis=0))
+    assert np.linalg.norm(midpoint_after)<np.linalg.norm(midpoint_before)
+    first_before=source[0,[0,1]].mean(axis=0)
+    first_after=solved[0,[0,1]].mean(axis=0)
+    assert first_after[2]>first_before[2]
+    assert system.matrix.shape[1]==16
+    assert system.matrix.shape[0]==2
+
+
+def test_global_pd_four_tile_auxetic_route_has_two_snap_rows():
+    from onestring_physics.paper_pd_global import PaperPDGlobal
+    state=_state(extra_four=True)
+    snaps,lifts,_=_validate_route(state)
+    sys=PaperPDGlobal(4,[],snaps,lifts,
+                     rigid_weight=.9,hinge_weight=.8,snap_weight=.8,lift_weight=.8)
+    assert sys.matrix.shape==(3,32)
+    assert sys.factor is not None
