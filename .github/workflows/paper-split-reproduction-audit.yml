@@ -1,0 +1,36 @@
+name: Paper BFF + CSF split reproduction audit
+on:
+  push:
+    branches: [agent/paper-split-reproduction-audit-20261013]
+    paths:
+      - "onestring-physics-simulator/src/onestring_physics/paper_reproduction_audit.py"
+      - "onestring-physics-simulator/app_runtime_base.py"
+      - "onestring-physics-simulator/tests/test_paper_reproduction_audit.py"
+      - ".github/workflows/paper-split-reproduction-audit.yml"
+  workflow_dispatch:
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev]"
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            src/onestring_physics/paper_reproduction_audit.py \
+            app_runtime_base.py \
+            tests/test_paper_reproduction_audit.py
+      - name: Paper and flat layout regressions
+        run: |
+          python -m pytest -q \
+            tests/test_paper_reproduction_audit.py \
+            tests/test_paper_pd_deployment.py \
+            tests/test_paper_t2d.py \
+            tests/test_split_and_hinge_audit.py
