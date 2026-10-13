@@ -337,19 +337,111 @@ def _discover_git_commit(path: Path) -> str:
     return OFFICIAL_BFF_CLI_COMMIT
 
 
+def find_rectangular_bff_executable(
+    explicit: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Require the OneString adapter linked to the OFFICIAL BFF C++ library.
+
+    Do not ever execute the ordinary bff-command-line in rectangle mode:
+    upstream CLI cannot prescribe boundary corner curvatures.
+    """
+    root=Path(__file__).resolve().parents[2]
+    candidates=[]
+    if explicit is not None:
+        candidates=[Path(explicit).expanduser()]
+    else:
+        env=os.environ.get("ONESTRING_BFF_RECTANGLE_EXECUTABLE")
+        if env:
+            candidates.append(Path(env).expanduser())
+        candidates.extend([
+            root/"third_party/bff_rectangle_build/bff-rect-command-line",
+            root/"third_party/bff_rectangle_build/Release/bff-rect-command-line.exe",
+        ])
+    for candidate in candidates:
+        if (candidate.name.startswith("bff-rect-command-line")
+            and candidate.is_file()
+            and (os.name=="nt" or os.access(candidate,os.X_OK))):
+            return candidate.resolve()
+    tried="\\n  - ".join(map(str,candidates))
+    raise ReferenceBFFUnavailableError(
+        "Rectangular BFF requires a separately built official-BFF-library "
+        "adapter, not the ordinary bff-command-line. No harmonic fallback.\\n"
+        "Build with: python3 scripts/setup_bff_rectangle.py\\n"
+        "Set ONESTRING_BFF_RECTANGLE_EXECUTABLE if installed elsewhere.\\n"
+        f"Tried:\\n  - {tried}"
+    )
+
+
+def validate_rectangular_boundary(
+    uv_vertices: np.ndarray,
+    boundary_loop: list[int],
+    relative_tolerance: float = 0.025,
+) -> dict[str,float | bool]:
+    """Verify all UV boundary vertices lie on four sides with four corners.
+
+    Align by the longest boundary edge so a rectangle rotated in UV space
+    is accepted, but an arbitrary free-boundary BFF output is rejected.
+    """
+    boundary=np.asarray(uv_vertices,dtype=float)[np.asarray(boundary_loop,dtype=int)]
+    if len(boundary)<4 or not np.all(np.isfinite(boundary)):
+        raise ReferenceBFFUnavailableError("Rectangular BFF returned an invalid boundary")
+    edges=np.roll(boundary,-1,axis=0)-boundary
+    lengths=np.linalg.norm(edges,axis=1)
+    direction=edges[int(np.argmax(lengths))]
+    norm=float(np.linalg.norm(direction))
+    if norm<=1e-12:
+        raise ReferenceBFFUnavailableError("Rectangular BFF returned a degenerate boundary")
+    direction=direction/norm
+    normal=np.array([-direction[1],direction[0]])
+    coords=np.stack((boundary@direction,boundary@normal),axis=1)
+    low=coords.min(axis=0)
+    high=coords.max(axis=0)
+    span=high-low
+    if min(span)<=1e-12:
+        raise ReferenceBFFUnavailableError("Rectangular BFF returned zero-area target")
+    tol=max(1e-12,float(relative_tolerance)*float(min(span)))
+    distances=np.column_stack((
+        np.abs(coords[:,0]-low[0]),np.abs(coords[:,0]-high[0]),
+        np.abs(coords[:,1]-low[1]),np.abs(coords[:,1]-high[1]),
+    ))
+    side_error=float(np.max(distances.min(axis=1)))
+    corners=np.array([
+        [low[0],low[1]],[low[0],high[1]],
+        [high[0],low[1]],[high[0],high[1]],
+    ])
+    corner_error=float(max(np.min(np.linalg.norm(coords-c,axis=1)) for c in corners))
+    if side_error>tol or corner_error>2.0*tol:
+        raise ReferenceBFFUnavailableError(
+            f"Official BFF rectangle failed geometric verification: "
+            f"side deviation={side_error:.6g}, corner deviation={corner_error:.6g}, "
+            f"tolerance={tol:.6g}. No free-boundary fallback used."
+        )
+    return {
+        "bff_rectangle_verified":True,
+        "bff_rectangle_side_max_deviation":side_error,
+        "bff_rectangle_corner_max_deviation":corner_error,
+        "bff_rectangle_verification_tolerance":tol,
+        "bff_rectangle_width":float(span[0]),
+        "bff_rectangle_height":float(span[1]),
+    }
+
+
 def run_official_bff(
     vertices: np.ndarray,
     faces: np.ndarray,
     *,
     executable: str | os.PathLike[str] | None = None,
-    boundary_policy: Literal["automatic_reference", "boundary_scale_zero", "target_disk"] = "automatic_reference",
+    rectangle_executable: str | os.PathLike[str] | None = None,
+    boundary_policy: Literal["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"] = "automatic_reference",
     timeout_seconds: float = 120.0,
 ) -> BFFRunResult:
     """Run the official BFF CLI and return its UV vertices in input order."""
 
     topology = validate_reference_mesh(vertices, faces)
-    exe = find_official_bff_executable(executable)
-    if boundary_policy not in {"automatic_reference", "boundary_scale_zero", "target_disk"}:
+    exe = (find_rectangular_bff_executable(rectangle_executable)
+           if boundary_policy == "target_rectangle"
+           else find_official_bff_executable(executable))
+    if boundary_policy not in {"automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"}:
         raise ReferenceBFFUnavailableError(
             f"Boundary policy {boundary_policy!r} is not exposed faithfully by the official CLI. No substitute was used."
         )
@@ -380,6 +472,10 @@ def run_official_bff(
                 f"exit={completed.returncode}, stdout={completed.stdout[-2000:]!r}, stderr={completed.stderr[-2000:]!r}"
             )
         uv = _read_write_only_uv_obj(output_path, len(vertices), np.asarray(faces, dtype=int))
+    rectangle_metrics=(
+        validate_rectangular_boundary(uv,topology["boundary_loops"][0])
+        if boundary_policy == "target_rectangle" else {}
+    )
     version_hint = exe.parent.name if "v" in exe.parent.name.lower() else "UNSPECIFIED_BY_BINARY"
     effective_policy = "boundary_scale_zero" if boundary_policy in {"automatic_reference", "boundary_scale_zero"} else boundary_policy
     return BFFRunResult(
@@ -393,8 +489,17 @@ def run_official_bff(
             "parameterization_backend_sha256": _sha256(exe),
             "bff_boundary_policy_requested": str(boundary_policy),
             "bff_boundary_policy_effective": effective_policy,
-            "bff_automatic_cli_call": "BFF::flatten(zero boundary scale factors, givenScaleFactors=true)",
-            "onestring_boundary_condition_status": "UNSPECIFIED_IN_PAPER",
+            "bff_automatic_cli_call": (
+                "BFF::flatten(four pi/2 boundary exterior angles, givenScaleFactors=false)"
+                if boundary_policy=="target_rectangle"
+                else "BFF::flatten(zero boundary scale factors, givenScaleFactors=true)"
+            ),
+            "onestring_boundary_condition_status": (
+                "RECTANGLE_USER_SELECTED_CORNER_POSITIONS_NOT_SPECIFIED_BY_PAPER"
+                if boundary_policy=="target_rectangle" else "UNSPECIFIED_IN_PAPER"
+            ),
+            "bff_rectangle_corner_selection":"four approximate 3D boundary-arclength quartiles" if boundary_policy=="target_rectangle" else None,
+            **rectangle_metrics,
             "fallbacks_used": [],
             "input_topology": topology,
         },
