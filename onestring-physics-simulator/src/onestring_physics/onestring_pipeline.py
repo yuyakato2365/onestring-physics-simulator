@@ -950,6 +950,7 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
+    paper_fidelity_mode: bool = False
     model_version: str = "2026-07-12-one-sided-t3d"
     use_principal_curvature_grid: bool = False
     use_extrusion_aware_k3d: bool = False
@@ -8495,6 +8496,21 @@ def build_onestring_design(
     progress_callback=None,
 ):
     active_params = params or PipelineParameters()
+    if getattr(active_params,"paper_fidelity_mode",False):
+        if getattr(active_params,"omega_parameterization_mode",None)!="paper_reference_bff":
+            raise ValueError(
+                "Paper fidelity mode must use official paper_reference_bff; "
+                "legacy 'bff' is not Boundary First Flattening."
+            )
+        if getattr(active_params,"collision_split_enabled",False):
+            raise ValueError(
+                "Paper fidelity mode excludes project-specific collision-driven "
+                "Split. Use only the curvature-based Sec.4.5 complete cuts."
+            )
+        if getattr(active_params,"t3d_variable_topology_enabled",False):
+            raise ValueError(
+                "Paper fidelity mode requires fixed eight-vertex frustum tiles."
+            )
     split_feedback_enabled=bool(getattr(active_params, 'collision_split_enabled', False))
     if split_feedback_enabled and run_simulation:
         raise ValueError(
