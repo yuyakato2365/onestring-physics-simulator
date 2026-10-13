@@ -39,7 +39,7 @@ def configure_paper_fidelity(params):
         "paper_fidelity_mode": True,
         "omega_parameterization_mode": "paper_reference_bff",
         "omega_boundary_mode": "paper_default",
-        "bff_boundary_policy": "automatic_reference",
+        "bff_boundary_policy": "target_rectangle",
         "m2d_crop_policy": "strict_vertices",
         "enable_csf_splits": True,
         "csf_split_threshold": 2.0,
@@ -81,7 +81,13 @@ def check_paper_fidelity(state, params) -> FidelityOutcome:
     reasons=[]
     # BFF is a REQUIREMENT, not inferred from a misleading 'bff' alias.
     omega=str(getattr(params,"omega_parameterization_mode",""))
-    stages["Omega"]="reference BFF requested" if omega=="paper_reference_bff" else "invalid"
+    rectangle=str(getattr(params,"bff_boundary_policy",""))=="target_rectangle"
+    stages["Omega"]=(
+        "official BFF with prescribed rectangular boundary requested"
+        if omega=="paper_reference_bff" and rectangle else "invalid"
+    )
+    if not rectangle:
+        reasons.append("Paper rectangle mode requires four BFF boundary exterior angles")
     if omega!="paper_reference_bff":
         reasons.append("Official BFF parameterization not selected")
     if "paper_reference_bff" not in omega:
