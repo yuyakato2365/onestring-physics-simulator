@@ -41,10 +41,10 @@ def configure_paper_fidelity(params):
         "omega_boundary_mode": "paper_default",
         "bff_boundary_policy": "target_rectangle",
         "m2d_crop_policy": "strict_vertices",
-        "enable_csf_splits": True,
-        "csf_split_threshold": 2.0,
-        "max_csf_splits": max(32,int(getattr(params,"max_csf_splits",64))),
-        "localize_csf_splits": False,
+        # Do NOT override any Split-related settings in Paper mode.
+        # The user requested exactly the OFF checkbox's Split processing,
+        # including enablement, threshold and max-cut budget. The actual
+        # Split algorithm is shared in paper_mesh_splitting.py.
         "collision_split_enabled": False,
         "collision_split_lookahead_enabled": False,
         "collision_split_forced_lines": (),
