@@ -13,6 +13,8 @@ on:
       - "onestring-physics-simulator/app_optcuts_20260923_extrusion_aware.py"
       - "onestring-physics-simulator/src/onestring_physics/split_process_view.py"
       - "onestring-physics-simulator/tests/test_split_process_view_pandas.py"
+      - "onestring-physics-simulator/tests/test_split_previous_acceptance.py"
+      - "onestring-physics-simulator/src/onestring_physics/paper_mesh_splitting.py"
       - "onestring-physics-simulator/pyproject.toml"
       - "onestring-physics-simulator/tests/test_rectangular_bff.py"
       - "onestring-physics-simulator/tests/test_paper_fidelity_computation_mode.py"
@@ -47,6 +49,7 @@ jobs:
           python -m pytest -q \
             tests/test_rectangular_bff.py \
             tests/test_split_process_view_pandas.py \
+            tests/test_split_previous_acceptance.py \
             tests/test_paper_fidelity_computation_mode.py \
             tests/test_paper_pd_deployment.py
   compile-and-run:
