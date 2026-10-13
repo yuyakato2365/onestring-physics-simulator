@@ -30,7 +30,7 @@ def test_reference_preset_is_independent_and_sets_actual_compute_options():
     assert selected is not original
     assert selected.paper_fidelity_mode
     assert selected.omega_parameterization_mode=="paper_reference_bff"
-    assert selected.bff_boundary_policy=="automatic_reference"
+    assert selected.bff_boundary_policy=="target_rectangle"
     assert selected.csf_split_threshold==2.0
     assert selected.max_csf_splits>=32
     assert selected.hinge_layout_collision_mode=="hard"
