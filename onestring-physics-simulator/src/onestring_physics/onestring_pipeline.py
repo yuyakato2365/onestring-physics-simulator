@@ -4580,6 +4580,7 @@ def _k3d_quality_metrics(base_vertices: np.ndarray, vertices: np.ndarray, faces:
     area = _quad_area_stats(vertices, faces)
     median_edge = max(float(edges["edge_length_median"]), 1e-12)
     base_median_edge = max(float(base_edges["edge_length_median"]), 1e-12)
+    base_edge_ratio = float(base_edges["edge_length_max"] / base_median_edge)
     median_area = max(float(area["quad_area_median"]), 1e-12)
     base_median_area = max(float(base_area["quad_area_median"]), 1e-12)
     displacement = np.linalg.norm(np.asarray(vertices, dtype=float) - np.asarray(base_vertices, dtype=float), axis=1)
@@ -4588,6 +4589,11 @@ def _k3d_quality_metrics(base_vertices: np.ndarray, vertices: np.ndarray, faces:
         "k3d_edge_length_median": float(edges["edge_length_median"]),
         "k3d_edge_length_max": float(edges["edge_length_max"]),
         "k3d_edge_max_to_median_ratio": float(edges["edge_length_max"] / median_edge) if median_edge > 0.0 else 0.0,
+        "m3d_edge_max_to_median_ratio": base_edge_ratio,
+        "m3d_edge_length_max": float(base_edges["edge_length_max"]),
+        "k3d_edge_outlier_ratio_relative_to_m3d": (
+            float(edges["edge_length_max"] / median_edge) / max(base_edge_ratio, 1e-12)
+        ),
         "k3d_edge_median_ratio_to_m3d": float(edges["edge_length_median"] / base_median_edge),
         "k3d_quad_area_min": float(area["quad_area_min"]),
         "k3d_quad_area_median": float(area["quad_area_median"]),
@@ -4600,9 +4606,23 @@ def _k3d_quality_metrics(base_vertices: np.ndarray, vertices: np.ndarray, faces:
     }
 
 
-def _k3d_quality_reject_reason(metrics: dict[str, float], grid) -> str | None:
+def _k3d_quality_reject_reason(
+    metrics: dict[str, float],
+    grid,
+    *,
+    input_aware: bool = False,
+) -> str | None:
     tile_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-8)
-    if float(metrics["k3d_edge_max_to_median_ratio"]) > 8.0:
+    # In Paper mode, judge the NEW outlier produced by K3D, not the
+    # absolute unevenness inherited from the pre-optimization M3D mesh.
+    # The normal OFF pipeline retains its previous absolute 8x guard.
+    # All remaining scale/collapse/displacement guards still apply.
+    edge_ratio = float(metrics["k3d_edge_max_to_median_ratio"])
+    base_ratio = float(metrics.get("m3d_edge_max_to_median_ratio", 0.0))
+    if not np.isfinite(edge_ratio) or not np.isfinite(base_ratio):
+        return "edge_length_nonfinite_guard"
+    limit = max(8.0, 1.2 * base_ratio) if input_aware else 8.0
+    if edge_ratio > limit:
         return "edge_length_outlier_guard"
     if float(metrics["k3d_edge_median_ratio_to_m3d"]) > 3.5 or float(metrics["k3d_edge_median_ratio_to_m3d"]) < 0.25:
         return "edge_scale_drift_guard"
@@ -4613,6 +4633,35 @@ def _k3d_quality_reject_reason(metrics: dict[str, float], grid) -> str | None:
     if float(metrics["k3d_vertex_displacement_max"]) > tile_size * 8.0:
         return "vertex_displacement_outlier_guard"
     return None
+
+
+def _k3d_damp_new_edge_outlier(
+    base_vertices: np.ndarray,
+    optimized_vertices: np.ndarray,
+    faces: np.ndarray,
+    grid,
+) -> tuple[np.ndarray | None, dict[str, float] | None, float | None]:
+    """Line-search a nonzero fraction of a K3D update, never revert to M3D.
+
+    Only used in official-BFF reference computation after a NEW outlier
+    is detected. Every trial passes ALL existing K3D quality guards, not
+    just the long-edge check. 1/8 is the minimum accepted update, so
+    negligible motion cannot masquerade as successful optimization.
+    """
+    base=np.asarray(base_vertices,dtype=float)
+    candidate=np.asarray(optimized_vertices,dtype=float)
+    delta=candidate-base
+    for alpha in (0.75, 0.5, 0.25, 0.125):
+        proposal=base + float(alpha)*delta
+        if not np.isfinite(proposal).all():
+            continue
+        measurements=_k3d_quality_metrics(base,proposal,faces)
+        reason=_k3d_quality_reject_reason(
+            measurements,grid,input_aware=True
+        )
+        if reason is None:
+            return proposal,measurements,float(alpha)
+    return None,None,None
 
 
 def _weld_k3d_duplicate_reference_vertices(
@@ -4675,7 +4724,59 @@ def _optimize_k3d(target, mesh, parameterization, params):
             list(getattr(out, "split_lines", [])),
         )
     quality = _k3d_quality_metrics(mesh.vertices, out.vertices, mesh.faces)
-    reject_reason = _k3d_quality_reject_reason(quality, mesh.grid)
+    reject_reason = _k3d_quality_reject_reason(
+        quality,mesh.grid,input_aware=reference_prefix
+    )
+    quality_initial_reject_reason=reject_reason
+    damping_alpha=1.0
+    if reference_prefix and reject_reason == "edge_length_outlier_guard":
+        # The raw K3D optimizer generated a new edge-length extreme.
+        # Try retaining a bounded portion of its update; neither
+        # disabling the guard nor substituting M3D is acceptable.
+        proposed,proposed_quality,alpha=_k3d_damp_new_edge_outlier(
+            mesh.vertices,out.vertices,mesh.faces,mesh.grid
+        )
+        if proposed is not None:
+            out = _original.QuadMesh(
+                proposed,np.asarray(out.faces,dtype=int).copy(),
+                out.grid,out.stage,dict(out.metrics),
+                list(getattr(out,"split_lines",[])),
+            )
+            quality=proposed_quality
+            damping_alpha=float(alpha)
+            reject_reason=None
+            after_planar=float(_original._quad_planarity_error(
+                out.vertices,mesh.faces
+            ))
+            after_surface=float(_original._surface_fit_error(
+                target,out.vertices,parameterization,params
+            ))
+            after_square=float(_original._square_error(
+                out.vertices,mesh.faces
+            ))
+            out.metrics.update({
+                "planarity_error_after":after_planar,
+                "surface_fit_error_after":after_surface,
+                "square_error_after":after_square,
+                "edge_length_variance_after":float(
+                    _original._edge_length_variance(out.vertices,mesh.faces)
+                ),
+                "z_range_K3D":float(_original._z_range(out.vertices)),
+                "z_range_ratio":float(
+                    _original._z_range(out.vertices) /
+                    max(_original._z_range(mesh.vertices),1e-8)
+                ),
+            })
+            report=_original.StageReport(
+                name=report.name,
+                objective=report.objective,
+                before_error=report.before_error,
+                after_error=after_planar+after_surface+after_square,
+                constraint_violation=after_planar,
+                computation_time=report.computation_time,
+                failed_constraints=list(getattr(report,"failed_constraints",[])),
+                counts=_original._mesh_counts(out),
+            )
     if reject_reason is None:
         out.metrics.update(quality)
         out.metrics.update(weld_metrics)
@@ -4688,6 +4789,12 @@ def _optimize_k3d(target, mesh, parameterization, params):
                 "k3d_surface_residual": float(out.metrics.get("surface_fit_error_after", 0.0)),
                 "k3d_quality_rejected": False,
                 "k3d_quality_guard_rejected": False,
+                "k3d_quality_guard_input_aware": reference_prefix,
+                "k3d_quality_guard_damping_alpha": damping_alpha,
+                "k3d_quality_guard_damping_applied": damping_alpha < 1.,
+                "k3d_quality_guard_initial_reject_reason": (
+                    quality_initial_reject_reason or ""
+                ),
                 "k3d_fallback_used": False,
                 "k3d_fallback_reason": "",
                 "k3d_exactness_label": "approximation",
@@ -4711,6 +4818,14 @@ def _optimize_k3d(target, mesh, parameterization, params):
     metrics = dict(out.metrics)
     metrics.update(quality)
     metrics.update(weld_metrics)
+    metrics.update({
+        "k3d_quality_guard_input_aware":reference_prefix,
+        "k3d_quality_guard_damping_alpha":damping_alpha,
+        "k3d_quality_guard_damping_applied":False,
+        "k3d_quality_guard_initial_reject_reason":(
+            quality_initial_reject_reason or ""
+        ),
+    })
     metrics.update(
         {
             "k3d_quality_guard_rejected": True,
@@ -8384,6 +8499,23 @@ def _collect_reference_run_diagnostics(state, params) -> dict[str, object]:
         "M2D_quad_count": int(m2d_metrics.get("m2d_quad_count", len(state.mesh_2d_initial.faces))),
         "M3D_round_trip_error": float(m3d_metrics.get("m3d_round_trip_error_rms", 0.0)),
         "M3D_round_trip_error_max": float(m3d_metrics.get("m3d_round_trip_error_max", 0.0)),
+        "K3D_quality": {
+            key: k3d_metrics.get(key) for key in (
+                "m3d_edge_max_to_median_ratio",
+                "k3d_edge_max_to_median_ratio",
+                "k3d_edge_outlier_ratio_relative_to_m3d",
+                "m3d_edge_length_max",
+                "k3d_edge_length_max",
+                "k3d_edge_median_ratio_to_m3d",
+                "k3d_quad_area_min_to_median_ratio",
+                "k3d_vertex_displacement_max",
+                "k3d_quality_guard_rejected",
+                "k3d_quality_guard_reason",
+                "k3d_quality_guard_damping_applied",
+                "k3d_quality_guard_damping_alpha",
+                "k3d_quality_guard_initial_reject_reason",
+            )
+        },
         "split_count": int(split_diagnostics.get("split_count", 0)),
         "split_locations": list(split_diagnostics.get("split_locations", []) or []),
         "split_status": split_diagnostics.get("status", "not_required"),
@@ -8578,6 +8710,8 @@ def build_onestring_design(
             raise ReferenceBFFError(
                 "Reference run recorded fallbacks and is therefore rejected: "
                 + "; ".join(str(value) for value in diagnostics["fallbacks_used"])
+                + f". K3D quality: {diagnostics.get('K3D_quality', {})}. "
+                  f"Diagnostics: {written}"
             )
     # Normally one cut per accepted step. Optional bounded lookahead can
     # inspect a temporarily rejected first cut followed by a second cut,
