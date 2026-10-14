@@ -413,18 +413,17 @@ with st.sidebar:
         value=True,
         help="Selects official rectangular BFF, rigid eight-vertex tiles, "
              "enhanced T2D refinement, and Paper Snap/Lift PD. "
-             "Split uses the OFF CSF estimator and controls; in Paper mode "
-             "only, cuts prioritize maximum curvature in CSF-high quads "
-             "and are accepted even without CSF improvement.",
+             "Split uses exactly the same CSF estimator, selection, "
+             "acceptance checks, settings and stopping as normal OFF mode.",
         key="paper_fidelity_computation_mode",
     )
     if paper_fidelity_enabled:
         st.info(
             "Paperモード：公式BFFの4つの90°外角による矩形Ω、"
             "8頂点剛体、T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
-            "SplitはOFFと同じCSF計算・閾値・最大分割数を使用します。"
-            "ただしPaperモードに限り、CSF超過領域の最大曲率点を優先し、"
-            "切断後のCSFが改善しなくても有効な切断は採用します。"
+            "Splitは通常版OFFと完全に同じ処理です：CSF計算、"
+            "対象領域・曲率点の選択、切断採否判定、停止条件、"
+            "閾値および最大分割回数を変更しません。"
             "これは論文の面積拡張率上限2の完全再現ではありません。"
         )
     st.header("Version")
