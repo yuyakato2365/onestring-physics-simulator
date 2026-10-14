@@ -32,12 +32,16 @@ Stages actually selected:
   No harmonic/LSCM/PCA fallback is allowed.
 - M2D grid: regular fixed-size grid, strict vertex crop, no additional
   speculative expansion or heuristic collision split.
-- Sec.4.5 Split: high Gaussian curvature, complete grid-direction
-  cuts, with a maximum of 64 by default. **NEW** for this mode: compare
-  the per-component area-Jacobian span
-  `max(J) / min(J)` against the paper's quadrilateral area-expansion
-  limit 2 (Supplement Fig.18). This is the smallest possible area
-  span after independent uniform scaling of each piece.
+- Sec.4.5 Split (Paper checkbox ON only): select connected regions where
+  `max(J)/min(J) > 2`, search signed source-Gaussian-curvature peaks for
+  grid-aligned complete bisections, and accept a cut **only** if the worst
+  child component has a strictly smaller area-Jacobian span. Reject
+  ineffective cuts instead of exhausting 64 cuts without improvement.
+  `max(J)/min(J)` is a *candidate* expansion bound after independent
+  scaling of each piece, **not** a certified physical deformation bound.
+  OFF mode retains its original fixed-chart linear-CSF behavior.
+  The strict-improvement test is an explicit implementation assumption:
+  Sec.4.5 does not prescribe a unique numerical candidate acceptance rule.
 - K3D/T3D: no variable-number-of-vertices patches, clipping/
   geometry-changing intersection repair, emergency prism fallback or
   independent extrusion-aware experiments. Keep eight rigid corners.
