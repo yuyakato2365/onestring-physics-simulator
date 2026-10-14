@@ -71,7 +71,11 @@ if those pieces can later be rescaled. But no such rescaling/conformal
 reparameterization is applied to the resulting actual M2D geometry by
 the current code. Consequently `csf_split_bound_certified=False`
 remains mandatory even if
-`csf_split_candidate_area_bound_satisfied=True`.
+`csf_split_candidate_linear_bound_satisfied=True`.
+The separate key `csf_split_candidate_area_bound_satisfied` enforces
+`max(J)/min(J)<=2` and may remain false even when `lambda<=2`.
+These are different inequalities and neither certifies fabrication without
+applying the component UV rescale.
 This must not be represented as proof of manufacture-ready scale.
 
 Original paper Sec.4.5 describes curvature-guided hierarchical full
