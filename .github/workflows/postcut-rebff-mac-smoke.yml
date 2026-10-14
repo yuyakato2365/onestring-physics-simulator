@@ -42,3 +42,44 @@ jobs:
           assert len(blob)>100
           print("PASS: both source-mesh halves form disks, CSF=1, OBJ + ZIP exported")
           PY
+
+      - name: Install native official BFF build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake build-essential libsuitesparse-dev libopenblas-dev liblapack-dev
+      - name: Build official BFF standard and rectangular CLIs
+        run: |
+          git clone --depth 1 --recursive https://github.com/GeometryCollective/boundary-first-flattening.git /tmp/onestring-postcut-official-bff
+          python scripts/setup_bff_rectangle.py --source /tmp/onestring-postcut-official-bff --jobs 4
+          cmake -S /tmp/onestring-postcut-official-bff -B /tmp/onestring-postcut-bff-cli \
+            -DBFF_BUILD_GUI=OFF -DBFF_BUILD_CLI=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            "-DCMAKE_CXX_FLAGS=-include cstdint"
+          cmake --build /tmp/onestring-postcut-bff-cli --target bff-command-line --parallel 4
+      - name: Run actual Lilium single-cut + official postcut BFF integration
+        run: |
+          curl -fL --retry 3 https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj -o /tmp/onestring-postcut-lilium.obj
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          from app_postcut_rebff import _execute, _download_zip
+          mesh=Path("/tmp/onestring-postcut-lilium.obj")
+          expected="4f62ff741b41bd629ccbeaeb0bb2e44ac060cdff88f090129911bede790e8ab3"
+          assert hashlib.sha256(mesh.read_bytes()).hexdigest()==expected
+          result=_execute(
+            mesh,14,
+            "/tmp/onestring-postcut-bff-cli/bff-command-line",
+            "third_party/bff_rectangle_build/bff-rect-command-line",
+            0.0,"曲率優先の最初のSplit","row",0.5,
+            "automatic_reference",
+          )
+          record=result["report"]
+          assert len(result["patches"])==2
+          assert sum(len(p["faces"]) for p in result["patches"])>=6500
+          for p in result["patches"]:
+              assert p["post"]["linear_span"]>0
+              print(p["side"],"original",p["pre"]["linear_span"],"new",p["post"]["linear_span"])
+          assert len(_download_zip(result))>1000
+          print("RESULT",record["split"],record["max_postcut_patch_linear_span"],
+                record["linear_limit_two_satisfied"])
+          PY
