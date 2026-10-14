@@ -182,3 +182,15 @@ def test_rebff_charts_without_seam_corner_constraints_are_rejected():
     patches[1]['new_uv']=patches[1]['xyz'][:,:2].copy()
     with pytest.raises(RuntimeError,match='did not constrain BOTH'):
         align_rectangular_bff_charts_on_source_seam(patches)
+
+
+def test_registered_common_omega_grid_is_used_for_t2d_seam():
+    state,patches=make_case(separate_by=(8.,-6.))
+    state.mesh_2d_initial.vertices=state.mesh_3d_initial.vertices.copy()
+    state.mesh_2d_initial.metrics={'postcut_seam_shared_grid_vertex_count':2}
+    audit=align_t2d_at_source_split_seams(state,patches,[0,1])
+    assert audit['split_seam_alignment']=='shared_source_seam_grid_rigid_SE2'
+    assert audit['split_seam_anchor_pair_count']==2
+    assert audit['split_seam_fit_rms_max']<1e-10
+    tiles=state.tiles_2d_dual_hinge.vertices
+    assert np.allclose(tiles[0,[1,2],:2],tiles[1,[0,3],:2],atol=1e-10)
