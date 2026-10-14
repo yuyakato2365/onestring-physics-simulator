@@ -100,3 +100,41 @@ def test_rigid_fit_cannot_scalably_deform_a_nonmatching_seam():
     assert residual>0.5
     assert abs(np.linalg.det(r)-1.)<1e-10
     assert np.allclose(r.T@r,np.eye(2),atol=1e-10)
+
+
+def test_grid_cut_exposes_same_physical_seam_as_rectangle_corners():
+    from postcut_rebff_iterative import _cut_child_rectangular_corners
+    from scripts.test_lilium_postcut_bff_hypothesis import clip_piece
+    x=np.array([[0.,0.,0.],[1.,0.,0.],[1.,1.,0.],[0.,1.,0.]])
+    f=np.array([[0,1,2],[0,2,3]],int)
+    chart={'xyz':x, 'new_uv':x[:,:2], 'faces':f}
+    seam_ends=[]
+    for positive in (False,True):
+        xyz,uv,faces,_=clip_piece(x,x[:,:2],f,1,0.5,positive)
+        corners=_cut_child_rectangular_corners(
+            chart,xyz,uv,faces,'row',0.5,positive
+        )
+        assert corners.shape==(4,3)
+        seam=corners[np.abs(corners[:,1]-.5)<1e-8]
+        assert seam.shape==(2,3)
+        seam_ends.append(np.asarray(sorted(seam.tolist())))
+    assert np.allclose(seam_ends[0],seam_ends[1])
+
+
+def test_required_rectangular_children_receive_explicit_corners():
+    from postcut_rebff_iterative import _split_and_rebff
+    from scripts.test_lilium_postcut_bff_hypothesis import clip_piece
+    x=np.array([[0.,0.,0.],[1.,0.,0.],[1.,1.,0.],[0.,1.,0.]])
+    f=np.array([[0,1,2],[0,2,3]],int)
+    parent={'xyz':x,'new_uv':x[:,:2],'faces':f,'side':'initial'}
+    seen=[]
+    def fake_bff(xyz,faces,*,rectangle_corner_positions):
+        corners=np.asarray(rectangle_corner_positions)
+        seen.append(corners)
+        assert corners.shape==(4,3)
+        return xyz[:,:2],{'bff_rectangle_verified':True}
+    fake_bff.seam_corners_required=True
+    children=_split_and_rebff(parent,'row',.5,fake_bff)
+    assert len(children)==2
+    assert len(seen)==2
+    assert all(c['seam_rectangle_corners_constrained'] for c in children)
