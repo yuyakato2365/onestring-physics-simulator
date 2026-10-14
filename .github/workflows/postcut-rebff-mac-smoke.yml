@@ -122,6 +122,11 @@ jobs:
           fit_report=fitted_lilium.metrics
           assert fit_report["bff_rectangle_verified"]
           assert fit_report["bff_corner_selection_valid_count"]>=1
+          assert any(
+              c.get("source_corner_method")=="source_boundary_pca_bounding_rectangle"
+              and "total_boundary_fit_score" in c
+              for c in fit_report["bff_corner_selection_attempts"]
+          ), "No geometry-derived Lilium corner candidate was accepted by official BFF"
           scores=[c["total_boundary_fit_score"]
                   for c in fit_report["bff_corner_selection_attempts"]
                   if "total_boundary_fit_score" in c]
