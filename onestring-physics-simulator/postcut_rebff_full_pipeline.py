@@ -267,6 +267,22 @@ def run_existing_pipeline_through_dual_hinge(
         state, patches, packed["tile_patch_ids"],
     )
     packed["audit"].update(seam_metrics)
+    if seam_metrics.get("split_seam_alignment") == "source_surface_3d_matched_rigid_SE2":
+        # The original full solver built its gap graph, lift points and string
+        # path *before* final seam registration. Recompute those dependent
+        # objects so the visible T2D and deployment constraints do not refer
+        # to stale, deliberately separated UV islands.
+        state.gap_graph = original._build_gap_graph(
+            state.mesh_3d_optimized.faces,
+            state.tiles_2d_dual_hinge, state.tiles_3d,
+        )
+        state.lift_points = original._select_lift_points(
+            state.gap_graph, params.lift_tau,
+        )
+        state.string_path = original._build_string_path(
+            state.gap_graph, state.lift_points, params.channel_friction,
+        )
+        packed["audit"]["postcut_rebff_string_path_recomputed_after_seam_alignment"] = True
     state.tiles_2d_dual_hinge.metrics.update(packed["audit"])
     state.tiles_2d_top_hinge.metrics.update(seam_metrics)
     state.hinge_graph.metrics.update(seam_metrics)
