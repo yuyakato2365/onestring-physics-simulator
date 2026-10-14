@@ -27,7 +27,9 @@ import numpy as np
 
 from .abd_backend import ABDBackendConfig, ShakeTrajectory, run_abd_backend
 
-from .bff_rectangle_selection import choose_rectangle_by_min_area_span
+from .bff_rectangle_selection import (
+    choose_rectangle_by_min_area_span, choose_rectangle_by_source_boundary_fit,
+)
 from .reference_bff import (
     count_internal_triangle_overlaps,
     ReferenceBFFError,
@@ -953,7 +955,9 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 class PipelineParameters(_original.PipelineParameters):
     paper_fidelity_mode: bool = False
     # Experimental paper-interpretation studies; defaults remain unchanged.
-    bff_rectangle_selection_mode: Literal["fixed_phase", "min_whole_source_area_span_4phase"] = "fixed_phase"
+    bff_rectangle_selection_mode: Literal[
+        "fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit"
+    ] = "fixed_phase"
     paper_split_area_limit_experiment: bool = False
     paper_csf_sampling_method: Literal["overlap_extrema", "interpolated_grid_vertices"] = "overlap_extrema"
     model_version: str = "2026-07-12-one-sided-t3d"
@@ -2694,7 +2698,15 @@ def _build_surface_parameterization(surface, target, grid, params):
             raise ValueError("paper_reference_bff requires omega_boundary_mode='paper_default'; its boundary policy is selected separately.")
         boundary_policy = str(getattr(params, "bff_boundary_policy", "automatic_reference"))
         selection_mode=str(getattr(params, "bff_rectangle_selection_mode", "fixed_phase"))
-        if selection_mode == "min_whole_source_area_span_4phase":
+        if selection_mode == "source_boundary_shape_fit":
+            if boundary_policy != "target_rectangle":
+                raise ValueError("Source-boundary shape fitting requires rectangular BFF")
+            result=choose_rectangle_by_source_boundary_fit(
+                surface_vertices,surface_faces,
+                rectangle_executable=getattr(params,"bff_rectangle_executable",None),
+                timeout_seconds=float(getattr(params,"bff_timeout_seconds",120.0)),
+            )
+        elif selection_mode == "min_whole_source_area_span_4phase":
             if boundary_policy != "target_rectangle":
                 raise ValueError("Automatic rectangle corner study requires the rectangular BFF policy")
             result=choose_rectangle_by_min_area_span(
