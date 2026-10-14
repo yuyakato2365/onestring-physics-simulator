@@ -127,6 +127,14 @@ jobs:
                   if "total_boundary_fit_score" in c]
           assert abs(fit_report["bff_corner_selection_selected_score"]
                      -min(scores))<1e-9
+          print("LILIUM FIT CANDIDATES",
+                fit_report["bff_corner_selection_attempt_count"],
+                "valid=",fit_report["bff_corner_selection_valid_count"],
+                "rejects=",[
+                    (c["source_corner_method"],c.get("failed_reason"))
+                    for c in fit_report["bff_corner_selection_attempts"]
+                    if "failed_reason" in c
+                ][:20],flush=True)
           print("LILIUM INITIAL SOURCE-BOUNDARY RECTANGLE",
                 fit_report["bff_corner_selection_valid_count"],
                 fit_report["bff_corner_selection_selected_source_vertex_ids"],
