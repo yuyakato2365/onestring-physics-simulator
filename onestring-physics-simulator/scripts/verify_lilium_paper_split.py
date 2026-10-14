@@ -35,6 +35,8 @@ def main() -> int:
     ap.add_argument("--bff-boundary-policy", choices=("target_rectangle", "automatic_reference"),
                     default="target_rectangle",
                     help="Compare two official BFF boundary policies without changing Split policy.")
+    ap.add_argument("--rectangle-corner-phase", type=float, default=0.0,
+                    help="Diagnostic only: phase of 4 boundary-arclength rectangle corners [0,0.25).")
     ap.add_argument("--bff-executable", type=Path, default=None,
                     help="Official standard bff-command-line, for automatic_reference.")
     ap.add_argument("--sampling-method", choices=("overlap_extrema", "interpolated_grid_vertices"),
@@ -64,6 +66,7 @@ def main() -> int:
     p, _ = configure_paper_fidelity(p)
     p.paper_csf_sampling_method = args.sampling_method
     p.bff_boundary_policy = args.bff_boundary_policy
+    p.bff_rectangle_corner_phase_fraction = args.rectangle_corner_phase
     if args.bff_executable is not None:
         p.bff_executable = str(args.bff_executable)
     p.reference_diagnostics_path = str(args.report.parent / "lilium_reference_initialization.json")
@@ -129,6 +132,7 @@ def main() -> int:
         "coverage_audit": coverage_audit,
         "csf_sampling_method": args.sampling_method,
         "bff_boundary_policy": args.bff_boundary_policy,
+        "bff_rectangle_corner_phase_fraction": args.rectangle_corner_phase,
         "csf_sampling_diagnostics": para.get("split_csf_sampling_diagnostics"),
         "number_of_splits": len(records),
         "one_split_picture_count_matches": len(records) == 1,
@@ -161,6 +165,7 @@ def main() -> int:
     args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     print("csf sampling method:", args.sampling_method)
     print("bff boundary policy:", args.bff_boundary_policy)
+    print("bff rectangle corner phase:", args.rectangle_corner_phase)
     print("mesh_sha256:", report["mesh_sha256"])
     print("quads:", report["actual_m2d_quads"])
     print("coverage fractions [UV, lifted 3D proxy]:", coverage_audit["m2d_omega_uv_area_fraction"], coverage_audit["lifted_quad_proxy_surface_area_fraction"])
