@@ -126,6 +126,23 @@ the proxy) produces **one generic cut** under
 That is evidence of the area-vs-linear CSF bug, **not** a successful
 official-BFF or paper-image-coordinate match.
 
+## Diagnostic: can ANY single cut meet the CSF limit?
+
+The generic Paper Split routine performs a read-only exhaustive scan of every
+initial M2D complete row/column cut **before** making any cut. This does not
+select or force a result. It records
+`csf_split_initial_one_cut_exhaustive_audit` with the number of valid
+candidates, best single cut coordinate and worst post-cut linear CSF,
+whether any single cut reaches 2, and all candidate scores.
+
+`scripts/verify_lilium_paper_split.py` prints the best result and saves
+all candidates in `output/lilium_paper_split_comparison.json`.
+A value above 2 for **every** candidate proves only that the *present fixed
+UV chart, M2D grid, and per-component scale model* cannot meet 2 using
+one full grid cut. It does not prove the original paper's BFF map or target
+were the same. The one-cut count observed in the publication must be
+reproduced **without** a Lilium-specific code path or cut-count cap.
+
 ## Comparing with legacy
 
 Uncheck Paper mode to return to the existing experimental choices.
