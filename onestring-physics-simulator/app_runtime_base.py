@@ -2668,7 +2668,7 @@ elif view_stage == "Split Map":
                 clean["next_recommended_split"] = str(clean.get("next_recommended_split", []))
                 display_steps.append(clean)
             st.dataframe(display_steps, width="stretch")
-    elif view_stage == "Omega":
+elif view_stage == "Omega":
     st.plotly_chart(figure_domain(state), use_container_width=True, key="omega_domain")
     st.subheader("S ↔ Omega Mapping Distortion")
     st.caption("The same per-triangle S→Omega distortion values are painted on the original surface S and on Omega, so corresponding distorted regions have exactly the same color.")
