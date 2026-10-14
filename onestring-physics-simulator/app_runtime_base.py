@@ -690,12 +690,12 @@ with st.sidebar:
     if selected_model_version["id"] in {"2026-09-20-paper-t3d", "2026-09-23-extrusion-aware"}:
         csf_split_threshold = float(
             st.number_input(
-                "Split threshold (area expansion)",
+                "Split threshold (Paper: conformal linear CSF; OFF: legacy)",
                 min_value=1.0,
                 value=2.0,
                 step=0.05,
                 format="%.3f",
-                help="SplitはON/OFFともに固定UVでの線形CSF（面積ヤコビアン平方根）を評価。論文の面積拡張率上限の厳密再現ではありません。",
+                help="Paperではsqrt(領域最大/最小の面積ヤコビアン)を採用し閾値2に固定。OFFは従来の固定UV評価。論文の物理的面積拡張条件は別途診断します。",
             )
         )
     else:
