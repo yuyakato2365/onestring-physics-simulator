@@ -95,11 +95,25 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
     # The physical seam is shared in S; use one global UV lattice after
     # seam-constrained rectangular BFF instead of independently translated
     # and retiled islands. All transformations are conformal similarities.
-    seam_uv_audit = align_rectangular_bff_charts_on_source_seam(patches)
-    common_uv = (
-        seam_uv_audit["postcut_seam_uv_registration"]
-        == "physical_seam_ends_uniform_BFF_similarity"
+    rectangular_seam_compatible = bool(
+        len(patches)>1 and all(
+            p.get("seam_rectangle_corners_constrained",False)
+            for p in patches
+        )
     )
+    if rectangular_seam_compatible:
+        seam_uv_audit = align_rectangular_bff_charts_on_source_seam(patches)
+    else:
+        # The legacy freely parameterized comparison is intentionally not
+        # declared seam-grid compatible. It retains isolated UV islands.
+        seam_uv_audit = {
+            "postcut_seam_uv_registration": (
+                "not_required" if len(patches)<=1
+                else "free_boundary_not_rectangular_seam_compatible"
+            ),
+            "postcut_seam_uv_pair_count":0,
+        }
+    common_uv = rectangular_seam_compatible
     spacing, expected = _find_tiling_spacing(
         patches, params, n, baseline_tiles, progress
     )
