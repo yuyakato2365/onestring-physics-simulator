@@ -8519,6 +8519,9 @@ def _collect_reference_run_diagnostics(state, params) -> dict[str, object]:
         "split_count": int(split_diagnostics.get("split_count", 0)),
         "split_locations": list(split_diagnostics.get("split_locations", []) or []),
         "split_status": split_diagnostics.get("status", "not_required"),
+        # Persist per-cut area-CSF evidence, rejected reasons and quad floors
+        # even if a later Paper strict-reference guard rejects the result.
+        "split_diagnostics": split_diagnostics,
         "fallbacks_used": fallbacks,
         "scope": {
             "S_TO_M3D": "paper-reference candidate",
