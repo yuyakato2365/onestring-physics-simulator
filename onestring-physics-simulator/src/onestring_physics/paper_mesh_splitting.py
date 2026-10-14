@@ -438,6 +438,14 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     threshold = (float(np.sqrt(2.0)) if area_limit_experiment else
                  2.0 if paper_fidelity else
                  float(getattr(domain, 'csf_split_threshold', 2.)))
+    # Paper Sec.4.5 describes hierarchical cuts, not a strict per-cut
+    # decrease in the worst component CSF. A decrease may require a
+    # sequence of cuts with an intermediate unchanged maximum.
+    # Every accepted neutral cut must separate nonempty quad sets,
+    # which ensures termination even when it does not improve CSF.
+    allow_neutral_cuts = bool(
+        paper_fidelity and getattr(params, "paper_split_allow_neutral_cuts", True)
+    )
     sampling_method = (str(getattr(params, "paper_csf_sampling_method",
                                   "overlap_extrema")) if paper_fidelity
                        else "overlap_extrema")
@@ -515,7 +523,13 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             for axis, coord in [('col', 0), ('row', 1)]:
                 # A peak on a previous cut cannot justify moving the same cut
                 # inward by another whole grid row. The other axis may work.
-                if not bounds[:, coord].min()+1e-12 < point[coord] < bounds[:, coord].max()-1e-12:
+                # A high-curvature source point on a *previous* seam can
+                # still guide the next grid cut in one of the resulting
+                # subdomains. Snapping to its nearest interior grid line is
+                # necessary for sequential plateau-then-improvement cuts.
+                # Legacy strict mode retains its historical boundary guard.
+                if (not allow_neutral_cuts
+                    and not bounds[:, coord].min()+1e-12 < point[coord] < bounds[:, coord].max()-1e-12):
                     continue
                 values = np.unique(np.round(bounds[:, coord], 12))[1:-1]
                 if not len(values):
@@ -533,12 +547,15 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 imbalance = abs(len(children[0])-len(children[1]))
                 child_sigmas = [ratio(component[c]) for c in children]
                 complete_candidate_seen = True
-                # Do not accept a full grid cut whose worst child still
-                # has the same span. Otherwise high-curvature candidates can
-                # consume all 64 slots without reducing sigma (old Paper bug).
-                # A small numerical tolerance prevents spurious gains.
+                # A strict one-step improvement rule is NOT specified in
+                # Sec.4.5 and rejects multi-cut solutions (e.g. [1,9,1,9]).
+                # Every valid bisection has smaller nonempty child tile
+                # sets, so neutral moves are finite, never an endless loop.
                 worst_child = max(child_sigmas)
-                if worst_child >= component_before - 1e-10 * max(1.0, component_before):
+                tolerance = 1e-10 * max(1.0, component_before)
+                if worst_child > component_before + tolerance:
+                    continue
+                if not allow_neutral_cuts and worst_child >= component_before - tolerance:
                     continue
                 score = (worst_child, imbalance, axis)
                 candidates.append((score, v2, subset, record))
@@ -573,6 +590,10 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         faces = updated
         children = _edge_components(subset)
         record.update(face_ids=component.tolist(), curvature_vertex_id=int(selected_peak), gaussian_curvature=float(curvature[selected_peak]),
+                      neutral_sigma_step=bool(
+                          abs(component_before-max(ratio(component[c]) for c in children))
+                          <=1e-10*max(1.,component_before)
+                      ),
                       sigma_before=component_before, sigma_after=[ratio(component[c]) for c in children],
                       worst_sigma_reduction=component_before-max(ratio(component[c]) for c in children),
                       child_face_ids=[component[c].tolist() for c in children],
@@ -685,6 +706,8 @@ def _split_mesh_single(vertices, faces, domain, params=None):
              if exhausted else 'no_admissible_curvature_guided_grid_cut')
         ),
         csf_split_step_analysis=records[:csf_count], csf_split_step_count=csf_count,
+        csf_split_neutral_cut_policy="allow_hierarchical_plateau" if allow_neutral_cuts else "strict_one_step_improvement",
+        csf_split_neutral_cut_count=int(sum(bool(r.get("neutral_sigma_step",False)) for r in records[:csf_count])),
         csf_split_locations=[['row' if r['axis']=='row' else 'col',r['snapped_value']]
                              for r in records[:csf_count]],
         csf_split_initial_components=[{'face_ids': c.tolist(), 'sigma': ratio(c)} for c in initial_components],
