@@ -205,6 +205,7 @@ jobs:
               and p["bff_metadata"].get("bff_rectangle_verified") is True
               for p in rectangular["patches"]
           )
+          import numpy as np
           # Real BFF initial Omega fits corners to S rather than forcing
           # every initial corner to a quarter of source perimeter.
           from onestring_physics.bff_rectangle_selection import choose_rectangle_by_source_boundary_fit
