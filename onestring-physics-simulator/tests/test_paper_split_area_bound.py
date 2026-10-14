@@ -65,6 +65,10 @@ def test_paper_split_reduces_linear_conformal_scale_span_and_stops(monkeypatch):
     assert not metrics["csf_split_component_rescale_applied"]
     assert metrics["csf_split_paper_area_span_active"]
     assert not metrics["csf_split_algorithm_same_as_normal"]
+    audit = metrics["csf_split_initial_one_cut_exhaustive_audit"]
+    assert audit["complete_cut_candidate_count"] > 0
+    assert audit["any_single_cut_below_threshold"]
+    assert audit["best_single_cut"]["worst_linear_csf"] < 2.0
 
 
 def test_paper_does_not_consume_64_cuts_for_irreducible_quad(monkeypatch):
@@ -77,6 +81,9 @@ def test_paper_does_not_consume_64_cuts_for_irreducible_quad(monkeypatch):
         "within_quad_distortion_floor"
     )
     assert not metrics["csf_split_candidate_area_bound_satisfied"]
+    audit = metrics["csf_split_initial_one_cut_exhaustive_audit"]
+    assert not audit["any_single_cut_below_threshold"]
+    assert audit["best_single_cut"]["worst_linear_csf"] > 2.0
 
 
 def test_paper_does_not_adopt_non_improving_full_cut(monkeypatch):
@@ -95,6 +102,7 @@ def test_off_mode_keeps_its_original_invariant_behavior(monkeypatch):
     assert records == []
     assert metrics["csf_split_algorithm_same_as_normal"]
     assert not metrics["csf_split_paper_area_span_active"]
+    assert metrics["csf_split_initial_one_cut_exhaustive_audit"] is None
 
 
 def test_paper_distinguishes_area_jacobian_from_linear_scale(monkeypatch):
