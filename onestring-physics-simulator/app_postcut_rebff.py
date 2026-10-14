@@ -30,7 +30,7 @@ from onestring_physics.legacy_pipeline_base import SurfaceParameterization
 from onestring_physics.paper_fidelity_mode import configure_paper_fidelity
 from onestring_physics.reference_bff import (
     run_official_bff, find_official_bff_executable,
-    find_rectangular_bff_executable,
+    find_rectangular_bff_executable, ReferenceBFFUnavailableError,
 )
 from scripts.test_lilium_postcut_bff_hypothesis import field
 from postcut_rebff_iterative import iterative_postcut_rebff
@@ -331,13 +331,21 @@ def main() -> None:
                         progress=lambda message: live.info(message),
                     )
                 live.empty()
+            except ReferenceBFFUnavailableError as exc:
+                st.error("公式BFF CLIが見つからないか、起動に失敗しました。"
+                         "OptCutsではなく、実験用の公式BFF実行ファイルが必要です。")
+                st.code("bash scripts/repair_postcut_bff_mac.sh", language="bash")
+                st.caption("ターミナルで上のコマンドを実行した後、実験ページを再実行してください。"
+                           "既存のOneString・OptCutsのコードは変更しません。")
+                st.exception(exc)
             except Exception as exc:
                 st.exception(exc)
     data = st.session_state.get("postcut_rebff_data")
     if data is None:
         st.info(
-            "最初に公式BFFの実行ファイルを用意してください。"
-            "READMEのMacセットアップ手順に従い、実行ボタンを押します。"
+            "公式BFFが未セットアップの場合はターミナルで "
+            "bash scripts/repair_postcut_bff_mac.sh を実行してください。"
+            "その後、実行ボタンを押します。"
         )
         return
 
