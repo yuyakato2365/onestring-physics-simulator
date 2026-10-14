@@ -428,7 +428,15 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     paper_fidelity = bool(getattr(params, "paper_fidelity_mode", False))
     # The theoretical Fig.18 area limit is 2; do not inherit arbitrary OFF
     # thresholds when called directly without the Streamlit Paper preset.
-    threshold = (2.0 if paper_fidelity else
+    area_limit_experiment = bool(
+        paper_fidelity and getattr(params, "paper_split_area_limit_experiment", False)
+    )
+    # In a conformal map, the area Jacobian is lambda^2. An area
+    # expansion-span limit of 2 corresponds to linear span sqrt(2).
+    # This interpretation is OPT-IN: §4.5's threshold notation is ambiguous.
+    # The default paper computational candidate still uses linear lambda=2.
+    threshold = (float(np.sqrt(2.0)) if area_limit_experiment else
+                 2.0 if paper_fidelity else
                  float(getattr(domain, 'csf_split_threshold', 2.)))
     sampling_method = (str(getattr(params, "paper_csf_sampling_method",
                                   "overlap_extrema")) if paper_fidelity
@@ -648,6 +656,10 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             'local inverse length scale sqrt(dA_S/dA_Omega); retained UV chart'
         ),
         csf_split_exactness_label=(
+            ('EXPERIMENTAL paper Figure 18 area-span<=2 interpreted via '
+             'sqrt(area Jacobian span)<=sqrt(2); no actual UV rescale/remap, '
+             'reparameterization or fabrication certificate')
+            if area_limit_experiment else
             'Paper candidate linear CSF only: sqrt(area Jacobian span) after hypothetical '
             'per-piece rescaling; no actual UV rescale/remap or fabrication certificate'
             if paper_fidelity else
@@ -687,8 +699,11 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             and not invalid_uv_count
         ),
         csf_split_candidate_linear_bound_satisfied=bool(
-            paper_fidelity and not unresolved and not invalid_uv_count
+            paper_fidelity and after <= 2.0 + 1e-10 and not invalid_uv_count
         ),
+        csf_split_area_limit_experiment=area_limit_experiment,
+        csf_split_effective_linear_threshold=float(threshold),
+        csf_split_requested_area_threshold=2.0 if area_limit_experiment else None,
         csf_split_component_area_ratio=[
             float(_component_area_span(lo, hi, c)) for c in final
         ] if paper_fidelity else [],
