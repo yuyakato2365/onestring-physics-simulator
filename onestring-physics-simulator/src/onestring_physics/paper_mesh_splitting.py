@@ -159,7 +159,7 @@ def _intersection_area(triangle, polygon):
     return abs(sum(_cross(a, b) for a, b in zip(points, np.roll(points, -1, axis=0))))*.5
 
 
-def _face_samples(vertices, faces, parameterization, threshold=2.):
+def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=False):
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     sf = np.asarray(getattr(parameterization, 'uv_faces', parameterization.surface_faces), int)
     triangles = uv[sf]
@@ -194,14 +194,22 @@ def _face_samples(vertices, faces, parameterization, threshold=2.):
             sweep[f][0].append(float(values[keep].min())); sweep[f][1].append(float(values[keep].max()))
     lo, hi = np.asarray(lo), np.asarray(hi)
     lo_cover, hi_cover = np.asarray(lo_cover), np.asarray(hi_cover)
-    quad_sigma = hi/lo
+    # Do not compare a raw area-Jacobian ratio to a *linear* CSF threshold.
+    quad_sigma = np.sqrt(hi/lo) if linear_csf else hi/lo
     q = [0., 50., 90., 99., 100.]
     report = {}
     for f in floors:
         fl, fh = np.asarray(sweep[f][0]), np.asarray(sweep[f][1])
-        report[f] = (float(fh.max()/fl.min()), int(np.count_nonzero(fh/fl > threshold+1e-10)), float((fh/fl).max()))
+        ratios = fh/fl
+        chart_ratio = fh.max()/fl.min()
+        if linear_csf:
+            ratios = np.sqrt(ratios)
+            chart_ratio = np.sqrt(chart_ratio)
+        report[f] = (float(chart_ratio), int(np.count_nonzero(ratios > threshold+1e-10)), float(ratios.max()))
     parameterization.metrics.update(
         split_quad_count=int(len(faces)),
+        split_quad_csf_units=('linear lambda=sqrt(area Jacobian ratio)' if linear_csf
+                              else 'legacy area Jacobian ratio'),
         split_quad_sigma_percentiles={f'p{x:g}': float(v) for x, v in zip(q, np.percentile(quad_sigma, q))},
         split_quad_irreducible_count=int(np.count_nonzero(quad_sigma > threshold+1e-10)),
         split_quad_lo_set_by_sliver_count=int(np.count_nonzero(lo_cover < .01)),
@@ -211,7 +219,7 @@ def _face_samples(vertices, faces, parameterization, threshold=2.):
                                                     'worst_quad_sigma': report[f][2]} for f in floors},
     )
     print('[FACE-SAMPLES] quads=%d threshold=%.4g active_coverage_floor=1e-12 (unchanged)' % (len(faces), threshold), flush=True)
-    print('  quad sigma hi/lo  ' + '  '.join('p%g=%.4g' % (x, v) for x, v in zip(q, np.percentile(quad_sigma, q)))
+    print('  quad sigma ' + ('sqrt(hi/lo)' if linear_csf else 'hi/lo') + '  ' + '  '.join('p%g=%.4g' % (x, v) for x, v in zip(q, np.percentile(quad_sigma, q)))
           + '   irreducible(>thr)=%d/%d' % (int(np.count_nonzero(quad_sigma > threshold+1e-10)), len(faces)), flush=True)
     print('  lo set by a triangle covering <1%% of the quad: %d quads  (<0.01%%: %d)'
           % (int(np.count_nonzero(lo_cover < .01)), int(np.count_nonzero(lo_cover < 1e-4))), flush=True)
@@ -340,7 +348,8 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     # thresholds when called directly without the Streamlit Paper preset.
     threshold = (2.0 if paper_fidelity else
                  float(getattr(domain, 'csf_split_threshold', 2.)))
-    lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
+    lo, hi, samples = _face_samples(vertices, faces, parameterization,
+                                    threshold, paper_fidelity)
     # In Sec.4.5, lambda is the conformal scale factor of the map;
     # the area Jacobian is lambda^2. A disconnected piece can, in
     # principle, be uniformly rescaled, so its *linear* scale span is
