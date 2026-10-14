@@ -254,8 +254,10 @@ jobs:
               rect_report["initial_m2d"]["quads"],
           )
           assert seam_packed["audit"]["postcut_seam_uv_registration"]==(
-              "physical_seam_ends_uniform_BFF_similarity"
+              "joint_parent_atlas_fixed_boundary"
           )
+          assert seam_packed["audit"]["postcut_seam_uv_full_physical_correspondence_verified"]
+          assert seam_packed["audit"]["postcut_seam_interior_correspondence_error_max"]<1e-8
           assert seam_packed["audit"]["postcut_seam_shared_grid_vertex_count"]>=2
           print("LILIUM SHARED RECTANGLE SEAM GRID PASSED",
                 seam_packed["audit"]["postcut_seam_shared_grid_vertex_count"],
@@ -292,7 +294,8 @@ jobs:
                   "RECT-T2D STAGE",stage,round(fraction,3),msg,flush=True),
           )
           assert rect_final_audit["postcut_omega_grid_no_cells_cropped"] is True
-          assert rect_final_audit["postcut_rebff_unconverged_visualization_only"] is True
+          assert rect_final_audit["postcut_seam_uv_full_physical_correspondence_verified"] is True
+          assert rect_final_audit["postcut_rebff_unconverged_visualization_only"] == (not rect_report["linear_limit_two_satisfied"])
           assert len(rect_state.tiles_2d_dual_hinge.vertices)==rect_final_audit["postcut_rebff_final_quad_count"]
           print("LILIUM RECTANGULAR FULL T2D",
                 rect_final_audit["split_seam_alignment"],
