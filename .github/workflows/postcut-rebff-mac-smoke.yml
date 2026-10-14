@@ -229,6 +229,29 @@ jobs:
           assert rect_report["all_postcut_patches_rectangle_verified"] is True
           assert len(rectangular["patches"])==2
           assert all(
+              p.get("seam_rectangle_corners_constrained") is True
+              for p in rectangular["patches"]
+          ), "Each child must use exact common-S seam endpoints as BFF corners"
+          # Assert actual Lilium 2D grid shares boundary positions BEFORE
+          # testing T2D (do not confuse independent island packing with weld).
+          from postcut_rebff_full_pipeline import _assemble_patches
+          seam_params=PipelineParameters(
+              nx=14,ny=14,
+              omega_parameterization_mode="paper_reference_bff",
+              paper_fidelity_mode=False,
+          )
+          seam_packed=_assemble_patches(
+              rectangular["patches"],seam_params,14,
+              rect_report["initial_m2d"]["quads"],
+          )
+          assert seam_packed["audit"]["postcut_seam_uv_registration"]==(
+              "physical_seam_ends_uniform_BFF_similarity"
+          )
+          assert seam_packed["audit"]["postcut_seam_shared_grid_vertex_count"]>=2
+          print("LILIUM SHARED RECTANGLE SEAM GRID PASSED",
+                seam_packed["audit"]["postcut_seam_shared_grid_vertex_count"],
+                flush=True)
+          assert all(
               p["bff_metadata"].get("bff_boundary_policy_effective")=="target_rectangle"
               and p["bff_metadata"].get("bff_rectangle_verified") is True
               for p in rectangular["patches"]
