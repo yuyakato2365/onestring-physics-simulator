@@ -425,6 +425,7 @@ def run_official_bff(
     executable: str | os.PathLike[str] | None = None,
     rectangle_executable: str | os.PathLike[str] | None = None,
     rectangle_corner_phase_fraction: float = 0.0,
+    rectangle_corner_positions: np.ndarray | None = None,
     boundary_policy: Literal["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"] = "automatic_reference",
     timeout_seconds: float = 120.0,
 ) -> BFFRunResult:
@@ -432,6 +433,13 @@ def run_official_bff(
 
     topology = validate_reference_mesh(vertices, faces)
     corner_phase=float(rectangle_corner_phase_fraction)
+    corners_xyz = (None if rectangle_corner_positions is None else
+                   np.asarray(rectangle_corner_positions, dtype=float))
+    if corners_xyz is not None:
+        if corners_xyz.shape != (4,3) or not np.isfinite(corners_xyz).all():
+            raise ValueError("Explicit BFF rectangle corners must be four finite 3D points")
+        if boundary_policy != "target_rectangle" or corner_phase:
+            raise ValueError("Explicit corners require rectangular boundary with no phase offset")
     if not math.isfinite(corner_phase) or not 0 <= corner_phase < 0.25:
         raise ValueError("BFF rectangle corner phase must be in [0, 0.25)")
     if corner_phase and boundary_policy != "target_rectangle":
@@ -451,7 +459,10 @@ def run_official_bff(
         command = [str(exe), str(input_path), str(output_path), "--writeOnlyUVs"]
         if boundary_policy == "target_disk":
             command.append("--flattenToDisk")
-        if boundary_policy == "target_rectangle" and corner_phase:
+        if corners_xyz is not None:
+            command.append("--corner-xyz")
+            command.extend(format(float(x), ".17g") for x in corners_xyz.ravel())
+        elif boundary_policy == "target_rectangle" and corner_phase:
             command.extend(["--corner-phase", format(corner_phase, ".17g")])
         try:
             completed = subprocess.run(
@@ -515,6 +526,9 @@ def run_official_bff(
             ),
             "bff_rectangle_corner_selection":"four approximate 3D boundary-arclength quartiles with optional cyclic phase" if boundary_policy=="target_rectangle" else None,
             "bff_rectangle_corner_phase_fraction":corner_phase if boundary_policy=="target_rectangle" else None,
+            "bff_rectangle_corner_mode":("source_boundary_explicit_xyz" if corners_xyz is not None
+                                         else "boundary_arclength_quartiles")
+            if boundary_policy=="target_rectangle" else None,
             "bff_rectangle_corner_boundary_wedge_indices":rect_wedges,
             **rectangle_metrics,
             "fallbacks_used": [],
