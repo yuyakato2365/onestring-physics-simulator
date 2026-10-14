@@ -1,0 +1,57 @@
+name: OneString post-cut official BFF falsification experiment
+on:
+  push:
+    branches: [agent/paper-split-area-verified-20261014]
+    paths:
+      - "onestring-physics-simulator/scripts/test_lilium_postcut_bff_hypothesis.py"
+      - ".github/workflows/onestring-postcut-rebff-experiment.yml"
+  workflow_dispatch:
+jobs:
+  compare-source-patch-charts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install BFF native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake build-essential libsuitesparse-dev libopenblas-dev liblapack-dev
+      - name: Build independent rectangle + official standard BFF CLI
+        run: |
+          git clone --depth 1 --recursive https://github.com/GeometryCollective/boundary-first-flattening.git /tmp/official-bff
+          python scripts/setup_bff_rectangle.py --source /tmp/official-bff --jobs 4
+          cmake -S /tmp/official-bff -B /tmp/official-bff-cli-build \
+            -DBFF_BUILD_GUI=OFF -DBFF_BUILD_CLI=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            "-DCMAKE_CXX_FLAGS=-include cstdint"
+          cmake --build /tmp/official-bff-cli-build --target bff-command-line --parallel 4
+      - run: python -m pip install -e ".[dev]"
+      - name: SHA-gate exact Lilium mesh
+        run: |
+          curl -fL --retry 3 -o /tmp/lilium.obj https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected="4f62ff741b41bd629ccbeaeb0bb2e44ac060cdff88f090129911bede790e8ab3"
+          actual=hashlib.sha256(Path("/tmp/lilium.obj").read_bytes()).hexdigest()
+          assert actual==expected,(actual,expected)
+          print("source SHA256 verified",actual)
+          PY
+      - name: Compare fixed-UV and actual re-BFF patch Jacobian spans
+        run: |
+          python scripts/test_lilium_postcut_bff_hypothesis.py /tmp/lilium.obj \
+            --bff-executable /tmp/official-bff-cli-build/bff-command-line \
+            --report output/lilium_postcut_bff_hypothesis.json
+      - name: Upload diagnostic regardless of result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postcut-rebff-research-diagnostic
+          path: onestring-physics-simulator/output/lilium_postcut_bff_hypothesis.json
+          if-no-files-found: warn
