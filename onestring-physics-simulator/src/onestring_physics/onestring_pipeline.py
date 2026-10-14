@@ -951,7 +951,6 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
     paper_fidelity_mode: bool = False
-    lilium_one_split_reference: bool = False
     model_version: str = "2026-07-12-one-sided-t3d"
     use_principal_curvature_grid: bool = False
     use_extrusion_aware_k3d: bool = False
