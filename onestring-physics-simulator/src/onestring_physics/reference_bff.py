@@ -307,33 +307,25 @@ def _sha256(path: Path) -> str:
 
 
 def _discover_git_commit(path: Path) -> str:
-    for parent in [path.parent, *path.parents]:
-        git_dir = parent / ".git"
-        if not git_dir.exists():
-            continue
-        if git_dir.is_file():
-            text = git_dir.read_text(encoding="utf-8", errors="replace").strip()
-            if text.startswith("gitdir:"):
-                candidate = Path(text.split(":", 1)[1].strip())
-                git_dir = candidate if candidate.is_absolute() else (parent / candidate).resolve()
-        head_path = git_dir / "HEAD"
-        if not head_path.is_file():
-            continue
-        head = head_path.read_text(encoding="ascii", errors="replace").strip()
-        if not head.startswith("ref:"):
-            return head or OFFICIAL_BFF_CLI_COMMIT
-        reference = head.split(":", 1)[1].strip()
-        loose_ref = git_dir / reference
-        if loose_ref.is_file():
-            return loose_ref.read_text(encoding="ascii", errors="replace").strip() or OFFICIAL_BFF_CLI_COMMIT
-        packed = git_dir / "packed-refs"
-        if packed.is_file():
-            for line in packed.read_text(encoding="ascii", errors="replace").splitlines():
-                if line and not line.startswith(("#", "^")):
-                    sha, name = line.split(" ", 1)
-                    if name.strip() == reference:
-                        return sha.strip()
-        return OFFICIAL_BFF_CLI_COMMIT
+    """Return BFF's commit ONLY if an exact executable-hash-matched manifest exists.
+
+    The executable is typically built below the OneString checkout.
+    Walking upward to the nearest .git returns OneString's HEAD, not the
+    actual GeometryCollective BFF source revision. Never do that.
+    Older builds without a manifest honestly return UNSPECIFIED.
+    """
+    if path.name.startswith("bff-rect-command-line"):
+        sidecar=path.with_name("bff-rect-command-line.provenance.json")
+        if sidecar.is_file():
+            try:
+                data=json.loads(sidecar.read_text(encoding="utf-8"))
+                if (data.get("official_bff_repository")==OFFICIAL_BFF_REPOSITORY
+                    and data.get("bff_rect_executable_sha256")==_sha256(path)):
+                    sha=str(data.get("official_bff_source_commit_sha",""))
+                    if len(sha)==40 and all(c in "0123456789abcdefABCDEF" for c in sha):
+                        return sha
+            except (ValueError,OSError):
+                pass
     return OFFICIAL_BFF_CLI_COMMIT
 
 
