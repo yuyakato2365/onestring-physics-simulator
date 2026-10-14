@@ -17,54 +17,81 @@ import numpy as np
 
 
 def _boundary_point_groups(patches):
-    """Return real source-S seam pairs, never mere point-contact pairs.
+    """Find positive-length physical source seams by 3D boundary-edge overlap.
 
-    Recursive cuts can leave two chart boundaries touching at one 3D vertex
-    without sharing a physical edge. Requiring a matched *grid edge* for
-    such a zero-length contact incorrectly aborts otherwise exact retile.
-    A seam needs at least two distinct matching physical boundary points.
+    Merely touching at one 3D vertex is NOT a split seam. Conversely, after
+    recursive cuts one patch can have a boundary vertex in the middle of an
+    adjacent patch's longer edge: counting equal vertex IDs would miss that
+    real, positive-length seam. Intersect boundary *segments* geometrically
+    and supply the overlap endpoints, including points interior to edges.
+    No UV-space proximity is used to invent source adjacency.
     """
-    all_x = np.concatenate([np.asarray(p["xyz"], float) for p in patches])
-    scale = max(1., float(np.max(np.ptp(all_x, axis=0))))
-    tol = 1e-7 * scale
-    buckets = defaultdict(list)
     from onestring_physics.reference_bff import validate_reference_mesh
-    for pid, patch in enumerate(patches):
-        xyz = np.asarray(patch["xyz"], float)
-        faces = np.asarray(patch["faces"], int)
-        topology = validate_reference_mesh(xyz, faces)
-        for vid in topology["boundary_loops"][0]:
-            point = xyz[int(vid)]
-            key = tuple(np.rint(point / tol).astype(np.int64))
-            buckets[key].append((pid,point))
-    by_pair = defaultdict(list)
-    for entry in buckets.values():
-        ids = {pid for pid,_ in entry}
-        if len(ids) < 2:
-            continue
-        center = np.mean([point for _,point in entry], axis=0)
-        if any(np.linalg.norm(point-center)>2*tol for _,point in entry):
-            continue  # spatial-hash collision, never invent a seam
-        for a in sorted(ids):
-            for b in sorted(ids):
-                if a<b:
-                    by_pair[(a,b)].append(center)
-    # A single shared 3D vertex is a T-junction/corner contact, NOT a
-    # positive-length Split seam. It cannot own a matching panel edge.
-    # De-duplicate source points geometrically as a vertex may be repeated
-    # across matching boundary buckets after multiple recursive cuts.
-    actual_seams={}
-    for pair,points in by_pair.items():
-        distinct=[]
-        for point in points:
-            if all(np.linalg.norm(point-prior)>2*tol for prior in distinct):
-                distinct.append(np.asarray(point,float))
-        if len(distinct)<2:
-            continue
-        if np.max(np.linalg.norm(np.asarray(distinct)-distinct[0],axis=1))<=2*tol:
-            continue
-        actual_seams[pair]=np.asarray(distinct,float)
-    return actual_seams
+
+    xyz_all=np.concatenate([np.asarray(p["xyz"],float) for p in patches])
+    scale=max(1.,float(np.max(np.ptp(xyz_all,axis=0))))
+    tol=1e-8*scale
+    segments=[]
+    for patch in patches:
+        xyz=np.asarray(patch["xyz"],float)
+        faces=np.asarray(patch["faces"],int)
+        loop=np.asarray(validate_reference_mesh(xyz,faces)["boundary_loops"][0],int)
+        start=xyz[loop]
+        end=xyz[np.roll(loop,-1)]
+        valid=np.linalg.norm(end-start,axis=1)>4*tol
+        start,end=start[valid],end[valid]
+        segments.append((
+            start,end,
+            np.minimum(start,end),np.maximum(start,end),
+        ))
+
+    by_pair={}
+    for i in range(len(patches)):
+        aa,ab,alo,ahi=segments[i]
+        for j in range(i+1,len(patches)):
+            ba,bb,blo,bhi=segments[j]
+            if not len(aa) or not len(ba):
+                continue
+            if np.any(np.max(alo,axis=0)>np.min(bhi,axis=0)+tol) or np.any(
+                np.max(blo,axis=0)>np.min(ahi,axis=0)+tol
+            ):
+                continue
+            common=[]
+            for a,b,low,high in zip(aa,ab,alo,ahi):
+                # Only boundary edges with intersecting spatial bounding boxes
+                # can overlap; avoid a Python O(N*M) geometric loop.
+                possible=np.flatnonzero(np.all(
+                    (bhi>=low-tol)&(blo<=high+tol),axis=1
+                ))
+                length=float(np.linalg.norm(b-a))
+                unit=(b-a)/length
+                for idx in possible:
+                    p,q=ba[idx],bb[idx]
+                    # Both endpoints must lie on the same infinite 3D line
+                    # to tolerance, with a positive common interval.
+                    dp=p-a
+                    dq=q-a
+                    tp=float(np.dot(dp,unit))
+                    tq=float(np.dot(dq,unit))
+                    if (np.linalg.norm(dp-tp*unit)>tol
+                        or np.linalg.norm(dq-tq*unit)>tol):
+                        continue
+                    lo=max(0.,min(tp,tq))
+                    hi=min(length,max(tp,tq))
+                    if hi-lo<=4*tol:
+                        continue
+                    common.extend((a+unit*lo,a+unit*hi))
+            if not common:
+                continue
+            # Shared endpoints can be generated repeatedly from subdivided
+            # source triangles; preserve only geometrically distinct samples.
+            distinct=[]
+            for point in common:
+                if all(np.linalg.norm(point-prev)>2*tol for prev in distinct):
+                    distinct.append(point)
+            if len(distinct)>=2:
+                by_pair[(i,j)]=np.asarray(distinct,float)
+    return by_pair
 
 
 def _rigid_2d(source, destination):
