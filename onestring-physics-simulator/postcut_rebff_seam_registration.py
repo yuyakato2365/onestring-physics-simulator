@@ -217,3 +217,164 @@ def align_t2d_at_source_split_seams(
             "guarantee one-to-one matching seam panel vertices or joint topology.",
         "split_seam_registration_steps":history,
     }
+
+
+
+def align_rectangular_bff_charts_on_source_seam(patches):
+    """Map both independently re-BFFed rectangles onto one shared seam lattice.
+
+    The parent grid Split duplicated the SAME source-S seam in 3D. Each child
+    BFF was explicitly given its two physical seam endpoints as adjacent
+    rectangle corners. By a conformal similarity (uniform scale + rotation +
+    translation), fit these endpoints exactly without changing the CSF ratio.
+    Root chart and child then share an axis-aligned seam with identical UV
+    grid coordinates. A reflection or per-vertex deformation is prohibited.
+    """
+    if len(patches) < 2:
+        return {
+            "postcut_seam_uv_registration":"not_required",
+            "postcut_seam_uv_pair_count":0,
+        }
+    if any(not p.get("seam_rectangle_corners_constrained",False) for p in patches):
+        raise RuntimeError(
+            "Cannot preserve a common rectangular seam grid: child BFF did "
+            "not constrain BOTH split endpoints to rectangle corners."
+        )
+    seams=_boundary_point_groups(patches)
+    if not seams:
+        raise RuntimeError("No matching source-S seam between BFF rectangles")
+    root=int(np.argmax([len(p["faces"]) for p in patches]))
+    raw=[np.asarray(p["new_uv"],float).copy() for p in patches]
+    transformed={root:raw[root].copy()}
+    used={root}
+    history=[]
+
+    def get_uv_at_source(patch_index,point):
+        xyz=np.asarray(patches[patch_index]["xyz"],float)
+        distances=np.linalg.norm(xyz-point,axis=1)
+        where=int(np.argmin(distances))
+        tol=1e-7*max(1.,float(np.max(np.ptp(xyz,axis=0))))
+        if distances[where]>tol:
+            raise RuntimeError("Physical 3D seam endpoint absent from a BFF child")
+        return raw[patch_index][where]
+
+    while len(used)<len(patches):
+        active=[]
+        for pair,seam in seams.items():
+            a,b=pair
+            if (a in used)==(b in used) or len(seam)<2:
+                continue
+            base,child=(a,b) if a in used else (b,a)
+            # Farthest physically shared pair are the seam endpoints.
+            distances=np.sum((seam[:,None,:]-seam[None,:,:])**2,axis=2)
+            i,j=np.unravel_index(np.argmax(distances),distances.shape)
+            if i==j:
+                continue
+            p,q=seam[i],seam[j]
+            target=np.asarray([
+                get_uv_at_source(base,p),get_uv_at_source(base,q)
+            ])
+            if base in transformed:
+                # Raw/base similarity already applied. Locate the explicit
+                # seam points in transformed vertex coordinates.
+                xyz=np.asarray(patches[base]["xyz"],float)
+                ids=[int(np.argmin(np.linalg.norm(xyz-pt,axis=1))) for pt in (p,q)]
+                target=transformed[base][ids]
+            source=np.asarray([
+                get_uv_at_source(child,p),get_uv_at_source(child,q)
+            ])
+            va=target[1]-target[0]
+            vb=source[1]-source[0]
+            na=float(np.linalg.norm(va))
+            nb=float(np.linalg.norm(vb))
+            if min(na,nb)<=1e-10:
+                continue
+            c=float(np.dot(vb,va)/(nb*na))
+            si=float((vb[0]*va[1]-vb[1]*va[0])/(nb*na))
+            R=np.array([[c,si],[-si,c]],float)
+            scale=na/nb
+            mapped=(raw[child]-source[0])@R*scale+target[0]
+            # Rectangular BFF guarantees straight-line seam ONLY when its
+            # endpoints are consecutive 90-degree rectangle corners.
+            xyz=np.asarray(patches[child]["xyz"],float)
+            uv=np.asarray(raw[child],float)
+            seam_ids=np.array([
+                int(np.argmin(np.linalg.norm(xyz-pt,axis=1)))
+                for pt in seam
+            ])
+            d=np.abs(np.cross(
+                source[1]-source[0],uv[seam_ids]-source[0]
+            ))/nb
+            relative=float(np.max(d)/nb)
+            if relative>1e-5:
+                raise RuntimeError(
+                    "BFF did not map the shared source seam onto one rectangle "
+                    f"edge (relative deviation={relative:.4g})."
+                )
+            # Preserve orientation: both rectangular patches must occupy
+            # opposite sides of the common edge, otherwise a reflection
+            # would be necessary and orientation-sensitive mapping changes.
+            tangent=va/na
+            root_centroid=np.mean(transformed[base],axis=0)-target[0]
+            child_centroid=np.mean(mapped,axis=0)-target[0]
+            base_side=float(np.cross(tangent,root_centroid))
+            child_side=float(np.cross(tangent,child_centroid))
+            if abs(base_side)<1e-10 or abs(child_side)<1e-10:
+                raise RuntimeError("Degenerate seam-aligned rectangle width")
+            if base_side*child_side>0:
+                raise RuntimeError(
+                    "Rectangular BFF child charts lie on the same side of "
+                    "the source seam; cannot join without an orientation flip"
+                )
+            active.append((
+                len(seam),base,child,mapped,scale,relative,
+                target.copy(),
+            ))
+        if not active:
+            raise RuntimeError(
+                "Cannot assemble a connected chain of seam-compatible "
+                "rectangular BFF charts"
+            )
+        _,base,child,mapped,scale,deviation,landmarks=max(
+            active,key=lambda c:c[0]
+        )
+        transformed[child]=mapped
+        used.add(child)
+        history.append({
+            "reference_piece":int(base),
+            "moving_piece":int(child),
+            "uniform_scale_ratio":float(scale),
+            "seam_uv_line_deviation_relative":float(deviation),
+        })
+
+    # Put the first shared seam at coordinate zero. Both charts share the
+    # same absolute square-grid lattice after this common global shift.
+    first_pair=tuple(sorted((history[0]["reference_piece"],
+                              history[0]["moving_piece"])))
+    seam=seams[first_pair]
+    end0=seam[0]
+    root_vertex=np.asarray(patches[root]["xyz"],float)
+    idx=int(np.argmin(np.linalg.norm(root_vertex-end0,axis=1)))
+    shift=np.zeros(2)
+    uvzero=transformed[root][idx]
+    neighbor=transformed[root]
+    # BFF rectangle sides are parallel to a coordinate axis.
+    other_shared=seam[-1]
+    jdx=int(np.argmin(np.linalg.norm(root_vertex-other_shared,axis=1)))
+    tangent=neighbor[jdx]-neighbor[idx]
+    if abs(tangent[0])<abs(tangent[1]):
+        shift[0]=-uvzero[0]
+        shift[1]=-uvzero[1]
+    else:
+        shift[0]=-uvzero[0]
+        shift[1]=-uvzero[1]
+    for i,patch in enumerate(patches):
+        patch["new_uv_before_seam_alignment"]=raw[i]
+        patch["new_uv"]=transformed[i]+shift
+    return {
+        "postcut_seam_uv_registration":"physical_seam_ends_uniform_BFF_similarity",
+        "postcut_seam_uv_pair_count":len(history),
+        "postcut_seam_uv_transform_steps":history,
+        "postcut_seam_uv_global_grid_origin":[0.,0.],
+        "postcut_seam_uv_preserves_csf_ratio":True,
+    }
