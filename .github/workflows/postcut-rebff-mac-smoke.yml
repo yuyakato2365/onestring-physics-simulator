@@ -75,6 +75,13 @@ jobs:
           )
           record=result["report"]
           assert len(result["patches"])==2
+          assert all("quad_preview" in p for p in result["patches"]), [
+              p.get("quad_preview_error") for p in result["patches"]
+          ]
+          for p in result["patches"]:
+              print("POSTCUT NEW M2D/M3D",p["side"],len(p["quad_preview"]["quads"]),
+                    "quads; roundtrip",p["quad_preview"]["roundtrip_max"])
+              assert len(p["quad_preview"]["quads"])>0
           assert sum(len(p["faces"]) for p in result["patches"])>=6500
           for p in result["patches"]:
               assert p["post"]["linear_span"]>0
