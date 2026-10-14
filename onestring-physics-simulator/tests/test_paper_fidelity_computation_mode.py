@@ -31,7 +31,7 @@ def test_reference_preset_is_independent_and_sets_actual_compute_options():
     assert selected.paper_fidelity_mode
     assert selected.omega_parameterization_mode=="paper_reference_bff"
     assert selected.bff_boundary_policy=="target_rectangle"
-    assert selected.csf_split_threshold==original.csf_split_threshold
+    assert selected.csf_split_threshold==2.0
     assert selected.max_csf_splits==original.max_csf_splits
     assert selected.enable_csf_splits==original.enable_csf_splits
     assert selected.hinge_layout_collision_mode=="hard"
@@ -44,7 +44,7 @@ def test_reference_preset_is_independent_and_sets_actual_compute_options():
     assert not selected.allow_legacy_normal_prism_emergency_fallback
     assert "omega_parameterization_mode" in overrides
     assert "paper_fidelity_mode" in overrides
-    assert "csf_split_threshold" not in overrides
+    assert overrides["csf_split_threshold"]==2.0
     assert "max_csf_splits" not in overrides
     assert "enable_csf_splits" not in overrides
 
