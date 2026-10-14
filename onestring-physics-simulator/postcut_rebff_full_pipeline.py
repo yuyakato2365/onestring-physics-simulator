@@ -101,7 +101,17 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
             for p in patches
         )
     )
-    if rectangular_seam_compatible:
+    joint_atlas=bool(
+        rectangular_seam_compatible and
+        all(p.get("postcut_joint_atlas",False) for p in patches)
+    )
+    if joint_atlas:
+        from postcut_rebff_joint_atlas import verify_joint_source_seams
+        # Atlas boundaries were fixed DURING each recursive Split and BFF
+        # recomputation. No subsequent per-piece similarities are permitted:
+        # such transformations would break already-certified seam vertices.
+        seam_uv_audit=verify_joint_source_seams(patches)
+    elif rectangular_seam_compatible:
         seam_uv_audit = align_rectangular_bff_charts_on_source_seam(patches)
     else:
         # The legacy freely parameterized comparison is intentionally not
