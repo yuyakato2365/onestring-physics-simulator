@@ -1,0 +1,50 @@
+name: OneString paper 4.5 primary-source audit
+on:
+  push:
+    branches: [agent/paper-split-area-verified-20261014]
+    paths:
+      - ".github/workflows/onestring-source-text-audit.yml"
+  workflow_dispatch:
+jobs:
+  inspect-published-method:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Install PDF text extraction
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
+      - name: Download publicly available author paper and supplement
+        run: |
+          curl -fL --retry 3 'https://onestringtopullthemall.github.io/static/pdfs/onestringpull_authors_version_compressed.pdf' -o /tmp/onestring.pdf
+          curl -fL --retry 3 'https://onestringtopullthemall.github.io/static/pdfs/OneStringPull-supplement.pdf' -o /tmp/onestring_supplement.pdf
+          pdfinfo /tmp/onestring.pdf | grep Pages
+          pdftotext -layout /tmp/onestring.pdf /tmp/onestring.txt
+          pdftotext -layout /tmp/onestring_supplement.pdf /tmp/onestring_supplement.txt
+      - name: Inspect primary-source Sections 4.1, 4.5, references and related sections
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          t=Path('/tmp/onestring.txt').read_text(errors='replace')
+          # Show text only in job's internal research logs.
+          for name,patterns,context in [
+              ("4.5 EXACT", [r"4\.5\s+Mesh Splitting"], 3900),
+              ("4.1 EXACT", [r"4\.1\s+",r"Conformal Mapping"], 1400),
+              ("FIG 6", [r"Fig\.\s*6\."], 1200),
+              ("LIMIT 2", [r"scale factor.{0,80}2",r"expansion ratio.{0,80}2"], 900),
+              ("FIG15", [r"Fig\.\s*15\."], 500),
+          ]:
+              print('\\n=== ',name,' ===',flush=True)
+              for p in patterns:
+                  hits=list(re.finditer(p,t,re.I|re.S))
+                  print('pattern',p,'hits',len(hits))
+                  for m in hits[:2]:
+                      lo=max(0,m.start()-300); hi=min(len(t),m.end()+context)
+                      print('PAGE',t[:m.start()].count('\\f')+1, '\\n',t[lo:hi],flush=True)
+          # Read all author references matching section's cited names when needed.
+          print('\\n=== SUPPLEMENT SCALE / FIG 18 ===')
+          s=Path('/tmp/onestring_supplement.txt').read_text(errors='replace')
+          for pattern in [r'Fig\\.\\s*18\\.',r'area expansion',r'conformal']:
+              ms=list(re.finditer(pattern,s,re.I))
+              for m in ms[:4]:
+                  print('PAGE',s[:m.start()].count('\\f')+1,s[max(0,m.start()-350):m.end()+1300])
+          PY
