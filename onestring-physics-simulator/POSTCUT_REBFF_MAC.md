@@ -15,7 +15,21 @@ git switch --track origin/agent/postcut-rebff-mac-20261014
 
 ※ `git status` に未コミット変更が出た場合、ブランチ切替前に退避してください。すでにブランチがある場合は `git switch agent/postcut-rebff-mac-20261014`。
 
-## 2. Pythonと公式BFF CLIを用意
+## 2. まとめてセットアップ（推奨）
+
+初回はmacOS用のセットアップスクリプトを使うと、Python 3.11用の独立仮想環境、公式BFFの通常CLI・矩形CLI、Lilium OBJまで用意できます。
+
+```bash
+bash scripts/setup_postcut_rebff_mac.sh
+source .venv-postcut-rebff/bin/activate
+python -m streamlit run app_postcut_rebff.py
+```
+
+このスクリプトはHomebrewで必要なツールを導入します。既存のソースや通常版OneStringのPython環境を上書きしません。
+
+以下は手動でインストールしたい場合の代替手順です。
+
+## 3. Pythonと公式BFF CLIを手動で用意
 
 ```bash
 brew install cmake suite-sparse openblas
@@ -38,13 +52,13 @@ python3 scripts/setup_bff_rectangle.py --source third_party/boundary-first-flatt
 
 実行ファイルが別の場所なら、実験画面のサイドバーへその絶対パスを指定してください。ビルドが失敗しても代替の調和写像には切り替えません。
 
-## 3. Liliumメッシュを取得
+## 4. Liliumメッシュを取得
 
 ```bash
 curl -fL https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj -o ~/Downloads/lilium.obj
 ```
 
-## 4. Macのブラウザで実際に計算
+## 5. Macのブラウザで実際に計算
 
 ```bash
 python3 -m streamlit run app_postcut_rebff.py
