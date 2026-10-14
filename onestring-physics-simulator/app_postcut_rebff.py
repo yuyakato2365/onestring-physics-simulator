@@ -330,6 +330,79 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
     }}
 
 
+def _mesh_top_stage_figure(vertices, faces, *, title: str):
+    """Visualize REAL mesh vertices/faces returned by the original solver."""
+    xyz = np.asarray(vertices, float)
+    f = np.asarray(faces, int)
+    tris = np.concatenate([f[:, [0, 1, 2]], f[:, [0, 2, 3]]])
+    fig = go.Figure(go.Mesh3d(
+        x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2],
+        i=tris[:, 0], j=tris[:, 1], k=tris[:, 2],
+        color="#3995aa", opacity=0.9, flatshading=True,
+    ))
+    fig.update_layout(title=title, scene=dict(aspectmode="data"),
+                      height=480, margin=dict(l=0, r=0, t=40, b=0))
+    return fig
+
+
+def _real_tile_stage_figure(tiles: np.ndarray, title: str, flat: bool = False):
+    """Plot per-tile outlines without fabricating shared-vertex connections."""
+    verts = np.asarray(tiles, float)
+    if verts.ndim != 3 or verts.shape[1] < 4 or verts.shape[2] < 3:
+        raise ValueError(f"Expected actual (tiles,>=4,3) output, got {verts.shape}")
+    fig = go.Figure()
+    for i, polygon in enumerate(verts[:, :4, :]):
+        closed = np.vstack((polygon, polygon[0]))
+        fig.add_trace(go.Scatter3d(
+            x=closed[:, 0], y=closed[:, 1],
+            z=np.zeros(5) if flat else closed[:, 2],
+            mode="lines", line=dict(width=3),
+            showlegend=False, hovertemplate=f"Tile {i}<extra></extra>",
+        ))
+    fig.update_layout(title=title, showlegend=False, height=560,
+                      scene=dict(aspectmode="data",
+                                 camera=dict(eye=dict(x=0, y=0, z=2.6)) if flat else None),
+                      margin=dict(l=0, r=0, t=40, b=0))
+    return fig
+
+
+def _show_existing_pipeline_state(state, audit):
+    st.success("既存のOneStringソルバーでT2D Dual Hingeまで計算が完了しました。")
+    st.json({
+        "M2D/M3D shared tile count": len(state.mesh_2d_initial.faces),
+        "K3D tile count": len(state.mesh_3d_optimized.faces),
+        "T3D tile count": len(state.tiles_3d.vertices),
+        "K2D tile count": len(state.mesh_2d_optimized.faces),
+        "T2D Dual Hinge tile count": len(state.tiles_2d_dual_hinge.vertices),
+        "Dual Hinge count": len(state.hinge_graph.hinges),
+        **audit,
+    })
+    st.subheader("既存の最適化器が出力した全段階の形状")
+    a, b = st.columns(2)
+    with a:
+        st.plotly_chart(_mesh_top_stage_figure(
+            state.mesh_3d_optimized.vertices, state.mesh_3d_optimized.faces,
+            title="K3D：平面性・四角形性・曲面追従最適化後",
+        ), use_container_width=True)
+    with b:
+        st.plotly_chart(_real_tile_stage_figure(
+            state.tiles_3d.vertices, title="T3D：実タイル（上面輪郭）",
+        ), use_container_width=True)
+    a, b = st.columns(2)
+    with a:
+        st.plotly_chart(_real_tile_stage_figure(
+            state.tiles_2d_top_hinge.vertices,
+            title="T2D Top Hinge：実計算結果", flat=True,
+        ), use_container_width=True)
+    with b:
+        st.plotly_chart(_real_tile_stage_figure(
+            state.tiles_2d_dual_hinge.vertices,
+            title="T2D Dual Hinge：実計算結果", flat=True,
+        ), use_container_width=True)
+    with st.expander("Dual Hingeソルバーの評価値"):
+        st.json(state.tiles_2d_dual_hinge.metrics)
+
+
 def main() -> None:
     st.set_page_config(page_title="OneString Split → re-BFF", layout="wide")
     st.title("OneString: Split後のBFF再計算（Mac実験モード）")
@@ -491,6 +564,40 @@ def main() -> None:
         data=_download_zip(data), file_name="onestring_postcut_rebff.zip",
         mime="application/zip",
     )
+    st.divider()
+    st.subheader("従来OneStringに接続してT2D Dual Hingeまで実計算")
+    st.caption("従来のOptCuts対応OneStringパイプラインのK3D・T3D・K2D・"
+               "T2D Top Hinge・Dual Hinge最適化器をそのまま使用します。"
+               "再BFF後は全領域のタイルを対応付きで統合し、元M2Dに近い"
+               "タイル数になる共通格子間隔を探索します。"
+               "K3D以降の制約違反や最適化失敗は隠さず表示します。")
+    if not report["linear_limit_two_satisfied"]:
+        st.warning("まだCSFが2以下になっていないため、下流段階は実行できません。")
+    elif st.button("従来の全段階を計算してT2D Dual Hingeを表示", type="primary"):
+        try:
+            from postcut_rebff_full_pipeline import run_existing_pipeline_through_dual_hinge
+            live_progress = st.empty()
+            def on_full_progress(stage, value, description=""):
+                live_progress.info(
+                    f"{stage}（{float(value)*100:.1f}%）: {description}"
+                )
+            with st.spinner("既存のOneStringでK3D→T3D→K2D→T2D Dual Hingeを計算中…"):
+                state, audit = run_existing_pipeline_through_dual_hinge(
+                    Path(mesh).expanduser().resolve(), data,
+                    grid=int(grid), progress=on_full_progress,
+                )
+                st.session_state["postcut_rebff_full_pipeline_state"] = state
+                st.session_state["postcut_rebff_full_pipeline_audit"] = audit
+            live_progress.empty()
+        except Exception as exc:
+            st.error("元のOneStringソルバーが停止しました。"
+                     "T2Dを偽の結果で代替していません。")
+            st.exception(exc)
+    final_state = st.session_state.get("postcut_rebff_full_pipeline_state")
+    final_audit = st.session_state.get("postcut_rebff_full_pipeline_audit")
+    if final_state is not None and final_audit is not None:
+        _show_existing_pipeline_state(final_state, final_audit)
+
     with st.expander("詳細CSFと実験条件"):
         st.json(report)
 
