@@ -351,6 +351,12 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
             p.get("bff_metadata", {}).get("bff_rectangle_verified") is True
             for p in patches
         ) if post_policy == "target_rectangle" else None,
+        "postcut_seam_physical_corner_constraints_enforced": bool(
+            post_policy == "target_rectangle" and all(
+                p.get("seam_rectangle_corners_constrained",False)
+                for p in patches
+            )
+        ),
         "rectangle_corner_phase": float(phase),
         "split_count": trial["split_count"],
         "split_history": trial["split_history"],
@@ -573,12 +579,12 @@ def main() -> None:
                  "複数の四隅候補で公式矩形BFFを実行、境界適合度とCSFを比較します。",
         )
         phase = st.select_slider(
-            "矩形BFF四隅の位相（従来初期モード・Split後に使用）",
+            "矩形BFF四隅の位相（従来の初期Ωのみ）",
             options=[0.0, 0.0625, 0.125, 0.1875], value=0.0,
         )
         if initial_rectangle_mode == "source_boundary_shape_fit":
             st.caption("初期Ωは入力境界への適合度で自動選択します。"
-                       "ここで指定する位相はSplit後の矩形BFFにのみ適用します。")
+                       "Split後の矩形BFFでは分割境界の両端を必ず矩形角に固定します。")
         cut_mode = st.radio(
             "切断位置", ["曲率優先の最初のSplit", "手動指定"], index=0,
         )
