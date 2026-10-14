@@ -51,7 +51,7 @@ def test_unconverged_preview_reuses_real_pipeline_and_remains_marked(monkeypatch
     seen={}
     monkeypatch.setattr(
         integrated,"_execute",
-        lambda *a,**kw:(seen.update({"options":kw}) or
+        lambda *a,**kw:(seen.update({"options":kw,"args":a}) or
                         {"report":report(7109.1819,False)}),
     )
     tiles=SimpleNamespace(metrics={})
@@ -74,7 +74,7 @@ def test_unconverged_preview_reuses_real_pipeline_and_remains_marked(monkeypatch
     assert audit["postcut_rebff_unconverged_visualization_only"] is True
     assert diagnostic["stop_reason"]=="all_candidate_cuts_failed"
     assert seen["options"]["initial_rectangle_mode"]=="source_boundary_shape_fit"
-    assert seen["options"]["postcut_boundary_policy"]=="target_rectangle"
+    assert seen["args"][8]=="target_rectangle"
     assert seen["full_options"]["allow_csf_violation_preview"] is True
     assert state.tiles_2d_dual_hinge.metrics["postcut_rebff_full_T2D_dual_hinge_computed"]
 
