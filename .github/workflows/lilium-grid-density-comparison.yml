@@ -1,0 +1,57 @@
+name: Paper Lilium grid resolution audit (no cut-count tuning)
+on:
+  workflow_dispatch:
+  push:
+    branches: [agent/paper-split-area-verified-20261014]
+    paths:
+      - ".github/workflows/lilium-grid-density-comparison.yml"
+jobs:
+  real-bff-lilium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        grid: [15, 16]
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install native BFF dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake build-essential libsuitesparse-dev libopenblas-dev liblapack-dev
+      - name: Compile prescribed-rectangle CLI from unforked official BFF
+        run: |
+          git clone --depth 1 --recursive https://github.com/GeometryCollective/boundary-first-flattening.git /tmp/official-bff
+          python scripts/setup_bff_rectangle.py --source /tmp/official-bff --jobs 4
+      - run: python -m pip install -e ".[dev]"
+      - name: Obtain and verify same Lilium input bytes
+        run: |
+          curl -fL --retry 3 -o /tmp/lilium.obj https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected="4f62ff741b41bd629ccbeaeb0bb2e44ac060cdff88f090129911bede790e8ab3"
+          got=hashlib.sha256(Path("/tmp/lilium.obj").read_bytes()).hexdigest()
+          print("mesh SHA256:",got)
+          if got!=expected:
+              raise RuntimeError("Mesh differs from user OBJ: abort same-input comparison")
+          PY
+      - name: Audit regular grid resolution with same general-purpose Split code
+        run: |
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj \
+            --grid ${{ matrix.grid }} \
+            --sampling-method interpolated_grid_vertices \
+            --report output/lilium_grid_${{ matrix.grid }}_vertex_csf.json
+      - name: Upload numerical comparison (do not assert a desired tile/cut count)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bff-lilium-grid-${{ matrix.grid }}
+          path: onestring-physics-simulator/output/lilium_grid_${{ matrix.grid }}_vertex_csf.json
+          if-no-files-found: warn
