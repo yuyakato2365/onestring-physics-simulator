@@ -317,108 +317,6 @@ def _component_area_span(lo, hi, component):
     return amax/amin
 
 
-def _lilium_single_full_cut(vertices, faces, samples, curvature, uv_grid, ratio):
-    """Select one reproducible picture-guided long slit for Lilium comparison.
-
-    This is intentionally NOT the unconstrained paper Sec.4.5 optimizer:
-    its target line is read approximately from the Lilium figure (left third).
-    We report the remaining area expansion unconditionally rather than
-    claiming that one forced split satisfies the paper's sigma <= 2 condition.
-    """
-    from .simple_split_panel_patch import _edge_components
-    from .final_split_panel_pass import _complete_cut_once
-
-    components = _edge_components(faces)
-    if len(components) != 1:
-        raise ValueError(
-            "Lilium one-Split reference requires a single connected M2D grid"
-        )
-    comp = components[0]
-    used = np.unique(faces[comp])
-    xmin, xmax = float(vertices[used, 0].min()), float(vertices[used, 0].max())
-    width = xmax - xmin
-    if width <= 1e-12:
-        raise ValueError("Lilium one-Split reference requires nonzero grid width")
-    grid_lines = np.unique(np.round(vertices[used, 0], 12))[1:-1]
-    candidate_records = []
-    for line in grid_lines:
-        candidate_vertices, subset, record = _complete_cut_once(
-            vertices, faces[comp], 'col', float(line)
-        )
-        if record is None:
-            continue
-        child_groups = _edge_components(subset)
-        if len(child_groups) != 2:
-            continue
-        if min(map(len, child_groups)) < max(2, int(0.10 * len(comp))):
-            continue
-        snapped = float(record["snapped_value"])
-        u = (snapped - xmin) / width
-        # The long slit is left-of-center in the Lilium flat photograph.
-        # This coordinate is an image-based hypothesis, NOT an inferred
-        # author-provided UV coordinate and not a paper optimizer parameter.
-        score = (abs(u - 0.30), -min(map(len, child_groups)))
-        candidate_records.append((score, candidate_vertices, subset,
-                                  record, child_groups))
-    if not candidate_records:
-        raise ValueError(
-            "Lilium one-Split reference: no complete left-to-right separating "
-            "grid-column cut found; inspect the M2D crop and grid orientation"
-        )
-    _, new_vertices, subset, record, children = min(
-        candidate_records, key=lambda item: item[0]
-    )
-    old_owners = defaultdict(list)
-    for fi in comp:
-        for k in range(4):
-            edge = tuple(sorted((int(faces[fi,k]),
-                                 int(faces[fi,(k+1)%4]))))
-            old_owners[edge].append((int(fi),k))
-    updated = faces.copy()
-    updated[comp] = subset
-    pairs = []
-    for entries in old_owners.values():
-        if len(entries) != 2:
-            continue
-        (a,ea),(b,eb) = entries
-        if set(updated[a, [ea, (ea+1)%4]]) != set(updated[b, [eb, (eb+1)%4]]):
-            pairs.append([a,ea,b,eb])
-    if not pairs:
-        raise ValueError("Lilium one-Split reference failed to sever any shared edges")
-    ids = np.unique(np.concatenate([samples[int(i)] for i in comp]))
-    valid = ids[np.isfinite(curvature[ids])]
-    if len(valid):
-        # Audit the nearest feature rather than claiming a precise author peak.
-        peak = int(min(valid, key=lambda i: (
-            abs(float(uv_grid[i,0]) - float(record["snapped_value"])),
-            -float(curvature[i]),
-        )))
-        peak_curvature = float(curvature[peak])
-    else:
-        peak, peak_curvature = -1, float("nan")
-    child_sigmas = [ratio(comp[c]) for c in children]
-    before = ratio(comp)
-    record.update(
-        face_ids=comp.tolist(),
-        curvature_vertex_id=peak,
-        gaussian_curvature=peak_curvature,
-        sigma_before=before,
-        sigma_after=child_sigmas,
-        worst_sigma_reduction=before-max(child_sigmas),
-        child_face_ids=[comp[c].tolist() for c in children],
-        split_boundary_pairs=pairs,
-        grid_snap_distance=abs(record["snapped_value"]-record["requested_value"]),
-        component_id=int(comp.min()),
-        lilium_figure_one_split_reference=True,
-        reference_image_guided=True,
-        reference_fraction_from_left=float(
-            (record["snapped_value"] - xmin) / width
-        ),
-        reference_note="single vertical complete cut approximating Lilium figure; not a sigma<=2 certificate",
-    )
-    return new_vertices, updated, record, pairs
-
-
 def _split_mesh_single(vertices, faces, domain, params=None):
     from .simple_split_panel_patch import _edge_components
     from .final_split_panel_pass import _complete_cut_once
@@ -444,11 +342,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     # Cuts and snapping take place in grid coordinates, including rotated BFF grids.
     vertices[:, :2] = vertices[:, :2] @ rotation
     uv_grid = uv @ rotation
-    requested_budget = max(0, int(getattr(domain, 'max_csf_splits', 64)))
-    lilium_reference = bool(
-        paper_fidelity and getattr(params, "lilium_one_split_reference", False)
-    )
-    budget = 1 if lilium_reference else requested_budget
+    budget = max(0, int(getattr(domain, 'max_csf_splits', 64)))
     enabled = bool(getattr(domain, 'csf_split_enabled', True))
     records, rejected, pairs, blocked = [], [], [], set()
     def ratio(component):
@@ -458,14 +352,6 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         return float(np.sqrt(hi[component].max()))
     initial_components = _edge_components(faces)
     before = max(map(ratio, initial_components), default=1.)
-    if lilium_reference:
-        if not enabled:
-            raise ValueError("Lilium one-Split comparison needs CSF Split enabled")
-        vertices, faces, record, reference_pairs = _lilium_single_full_cut(
-            vertices, faces, samples, curvature, uv_grid, ratio
-        )
-        records.append(record)
-        pairs.extend(reference_pairs)
     while enabled and len(records) < budget:
         components = _edge_components(faces)
         bad = [c for c in components
@@ -631,9 +517,8 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     values = [ratio(c) for c in final]
     unresolved = sum(v > threshold+1e-10 for v in values)
     unresolved_mixed = 0  # legacy metric retained for dashboard compatibility
-    exhausted = bool(enabled and unresolved and csf_count >= budget and not lilium_reference)
+    exhausted = bool(enabled and unresolved and csf_count >= budget)
     stopping_reason = (
-        'lilium_one_split_reference' if lilium_reference else
         'disabled' if not enabled else
         'threshold_met' if not unresolved else
         'budget_exhausted' if exhausted else
@@ -670,9 +555,6 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_stopping_reason=stopping_reason,
         csf_split_unresolved_mixed_edges=unresolved_mixed,
         csf_split_status=(
-            ('lilium_reference_one_cut_csf_unresolved' if unresolved else
-             'lilium_reference_one_cut_candidate_area_bound_met')
-            if lilium_reference else
             'uncertified_uv_degeneracy' if invalid_uv_count
             else 'satisfied' if not unresolved else
             ('disabled' if not enabled else 'budget_exhausted'
@@ -691,11 +573,6 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_component_rescale_applied=False,
         csf_split_paper_area_span_active=paper_fidelity,
         csf_split_algorithm_same_as_normal=not paper_fidelity,
-        csf_split_lilium_one_split_reference=lilium_reference,
-        csf_split_reference_target_count=1 if lilium_reference else None,
-        csf_split_reference_target_count_met=bool(lilium_reference and csf_count==1),
-        csf_split_reference_is_paper_solver_fidelity=False if lilium_reference else None,
-        csf_split_requested_budget=requested_budget,
         csf_split_degenerate_uv_face_count=invalid_uv_count,
         csf_split_parameterization_repair_required=bool(invalid_uv_count),
         csf_split_evaluation_scope='usable source triangles only' if invalid_uv_count else 'all source triangles',
@@ -719,9 +596,6 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             exhausted and not all(r['reason'] == 'within_quad_distortion_floor' for r in rejected)
         ),
         csf_split_stopping_rule=(
-            'Lilium figure-conditioned one-column-cut benchmark; stop at one, '
-            'report residual CSF independently; not a paper solver reproduction'
-            if lilium_reference else
             'Paper Sec.4.5 approximate: use component area-Jacobian span; '
             'highest eligible source Gaussian-curvature point; complete '
             'grid bisection with strict worst-child span improvement; '
@@ -741,8 +615,6 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         m2d_largest_component_quad_count_after_csf_split=max(map(len, final), default=0),
         m2d_smallest_component_quad_count_after_csf_split=min(map(len, final), default=0),
         csf_split_direction_rule=(
-            'Lilium visual figure hypothesis: one full column near left 30 percent'
-            if lilium_reference else
             'Paper: highest signed source Gaussian curvature admitting an improving '
             'full-grid cut; choose axis with least worst-child area span'
             if paper_fidelity else
