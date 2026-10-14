@@ -1,13 +1,14 @@
 name: Paper fidelity computation mode regression
 on:
   push:
-    branches: [agent/paper-fidelity-computation-mode-20261013]
+    branches: [agent/paper-fidelity-computation-mode-20261013, agent/paper-split-area-verified-20261014]
     paths:
       - "onestring-physics-simulator/src/onestring_physics/paper_fidelity_mode.py"
       - "onestring-physics-simulator/src/onestring_physics/paper_mesh_splitting.py"
       - "onestring-physics-simulator/src/onestring_physics/onestring_pipeline.py"
       - "onestring-physics-simulator/app_runtime_base.py"
       - "onestring-physics-simulator/tests/test_paper_fidelity_computation_mode.py"
+      - "onestring-physics-simulator/tests/test_paper_split_area_bound.py"
       - ".github/workflows/paper-fidelity-computation.yml"
   workflow_dispatch:
 jobs:
@@ -35,6 +36,7 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_paper_fidelity_computation_mode.py \
+            tests/test_paper_split_area_bound.py \
             tests/test_paper_reproduction_audit.py \
             tests/test_paper_pd_deployment.py \
             tests/test_paper_t2d.py \
