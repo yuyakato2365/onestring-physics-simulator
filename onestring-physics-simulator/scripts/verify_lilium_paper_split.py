@@ -35,6 +35,12 @@ def main() -> int:
     ap.add_argument("--bff-boundary-policy", choices=("target_rectangle", "automatic_reference"),
                     default="target_rectangle",
                     help="Compare two official BFF boundary policies without changing Split policy.")
+    ap.add_argument("--rectangle-corner-selection",
+                    choices=("fixed_phase", "min_whole_source_area_span_4phase"),
+                    default="fixed_phase",
+                    help="Experimental 4-phase rectangle selection by whole-source area distortion, independent of Split count.")
+    ap.add_argument("--area-limit-two", action="store_true",
+                    help="Experimental interpretation of Figure 18: area-Jacobian span <=2, so linear threshold sqrt(2).")
     ap.add_argument("--rectangle-corner-phase", type=float, default=0.0,
                     help="Diagnostic only: phase of 4 boundary-arclength rectangle corners [0,0.25).")
     ap.add_argument("--bff-executable", type=Path, default=None,
@@ -67,6 +73,8 @@ def main() -> int:
     p.paper_csf_sampling_method = args.sampling_method
     p.bff_boundary_policy = args.bff_boundary_policy
     p.bff_rectangle_corner_phase_fraction = args.rectangle_corner_phase
+    p.bff_rectangle_selection_mode = args.rectangle_corner_selection
+    p.paper_split_area_limit_experiment = args.area_limit_two
     if args.bff_executable is not None:
         p.bff_executable = str(args.bff_executable)
     p.reference_diagnostics_path = str(args.report.parent / "lilium_reference_initialization.json")
@@ -133,6 +141,11 @@ def main() -> int:
         "csf_sampling_method": args.sampling_method,
         "bff_boundary_policy": args.bff_boundary_policy,
         "bff_rectangle_corner_phase_fraction": args.rectangle_corner_phase,
+        "bff_rectangle_corner_selection": args.rectangle_corner_selection,
+        "bff_corner_selection_audit": para.get("bff_corner_selection_attempts"),
+        "bff_corner_selection_selected_phase": para.get("bff_corner_selection_selected_phase"),
+        "requested_area_limit_two": bool(args.area_limit_two),
+        "effective_linear_split_threshold": m.get("csf_split_effective_linear_threshold"),
         "csf_sampling_diagnostics": para.get("split_csf_sampling_diagnostics"),
         "number_of_splits": len(records),
         "one_split_picture_count_matches": len(records) == 1,
@@ -166,6 +179,10 @@ def main() -> int:
     print("csf sampling method:", args.sampling_method)
     print("bff boundary policy:", args.bff_boundary_policy)
     print("bff rectangle corner phase:", args.rectangle_corner_phase)
+    print("bff rectangle corner selection:", args.rectangle_corner_selection)
+    print("BFF selected corner phase:", report["bff_corner_selection_selected_phase"])
+    print("BFF corner candidate audit:", report["bff_corner_selection_audit"])
+    print("area limit 2 experiment:", args.area_limit_two, "effective linear threshold:", report["effective_linear_split_threshold"])
     print("mesh_sha256:", report["mesh_sha256"])
     print("quads:", report["actual_m2d_quads"])
     print("coverage fractions [UV, lifted 3D proxy]:", coverage_audit["m2d_omega_uv_area_fraction"], coverage_audit["lifted_quad_proxy_surface_area_fraction"])
