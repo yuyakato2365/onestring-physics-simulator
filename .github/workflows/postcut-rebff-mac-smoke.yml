@@ -197,6 +197,15 @@ jobs:
                   "FULL STAGE",stage,round(fraction,3),msg,flush=True),
           )
           print("FULL DUAL HINGE OK",len(state.tiles_2d_dual_hinge.vertices),audit)
+          assert audit["split_seam_alignment"]=="source_surface_3d_matched_rigid_SE2",audit
+          assert audit["split_seam_anchor_pair_count"]>=2,audit
+          assert np.isfinite(audit["split_seam_fit_rms_max"]),audit
+          assert audit["postcut_rebff_string_path_recomputed_after_seam_alignment"],audit
+          print("LILIUM PHYSICAL SPLIT SEAM ALIGNMENT",
+                audit["split_seam_anchor_pair_count"],
+                audit["split_seam_fit_rms_max"],
+                audit["split_seam_fit_rms_relative_to_tile"],flush=True)
+
           assert len(state.tiles_2d_dual_hinge.vertices)>=int(
               .75*record["initial_m2d"]["quads"]
           )
