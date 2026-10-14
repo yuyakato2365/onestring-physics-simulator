@@ -347,25 +347,93 @@ def _mesh_top_stage_figure(vertices, faces, *, title: str):
     return fig
 
 
-def _real_tile_stage_figure(tiles: np.ndarray, title: str, flat: bool = False):
-    """Plot per-tile outlines without fabricating shared-vertex connections."""
-    verts = np.asarray(tiles, float)
-    if verts.ndim != 3 or verts.shape[1] < 4 or verts.shape[2] < 3:
-        raise ValueError(f"Expected actual (tiles,>=4,3) output, got {verts.shape}")
-    fig = go.Figure()
-    for i, polygon in enumerate(verts[:, :4, :]):
-        closed = np.vstack((polygon, polygon[0]))
-        fig.add_trace(go.Scatter3d(
-            x=closed[:, 0], y=closed[:, 1],
-            z=np.zeros(5) if flat else closed[:, 2],
-            mode="lines", line=dict(width=3),
-            showlegend=False, hovertemplate=f"Tile {i}<extra></extra>",
-        ))
-    fig.update_layout(title=title, showlegend=False, height=560,
+def _real_tile_stage_figure(tiles: np.ndarray, title: str, flat: bool = False,
+                            hinge_graph=None):
+    """Draw the ACTUAL eight-vertex T3D/T2D polygons and joint locations."""
+    verts = np.asarray(tiles, float).copy()
+    if verts.ndim != 3 or verts.shape[1:] != (8, 3):
+        raise ValueError(f"Expected REAL (tiles, 8, 3), got {verts.shape}")
+    if flat:
+        verts[:, :, 2] = 0.
+    all_vertices = verts.reshape(-1, 3)
+    local_tris = np.array([
+        [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
+        [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5],
+        [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7],
+    ], int)
+    triangles = np.concatenate([
+        local_tris + 8*i for i in range(len(verts))
+    ])
+    fig = go.Figure(go.Mesh3d(
+        x=all_vertices[:, 0], y=all_vertices[:, 1], z=all_vertices[:, 2],
+        i=triangles[:, 0], j=triangles[:, 1], k=triangles[:, 2],
+        color="#41a0b3", opacity=0.35, flatshading=True,
+        hoverinfo="skip", showscale=False,
+    ))
+    lines = []
+    for tile in verts:
+        for indices in ([0, 1, 2, 3, 0], [4, 5, 6, 7, 4],
+                        [0, 4], [1, 5], [2, 6], [3, 7]):
+            lines.extend(tile[indices].tolist())
+            lines.append([None, None, None])
+    seq = np.asarray(lines, dtype=object)
+    fig.add_trace(go.Scatter3d(
+        x=seq[:, 0], y=seq[:, 1], z=seq[:, 2],
+        mode="lines", line=dict(color="#224c68", width=2),
+        showlegend=False, hoverinfo="skip",
+    ))
+    if hinge_graph is not None:
+        points = []
+        for hinge in hinge_graph.hinges:
+            xy = np.asarray(hinge.rest_position_2d, float).reshape(-1)
+            if len(xy) >= 2 and np.all(np.isfinite(xy[:2])):
+                points.append([xy[0], xy[1], 0.])
+        if points:
+            positions = np.asarray(points, float)
+            fig.add_trace(go.Scatter3d(
+                x=positions[:, 0], y=positions[:, 1], z=positions[:, 2],
+                mode="markers", marker=dict(size=2.4, color="#d35f70"),
+                name="Dual Hinge joints",
+            ))
+    fig.update_layout(title=title, height=580,
                       scene=dict(aspectmode="data",
                                  camera=dict(eye=dict(x=0, y=0, z=2.6)) if flat else None),
                       margin=dict(l=0, r=0, t=40, b=0))
     return fig
+
+
+def _tile_stage_obj_bytes(tiles: np.ndarray, label: str) -> bytes:
+    geom = np.asarray(tiles, float)
+    if geom.ndim != 3 or geom.shape[1:] != (8, 3):
+        raise ValueError(f"Unexpected {label} stage geometry: {geom.shape}")
+    lines = [f"# Actual OneString stage: {label}"]
+    for tile in geom:
+        for v in tile:
+            lines.append("v " + " ".join(f"{float(x):.17g}" for x in v))
+    for i in range(len(geom)):
+        offset = 8*i
+        for ids in ([1, 2, 3, 4], [8, 7, 6, 5],
+                    [1, 5, 6, 2], [2, 6, 7, 3],
+                    [3, 7, 8, 4], [4, 8, 5, 1]):
+            lines.append("f " + " ".join(str(offset+j) for j in ids))
+    return ("\n".join(lines)+"\n").encode("utf-8")
+
+
+def _export_real_pipeline_zip(state, audit):
+    data = io.BytesIO()
+    stages = {
+        "T3D": state.tiles_3d.vertices,
+        "T2D_Top_Hinge": state.tiles_2d_top_hinge.vertices,
+        "T2D_Dual_Hinge": state.tiles_2d_dual_hinge.vertices,
+    }
+    with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, tiles in stages.items():
+            archive.writestr(
+                name + ".obj", _tile_stage_obj_bytes(tiles, name)
+            )
+        archive.writestr("full_pipeline_audit.json",
+                         json.dumps(audit, indent=2, ensure_ascii=False))
+    return data.getvalue()
 
 
 def _show_existing_pipeline_state(state, audit):
@@ -400,7 +468,14 @@ def _show_existing_pipeline_state(state, audit):
         st.plotly_chart(_real_tile_stage_figure(
             state.tiles_2d_dual_hinge.vertices,
             title="T2D Dual Hinge：実計算結果", flat=True,
+            hinge_graph=state.hinge_graph,
         ), use_container_width=True)
+    st.download_button(
+        "実計算したT3D・T2D Top Hinge・T2D Dual HingeのOBJをZIP保存",
+        data=_export_real_pipeline_zip(state, audit),
+        file_name="onestring_rebff_full_T2D_dual_hinge.zip",
+        mime="application/zip",
+    )
     with st.expander("Dual Hingeソルバーの評価値"):
         st.json(state.tiles_2d_dual_hinge.metrics)
 
