@@ -1,8 +1,7 @@
-"""The Paper checkbox must NOT alter the OFF-mode Split processing.
+"""Legacy OFF Split regression plus intentional separation of Paper policy.
 
-Run the same synthetic M2D chart through both modes and assert identical
-mesh topology, cuts, peak selection, CSF diagnostics and stopping conditions.
-The OFF algorithm deliberately has an invariant fixed-chart CSF floor.
+The original OFF policy remains invariant; Paper now uses the distinct
+per-component area-Jacobian span required for a Sec.4.5 candidate.
 """
 from types import SimpleNamespace
 
@@ -46,60 +45,47 @@ def _run(monkeypatch, paper_mode, lo, hi, *, threshold=2.0, budget=64,
     return split._split_mesh_single(vertices, faces, domain, params)
 
 
-_METRICS = (
-    "number_of_splits", "csf_split_step_count", "max_csf_before_split",
-    "max_csf_after_split", "csf_split_component_sigma", "csf_split_status",
-    "csf_split_unresolved_component_count", "csf_split_budget_exhausted",
-    "csf_split_stopping_reason", "csf_split_stopping_rule",
-    "csf_split_rejected_components", "split_boundary_pairs",
-    "csf_split_face_sigma", "csf_model",
-)
-
-
-def _assert_identical(a, b):
-    for x, y in zip(a[:2], b[:2]):
-        np.testing.assert_array_equal(x, y)
-    assert a[2] == b[2]
-    for name in _METRICS:
-        assert a[3][name] == b[3][name], name
-    assert a[3]["csf_split_algorithm_same_as_normal"] is True
-    assert b[3]["csf_split_algorithm_same_as_normal"] is True
-
-
 @pytest.mark.parametrize("peak_jacobian", [1.9, 4.2, 12.5])
-def test_split_solver_and_stopping_are_identical_in_both_modes(
-    monkeypatch, peak_jacobian
-):
-    lo=np.ones(16)
-    hi=np.full(16,peak_jacobian)
-    off=_run(monkeypatch, False, lo, hi)
-    on=_run(monkeypatch, True, lo, hi)
-    _assert_identical(off, on)
-    # Under the CURRENT OFF rule, worst-quad CSF is an invariant lower
-    # bound and halts the candidate before any cuts are made.
-    assert off[3]["number_of_splits"]==0
-    assert off[3]["csf_split_stopping_reason"]==(
-        "threshold_met" if peak_jacobian<=4.0 else
-        "no_admissible_cut_remaining"
+def test_off_mode_preserves_invariant_floor(monkeypatch, peak_jacobian):
+    lo = np.ones(16)
+    hi = np.full(16, peak_jacobian)
+    off = _run(monkeypatch, False, lo, hi)
+    paper = _run(monkeypatch, True, lo, hi)
+    assert off[3]["number_of_splits"] == 0
+    assert off[3]["max_csf_before_split"] == pytest.approx(
+        np.sqrt(peak_jacobian)
     )
+    assert off[3]["csf_split_stopping_reason"] == (
+        "threshold_met" if peak_jacobian <= 4.0
+        else "no_admissible_cut_remaining"
+    )
+    assert off[3]["csf_split_algorithm_same_as_normal"] is True
+    # The area span of the *same* chart is a different physical quantity.
+    assert paper[3]["max_csf_before_split"] == pytest.approx(peak_jacobian)
+    assert paper[3]["csf_split_algorithm_same_as_normal"] is False
+    assert paper[3]["number_of_splits"] == 0
 
 
-def test_split_parity_preserves_custom_threshold_and_budget(monkeypatch):
-    lo=np.ones(16)
-    hi=np.linspace(1.,9.,16)
-    off=_run(monkeypatch,False,lo,hi,threshold=1.7,budget=8)
-    on=_run(monkeypatch,True,lo,hi,threshold=1.7,budget=8)
-    _assert_identical(off,on)
-    assert on[3]["csf_split_threshold"]==1.7
-    assert on[3]["max_csf_splits"]==8
+def test_paper_switch_preserves_custom_controls_but_not_csf_formula(monkeypatch):
+    lo = np.ones(16)
+    hi = np.linspace(1., 9., 16)
+    off = _run(monkeypatch, False, lo, hi, threshold=1.7, budget=8)
+    paper = _run(monkeypatch, True, lo, hi, threshold=1.7, budget=8)
+    assert off[3]["csf_split_threshold"] == paper[3]["csf_split_threshold"] == 1.7
+    assert off[3]["max_csf_splits"] == paper[3]["max_csf_splits"] == 8
+    assert off[3]["max_csf_before_split"] == pytest.approx(3.)
+    assert paper[3]["max_csf_before_split"] == pytest.approx(9.)
+    assert not paper[3]["csf_split_bound_certified"]
 
 
-def test_split_parity_includes_explicit_collision_feedback_cut(monkeypatch):
-    lo=np.ones(16)
-    hi=np.ones(16)
-    forced=[dict(axis="col",value=2.,source_face_id=5)]
-    off=_run(monkeypatch,False,lo,hi,forced=forced,budget=0)
-    on=_run(monkeypatch,True,lo,hi,forced=forced,budget=0)
-    _assert_identical(off,on)
-    assert on[3]["collision_split_count"]==1
-    assert on[3]["csf_split_step_count"]==0
+def test_explicit_collision_feedback_is_orthogonal_to_csf_policy(monkeypatch):
+    lo = np.ones(16)
+    hi = np.ones(16)
+    forced = [dict(axis="col", value=2., source_face_id=5)]
+    off = _run(monkeypatch, False, lo, hi, forced=forced, budget=0)
+    paper = _run(monkeypatch, True, lo, hi, forced=forced, budget=0)
+    for x, y in zip(off[:2], paper[:2]):
+        np.testing.assert_array_equal(x, y)
+    assert off[2] == paper[2]
+    assert off[3]["collision_split_count"] == paper[3]["collision_split_count"] == 1
+    assert off[3]["csf_split_step_count"] == paper[3]["csf_split_step_count"] == 0
