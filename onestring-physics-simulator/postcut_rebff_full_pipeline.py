@@ -89,6 +89,17 @@ def _find_tiling_spacing(patches, params, n, target_tiles, progress=None):
 
 
 def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
+    from postcut_rebff_seam_registration import (
+        align_rectangular_bff_charts_on_source_seam,
+    )
+    # The physical seam is shared in S; use one global UV lattice after
+    # seam-constrained rectangular BFF instead of independently translated
+    # and retiled islands. All transformations are conformal similarities.
+    seam_uv_audit = align_rectangular_bff_charts_on_source_seam(patches)
+    common_uv = (
+        seam_uv_audit["postcut_seam_uv_registration"]
+        == "physical_seam_ends_uniform_BFF_similarity"
+    )
     spacing, expected = _find_tiling_spacing(
         patches, params, n, baseline_tiles, progress
     )
@@ -115,8 +126,13 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
         old_xyz = np.asarray(patch["xyz"], float)
         old_faces = np.asarray(patch["faces"], int)
         tiled_uv = np.asarray(mesh.vertices, float)[:, :2]
-        shift = np.array([cursor - float(np.min(old_uv[:, 0])),
-                          -float(np.min(old_uv[:, 1]))])
+        shift = (
+            np.zeros(2)
+            if common_uv else np.array([
+                cursor - float(np.min(old_uv[:, 0])),
+                -float(np.min(old_uv[:, 1]))
+            ])
+        )
         source_xyz.append(old_xyz)
         source_uv.append(old_uv + shift)
         source_faces.append(old_faces + source_index)
@@ -140,10 +156,32 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
         raise RuntimeError("Tile-to-source-patch ownership has been lost")
     if np.min(joined_source_faces) < 0 or np.max(joined_source_faces) >= len(joined_xyz):
         raise RuntimeError("UV and source triangle indices are inconsistent")
+    # Each half must reuse precisely the same UV square-grid vertices
+    # along the physical seam. Verify before K3D/T2D; do not hide any gap.
+    if common_uv:
+        rounded=[set() for _ in patches]
+        uv_all=np.asarray(joined_quad_vertices[:,:2],float)
+        for quad_id,component in enumerate(tile_components):
+            ids=joined_quads[quad_id]
+            for pt in uv_all[ids]:
+                rounded[component].add(tuple(np.rint(pt/(1e-8*spacing)).astype(np.int64)))
+        shared_grid_points=sum(
+            len(rounded[a].intersection(rounded[b]))
+            for a in range(len(patches)) for b in range(a+1,len(patches))
+        )
+        if shared_grid_points<2:
+            raise RuntimeError(
+                "Postcut rectangles share the source seam, but the common "
+                "square grid generated fewer than 2 matching boundary "
+                "vertices. Change shared grid spacing; do not claim the "
+                "panels match at the seam."
+            )
+        seam_uv_audit["postcut_seam_shared_grid_vertex_count"]=int(shared_grid_points)
     # DO NOT weld source vertices between detached islands: doing so would
     # incorrectly introduce hinges across physical Split boundaries.
     patch_label_counts = np.bincount(np.asarray(tile_components, int)).tolist()
     audit = {
+        **seam_uv_audit,
         "postcut_rebff_integrated": True,
         "postcut_rebff_full_solver": True,
         "postcut_rebff_split_patch_count": len(patches),
