@@ -45,9 +45,10 @@ def _fixture(monkeypatch, by_col):
     return verts, faces, domain
 
 
-def _run(monkeypatch, by_col, paper=True):
+def _run(monkeypatch, by_col, paper=True, *, allow_neutral=True):
     vertices, faces, domain = _fixture(monkeypatch, by_col)
     params = SimpleNamespace(paper_fidelity_mode=paper,
+                             paper_split_allow_neutral_cuts=allow_neutral,
                              collision_split_forced_lines=())
     return splitting._split_mesh_single(vertices, faces, domain, params)
 
@@ -86,9 +87,9 @@ def test_paper_does_not_consume_64_cuts_for_irreducible_quad(monkeypatch):
     assert audit["best_single_cut"]["worst_linear_csf"] > 2.0
 
 
-def test_paper_does_not_adopt_non_improving_full_cut(monkeypatch):
+def test_legacy_strict_one_step_improvement_is_still_available(monkeypatch):
     _, _, records, metrics = _run(monkeypatch, [
-        (1., 1.05), (4., 5.), (4., 5.), (1., 1.05)])
+        (1., 1.05), (4., 5.), (4., 5.), (1., 1.05)], allow_neutral=False)
     assert records == []
     assert metrics["max_csf_before_split"] == pytest.approx(np.sqrt(5.))
     assert metrics["max_csf_after_split"] == pytest.approx(np.sqrt(5.))
@@ -156,3 +157,34 @@ def test_experimental_physical_area_limit_can_require_a_cut_where_linear_two_doe
     assert metrics["csf_split_area_ratio_after"] <= 2.
     # CSF fit alone is NOT fabrication certification.
     assert metrics["csf_split_bound_certified"] is False
+
+
+def test_paper_allows_plateau_step_required_for_three_cut_solution(monkeypatch):
+    # Astra's real-code counterexample: four 2-row columns with constant
+    # per-quad Jacobians [1,9,1,9]. Any FIRST cut has worst span 3.
+    # The reference description asks to keep splitting until each
+    # component reaches its scale bound, not to insist each step improves.
+    _, _, records, metrics = _run(
+        monkeypatch, [(1.,1.),(9.,9.),(1.,1.),(9.,9.)]
+    )
+    assert len(records)==3, [r.get("axis") for r in records]
+    assert metrics["max_csf_before_split"]==pytest.approx(3.)
+    assert metrics["max_csf_after_split"]==pytest.approx(1.)
+    assert metrics["csf_split_stopping_reason"]=="threshold_met"
+    assert metrics["csf_split_neutral_cut_count"]>=1
+    assert metrics["csf_split_neutral_cut_policy"]=="allow_hierarchical_plateau"
+    for r in records:
+        assert len(r["child_face_ids"])==2
+        assert all(len(c)>0 for c in r["child_face_ids"])
+        assert sum(len(c) for c in r["child_face_ids"])==len(r["face_ids"])
+
+
+def test_strict_one_step_policy_reproduces_counterexample_failure(monkeypatch):
+    _,_,records,metrics=_run(
+        monkeypatch, [(1.,1.),(9.,9.),(1.,1.),(9.,9.)],
+        allow_neutral=False,
+    )
+    assert records==[]
+    assert metrics["max_csf_after_split"]==pytest.approx(3.)
+    assert metrics["csf_split_stopping_reason"]=="no_admissible_cut_remaining"
+    assert metrics["csf_split_neutral_cut_count"]==0
