@@ -701,6 +701,23 @@ with st.sidebar:
     else:
         csf_split_threshold = 2.0
     max_csf_splits = int(st.number_input("Maximum complete splits", min_value=0, value=64, step=1))
+    # Lilium-only reference visualization: one straight full-grid cut from
+    # the published flat layout. Not a replacement for the Sec.4.5 optimizer.
+    lilium_one_split_reference = False
+    if (paper_fidelity_enabled and uploaded is not None
+            and Path(uploaded.name).stem.casefold() == "lilium"):
+        lilium_one_split_reference = bool(st.checkbox(
+            "Lilium figure comparison: one full Split",
+            value=True,
+            help="Approximate the single long left-side slit in the published "
+                 "Lilium flat layout. This intentionally forces one complete "
+                 "grid-column cut; remaining CSF is reported separately. "
+                 "It is NOT proof of the authors' automatic split algorithm.",
+        ))
+        if lilium_one_split_reference:
+            st.info("Lilium図との比較：左寄りの1本だけ切断します。"
+                    "CSF≤2を満たさない場合も隠さず診断に残します。"
+                    "他の形状や通常モードには適用されません。")
     with st.expander(
         "Bijective free-boundary settings",
         expanded=omega_parameterization_mode == "bijective_free_boundary",
@@ -1677,6 +1694,7 @@ def current_pipeline_key() -> tuple:
         reference_stop_on_required_split,
         csf_split_threshold,
         max_csf_splits,
+        lilium_one_split_reference,
         bijective_free_boundary_initial_boundary_shape,
         bijective_free_boundary_max_iterations,
         bijective_free_boundary_line_search_max_steps,
@@ -1821,6 +1839,7 @@ pipeline_params = PipelineParameters(
     reference_stop_on_required_split=reference_stop_on_required_split,
     csf_split_threshold=csf_split_threshold,
     max_csf_splits=max_csf_splits,
+    lilium_one_split_reference=lilium_one_split_reference,
     boundary_target_shape="rectangle",
     boundary_target_aspect_mode=boundary_target_aspect_mode,
     boundary_target_aspect_ratio=boundary_target_aspect_ratio,
