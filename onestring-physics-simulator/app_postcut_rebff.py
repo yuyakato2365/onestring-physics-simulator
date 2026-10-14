@@ -333,7 +333,7 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
 
     worst = max(p["post"]["linear_span"] for p in patches)
     report = {
-        "experiment": "Initial rectangular BFF CSF gate -> grid-aligned cuts -> repeated rectangular BFF until CSF <= 2",
+        "experiment": "Initial rectangular BFF -> grid Split -> independent child BFF -> seam-constrained shared atlas -> measure atlas CSF and repeat Split",
         "not_paper_author_verified": True,
         "not_applied_to_K3D_or_T2D": True,
         "input_mesh": str(mesh_path), "grid": int(grid),
@@ -359,6 +359,18 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
                 for p in patches
             )
         ),
+        "postcut_joint_atlas_active": bool(
+            post_policy == "target_rectangle"
+            and all(p.get("postcut_joint_atlas",False) for p in patches)
+            and len(patches)>1
+        ),
+        "postcut_joint_atlas_note": (
+            "Physical source seam vertices inherited from parent are fixed. "
+            "The independently computed rectangular BFF supplies an interior "
+            "target only. The final joined atlas is NOT itself an independent "
+            "conformal BFF; the CSF gate is recomputed on the atlas."
+            if post_policy == "target_rectangle" else None
+        ),
         "rectangle_corner_phase": float(phase),
         "split_count": trial["split_count"],
         "split_history": trial["split_history"],
@@ -382,6 +394,8 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
                 "side": p["side"], "triangles": int(len(p["faces"])),
                 "fixed_original_chart": p["pre"],
                 "postcut_rebff": p["post"],
+                "independent_rectangular_bff_csf":p.get("independent_bff_post"),
+                "postcut_joint_atlas":p.get("postcut_joint_atlas_metadata"),
             } for p in patches
         ],
         "new_piece_m2d_quad_counts": [
@@ -391,10 +405,19 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         "new_piece_m2d_grid_spacing": float(common_spacing),
         "new_piece_m2d_errors": [p.get("quad_preview_error") for p in patches],
         "max_postcut_patch_linear_span": float(worst),
+        "max_independent_rectangular_bff_linear_span": max(
+            float(p.get("independent_bff_post",p["post"])["linear_span"])
+            for p in patches
+        ),
+        "postcut_csf_measurement_chart":"actual_shared_atlas" if (
+            post_policy=="target_rectangle" and len(patches)>1
+        ) else "independent_BFF",
         "linear_limit_two_satisfied": trial["all_pass"],
         "caution": "Intermediate per-island M2D/M3D previews are not the full "
                    "design. Full-solver K3D/T3D/K2D/T2D is available separately; "
-                   "its fabrication quality is not certified.",
+                   "its fabrication quality is not certified. Joint-atlas fixed seam "
+                   "boundary is a nonconformal experimental coupling, NOT "
+                   "an author-verified independent BFF result.",
     }
     return {"report": report, "patches": patches, "initial": {
         "xyz": xyz, "uv": uv, "faces": faces,
