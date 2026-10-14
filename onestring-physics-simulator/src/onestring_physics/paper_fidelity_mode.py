@@ -41,10 +41,9 @@ def configure_paper_fidelity(params):
         "omega_boundary_mode": "paper_default",
         "bff_boundary_policy": "target_rectangle",
         "m2d_crop_policy": "strict_vertices",
-        # Split uses exactly the normal OFF algorithm: same CSF estimator,
-        # component selection, curvature ranking, improvement checks,
-        # stopping conditions, threshold and budget. Only non-Split Paper
-        # stages (e.g. rectangular BFF) have a different computation preset.
+        # Paper Sec.4.5 imposes the square-auxetic area expansion limit 2.
+        # CSF is assessed per component; the OFF linear-CSF policy is separate.
+        "csf_split_threshold": 2.0,
         "collision_split_enabled": False,
         "collision_split_lookahead_enabled": False,
         "collision_split_forced_lines": (),
