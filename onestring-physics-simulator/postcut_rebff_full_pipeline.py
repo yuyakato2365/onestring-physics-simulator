@@ -180,6 +180,8 @@ def run_existing_pipeline_through_dual_hinge(
         paper_fidelity_mode=False,
         max_csf_splits=1,
     ))
+    params.bff_executable = str(experiment["report"].get("official_bff_executable") or params.bff_executable or "")
+    params.bff_rectangle_executable = str(experiment["report"].get("rectangular_bff_executable") or params.bff_rectangle_executable or "")
     params.nx = params.ny = int(grid)
     params.omega_parameterization_mode = "paper_reference_bff"
     params.paper_fidelity_mode = False
