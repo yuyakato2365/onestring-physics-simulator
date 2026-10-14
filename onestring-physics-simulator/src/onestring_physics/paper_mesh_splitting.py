@@ -323,13 +323,16 @@ def _split_mesh_single(vertices, faces, domain, params=None):
 
     vertices, faces = np.asarray(vertices, float).copy(), np.asarray(faces, int).copy()
     parameterization = domain.parameterization
-    threshold = float(getattr(domain, 'csf_split_threshold', 2.))
+    paper_fidelity = bool(getattr(params, "paper_fidelity_mode", False))
+    # The theoretical Fig.18 area limit is 2; do not inherit arbitrary OFF
+    # thresholds when called directly without the Streamlit Paper preset.
+    threshold = (2.0 if paper_fidelity else
+                 float(getattr(domain, 'csf_split_threshold', 2.)))
     lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
     # In Paper mode, Fig.18 bounds *area* expansion at 2. A disconnected
     # piece may be rescaled uniformly, so its potential area span is
     # max(J)/min(J); individual quads cannot be divided by a grid seam.
     # Legacy OFF mode must retain its historical linear-CSF calculation.
-    paper_fidelity = bool(getattr(params, "paper_fidelity_mode", False))
     irreducible = np.sqrt(hi)
     paper_quad_floor = hi / lo
     uv = np.asarray(parameterization.uv_vertices_2d, float)
