@@ -159,19 +159,23 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
         )
         if not topo["disk_topology"] or len(faces) < 4:
             raise ValueError("Split would produce a nondisk or fewer than 4 triangles")
-        corners_xyz=_cut_child_rectangular_corners(
-            patch,xyz,uv_old,faces,axis,float(coordinate),positive,
-        )
-        import inspect
-        signature=inspect.signature(rebff)
-        if "rectangle_corner_positions" not in signature.parameters:
-            raise ValueError(
-                "Rectangular post-cut BFF must accept explicit seam corner positions; "
-                "silent arclength-quartile fallback is forbidden"
+        corners_xyz=None
+        if getattr(rebff,"seam_corners_required",False):
+            corners_xyz=_cut_child_rectangular_corners(
+                patch,xyz,uv_old,faces,axis,float(coordinate),positive,
             )
-        new_uv, metadata = rebff(
-            xyz, faces, rectangle_corner_positions=corners_xyz
-        )
+            import inspect
+            signature=inspect.signature(rebff)
+            if "rectangle_corner_positions" not in signature.parameters:
+                raise ValueError(
+                    "Rectangular post-cut BFF must accept explicit seam corner positions; "
+                    "silent arclength-quartile fallback is forbidden"
+                )
+            new_uv, metadata = rebff(
+                xyz, faces, rectangle_corner_positions=corners_xyz
+            )
+        else:
+            new_uv, metadata = rebff(xyz, faces)
         new_uv = np.asarray(new_uv, float)
         if new_uv.shape != (len(xyz), 2) or not np.isfinite(new_uv).all():
             raise ValueError("Official BFF returned invalid UV dimensions or nonfinite values")
@@ -184,7 +188,7 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
             xyz=xyz, faces=faces, original_uv=uv_old, new_uv=new_uv,
             pre=prior, post=post, bff_metadata=metadata,
             seam_rectangle_corners_xyz=corners_xyz,
-            seam_rectangle_corners_constrained=True,
+            seam_rectangle_corners_constrained=bool(corners_xyz is not None),
         ))
     return children
 
