@@ -1,0 +1,102 @@
+"""Real physical S seam, not synthetic UV packing, drives T2D placement."""
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from postcut_rebff_seam_registration import (
+    _boundary_point_groups, _rigid_2d, align_t2d_at_source_split_seams
+)
+
+
+def make_case(*, separate_by=(3.,4.), alter_source=False):
+    # Two disk-shaped source triangles on opposite sides of x=1.
+    patch_a={
+        "xyz":np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0]],float),
+        "faces":np.array([[0,1,2],[0,2,3]],int),
+    }
+    patch_b={
+        "xyz":np.array([[1,0,0],[2,0,0],[2,1,0],[1,1,0]],float),
+        "faces":np.array([[0,1,2],[0,2,3]],int),
+    }
+    if alter_source:
+        patch_b["xyz"][:,0]+=2.
+    pieces=[patch_a,patch_b]
+    tile3d=np.array([
+        patch_a["xyz"],
+        patch_b["xyz"],
+    ])
+    t2d=tile3d.copy()
+    t2d[1,:,:2]+=np.asarray(separate_by,float)
+    # 8 vertices per real thick tile; bottom copies top shifted in Z.
+    tile8=np.concatenate([t2d,t2d-np.array([0,0,0.1])],axis=1)
+    a=SimpleNamespace(
+        vertices=tile8.copy(),transform_matrices=np.tile(np.eye(4),(2,1,1)),
+        metrics={},
+    )
+    b=SimpleNamespace(
+        vertices=tile8.copy(),transform_matrices=np.tile(np.eye(4),(2,1,1)),
+        metrics={},
+    )
+    hinges=SimpleNamespace(hinges=[],metrics={})
+    state=SimpleNamespace(
+        mesh_2d_initial=SimpleNamespace(faces=np.array([[0,1,2,3],[4,5,6,7]])),
+        mesh_3d_initial=SimpleNamespace(
+            vertices=tile3d.reshape(-1,3),
+            faces=np.array([[0,1,2,3],[4,5,6,7]],int),
+        ),
+        tiles_2d_dual_hinge=a, tiles_2d_top_hinge=b,hinge_graph=hinges,
+    )
+    return state,pieces
+
+
+def test_physical_seam_points_detected():
+    _,pieces=make_case()
+    shared=_boundary_point_groups(pieces)
+    assert (0,1) in shared
+    assert len(shared[(0,1)])==2
+    assert {tuple(p) for p in shared[(0,1)]}=={(1.,0.,0.),(1.,1.,0.)}
+
+
+def test_seam_aligned_without_changing_panel_dimensions():
+    state,pieces=make_case()
+    old=state.tiles_2d_dual_hinge.vertices.copy()
+    before=np.linalg.norm(old[:,None,:,:]-old[:,:,None,:],axis=-1)
+    result=align_t2d_at_source_split_seams(state,pieces,[0,1])
+    after=np.linalg.norm(
+        state.tiles_2d_dual_hinge.vertices[:,None,:,:]-
+        state.tiles_2d_dual_hinge.vertices[:,:,None,:],axis=-1)
+    assert np.allclose(before,after,atol=1e-10)
+    assert result["split_seam_pair_count"]==1
+    assert result["split_seam_anchor_pair_count"]==2
+    assert result["split_seam_fit_rms_max"]<1e-10
+    a=state.tiles_2d_dual_hinge.vertices
+    # Shared source physical seam = x1 in tile a / x0 in tile b.
+    assert np.allclose(a[0,[1,2],:2],a[1,[0,3],:2],atol=1e-10)
+    assert np.allclose(a,state.tiles_2d_top_hinge.vertices)
+    assert result["split_seam_matching_certified"] is False
+
+
+def test_non_matching_source_pieces_do_not_fake_success():
+    state,pieces=make_case(alter_source=True)
+    with pytest.raises(RuntimeError,match="Cannot align re-BFF T2D"):
+        align_t2d_at_source_split_seams(state,pieces,[0,1])
+
+
+def test_alignment_preserves_3d_heights_and_transform_matrices():
+    state,pieces=make_case(separate_by=(10.,-10.))
+    original=state.tiles_2d_dual_hinge.vertices.copy()
+    align_t2d_at_source_split_seams(state,pieces,[0,1])
+    assert np.allclose(
+        state.tiles_2d_dual_hinge.vertices[:,:,2], original[:,:,2])
+    assert not np.allclose(
+        state.tiles_2d_dual_hinge.transform_matrices[1],np.eye(4))
+
+
+def test_rigid_fit_cannot_scalably_deform_a_nonmatching_seam():
+    x=np.array([[0.,0.],[0.,1.],[0.,2.]])
+    y=np.array([[0.,0.],[0.,2.],[0.,4.]])
+    r,t,residual=_rigid_2d(x,y)
+    assert residual>0.5
+    assert abs(np.linalg.det(r)-1.)<1e-10
+    assert np.allclose(r.T@r,np.eye(2),atol=1e-10)
