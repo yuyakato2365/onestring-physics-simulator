@@ -319,7 +319,10 @@ def run_existing_pipeline_through_dual_hinge(
         state, patches, packed["tile_patch_ids"],
     )
     packed["audit"].update(seam_metrics)
-    if seam_metrics.get("split_seam_alignment") == "source_surface_3d_matched_rigid_SE2":
+    if seam_metrics.get("split_seam_alignment") in (
+        "source_surface_3d_matched_rigid_SE2",
+        "shared_source_seam_grid_rigid_SE2",
+    ):
         # The original full solver built its gap graph, lift points and string
         # path *before* final seam registration. Recompute those dependent
         # objects so the visible T2D and deployment constraints do not refer
