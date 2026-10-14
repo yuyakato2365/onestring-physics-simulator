@@ -104,10 +104,19 @@ def grid_at_pitch(patches,pitch,*, max_tiles=15000):
         for j,(aj,bj) in enumerate(bounds):
             if j<=i:
                 continue
-            area=np.prod(np.maximum(0.,np.minimum(bi,bj)-np.maximum(ai,aj)))
-            if area>eps**2:
+            penetration=np.maximum(
+                0.,np.minimum(bi,bj)-np.maximum(ai,aj)
+            )
+            # Two guillotine cut rectangles can differ by a few ULPs at
+            # their shared edge (the source clipper interpolates float64).
+            # An area threshold eps**2 rejects an entire legitimate
+            # shared edge when the normal penetration is ~1e-15 but the
+            # tangential overlap is O(1). Reject only overlaps thicker
+            # than the geometry tolerance on BOTH axes.
+            if np.all(penetration>eps):
                 raise RuntimeError(
-                    f"ReBFF rectangles {i} and {j} overlap in the common UV chart; "
+                    f"ReBFF rectangles {i} and {j} overlap in the common UV chart "
+                    f"by {penetration.tolist()}; "
                     "no valid seam-preserving grid exists"
                 )
     xs=_coordinate_grid(bounds,pitch,0)
