@@ -1,0 +1,100 @@
+name: Lilium BFF corners and area-bound experimental comparison
+
+on:
+  push:
+    branches: [agent/paper-split-area-verified-20261014]
+    paths:
+      - ".github/workflows/lilium-bff-area-limit-experimental-comparison.yml"
+      - "onestring-physics-simulator/src/onestring_physics/bff_rectangle_selection.py"
+      - "onestring-physics-simulator/src/onestring_physics/paper_mesh_splitting.py"
+      - "onestring-physics-simulator/src/onestring_physics/onestring_pipeline.py"
+      - "onestring-physics-simulator/scripts/verify_lilium_paper_split.py"
+  workflow_dispatch:
+
+jobs:
+  four-cases-same-official-bff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install official BFF native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake build-essential libsuitesparse-dev libopenblas-dev liblapack-dev
+      - name: Build unmodified upstream official BFF and independent rectangle CLI
+        run: |
+          git clone --depth 1 --recursive https://github.com/GeometryCollective/boundary-first-flattening.git /tmp/official-bff
+          python scripts/setup_bff_rectangle.py --source /tmp/official-bff --jobs 4
+      - run: python -m pip install -e ".[dev]"
+      - name: Verify same Lilium OBJ bytes and run unforced 2-by-2 factorial experiment
+        run: |
+          curl -fL --retry 3 -o /tmp/lilium.obj https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          expected="4f62ff741b41bd629ccbeaeb0bb2e44ac060cdff88f090129911bede790e8ab3"
+          actual=hashlib.sha256(Path("/tmp/lilium.obj").read_bytes()).hexdigest()
+          assert actual==expected,(actual,expected)
+          print("Same Lilium source SHA256:",actual,flush=True)
+          PY
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj --grid 14 \
+            --sampling-method interpolated_grid_vertices \
+            --report output/lilium_bff_fixed_linear2.json
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj --grid 14 \
+            --sampling-method interpolated_grid_vertices \
+            --area-limit-two --report output/lilium_bff_fixed_area2.json
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj --grid 14 \
+            --sampling-method interpolated_grid_vertices \
+            --rectangle-corner-selection min_whole_source_area_span_4phase \
+            --report output/lilium_bff_selected_linear2.json
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj --grid 14 \
+            --sampling-method interpolated_grid_vertices \
+            --rectangle-corner-selection min_whole_source_area_span_4phase \
+            --area-limit-two --report output/lilium_bff_selected_area2.json
+      - name: Summarize measured results without fitting any Lilium target cut count
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          cases={}
+          for name in ["fixed_linear2","fixed_area2","selected_linear2","selected_area2"]:
+              d=json.loads(Path("output/lilium_bff_"+name+".json").read_text())
+              cases[name]=dict(
+                  initial_quads=d["actual_m2d_quads"],
+                  source_area_fraction=d["coverage_audit"]["lifted_quad_proxy_surface_area_fraction"],
+                  selected_phase=d.get("bff_corner_selection_selected_phase"),
+                  selected_source_area_span=next((
+                      row["whole_source_area_jacobian_span"]
+                      for row in d.get("bff_corner_selection_audit") or []
+                      if row["boundary_arclength_phase"]==d.get("bff_corner_selection_selected_phase")
+                  ),None),
+                  splits=d["number_of_splits"],
+                  initial_linear_csf=d["linear_csf_before"],
+                  final_linear_csf=d["linear_csf_after"],
+                  final_area_span=d["area_jacobian_span_after"],
+                  area_bound_two_met=d["area_expansion_limit_two_satisfied"],
+                  stopping_reason=d["stopping_reason"],
+                  physical_certificate=d["fabrication_bound_certified"],
+              )
+          print("COMPARISON_JSON "+json.dumps(cases,ensure_ascii=False,sort_keys=True),flush=True)
+          Path("output/lilium_bff_area_limit_comparison_summary.json").write_text(
+              json.dumps(cases,indent=2,ensure_ascii=False))
+          PY
+      - name: Upload all four raw scientific diagnostics and combined result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lilium-four-case-bff-csf-experiment
+          path: |
+            onestring-physics-simulator/output/lilium_bff_fixed_linear2.json
+            onestring-physics-simulator/output/lilium_bff_fixed_area2.json
+            onestring-physics-simulator/output/lilium_bff_selected_linear2.json
+            onestring-physics-simulator/output/lilium_bff_selected_area2.json
+            onestring-physics-simulator/output/lilium_bff_area_limit_comparison_summary.json
+          if-no-files-found: warn
