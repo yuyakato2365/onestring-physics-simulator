@@ -322,12 +322,10 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     parameterization = domain.parameterization
     threshold = float(getattr(domain, 'csf_split_threshold', 2.))
     lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
-    # The Paper checkbox uses the original OFF Split estimator and cut
-    # machinery, with two EXCEPTIONS ONLY IN PAPER MODE:
-    # (1) prioritize highest Gaussian curvature in a high-CSF quad;
-    # (2) accept any valid complete cut, even with no child-CSF gain.
-    # Preserve the OFF version's original selection and improvement veto.
-    paper_fidelity=bool(getattr(params,"paper_fidelity_mode",False))
+    # Both UI checkbox states intentionally use the exact same Split
+    # algorithm: the original OFF path. Do not branch Split decisions,
+    # threshold interpretation or CSF estimator on paper_fidelity_mode.
+    # Other Paper preset stages (e.g. official BFF) remain independent.
     irreducible = np.sqrt(hi)
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     curvature = gaussian_curvature(parameterization)
@@ -346,47 +344,24 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         return float(np.sqrt(hi[component].max()))
     initial_components = _edge_components(faces)
     before = max(map(ratio, initial_components), default=1.)
-    def high_curvature_candidates(component):
-        # The OFF-mode CSF is sqrt(area Jacobian), normalized once at
-        # the beginning. Only quads exceeding the same CSF threshold
-        # qualify as high-curvature sampling regions for a new Split.
-        offending = component[np.sqrt(hi[component]) > threshold + 1e-10]
-        if not len(offending):
-            return np.empty(0, dtype=int)
-        vertex_ids = np.unique(np.concatenate([samples[i] for i in offending]))
-        vertex_ids = vertex_ids[np.isfinite(curvature[vertex_ids])]
-        return vertex_ids[np.argsort(-curvature[vertex_ids], kind='stable')]
-
     while enabled and len(records) < budget:
         components = _edge_components(faces)
         bad = [c for c in components
                if ratio(c) > threshold + 1e-10 and tuple(c) not in blocked]
         if not bad:
             break
-        if paper_fidelity:
-            # Paper exception #1: prioritize the strongest curvature
-            # peak that lies in a high-CSF part, even if another
-            # component has higher CSF but lower Gaussian curvature.
-            candidates_by_component = [
-                (c,high_curvature_candidates(c)) for c in bad
-            ]
-            component, ids = max(
-                candidates_by_component,
-                key=lambda item: (
-                    float(curvature[item[1][0]]) if len(item[1]) else -np.inf,
-                    round(ratio(item[0]), 10), len(item[0]),
-                ),
-            )
-        else:
-            # The untouched normal version: process the highest-CSF
-            # connected component and rank its peaks by curvature.
-            component = max(bad, key=lambda c: (round(ratio(c), 10), len(c)))
-            ids = np.unique(np.concatenate([samples[i] for i in component]))
-            ids = ids[np.isfinite(curvature[ids])]
-            ids = ids[np.argsort(-curvature[ids], kind='stable')]
+        # Exactly the OFF mode's offending-component and peak order.
+        component = max(bad, key=lambda c: (round(ratio(c), 10), len(c)))
+        ids = np.unique(np.concatenate([samples[i] for i in component]))
+        ids = ids[np.isfinite(curvature[ids])]
+        ids = ids[np.argsort(-curvature[ids], kind='stable')]
         component_before = ratio(component)
+        # Exact OFF-mode guard: an existing quad's worst fixed-chart
+        # stretch is invariant under a complete seam cut. This test
+        # may prevent *all* splits on a fixed chart; deliberately
+        # preserve the OFF behavior rather than quietly "improve" it.
         component_floor = float(irreducible[component].max())
-        if not paper_fidelity and component_before <= component_floor * (1. + 1e-10):
+        if component_before <= component_floor * (1. + 1e-10):
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(),
                              'sigma': component_before,
@@ -430,11 +405,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 imbalance = abs(len(children[0])-len(children[1]))
                 child_sigmas = [ratio(component[c]) for c in children]
                 complete_candidate_seen = True
-                # Paper exception #2: any valid complete seam is accepted,
-                # even when its worst child CSF is unchanged. The OFF
-                # version still rejects non-improving cuts.
+                # The *same* improvement veto and direction score as OFF.
                 worst_child = max(child_sigmas)
-                if not paper_fidelity and worst_child >= component_before - 1e-10:
+                if worst_child >= component_before - 1e-10:
                     continue
                 score = (worst_child, imbalance, axis)
                 candidates.append((score, v2, subset, record))
@@ -445,12 +418,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         if selected is None:
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(), 'sigma': component_before,
-                             'reason': (
-                                 'no_complete_grid_cut_near_high_csf_curvature_sample'
-                                 if paper_fidelity else
-                                 'no_distortion_reducing_grid_cut' if complete_candidate_seen
-                                 else 'no_complete_grid_cut_near_source_curvature_sample'
-                             ),
+                             'reason': ('no_distortion_reducing_grid_cut'
+                                        if complete_candidate_seen else
+                                        'no_complete_grid_cut_near_source_curvature_sample'),
                              'irreducible_sigma': component_floor})
             continue
         _, vertices, subset, record = selected
@@ -583,8 +553,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_candidate_area_bound_satisfied=False,
         csf_split_component_rescale_applied=False,
         csf_split_paper_area_span_active=False,
-        csf_split_algorithm_same_as_normal=(not paper_fidelity),
-        csf_split_paper_exceptions_active=paper_fidelity,
+        csf_split_algorithm_same_as_normal=True,
         csf_split_degenerate_uv_face_count=invalid_uv_count,
         csf_split_parameterization_repair_required=bool(invalid_uv_count),
         csf_split_evaluation_scope='usable source triangles only' if invalid_uv_count else 'all source triangles',
@@ -596,17 +565,13 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_face_sigma=face_sigma.tolist(),
         csf_split_residual_high_face_count=int(np.count_nonzero(face_sigma > threshold+1e-10)),
         csf_split_additional_split_recommended_after_all=bool(
-            exhausted and (paper_fidelity or
-                           not all(r['reason'] == 'within_quad_distortion_floor'
-                                   for r in rejected))
+            exhausted and not all(r['reason'] == 'within_quad_distortion_floor' for r in rejected)
         ),
         csf_split_stopping_rule=(
-            'Paper: same OFF CSF sqrt(area Jacobian), but select the highest '
-            'Gaussian-curvature peak in CSF>threshold quads and accept any '
-            'complete seam without CSF improvement; threshold, no cut or budget stop'
-            if paper_fidelity else
-            'Normal OFF: highest-CSF component, then curvature peak; reject '
-            'non-improving cuts and within-quad-distortion-floor components'
+            'shared OFF-mode algorithm: select max-CSF component; scan Gaussian-'
+            'curvature peaks for complete grid bisections; require worst-child '
+            'CSF decrease; stop at within-quad distortion floor, no admissible '
+            'improvement, threshold or budget'
         ),
         csf_split_conformal_anisotropy_max=parameterization.metrics.get('split_conformal_anisotropy_max'),
         csf_split_area_bound_requires_conformal_map=True,
@@ -616,13 +581,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         m2d_quad_count_after_csf_split=len(faces), m2d_connected_component_count_after_csf_split=len(final),
         m2d_largest_component_quad_count_after_csf_split=max(map(len, final), default=0),
         m2d_smallest_component_quad_count_after_csf_split=min(map(len, final), default=0),
-        csf_split_direction_rule=(
-            'Paper: highest source Gaussian curvature in CSF>threshold quad; '
-            'nearest complete grid cut, no improvement veto'
-            if paper_fidelity else
-            'Normal OFF: highest-CSF region, then curvature peak; require '
-            'decreased worst child CSF'
-        ),
+        csf_split_direction_rule='highest signed area-normalized source Gaussian curvature; nearest complete grid cut; minimize worst child distortion',
         csf_split_grid_rotation_degrees=float(np.rad2deg(angle)),
     )
     vertices[:, :2] = vertices[:, :2] @ rotation.T
