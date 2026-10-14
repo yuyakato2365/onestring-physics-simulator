@@ -58,6 +58,25 @@ def test_physical_seam_points_detected():
     assert {tuple(p) for p in shared[(0,1)]}=={(1.,0.,0.),(1.,1.,0.)}
 
 
+def test_recursive_grid_cut_point_contacts_are_not_physical_seams():
+    # Four source rectangles meet at one vertex. Opposite diagonal charts
+    # share the center vertex but NO edge; the global lattice must not be
+    # required to provide a matching seam panel between those charts.
+    pieces=[]
+    for x0,y0 in [(0.,0.),(1.,0.),(0.,1.),(1.,1.)]:
+        pieces.append({
+            "xyz":np.array([
+                [x0,y0,0.],[x0+1,y0,0.],
+                [x0+1,y0+1,0.],[x0,y0+1,0.]
+            ],float),
+            "faces":np.array([[0,1,2],[0,2,3]],int),
+        })
+    seams=_boundary_point_groups(pieces)
+    assert set(seams)=={(0,1),(0,2),(1,3),(2,3)}
+    assert all(len(points)>=2 for points in seams.values())
+    assert (0,3) not in seams and (1,2) not in seams
+
+
 def test_seam_aligned_without_changing_panel_dimensions():
     state,pieces=make_case()
     old=state.tiles_2d_dual_hinge.vertices.copy()
