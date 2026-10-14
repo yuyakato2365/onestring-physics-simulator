@@ -159,7 +159,8 @@ def _intersection_area(triangle, polygon):
     return abs(sum(_cross(a, b) for a, b in zip(points, np.roll(points, -1, axis=0))))*.5
 
 
-def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=False):
+def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=False,
+                  sampling_method="overlap_extrema"):
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     sf = np.asarray(getattr(parameterization, 'uv_faces', parameterization.surface_faces), int)
     triangles = uv[sf]
@@ -194,6 +195,24 @@ def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=Fa
             sweep[f][0].append(float(values[keep].min())); sweep[f][1].append(float(values[keep].max()))
     lo, hi = np.asarray(lo), np.asarray(hi)
     lo_cover, hi_cover = np.asarray(lo_cover), np.asarray(hi_cover)
+    if sampling_method == "interpolated_grid_vertices":
+        from .paper_csf_discrete import interpolate_jacobian_to_grid_vertices
+        raw_lo,raw_hi=lo.copy(),hi.copy()
+        lo,hi,sampling_diagnostics = interpolate_jacobian_to_grid_vertices(
+            uv,sf,raw,vertices,faces
+        )
+        parameterization.metrics.update(
+            split_csf_sampling_diagnostics=sampling_diagnostics,
+            split_quad_overlap_extrema_before_vertex_sampling=dict(
+                worst_quad_linear_csf=float(np.max(np.sqrt(raw_hi/raw_lo))),
+                chart_linear_csf=float(np.sqrt(raw_hi.max()/raw_lo.min())),
+                min_extremum_coverage_below_one_percent=int((lo_cover<.01).sum()),
+                max_extremum_coverage_below_one_percent=int((hi_cover<.01).sum()),
+            ),
+        )
+    elif sampling_method != "overlap_extrema":
+        raise ValueError(f"Unknown Paper CSF sampling method: {sampling_method}")
+    parameterization.metrics["split_csf_sampling_method"] = sampling_method
     # Do not compare a raw area-Jacobian ratio to a *linear* CSF threshold.
     quad_sigma = np.sqrt(hi/lo) if linear_csf else hi/lo
     q = [0., 50., 90., 99., 100.]
@@ -408,8 +427,11 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     # thresholds when called directly without the Streamlit Paper preset.
     threshold = (2.0 if paper_fidelity else
                  float(getattr(domain, 'csf_split_threshold', 2.)))
+    sampling_method = (str(getattr(params, "paper_csf_sampling_method",
+                                  "overlap_extrema")) if paper_fidelity
+                       else "overlap_extrema")
     lo, hi, samples = _face_samples(vertices, faces, parameterization,
-                                    threshold, paper_fidelity)
+                                    threshold, paper_fidelity, sampling_method)
     # In Sec.4.5, lambda is the conformal scale factor of the map;
     # the area Jacobian is lambda^2. A disconnected piece can, in
     # principle, be uniformly rescaled, so its *linear* scale span is
@@ -671,6 +693,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_linear_csf_area_relation='lambda=sqrt(area Jacobian ratio)' if paper_fidelity else None,
         csf_split_component_rescale_applied=False,
         csf_split_paper_area_span_active=paper_fidelity,
+        csf_split_sampling_method=sampling_method,
         csf_split_algorithm_same_as_normal=not paper_fidelity,
         csf_split_degenerate_uv_face_count=invalid_uv_count,
         csf_split_parameterization_repair_required=bool(invalid_uv_count),
