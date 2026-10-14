@@ -1,12 +1,15 @@
-"""Sec. 4.5: complete, component-local grid cuts on an existing Omega.
+"""Hierarchical full-grid Split, with separate research and legacy policies.
 
-Supplement Fig. 18 bounds *area* expansion by two (linear expansion sqrt(2)).
-We retain the selected chart and measure its piecewise-affine area Jacobian.
-The source chart's local area Jacobian is fixed; after each cut, independently
-normalize the area scale for each connected component and recompute its range.
-Cut locations are selected by maximum admissible source Gaussian curvature,
-not by CSF improvement. No post-cut conformal remeshing is implemented. Axis choice and grid snapping are
-discretization choices, not a claim to reproduce the authors' implementation.
+Zaman et al. 2025 Sec.4.5 and Fig.6 place complete grid cuts near high source
+Gaussian curvature when the bounded auxetic expansion sigma exceeds two.
+The paper does NOT specify a discrete cut candidate optimizer or reflattening
+implementation. Our Paper mode evaluates the *potential* per-component area
+Jacobian span after independent uniform rescaling, and requires an actual
+improvement before committing a cut. This prevents unproductive budget-
+exhausting cuts but is an explicitly labeled discretization, not authors' code.
+No piecewise UV rescaling or post-cut conformal remeshing is performed, so an
+area bound computed here is NOT a certified manufacturable mechanism.
+OFF mode keeps its pre-existing fixed-chart linear-CSF behavior unchanged.
 """
 from __future__ import annotations
 
@@ -322,11 +325,13 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     parameterization = domain.parameterization
     threshold = float(getattr(domain, 'csf_split_threshold', 2.))
     lo, hi, samples = _face_samples(vertices, faces, parameterization, threshold)
-    # Both UI checkbox states intentionally use the exact same Split
-    # algorithm: the original OFF path. Do not branch Split decisions,
-    # threshold interpretation or CSF estimator on paper_fidelity_mode.
-    # Other Paper preset stages (e.g. official BFF) remain independent.
+    # In Paper mode, Fig.18 bounds *area* expansion at 2. A disconnected
+    # piece may be rescaled uniformly, so its potential area span is
+    # max(J)/min(J); individual quads cannot be divided by a grid seam.
+    # Legacy OFF mode must retain its historical linear-CSF calculation.
+    paper_fidelity = bool(getattr(params, "paper_fidelity_mode", False))
     irreducible = np.sqrt(hi)
+    paper_quad_floor = hi / lo
     uv = np.asarray(parameterization.uv_vertices_2d, float)
     curvature = gaussian_curvature(parameterization)
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
@@ -338,9 +343,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     enabled = bool(getattr(domain, 'csf_split_enabled', True))
     records, rejected, pairs, blocked = [], [], [], set()
     def ratio(component):
-        # OFF implementation: global-min-normalized inverse area
-        # Jacobian estimated as a *linear* expansion, not a
-        # per-component re-scaled area ratio.
+        if paper_fidelity:
+            return _component_area_span(lo, hi, component)
+        # Exact original OFF calculation: global-min-normalized linear scale.
         return float(np.sqrt(hi[component].max()))
     initial_components = _edge_components(faces)
     before = max(map(ratio, initial_components), default=1.)
@@ -356,11 +361,11 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         ids = ids[np.isfinite(curvature[ids])]
         ids = ids[np.argsort(-curvature[ids], kind='stable')]
         component_before = ratio(component)
-        # Exact OFF-mode guard: an existing quad's worst fixed-chart
-        # stretch is invariant under a complete seam cut. This test
-        # may prevent *all* splits on a fixed chart; deliberately
-        # preserve the OFF behavior rather than quietly "improve" it.
-        component_floor = float(irreducible[component].max())
+        # Lower bound imposed by indivisible grid quads. In Paper mode this
+        # is max over each quad's local J_max / J_min. Splitting cannot
+        # reduce that distortion without changing the mesh/parameterization.
+        component_floor = float((paper_quad_floor if paper_fidelity
+                                else irreducible)[component].max())
         if component_before <= component_floor * (1. + 1e-10):
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(),
@@ -405,9 +410,12 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 imbalance = abs(len(children[0])-len(children[1]))
                 child_sigmas = [ratio(component[c]) for c in children]
                 complete_candidate_seen = True
-                # The *same* improvement veto and direction score as OFF.
+                # Do not accept a full grid cut whose worst child still
+                # has the same span. Otherwise high-curvature candidates can
+                # consume all 64 slots without reducing sigma (old Paper bug).
+                # A small numerical tolerance prevents spurious gains.
                 worst_child = max(child_sigmas)
-                if worst_child >= component_before - 1e-10:
+                if worst_child >= component_before - 1e-10 * max(1.0, component_before):
                     continue
                 score = (worst_child, imbalance, axis)
                 candidates.append((score, v2, subset, record))
@@ -514,15 +522,21 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         'no_admissible_cut_remaining'
     )
     after = max(values, default=1.)
-    face_sigma = np.sqrt(hi).copy()
+    face_sigma = paper_quad_floor.copy() if paper_fidelity else np.sqrt(hi).copy()
     domain.csf_before, domain.csf_after_split = before, after
     domain.split_lines = [('row' if r['axis'] == 'row' else 'col', r['snapped_value']) for r in records]
     domain.localized_split_segments = list(domain.split_lines)
     metrics = dict(
-        csf_model='local inverse length scale sqrt(dA_S/dA_Omega); retained UV chart',
+        csf_model=(
+            'Paper Sec.4.5 candidate component area-Jacobian span max(J)/min(J)'
+            if paper_fidelity else
+            'local inverse length scale sqrt(dA_S/dA_Omega); retained UV chart'
+        ),
         csf_split_exactness_label=(
-            'OFF-mode fixed-chart inverse-length CSF; identical algorithm in both '
-            'checkbox states; no post-cut reparameterization or paper area certificate'
+            'Paper candidate only: area span after hypothetical per-piece rescaling; '
+            'no actual rescale or remap, no fabrication certificate'
+            if paper_fidelity else
+            'OFF-mode fixed-chart inverse-length CSF; no post-cut reparameterization'
         ),
         csf_split_applied=bool(csf_count), csf_split_threshold=threshold, max_csf_splits=budget,
         max_csf_before_split=before, max_csf_after_split=after, number_of_splits=len(records),
@@ -550,17 +564,28 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         # This OFF-mode CSF is a *linear* proxy; no paper Fig.18 area
         # upper bound has been geometrically certified.
         csf_split_bound_certified=False,
-        csf_split_candidate_area_bound_satisfied=False,
+        csf_split_candidate_area_bound_satisfied=bool(
+            paper_fidelity and not unresolved and not invalid_uv_count
+        ),
         csf_split_component_rescale_applied=False,
-        csf_split_paper_area_span_active=False,
-        csf_split_algorithm_same_as_normal=True,
+        csf_split_paper_area_span_active=paper_fidelity,
+        csf_split_algorithm_same_as_normal=not paper_fidelity,
         csf_split_degenerate_uv_face_count=invalid_uv_count,
         csf_split_parameterization_repair_required=bool(invalid_uv_count),
         csf_split_evaluation_scope='usable source triangles only' if invalid_uv_count else 'all source triangles',
-        csf_split_step_analysis_model='fixed-chart inverse length scale; no conformal reparameterization',
+        csf_split_step_analysis_model=(
+            'Paper: componentwise area-Jacobian span candidate; no UV rescale/remap'
+            if paper_fidelity else
+            'fixed-chart inverse length scale; no conformal reparameterization'
+        ),
         csf_split_component_sigma=values, csf_split_component_area_scale=[1.0 for _ in final],
-        csf_split_component_irreducible_quad_sigma=[float(irreducible[c].max()) for c in final],
-        csf_split_irreducible_quad_count=int(np.count_nonzero(irreducible > threshold+1e-10)),
+        csf_split_component_irreducible_quad_sigma=[
+            float((paper_quad_floor if paper_fidelity else irreducible)[c].max())
+            for c in final
+        ],
+        csf_split_irreducible_quad_count=int(np.count_nonzero(
+            (paper_quad_floor if paper_fidelity else irreducible) > threshold+1e-10
+        )),
         csf_split_quad_coverage_floor_sweep=parameterization.metrics.get('split_quad_coverage_floor_sweep'),
         csf_split_face_sigma=face_sigma.tolist(),
         csf_split_residual_high_face_count=int(np.count_nonzero(face_sigma > threshold+1e-10)),
@@ -568,10 +593,15 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             exhausted and not all(r['reason'] == 'within_quad_distortion_floor' for r in rejected)
         ),
         csf_split_stopping_rule=(
-            'shared OFF-mode algorithm: select max-CSF component; scan Gaussian-'
-            'curvature peaks for complete grid bisections; require worst-child '
-            'CSF decrease; stop at within-quad distortion floor, no admissible '
-            'improvement, threshold or budget'
+            'Paper Sec.4.5 approximate: use component area-Jacobian span; '
+            'highest eligible source Gaussian-curvature point; complete '
+            'grid bisection with strict worst-child span improvement; '
+            'terminate at area=2, irreducible quad, no improving cut or budget; '
+            'no physical UV rescale or remap performed'
+            if paper_fidelity else
+            'OFF-mode algorithm: max-CSF component; curvature-guided full grid '
+            'bisections; worst-child CSF decrease required; stop at distortion '
+            'floor, no improvement, threshold or budget'
         ),
         csf_split_conformal_anisotropy_max=parameterization.metrics.get('split_conformal_anisotropy_max'),
         csf_split_area_bound_requires_conformal_map=True,
@@ -581,7 +611,12 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         m2d_quad_count_after_csf_split=len(faces), m2d_connected_component_count_after_csf_split=len(final),
         m2d_largest_component_quad_count_after_csf_split=max(map(len, final), default=0),
         m2d_smallest_component_quad_count_after_csf_split=min(map(len, final), default=0),
-        csf_split_direction_rule='highest signed area-normalized source Gaussian curvature; nearest complete grid cut; minimize worst child distortion',
+        csf_split_direction_rule=(
+            'Paper: highest signed source Gaussian curvature admitting an improving '
+            'full-grid cut; choose axis with least worst-child area span'
+            if paper_fidelity else
+            'highest signed area-normalized source Gaussian curvature; nearest complete grid cut; minimize worst child distortion'
+        ),
         csf_split_grid_rotation_degrees=float(np.rad2deg(angle)),
     )
     vertices[:, :2] = vertices[:, :2] @ rotation.T
