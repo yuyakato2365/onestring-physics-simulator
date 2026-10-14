@@ -109,6 +109,8 @@ def test_paper_distinguishes_area_jacobian_from_linear_scale(monkeypatch):
         "lambda=sqrt(area Jacobian ratio)"
     )
     assert metrics["csf_split_area_ratio_after"] == pytest.approx(3.)
+    assert metrics["csf_split_candidate_linear_bound_satisfied"]
+    assert not metrics["csf_split_candidate_area_bound_satisfied"]
 
 
 def test_paper_one_split_when_ratio_crosses_linear_threshold(monkeypatch):
