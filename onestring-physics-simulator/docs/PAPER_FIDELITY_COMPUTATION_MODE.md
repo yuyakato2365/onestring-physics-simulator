@@ -33,12 +33,18 @@ Stages actually selected:
 - M2D grid: regular fixed-size grid, strict vertex crop, no additional
   speculative expansion or heuristic collision split.
 - Sec.4.5 Split (Paper checkbox ON only): select connected regions where
-  `max(J)/min(J) > 2`, search signed source-Gaussian-curvature peaks for
-  grid-aligned complete bisections, and accept a cut **only** if the worst
-  child component has a strictly smaller area-Jacobian span. Reject
-  ineffective cuts instead of exhausting 64 cuts without improvement.
-  `max(J)/min(J)` is a *candidate* expansion bound after independent
-  scaling of each piece, **not** a certified physical deformation bound.
+  `lambda(C) = sqrt(max(J)/min(J)) > 2`, where `J=dA_S/dA_Omega`
+  is an **area** Jacobian and `lambda` is a **linear conformal** scale
+  ratio. Then search signed source-Gaussian-curvature peaks for
+  grid-aligned complete bisections. A cut must reduce worst-child
+  `lambda`; the stopping target is `lambda<=2`. This distinction between
+  an area ratio and its square root is responsible for a previously
+  over-split Lilium proxy test (19 splits vs 1 on the same harmonic UV).
+  The per-component normalization is a candidate bound under hypothetical
+  independent uniform piece scaling, **not** yet an implemented UV rescale
+  or a certified physical deformation. The paper also uses the term area
+  expansion in describing the quad limit; the exact discrete convention
+  remains an open fidelity assumption rather than claimed authors' code.
   OFF mode retains its original fixed-chart linear-CSF behavior.
   The strict-improvement test is an explicit implementation assumption:
   Sec.4.5 does not prescribe a unique numerical candidate acceptance rule.
@@ -59,7 +65,7 @@ Stages actually selected:
 ## Important, unresolved fidelity gaps
 
 A fixed UV map does **not** change pointwise Jacobian just because its
-topology has been cut. Dividing the area-Jacobian range into separate
+topology has been cut. Dividing the linear conformal-scale range into separate
 components lowers the minimum *theoretical per-piece normalized range*
 if those pieces can later be rescaled. But no such rescaling/conformal
 reparameterization is applied to the resulting actual M2D geometry by
@@ -69,7 +75,7 @@ remains mandatory even if
 This must not be represented as proof of manufacture-ready scale.
 
 Original paper Sec.4.5 describes curvature-guided hierarchical full
-cuts and the ratio condition; it does not prescribe a unique numerical
+cuts and a bound on the conformal scale factor; it does not prescribe a unique numerical
 component-rescaling algorithm. We do NOT invent and claim one.
 
 The T2D hard repair and 2D convex footprint SAT are project-specific
