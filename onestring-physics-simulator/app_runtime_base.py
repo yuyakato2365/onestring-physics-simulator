@@ -427,6 +427,34 @@ with st.sidebar:
             "分割後のUV再写像・独立スケール変更は未実装のため、"
             "論文の製造可能性条件を完全に証明するものではありません。"
         )
+    # Opt-in extension of the ORIGINAL OneString pipeline, not a separate
+    # viewer. Leaves OptCuts / legacy BFF untouched when disabled.
+    postcut_rebff_integrated_mode = st.checkbox(
+        "Split後の矩形BFF再計算 → T2D Dual Hinge（実験）",
+        value=False,
+        disabled=not paper_fidelity_enabled,
+        key="onestring_postcut_rebff_integrated_enabled",
+        help="元のRun OneString pipeline / View stage内で、S→初期矩形BFF→CSF判定"
+             "→高曲率点付近のGrid Split→各子領域で矩形BFFを再計算し、"
+             "既存のK3D/T3D/K2D/T2D Dual Hingeへ接続します。",
+    )
+    postcut_rebff_budget = 8
+    postcut_rebff_preview_unconverged = False
+    if postcut_rebff_integrated_mode:
+        postcut_rebff_budget = int(st.number_input(
+            "再BFFの最大Split数",min_value=1,max_value=64,value=8,step=1,
+            key="onestring_postcut_rebff_split_budget",
+        ))
+        postcut_rebff_preview_unconverged = st.checkbox(
+            "CSF>2で停止してもT2D Dual Hingeの試験計算を許可",
+            value=False,
+            key="onestring_postcut_rebff_allow_unconverged_preview",
+            help="明示的にONにした場合のみ、CSF条件未達の計算を"
+                 "製造不能の可能性がある試験結果として表示します。"
+                 "K3D/T2Dの最適化失敗はそのまま報告します。",
+        )
+        st.warning("CSFが2を超える場合は未収束です。T2Dが表示されても"
+                   "元論文への一致や製造可能性は意味しません。")
     st.header("Version")
     # Experimental 2026-09-21 deployability-aware K3D variant.
     _deploy_version = {
@@ -680,12 +708,13 @@ with st.sidebar:
         st.caption("以下は論文の著者実装が未確認の研究用設定です。既定値なら従来のPaperモードと同じです。")
         bff_rectangle_selection_mode = st.selectbox(
             "矩形BFF 四隅の選び方（実験）",
-            ["fixed_phase", "min_whole_source_area_span_4phase"],
-            format_func=lambda v: (
-                "従来の周長4等分（変更なし）" if v == "fixed_phase"
-                else "4位相から元曲面の面積ヤコビアン比最小を選択"
-            ),
-            index=0,
+            ["fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit"],
+            format_func=lambda v: {
+                "fixed_phase":"従来の周長4等分（変更なし）",
+                "min_whole_source_area_span_4phase":"4位相から元曲面のCSF比最小を選択",
+                "source_boundary_shape_fit":"Sの境界形状に合う矩形の四隅を自動選択",
+            }[v],
+            index=2 if postcut_rebff_integrated_mode else 0,
             help="同じ3D入力の4つの矩形BFFから、Split数を参照せずに選択。論文にこの手順の記載はありません。",
         )
         paper_csf_sampling_method = st.selectbox(
@@ -1693,6 +1722,9 @@ def current_pipeline_key() -> tuple:
         omega_parameterization_mode,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
+        postcut_rebff_integrated_mode,
+        postcut_rebff_budget,
+        postcut_rebff_preview_unconverged,
         paper_csf_sampling_method,
         paper_split_area_limit_experiment,
         bff_executable,
@@ -1967,16 +1999,49 @@ if run_pipeline:
             progress_log.append({"elapsed_sec": elapsed, "progress_%": fraction * 100.0, "stage": stage, "detail": detail})
 
         try:
-            st.session_state.onestring_state = build_onestring_design(
-                build_target(),
-                pipeline_params,
-                progress_callback=_build_progress,
-            )
+            if postcut_rebff_integrated_mode:
+                from postcut_rebff_integrated import run_original_onestring_with_postcut_rebff
+                st.session_state.pop("onestring_postcut_rebff_report",None)
+                result_state,integrated_audit,integrated_report = (
+                    run_original_onestring_with_postcut_rebff(
+                        build_target(), pipeline_params,
+                        max_splits=postcut_rebff_budget,
+                        initial_rectangle_mode=bff_rectangle_selection_mode,
+                        postcut_boundary_policy="target_rectangle",
+                        allow_unconverged_t2d_preview=postcut_rebff_preview_unconverged,
+                        progress_callback=_build_progress,
+                        diagnostic_callback=lambda report:
+                            st.session_state.__setitem__(
+                                "onestring_postcut_rebff_report",report),
+                    )
+                )
+                st.session_state.onestring_state = result_state
+                st.session_state["onestring_postcut_rebff_report"] = integrated_report
+                st.session_state["onestring_postcut_rebff_audit"] = integrated_audit
+            else:
+                st.session_state.pop("onestring_postcut_rebff_report",None)
+                st.session_state.pop("onestring_postcut_rebff_audit",None)
+                st.session_state.onestring_state = build_onestring_design(
+                    build_target(),
+                    pipeline_params,
+                    progress_callback=_build_progress,
+                )
         except Exception as exc:
             st.session_state.pipeline_progress_log = progress_log
+            if postcut_rebff_integrated_mode:
+                report=st.session_state.get("onestring_postcut_rebff_report")
+                if report is not None:
+                    st.error(
+                        "再BFFはCSF上限を満たせず停止、または下流段階で失敗しました。"
+                        f"Split={report['split_count']}本、"
+                        f"最大CSF={report['max_postcut_patch_linear_span']:.4f}、"
+                        f"停止理由={report['stop_reason']}。"
+                    )
+                    with st.expander("追加Splitの全棄却理由",expanded=True):
+                        st.json(report.get("rejected_candidates",[]))
             st.exception(exc)
             st.stop()
-        if paper_fidelity_enabled:
+        if paper_fidelity_enabled and not postcut_rebff_integrated_mode:
             outcome=check_paper_fidelity(st.session_state.onestring_state,pipeline_params)
             st.session_state.onestring_state.tiles_2d_dual_hinge.metrics.update({
                 "paper_fidelity_mode":True,
@@ -2036,6 +2101,30 @@ if _saved_grid_size is not None:
             "軽量なPipeline Viewを表示しています。"
             "T2D Dual Hingeなどの表示はView stageから選び直せます。"
         )
+
+# An integrated re-BFF run returns the SAME OneStringState used by the
+# original "View stage" selector. Do not label CSF-unconverged tests as valid.
+_postcut_report=st.session_state.get("onestring_postcut_rebff_report")
+if _postcut_report is not None:
+    _postcut_max=float(_postcut_report["max_postcut_patch_linear_span"])
+    _postcut_status=(
+        f"矩形BFF再計算: Split={_postcut_report['split_count']}本、"
+        f"最大CSF={_postcut_max:.4f}、"
+        f"停止理由={_postcut_report['stop_reason']}。"
+    )
+    if _postcut_report.get("linear_limit_two_satisfied"):
+        st.success("再BFFのCSF≤2を満たしました。" + _postcut_status)
+    else:
+        st.error("再BFFはCSF≤2を満たしていません（T2Dは試験計算）。"+_postcut_status)
+    with st.expander("再BFF Grid Split履歴・棄却理由",expanded=False):
+        st.write("Grid Split前後の矩形BFFで評価した線形CSFです。")
+        st.json({
+            "initial_csf":_postcut_report.get("initial_bff_linear_csf"),
+            "split_history":_postcut_report.get("split_history"),
+            "rejected_candidates":_postcut_report.get("rejected_candidates"),
+            "rectangle_boundary_verified":
+                _postcut_report.get("all_postcut_patches_rectangle_verified"),
+        })
 
 # The main-page action is shown after the initial pipeline is available, so
 # it is enabled immediately after the first successful full build.
@@ -2499,74 +2588,87 @@ if view_stage == "Pipeline View":
 elif view_stage == "S":
     st.plotly_chart(figure_surface_mesh(state.target_surface), use_container_width=True, key="target_surface")
 elif view_stage == "Split Map":
-    from onestring_physics.split_process_view import figure_split_process
-    st.subheader("Splitを追加する過程")
-    _split_records = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
-    _split_count = len(_split_records)
-    _split_step = st.slider("追加済みのSplit数", 0, _split_count, 0, key=f"split_process_step_{_split_count}") if _split_count else 0
-    _split_figure, _split_rows = figure_split_process(state.mesh_2d_initial, _split_step)
-    if _split_figure is None:
-        st.info("この結果には途中状態の記録がありません。対応するSplit経路で再生成すると表示できます。")
+    if _postcut_report is not None:
+        st.subheader("再BFFを使ったGrid Split履歴")
+        st.caption("各領域を矩形BFFで解き直した後のCSFと実際の切断候補を表示します。"
+                   "従来の固定UVベースのSplit Mapを混同して表示しません。")
+        st.json({
+            "initial_linear_csf":_postcut_report.get("initial_bff_linear_csf"),
+            "split_count":_postcut_report.get("split_count"),
+            "split_history":_postcut_report.get("split_history"),
+            "stop_reason":_postcut_report.get("stop_reason"),
+        })
+        with st.expander("失敗したすべてのGrid切断候補"):
+            st.json(_postcut_report.get("rejected_candidates",[]))
     else:
-        st.caption("0は追加Split前です。赤＝今回追加、黒＝それまでの切断。元のΩ座標で表示し、分割片を移動させません。初期状態にある切れ目は追加Splitに含みません。")
-        st.plotly_chart(_split_figure, use_container_width=True, key="split_process_figure")
-        if _split_step:
-            _record = _split_records[_split_step-1]
-            st.caption(f"切断した領域のCSF: {_record['sigma_before']:.4g} → " + ", ".join(f"{value:.4g}" for value in _record['sigma_after']))
+        from onestring_physics.split_process_view import figure_split_process
+        st.subheader("Splitを追加する過程")
+        _split_records = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
+        _split_count = len(_split_records)
+        _split_step = st.slider("追加済みのSplit数", 0, _split_count, 0, key=f"split_process_step_{_split_count}") if _split_count else 0
+        _split_figure, _split_rows = figure_split_process(state.mesh_2d_initial, _split_step)
+        if _split_figure is None:
+            st.info("この結果には途中状態の記録がありません。対応するSplit経路で再生成すると表示できます。")
         else:
-            st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
-        st.dataframe(_split_rows, hide_index=True, width="stretch")
-        st.caption("CSFは現在のUV写像に基づく評価値です。")
-        _split_metrics = state.mesh_2d_initial.metrics
-        _split_unresolved = int(_split_metrics.get("csf_split_unresolved_component_count", 0) or 0)
-        if _split_unresolved:
-            _split_reason = _split_metrics.get("csf_split_stopping_reason", "unknown")
-            _split_threshold = float(_split_metrics.get("csf_split_threshold", 2.))
+            st.caption("0は追加Split前です。赤＝今回追加、黒＝それまでの切断。元のΩ座標で表示し、分割片を移動させません。初期状態にある切れ目は追加Splitに含みません。")
+            st.plotly_chart(_split_figure, use_container_width=True, key="split_process_figure")
+            if _split_step:
+                _record = _split_records[_split_step-1]
+                st.caption(f"切断した領域のCSF: {_record['sigma_before']:.4g} → " + ", ".join(f"{value:.4g}" for value in _record['sigma_after']))
+            else:
+                st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
+            st.dataframe(_split_rows, hide_index=True, width="stretch")
+            st.caption("CSFは現在のUV写像に基づく評価値です。")
+            _split_metrics = state.mesh_2d_initial.metrics
+            _split_unresolved = int(_split_metrics.get("csf_split_unresolved_component_count", 0) or 0)
+            if _split_unresolved:
+                _split_reason = _split_metrics.get("csf_split_stopping_reason", "unknown")
+                _split_threshold = float(_split_metrics.get("csf_split_threshold", 2.))
+                st.warning(
+                    f"Split未完了：CSFが{_split_threshold:g}を超える領域が"
+                    f"{_split_unresolved}個残っています。終了理由：{_split_reason}。"
+                    " 分割回数の上限や格子上の切断不能は、CSF条件の達成を意味しません。"
+                )
+        if state.mesh_2d_initial.metrics.get("csf_split_parameterization_repair_required"):
             st.warning(
-                f"Split未完了：CSFが{_split_threshold:g}を超える領域が"
-                f"{_split_unresolved}個残っています。終了理由：{_split_reason}。"
-                " 分割回数の上限や格子上の切断不能は、CSF条件の達成を意味しません。"
+                "UVに退化した三角形があるため、有効な領域で処理を継続しています。"
+                "表示CSFは部分評価であり、閾値達成は未確認です。"
+                f" 対象: {state.mesh_2d_initial.metrics.get('csf_split_degenerate_uv_face_count', 0)} 三角形。"
             )
-    if state.mesh_2d_initial.metrics.get("csf_split_parameterization_repair_required"):
-        st.warning(
-            "UVに退化した三角形があるため、有効な領域で処理を継続しています。"
-            "表示CSFは部分評価であり、閾値達成は未確認です。"
-            f" 対象: {state.mesh_2d_initial.metrics.get('csf_split_degenerate_uv_face_count', 0)} 三角形。"
+        st.plotly_chart(figure_split_mapping(state), use_container_width=True, key="split_mapping")
+        st.write(
+            {
+                "meaning": "Red samples show the Omega split line mapped back onto S through the stored S->Omega parameterization.",
+                "csf_split_threshold": state.mesh_2d_initial.metrics.get("csf_split_threshold"),
+                "max_csf_before_split": state.mesh_2d_initial.metrics.get("max_csf_before_split"),
+                "max_csf_after_split": state.mesh_2d_initial.metrics.get("max_csf_after_split"),
+                "csf_split_step_analysis_model": state.mesh_2d_initial.metrics.get("csf_split_step_analysis_model"),
+                "csf_split_residual_high_face_count": state.mesh_2d_initial.metrics.get("csf_split_residual_high_face_count"),
+                "csf_split_status": state.mesh_2d_initial.metrics.get("csf_split_status"),
+                "parameterization_method": state.mesh_2d_initial.metrics.get("csf_split_parameterization_method"),
+                "components_before_additional_split": state.mesh_2d_initial.metrics.get("m2d_connected_component_count_before_csf_split"),
+                "components_after_additional_split": state.mesh_2d_initial.metrics.get("m2d_connected_component_count_after_csf_split"),
+                "split_stopping_rule": state.mesh_2d_initial.metrics.get("csf_split_stopping_rule"),
+                "csf_split_budget_exhausted": state.mesh_2d_initial.metrics.get("csf_split_budget_exhausted"),
+                "csf_split_component_sigma": state.mesh_2d_initial.metrics.get("csf_split_component_sigma"),
+                "csf_split_additional_split_recommended_after_all": state.mesh_2d_initial.metrics.get("csf_split_additional_split_recommended_after_all"),
+                "number_of_splits": state.mesh_2d_initial.metrics.get("number_of_splits"),
+                "split_locations": state.mesh_2d_initial.metrics.get("split_locations"),
+                "csf_split_model": state.mesh_2d_initial.metrics.get("csf_split_model"),
+                "csf_split_removed_quad_count": state.mesh_2d_initial.metrics.get("csf_split_removed_quad_count"),
+                "csf_split_duplicated_vertex_count": state.mesh_2d_initial.metrics.get("csf_split_duplicated_vertex_count"),
+            }
         )
-    st.plotly_chart(figure_split_mapping(state), use_container_width=True, key="split_mapping")
-    st.write(
-        {
-            "meaning": "Red samples show the Omega split line mapped back onto S through the stored S->Omega parameterization.",
-            "csf_split_threshold": state.mesh_2d_initial.metrics.get("csf_split_threshold"),
-            "max_csf_before_split": state.mesh_2d_initial.metrics.get("max_csf_before_split"),
-            "max_csf_after_split": state.mesh_2d_initial.metrics.get("max_csf_after_split"),
-            "csf_split_step_analysis_model": state.mesh_2d_initial.metrics.get("csf_split_step_analysis_model"),
-            "csf_split_residual_high_face_count": state.mesh_2d_initial.metrics.get("csf_split_residual_high_face_count"),
-            "csf_split_status": state.mesh_2d_initial.metrics.get("csf_split_status"),
-            "parameterization_method": state.mesh_2d_initial.metrics.get("csf_split_parameterization_method"),
-            "components_before_additional_split": state.mesh_2d_initial.metrics.get("m2d_connected_component_count_before_csf_split"),
-            "components_after_additional_split": state.mesh_2d_initial.metrics.get("m2d_connected_component_count_after_csf_split"),
-            "split_stopping_rule": state.mesh_2d_initial.metrics.get("csf_split_stopping_rule"),
-            "csf_split_budget_exhausted": state.mesh_2d_initial.metrics.get("csf_split_budget_exhausted"),
-            "csf_split_component_sigma": state.mesh_2d_initial.metrics.get("csf_split_component_sigma"),
-            "csf_split_additional_split_recommended_after_all": state.mesh_2d_initial.metrics.get("csf_split_additional_split_recommended_after_all"),
-            "number_of_splits": state.mesh_2d_initial.metrics.get("number_of_splits"),
-            "split_locations": state.mesh_2d_initial.metrics.get("split_locations"),
-            "csf_split_model": state.mesh_2d_initial.metrics.get("csf_split_model"),
-            "csf_split_removed_quad_count": state.mesh_2d_initial.metrics.get("csf_split_removed_quad_count"),
-            "csf_split_duplicated_vertex_count": state.mesh_2d_initial.metrics.get("csf_split_duplicated_vertex_count"),
-        }
-    )
-    split_steps = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
-    if split_steps:
-        st.caption("CSF residual analysis after each Split step")
-        display_steps = []
-        for row in split_steps:
-            clean = dict(row)
-            clean["next_recommended_split"] = str(clean.get("next_recommended_split", []))
-            display_steps.append(clean)
-        st.dataframe(display_steps, width="stretch")
-elif view_stage == "Omega":
+        split_steps = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
+        if split_steps:
+            st.caption("CSF residual analysis after each Split step")
+            display_steps = []
+            for row in split_steps:
+                clean = dict(row)
+                clean["next_recommended_split"] = str(clean.get("next_recommended_split", []))
+                display_steps.append(clean)
+            st.dataframe(display_steps, width="stretch")
+    elif view_stage == "Omega":
     st.plotly_chart(figure_domain(state), use_container_width=True, key="omega_domain")
     st.subheader("S ↔ Omega Mapping Distortion")
     st.caption("The same per-triangle S→Omega distortion values are painted on the original surface S and on Omega, so corresponding distorted regions have exactly the same color.")
