@@ -2669,7 +2669,28 @@ elif view_stage == "Split Map":
                 display_steps.append(clean)
             st.dataframe(display_steps, width="stretch")
 elif view_stage == "Omega":
-    st.plotly_chart(figure_domain(state), use_container_width=True, key="omega_domain")
+    if _postcut_report is not None:
+        # One original BFF rectangle is NOT the correct Omega after repeated
+        # re-BFF. Each child is an independent UV island, so plot all islands
+        # using exactly the triangle correspondences passed to the solver.
+        _multi_chart=state.surface_parameterization
+        _uv=np.asarray(_multi_chart.uv_vertices_2d,float)
+        _faces=np.asarray(_multi_chart.uv_faces,int)
+        _omega_figure=go.Figure(go.Mesh3d(
+            x=_uv[:,0],y=_uv[:,1],z=np.zeros(len(_uv)),
+            i=_faces[:,0],j=_faces[:,1],k=_faces[:,2],
+            color="#42a7ae",opacity=.8,flatshading=True,
+        ))
+        _omega_figure.update_layout(
+            title="再BFF後のすべての矩形Ω領域（独立UV島）",
+            scene=dict(aspectmode="data"),
+            margin=dict(l=0,r=0,t=40,b=0),
+        )
+        st.plotly_chart(_omega_figure,use_container_width=True,key="rebff_omega_islands")
+        st.caption("元の一枚のΩではなく、Split後に再BFFした各領域のUV島を"
+                   "実際の三角形対応に従って表示しています。")
+    else:
+        st.plotly_chart(figure_domain(state), use_container_width=True, key="omega_domain")
     st.subheader("S ↔ Omega Mapping Distortion")
     st.caption("The same per-triangle S→Omega distortion values are painted on the original surface S and on Omega, so corresponding distorted regions have exactly the same color.")
     distortion_mode = st.selectbox(
