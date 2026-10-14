@@ -2116,6 +2116,26 @@ if _postcut_report is not None:
         st.success("再BFFのCSF≤2を満たしました。" + _postcut_status)
     else:
         st.error("再BFFはCSF≤2を満たしていません（T2Dは試験計算）。"+_postcut_status)
+    _state_metrics=getattr(
+        getattr(st.session_state.get("onestring_state"),"tiles_2d_dual_hinge",None),
+        "metrics",{}
+    )
+    _seam_mode=_state_metrics.get("split_seam_alignment")
+    if _seam_mode == "source_surface_3d_matched_rigid_SE2":
+        _seam_rms=float(_state_metrics["split_seam_fit_rms_max"])
+        _seam_rel=float(_state_metrics["split_seam_fit_rms_relative_to_tile"])
+        st.info(
+            "Split境界の3D対応点でT2D領域を剛体位置合わせしました。"
+            f"対応点={_state_metrics['split_seam_anchor_pair_count']}組、"
+            f"最大RMS={_seam_rms:.6g}、"
+            f"タイル辺長比={_seam_rel:.3f}。"
+            "独立に再格子化した境界パネルの完全一致は未保証です。"
+        )
+        if _seam_rel>0.15:
+            st.warning(
+                "Split境界の残差がタイル辺長の15%を超えています。"
+                "パネル間の厳密な一致には共通境界を固定した再格子化が必要です。"
+            )
     with st.expander("再BFF Grid Split履歴・棄却理由",expanded=False):
         st.write("Grid Split前後の矩形BFFで評価した線形CSFです。")
         st.json({
