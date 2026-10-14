@@ -98,7 +98,10 @@ int main(int argc, char** argv) {
             int best=-1;
             double minDist=std::numeric_limits<double>::infinity();
             for (int i=0; i<n; ++i) {
-                Vector v=boundary[i]->vertex()->position;
+                // MeshIO::read() normalizes 3D positions (unit radius)
+                // internally. Convert back to the ORIGINAL OBJ coordinates
+                // before matching the source-boundary corner sent by Python.
+                Vector v=boundary[i]->vertex()->position * mesh.radius + mesh.cm;
                 double dist=0.;
                 for (int d=0; d<3; ++d) {
                     const double delta=v[d]-values[d];
