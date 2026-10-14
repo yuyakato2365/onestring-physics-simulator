@@ -27,6 +27,7 @@ import numpy as np
 
 from .abd_backend import ABDBackendConfig, ShakeTrajectory, run_abd_backend
 
+from .bff_rectangle_selection import choose_rectangle_by_min_area_span
 from .reference_bff import (
     count_internal_triangle_overlaps,
     ReferenceBFFError,
@@ -951,6 +952,9 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
     paper_fidelity_mode: bool = False
+    # Experimental paper-interpretation studies; defaults remain unchanged.
+    bff_rectangle_selection_mode: Literal["fixed_phase", "min_whole_source_area_span_4phase"] = "fixed_phase"
+    paper_split_area_limit_experiment: bool = False
     model_version: str = "2026-07-12-one-sided-t3d"
     use_principal_curvature_grid: bool = False
     use_extrusion_aware_k3d: bool = False
@@ -2688,15 +2692,27 @@ def _build_surface_parameterization(surface, target, grid, params):
         if boundary_mode != "paper_default":
             raise ValueError("paper_reference_bff requires omega_boundary_mode='paper_default'; its boundary policy is selected separately.")
         boundary_policy = str(getattr(params, "bff_boundary_policy", "automatic_reference"))
-        result = run_official_bff(
-            surface_vertices,
-            surface_faces,
-            executable=getattr(params, "bff_executable", None),
-            rectangle_executable=getattr(params, "bff_rectangle_executable", None),
-            rectangle_corner_phase_fraction=float(getattr(params, "bff_rectangle_corner_phase_fraction", 0.0)),
-            boundary_policy=boundary_policy,
-            timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
-        )
+        selection_mode=str(getattr(params, "bff_rectangle_selection_mode", "fixed_phase"))
+        if selection_mode == "min_whole_source_area_span_4phase":
+            if boundary_policy != "target_rectangle":
+                raise ValueError("Automatic rectangle corner study requires the rectangular BFF policy")
+            result=choose_rectangle_by_min_area_span(
+                surface_vertices,surface_faces,
+                rectangle_executable=getattr(params,"bff_rectangle_executable",None),
+                timeout_seconds=float(getattr(params,"bff_timeout_seconds",120.0)),
+            )
+        elif selection_mode == "fixed_phase":
+            result = run_official_bff(
+                surface_vertices,
+                surface_faces,
+                executable=getattr(params, "bff_executable", None),
+                rectangle_executable=getattr(params, "bff_rectangle_executable", None),
+                rectangle_corner_phase_fraction=float(getattr(params, "bff_rectangle_corner_phase_fraction", 0.0)),
+                boundary_policy=boundary_policy,
+                timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
+            )
+        else:
+            raise ValueError(f"Unknown BFF rectangle corner selection mode: {selection_mode!r}")
         uv_vertices, differential = normalize_uv_and_compute_csf(
             surface_vertices,
             result.uv_vertices,
