@@ -16,7 +16,7 @@ fi
 brew install cmake suite-sparse openblas python@3.11
 export CMAKE_PREFIX_PATH="$(brew --prefix suite-sparse);$(brew --prefix openblas)"
 suitesparse_prefix="$(brew --prefix suite-sparse)"
-cholmod_header="$(find "$suitesparse_prefix" -type f -name cholmod.h -print -quit)"
+cholmod_header="$(find -L "$suitesparse_prefix" -type f -name cholmod.h -print -quit)"
 if [[ -z "$cholmod_header" ]]; then
   echo "cholmod.h not found in Homebrew SuiteSparse: $suitesparse_prefix" >&2
   echo "Try: brew reinstall suite-sparse" >&2
