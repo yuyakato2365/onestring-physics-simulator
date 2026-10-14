@@ -18,7 +18,28 @@ jobs:
           curl -fL --retry 3 'https://onestringtopullthemall.github.io/static/pdfs/OneStringPull-supplement.pdf' -o /tmp/onestring_supplement.pdf
           pdfinfo /tmp/onestring.pdf | grep Pages
           pdftotext -layout /tmp/onestring.pdf /tmp/onestring.txt
+          pdftotext -raw /tmp/onestring.pdf /tmp/onestring_raw.txt
           pdftotext -layout /tmp/onestring_supplement.pdf /tmp/onestring_supplement.txt
+      - name: Extract 4.5 in contiguous raw reading order with exact citations
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          text=Path('/tmp/onestring_raw.txt').read_text()
+          for pattern in [r'4\\.5\\s+Mesh Splitting',r'4\\.1\\s+Initialization',
+                          r'Fig\\. 6\\.',r'Chen,',r'Konakovi',r'Jiang,',
+                          r'Fig\\. 18\\.',r'193']:
+              hits=list(re.finditer(pattern,text,re.I))
+              print('===== PATTERN',pattern,'COUNT',len(hits), '=====')
+              for m in hits[:2]:
+                  left=max(0,m.start()-260)
+                  right=min(len(text),m.end()+(6100 if 'Splitting' in pattern else 1700))
+                  print(text[left:right],flush=True)
+          supp=Path('/tmp/onestring_supplement.txt').read_text()
+          for term in ['Figure 18','Fig. 18','Expansion Factor','Area Expansion']:
+              for m in list(re.finditer(re.escape(term),supp,re.I))[:2]:
+                  print('SUPPLEMENT',term,supp[max(0,m.start()-220):m.end()+1000])
+          PY
       - name: Inspect primary-source Sections 4.1, 4.5, references and related sections
         run: |
           python - <<'PY'
