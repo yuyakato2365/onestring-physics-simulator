@@ -20,6 +20,7 @@ on:
       - "onestring-physics-simulator/tests/test_rectangular_bff.py"
       - "onestring-physics-simulator/tests/test_paper_fidelity_computation_mode.py"
       - "onestring-physics-simulator/tests/test_paper_split_area_bound.py"
+      - "onestring-physics-simulator/scripts/verify_lilium_paper_split.py"
       - ".github/workflows/rectangular-bff.yml"
   workflow_dispatch:
 jobs:
@@ -45,6 +46,7 @@ jobs:
             src/onestring_physics/paper_fidelity_mode.py \
             scripts/setup_bff_rectangle.py \
             scripts/verify_rectangular_bff.py \
+            scripts/verify_lilium_paper_split.py \
             app_runtime_base.py
       - name: Rectangular BFF and pipeline regressions
         run: |
