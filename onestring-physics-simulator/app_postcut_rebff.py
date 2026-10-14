@@ -212,7 +212,8 @@ def _download_zip(result: dict) -> bytes:
 def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
              phase: float, cut_mode: str, manual_axis: str,
              manual_fraction: float, post_policy: str,
-             max_splits: int = 8, progress=None) -> dict:
+             max_splits: int = 8, progress=None,
+             initial_rectangle_mode: str = "source_boundary_shape_fit") -> dict:
     standard_path = str(_locate_bff_cli(standard_exe, rectangle=False))
     rectangle_path = str(_locate_bff_cli(rect_exe, rectangle=True))
 
@@ -226,6 +227,7 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
     params.bff_executable = standard_path
     params.bff_rectangle_executable = rectangle_path
     params.bff_rectangle_corner_phase_fraction = float(phase)
+    params.bff_rectangle_selection_mode = initial_rectangle_mode
     params.max_csf_splits = 1
     initial = build_paper_reference_initialization(load_target_shape(mesh_path), params)
     param = initial.surface_parameterization
@@ -332,6 +334,12 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         "official_bff_executable": standard_path,
         "rectangular_bff_executable": rectangle_path,
         "initial_bff": "target_rectangle", "postcut_bff": post_policy,
+        "initial_rectangle_selection_mode": initial_rectangle_mode,
+        "initial_rectangle_selection_method": param.metrics.get("bff_corner_selection_method"),
+        "initial_rectangle_selected_score": param.metrics.get("bff_corner_selection_selected_score"),
+        "initial_rectangle_selected_corner_vertex_ids": param.metrics.get("bff_corner_selection_selected_source_vertex_ids"),
+        "initial_rectangle_selected_corner_xyz": param.metrics.get("bff_corner_selection_selected_source_xyz"),
+        "initial_rectangle_selection_attempts": param.metrics.get("bff_corner_selection_attempts"),
         "initial_bff_linear_csf": float(initial_report["linear_span"]),
         "initial_bff_satisfies_csf_limit": not needs_split,
         "initial_bff_rectangle_verified": True,
@@ -548,10 +556,25 @@ def main() -> None:
         grid = st.number_input("グリッド（nx=ny）", min_value=2, max_value=60, value=14)
         rect = st.text_input("矩形BFF実行ファイル（空欄なら自動検出）", value="")
         standard = st.text_input("通常BFF実行ファイル（空欄なら自動検出）", value="")
+        initial_rectangle_mode = st.selectbox(
+            "初期Ωの矩形BFF四隅の選択",
+            ["source_boundary_shape_fit", "fixed_phase"],
+            index=0,
+            format_func=lambda mode: (
+                "入力メッシュSの境界に合わせて自動探索"
+                if mode == "source_boundary_shape_fit" else
+                "境界周長の4等分（従来方式）"
+            ),
+            help="自動モードでは元Sの3D境界をPCAで評価し、"
+                 "複数の四隅候補で公式矩形BFFを実行、境界適合度とCSFを比較します。",
+        )
         phase = st.select_slider(
-            "矩形BFFの四隅の位相（初期・Split後）",
+            "矩形BFF四隅の位相（従来初期モード・Split後に使用）",
             options=[0.0, 0.0625, 0.125, 0.1875], value=0.0,
         )
+        if initial_rectangle_mode == "source_boundary_shape_fit":
+            st.caption("初期Ωは入力境界への適合度で自動選択します。"
+                       "ここで指定する位相はSplit後の矩形BFFにのみ適用します。")
         cut_mode = st.radio(
             "切断位置", ["曲率優先の最初のSplit", "手動指定"], index=0,
         )
@@ -600,6 +623,7 @@ def main() -> None:
                         cut_mode, axis, float(fraction), post_policy,
                         max_splits=max_splits,
                         progress=lambda message: live.info(message),
+                        initial_rectangle_mode=initial_rectangle_mode,
                     )
                 live.empty()
             except ReferenceBFFUnavailableError as exc:
@@ -630,6 +654,11 @@ def main() -> None:
     )
     st.caption(f"初期BFF: {report['initial_bff']} ｜ Split後BFF: {report['postcut_bff']} ｜ "
                f"全子領域の矩形検証: {report.get('all_postcut_patches_rectangle_verified')}")
+    st.caption(f"初期Ω四隅選択: {report['initial_rectangle_selection_mode']} ｜ "
+               f"選択スコア: {report.get('initial_rectangle_selected_score')}")
+    if report.get("initial_rectangle_selection_attempts"):
+        with st.expander("入力S境界に合わせた初期矩形の候補と比較結果"):
+            st.json(report["initial_rectangle_selection_attempts"])
     if passed:
         st.success("全領域のCSFが2以下になりました。" + summary)
     else:
