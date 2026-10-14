@@ -32,7 +32,8 @@ from onestring_physics.reference_bff import (
     run_official_bff, find_official_bff_executable,
     find_rectangular_bff_executable,
 )
-from scripts.test_lilium_postcut_bff_hypothesis import clip_piece, field
+from scripts.test_lilium_postcut_bff_hypothesis import field
+from postcut_rebff_iterative import iterative_postcut_rebff
 
 
 def _jacobian(xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -156,7 +157,8 @@ def _download_zip(result: dict) -> bytes:
 
 def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
              phase: float, cut_mode: str, manual_axis: str,
-             manual_fraction: float, post_policy: str) -> dict:
+             manual_fraction: float, post_policy: str,
+             max_splits: int = 8, progress=None) -> dict:
     standard_path = str(find_official_bff_executable(standard_exe or None))
     rectangle_path = str(find_rectangular_bff_executable(rect_exe or None))
 
@@ -197,27 +199,23 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
                            manual_fraction * np.ptp(uv[:, dim]))
         source_vertex, curvature = None, None
 
-    dim = {"row": 1, "col": 0}[axis]
-    patches = []
-    for is_positive in (False, True):
-        x, old_uv, f, topology = clip_piece(
-            xyz, uv, faces, dim, coordinate, is_positive
-        )
-        if not bool(topology["disk_topology"]):
-            raise ValueError("Post-cut patch is not a topological disk")
+    def _rebff(x, f):
         bff = run_official_bff(
             x, f, executable=standard_path,
             rectangle_executable=rectangle_path, boundary_policy=post_policy,
         )
-        new_uv = np.asarray(bff.uv_vertices, float)
-        pre = field(x, old_uv, f)
-        post = field(x, new_uv, f)
-        patches.append({
-            "side": "positive" if is_positive else "negative",
-            "xyz": x, "original_uv": old_uv, "new_uv": new_uv,
-            "faces": f, "pre": pre, "post": post,
-            "bff_metadata": bff.metrics,
-        })
+        return np.asarray(bff.uv_vertices, float), bff.metrics
+
+    trial = iterative_postcut_rebff(
+        xyz, uv, faces, grid=int(grid), rebff=_rebff, max_splits=int(max_splits),
+        csf_limit=2.0, progress=progress,
+        first_cut=dict(
+            axis=axis, coordinate=coordinate,
+            origin=cut_mode, source_vertex=source_vertex,
+            curvature=curvature,
+        ),
+    )
+    patches = trial["patches"]
     # Regenerate real square M2D panels and 3D inverse-map lifts on the NEW UV.
     # Keep one shared spacing across the two patches for meaningful comparison.
     maximum_span = max(float(np.max(np.ptp(p["new_uv"], axis=0))) for p in patches)
@@ -232,12 +230,18 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
 
     worst = max(p["post"]["linear_span"] for p in patches)
     report = {
-        "experiment": "One cut followed by independently rerun official BFF",
+        "experiment": "Iterative high-curvature cuts and independent official BFF until CSF <= 2",
         "not_paper_author_verified": True,
         "not_applied_to_K3D_or_T2D": True,
         "input_mesh": str(mesh_path), "grid": int(grid),
         "initial_bff": "target_rectangle", "postcut_bff": post_policy,
         "rectangle_corner_phase": float(phase),
+        "split_count": trial["split_count"],
+        "split_history": trial["split_history"],
+        "rejected_candidates": trial["rejected_candidates"],
+        "stop_reason": trial["stop_reason"],
+        "csf_limit": trial["csf_limit"],
+        "max_splits_budget": trial["max_splits"],
         "split": {
             "axis": axis, "uv_coordinate": coordinate, "origin": cut_mode,
             "source_curvature_vertex": source_vertex, "gaussian_curvature": curvature,
@@ -262,7 +266,7 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         "new_piece_m2d_grid_spacing": float(common_spacing),
         "new_piece_m2d_errors": [p.get("quad_preview_error") for p in patches],
         "max_postcut_patch_linear_span": float(worst),
-        "linear_limit_two_satisfied": bool(worst <= 2.0 + 1e-10),
+        "linear_limit_two_satisfied": trial["all_pass"],
         "caution": "Independent per-patch M2D/M3D previews are computed on "
                    "the new BFF UVs. These UV islands are not globally packed "
                    "or integrated into K3D/T2D. Fabrication not certified.",
