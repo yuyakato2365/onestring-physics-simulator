@@ -112,8 +112,36 @@ def main():
         fidelity=check_paper_fidelity(state,p)
         report["paper_fidelity"]=dict(verified=fidelity.verified,
             stages=fidelity.stages,reasons=fidelity.reasons)
+        # This is the applied topology's authoritative count. The old
+        # "csf_split_count" field is not set by the Paper Split implementation,
+        # and incorrectly reported ZERO despite eight actual Lilium cuts.
+        split_records=state.mesh_2d_initial.metrics.get("csf_split_step_analysis",[])
+        split_count=int(state.mesh_2d_initial.metrics.get(
+            "csf_split_step_count",len(split_records)
+        ))
+        def count_components(mesh):
+            faces=np.asarray(mesh.faces,dtype=int)
+            owners={}
+            parent=list(range(len(faces)))
+            def root(i):
+                while parent[i]!=i:
+                    parent[i]=parent[parent[i]]
+                    i=parent[i]
+                return i
+            for face_id,face in enumerate(faces):
+                for vertex_id in face:
+                    vertex_id=int(vertex_id)
+                    if vertex_id in owners:
+                        parent[root(face_id)]=root(owners[vertex_id])
+                    else:
+                        owners[vertex_id]=face_id
+            return len({root(i) for i in range(len(faces))})
+        component_count=count_components(state.mesh_2d_initial)
         report["final_split"]=dict(
-            count=int(state.mesh_2d_initial.metrics.get("csf_split_count",0)),
+            count=split_count,
+            actual_topological_components=component_count,
+            expected_components_from_full_bisections=split_count+1,
+            topology_matches_recorded_splits=bool(component_count==split_count+1),
             area_span=float(state.mesh_2d_initial.metrics.get("csf_split_area_ratio_after",float("nan"))),
             stop_reason=state.mesh_2d_initial.metrics.get("csf_split_stopping_reason"),
         )
