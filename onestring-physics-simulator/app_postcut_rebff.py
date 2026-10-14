@@ -455,7 +455,11 @@ def _export_real_pipeline_zip(state, audit):
 
 
 def _show_existing_pipeline_state(state, audit):
-    st.success("既存のOneStringソルバーでT2D Dual Hingeまで計算が完了しました。")
+    if audit.get("postcut_rebff_unconverged_visualization_only", False):
+        st.error("これはCSF上限2を満たさない矩形BFFからの試験的なT2D表示です。"
+                 "製造可能な結果として使用しないでください。")
+    else:
+        st.success("既存のOneStringソルバーでT2D Dual Hingeまで計算が完了しました。")
     st.json({
         "M2D/M3D shared tile count": len(state.mesh_2d_initial.faces),
         "K3D tile count": len(state.mesh_3d_optimized.faces),
@@ -620,9 +624,20 @@ def main() -> None:
                "再BFF後は全領域のタイルを対応付きで統合し、元M2Dに近い"
                "タイル数になる共通格子間隔を探索します。"
                "K3D以降の制約違反や最適化失敗は隠さず表示します。")
+    opt_in_preview = False
     if not report["linear_limit_two_satisfied"]:
-        st.warning("まだCSFが2以下になっていないため、下流段階は実行できません。")
-    elif st.button("従来の全段階を計算してT2D Dual Hingeを表示", type="primary"):
+        st.warning(
+            "矩形境界BFFでCSFが2以下になっていません。"
+            "この状態のT2Dは製造可能な設計とは判定できません。"
+        )
+        opt_in_preview = st.checkbox(
+            "CSF未達でも、実験用としてT2D Dual Hingeの計算を試す"
+            "（品質・製造可能性は保証しない）",
+            value=False,
+        )
+    if (report["linear_limit_two_satisfied"] or opt_in_preview) and st.button(
+        "従来の全段階を計算してT2D Dual Hingeを表示", type="primary"
+    ):
         try:
             from postcut_rebff_full_pipeline import run_existing_pipeline_through_dual_hinge
             live_progress = st.empty()
@@ -634,6 +649,7 @@ def main() -> None:
                 state, audit = run_existing_pipeline_through_dual_hinge(
                     Path(mesh).expanduser().resolve(), data,
                     grid=int(grid), progress=on_full_progress,
+                    allow_csf_violation_preview=bool(opt_in_preview),
                 )
                 st.session_state["postcut_rebff_full_pipeline_state"] = state
                 st.session_state["postcut_rebff_full_pipeline_audit"] = audit
