@@ -91,3 +91,20 @@ python3 -m streamlit run app_postcut_rebff.py
 - ZIPには最終的な全領域の再BFF OBJ、新M3DタイルOBJ、全Split履歴と停止理由を出力します。
 
 **注意:** 反復が終了しても、各パッチのUV島は独立しています。K3D・T2Dには接続していません。またCSF比の判定は研究用の近似で、元論文の製造条件を完全に証明するものではありません。
+
+## BFF CLIが見つからないエラーの修復（Mac）
+
+実験用worktreeのルートで以下を実行します。元の研究用worktreeは変更しません。
+
+```bash
+cd ~/Documents/onestring-postcut-rebff/onestring-physics-simulator
+git fetch origin
+git switch --detach origin/agent/postcut-rebff-mac-20261014
+bash scripts/repair_postcut_bff_mac.sh
+source .venv-postcut-rebff/bin/activate
+python3 -m streamlit run app_postcut_rebff.py
+```
+
+修復スクリプトは標準BFF CLIと矩形BFF CLIをビルドして、両方の実行ファイルの存在と実行権限を確認します。ビルドが失敗した場合はターミナルの最後のエラーメッセージを確認してください。途中でエラーが起きた場合は、元のOptCuts環境には手を加えません。
+
+**既存OptCutsの扱い:** このアプリは公式BFFの新しい仮説を単独で検証する画面であり、`optcuts_backend.py` や旧`app.py`のOptCuts処理を削除しません。従来の研究用worktreeは別ディレクトリに残っています。再BFFのUVはK3D/T2Dへ統合していません。
