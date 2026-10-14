@@ -581,7 +581,14 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         # This OFF-mode CSF is a *linear* proxy; no paper Fig.18 area
         # upper bound has been geometrically certified.
         csf_split_bound_certified=False,
+        # Keep *area* and *linear* thresholds separate. The paper uses
+        # lambda<=2, but Supplement Fig.18 calls 2 the area-expansion
+        # limit; we must not silently certify both with one comparison.
         csf_split_candidate_area_bound_satisfied=bool(
+            paper_fidelity and after*after <= 2.0 + 1e-10
+            and not invalid_uv_count
+        ),
+        csf_split_candidate_linear_bound_satisfied=bool(
             paper_fidelity and not unresolved and not invalid_uv_count
         ),
         csf_split_component_area_ratio=[
