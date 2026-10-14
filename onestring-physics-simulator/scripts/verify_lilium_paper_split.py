@@ -92,6 +92,7 @@ def main() -> int:
         "stopping_reason": m.get("csf_split_stopping_reason"),
         "split_lines": m.get("csf_split_locations"),
         "cuts": cuts,
+        "best_single_cut_diagnostic": m.get("csf_split_initial_one_cut_exhaustive_audit"),
         "rejected_regions": m.get("csf_split_rejected_components"),
         "quad_sliver_diagnostics": {
             k: para.get(k) for k in (
@@ -116,6 +117,10 @@ def main() -> int:
     print("linear CSF:", report["linear_csf_before"], "->", report["linear_csf_after"])
     print("area ratio:", report["area_jacobian_span_after"])
     print("stopping reason:", report["stopping_reason"])
+    audit = report.get("best_single_cut_diagnostic") or {}
+    print("single-cut candidate count:", audit.get("complete_cut_candidate_count"))
+    print("best single-cut result:", audit.get("best_single_cut"))
+    print("any single cut reaches threshold:", audit.get("any_single_cut_below_threshold"))
     print("report:", args.report.resolve())
     if args.expect_splits is not None and len(records) != args.expect_splits:
         print("MISMATCH: split count differs from the requested paper benchmark", file=sys.stderr)
