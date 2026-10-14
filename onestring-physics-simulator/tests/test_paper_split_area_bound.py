@@ -1,4 +1,4 @@
-"""Regression tests for Sec.4.5-inspired area-span Split candidate policy.
+"""Regression tests for Sec.4.5-inspired conformal-scale Split candidates.
 
 Synthetic quad grids only; no paper-figure or full BFF result is certified.
 """
@@ -52,12 +52,12 @@ def _run(monkeypatch, by_col, paper=True):
     return splitting._split_mesh_single(vertices, faces, domain, params)
 
 
-def test_paper_split_reduces_component_area_span_and_stops(monkeypatch):
+def test_paper_split_reduces_linear_conformal_scale_span_and_stops(monkeypatch):
     _, _, records, metrics = _run(monkeypatch, [
         (1., 1.02), (1.1, 1.12), (4., 4.02), (4.1, 4.12)])
     assert len(records) == 1
     assert records[0]["worst_sigma_reduction"] > 0
-    assert metrics["max_csf_before_split"] > 4
+    assert 2 < metrics["max_csf_before_split"] < 2.1
     assert metrics["max_csf_after_split"] < 2
     assert metrics["csf_split_stopping_reason"] == "threshold_met"
     assert metrics["csf_split_candidate_area_bound_satisfied"]
@@ -83,8 +83,8 @@ def test_paper_does_not_adopt_non_improving_full_cut(monkeypatch):
     _, _, records, metrics = _run(monkeypatch, [
         (1., 1.05), (4., 5.), (4., 5.), (1., 1.05)])
     assert records == []
-    assert metrics["max_csf_before_split"] == pytest.approx(5.)
-    assert metrics["max_csf_after_split"] == pytest.approx(5.)
+    assert metrics["max_csf_before_split"] == pytest.approx(np.sqrt(5.))
+    assert metrics["max_csf_after_split"] == pytest.approx(np.sqrt(5.))
     assert metrics["csf_split_stopping_reason"] == "no_admissible_cut_remaining"
     assert not metrics["csf_split_candidate_area_bound_satisfied"]
 
@@ -95,3 +95,27 @@ def test_off_mode_keeps_its_original_invariant_behavior(monkeypatch):
     assert records == []
     assert metrics["csf_split_algorithm_same_as_normal"]
     assert not metrics["csf_split_paper_area_span_active"]
+
+
+def test_paper_distinguishes_area_jacobian_from_linear_scale(monkeypatch):
+    # Ratio of 3 in *area* corresponds to sqrt(3) in conformal length.
+    # It is not a Split trigger at the paper's lambda threshold 2.
+    _, _, records, metrics = _run(monkeypatch, [
+        (1., 1.), (1., 1.01), (2.95, 2.98), (2.99, 3.)])
+    assert records == []
+    assert metrics["max_csf_before_split"] == pytest.approx(np.sqrt(3.))
+    assert metrics["csf_split_stopping_reason"] == "threshold_met"
+    assert metrics["csf_split_linear_csf_area_relation"] == (
+        "lambda=sqrt(area Jacobian ratio)"
+    )
+    assert metrics["csf_split_area_ratio_after"] == pytest.approx(3.)
+
+
+def test_paper_one_split_when_ratio_crosses_linear_threshold(monkeypatch):
+    # A tiny margin above area ratio 4 requires a single topological cut.
+    _, _, records, metrics = _run(monkeypatch, [
+        (1., 1.), (1., 1.01), (4.01, 4.03), (4.05, 4.08)])
+    assert len(records) == 1
+    assert metrics["max_csf_before_split"] == pytest.approx(np.sqrt(4.08))
+    assert metrics["max_csf_after_split"] <= 2
+    assert metrics["csf_split_stopping_reason"] == "threshold_met"
