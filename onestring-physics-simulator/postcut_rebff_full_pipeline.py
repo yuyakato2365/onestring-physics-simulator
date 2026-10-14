@@ -114,13 +114,75 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
             "postcut_seam_uv_pair_count":0,
         }
     common_uv = rectangular_seam_compatible
-    spacing, expected = _find_tiling_spacing(
-        patches, params, n, baseline_tiles, progress
+    exact_rectangular_coverage = bool(
+        common_uv or (len(patches)==1 and patches[0].get(
+            "bff_metadata",{}).get("bff_rectangle_verified") is True)
     )
-    patch_meshes = []
-    for i, patch in enumerate(patches):
-        quad = _piece_m2d_only(patch, params, n, spacing)
-        patch_meshes.append(quad)
+    exact_grid_audit = {}
+    if exact_rectangular_coverage:
+        # A rectangle's sides are not necessarily integer multiples of the
+        # desired square pitch. Losing boundary cells is NEVER acceptable.
+        # All rectangles share one global set of grid lines, with their exact
+        # edges included as mandatory lines. Edge cells can be non-square.
+        from types import SimpleNamespace
+        from postcut_rebff_exact_rectangle_grid import (
+            choose_exact_grid, matching_seam_edges,
+        )
+        spacing, grids = choose_exact_grid(
+            patches, baseline_tiles, grid=n,
+        )
+        patch_meshes = [
+            SimpleNamespace(vertices=patch_grid["vertices"],
+                            faces=patch_grid["faces"])
+            for patch_grid in grids
+        ]
+        expected = sum(len(mesh.faces) for mesh in patch_meshes)
+        seam_pairs = matching_seam_edges(grids)
+        if common_uv:
+            from postcut_rebff_seam_registration import _boundary_point_groups
+            source_pairs = _boundary_point_groups(patches)
+            missing_pairs = [
+                pair for pair in source_pairs
+                if seam_pairs.get(pair,0)<1
+            ]
+            if missing_pairs:
+                raise RuntimeError(
+                    "One global grid failed to give exactly matching Split "
+                    f"seam panel edges for source-adjacent charts: {missing_pairs}."
+                )
+        widths = [
+            min(float(cell["min_cell_width"]),float(cell["min_cell_height"]))
+            for cell in grids
+        ]
+        exact_grid_audit = {
+            "postcut_omega_grid_policy":"exact_rectangle_coverage_shared_global_lines",
+            "postcut_omega_grid_no_cells_cropped":True,
+            "postcut_omega_rectangles_area_fraction_covered":[
+                float(cell["area_fraction_covered"]) for cell in grids
+            ],
+            "postcut_omega_grid_min_cell_size":float(min(widths)),
+            "postcut_omega_grid_min_cell_to_pitch_ratio":float(min(widths)/spacing),
+            "postcut_seam_exact_uv_edge_pairs":{
+                f"{a}-{b}":int(count) for (a,b),count in seam_pairs.items()
+            },
+            "postcut_omega_nonsquare_boundary_cells_possible":True,
+            "postcut_omega_boundary_tile_loss":0,
+        }
+    else:
+        # Explicitly unsupported research comparison: free-boundary BFF
+        # regions are not rectangles, and cannot be tiled without clipping
+        # by this rectangle-only generator.
+        spacing, expected = _find_tiling_spacing(
+            patches, params, n, baseline_tiles, progress,
+        )
+        patch_meshes = [
+            _piece_m2d_only(patch, params, n, spacing)
+            for patch in patches
+        ]
+        exact_grid_audit = {
+            "postcut_omega_grid_policy":"legacy_clipped_nonrectangular_comparison",
+            "postcut_omega_grid_no_cells_cropped":False,
+        }
     total = sum(len(m.faces) for m in patch_meshes)
     if total < 4 or total != expected:
         raise RuntimeError(f"Retiling count not consistent: {total}, expected {expected}")
@@ -196,6 +258,7 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
     patch_label_counts = np.bincount(np.asarray(tile_components, int)).tolist()
     audit = {
         **seam_uv_audit,
+        **exact_grid_audit,
         "postcut_rebff_integrated": True,
         "postcut_rebff_full_solver": True,
         "postcut_rebff_split_patch_count": len(patches),
@@ -250,8 +313,8 @@ def run_existing_pipeline_through_dual_hinge(
     params.collision_split_enabled = False
     params.max_csf_splits = 1
     params.reference_stop_on_required_split = False
-    # Retiling retains a near-baseline number of 2D panels; differences are
-    # explicitly audited. The tile count is never arbitrarily cut in half.
+    # Cover every rectangular Omega exactly. The desired tile count is only a
+    # density target; never delete boundary panels to hit a number.
     baseline = int(experiment["report"]["initial_m2d"]["quads"])
     packed = _assemble_patches(patches, params, int(grid), baseline, progress)
     packed["audit"]["postcut_rebff_csf_limit_satisfied"] = csf_converged
