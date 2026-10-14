@@ -95,3 +95,29 @@ def test_no_grid_cell_when_pitch_exceeds_rectangle_would_be_wrong():
     meshes=grid_at_pitch([p],pitch=.5)
     assert len(meshes[0]["faces"])==1
     assert meshes[0]["area_fraction_covered"]==pytest.approx(1.)
+
+
+
+def test_four_chart_source_corner_contacts_do_not_block_full_m2d_assembly():
+    # Reproduces the failure class from a recursively split rectangular Omega:
+    # adjacent patches must share the SAME lattice edges, but diagonally
+    # opposed charts share only one source vertex and MUST NOT demand an edge.
+    from postcut_rebff_full_pipeline import _assemble_patches
+    patches=[]
+    for i,(x0,y0) in enumerate([(0.,0.),(1.,0.),(0.,1.),(1.,1.)]):
+        p=patch(x0,x0+1.,y0,y0+1.)
+        # Each source chart was independently BFF'ed, with a different
+        # conformal uniform scale and UV-space translation.
+        p["new_uv"]=p["new_uv"]*(.5+i*.125)+[5*i,-3*i]
+        patches.append(p)
+    result=_assemble_patches(patches,None,8,64)
+    audit=result["audit"]
+    assert audit["postcut_rebff_final_quad_count"]>0
+    assert all(
+        abs(v-1.)<1e-10
+        for v in audit["postcut_omega_rectangles_area_fraction_covered"]
+    )
+    matched=audit["postcut_seam_exact_uv_edge_pairs"]
+    for pair in ("0-1","0-2","1-3","2-3"):
+        assert matched.get(pair,0)>0
+    assert "0-3" not in matched and "1-2" not in matched
