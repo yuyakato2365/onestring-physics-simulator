@@ -196,10 +196,16 @@ def iterative_postcut_rebff(
             break
 
         cut, children = accepted
+        before_worst = max(p["post"]["linear_span"] for p in pending)
+        parent_csf = float(patch["post"]["linear_span"])
         pending = [p for p in pending if p is not patch] + children
         worst = max(p["post"]["linear_span"] for p in pending)
         history.append(dict(
             step=len(history)+1, parent=patch["side"],
+            parent_linear_span=parent_csf,
+            all_patches_max_csf_before=float(before_worst),
+            all_patches_max_csf_improvement=float(before_worst - worst),
+            csf_improved=bool(worst < before_worst - 1e-9),
             axis=cut["axis"], uv_coordinate=float(cut["coordinate"]),
             selection=cut.get("proposal_method"),
             curvature_vertex=cut.get("curvature_vertex"),
