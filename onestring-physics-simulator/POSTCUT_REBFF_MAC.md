@@ -68,7 +68,7 @@ python3 -m streamlit run app_postcut_rebff.py
 
 1. OBJのパスが `~/Downloads/lilium.obj` か確認
 2. グリッドは `14`、切断位置は **曲率優先の最初のSplit**
-3. Split後のBFFは `automatic_reference`（自由境界）
+3. Split後のBFFは **`target_rectangle`（矩形境界・初期設定）**を選択。これは初回のSplit後だけでなく、その後の全Splitの子領域にも適用
 4. **最大Split数（初回を含む、既定8）**を選び、**Split → BFF再計算を収束まで繰り返す** を押す
 
 画面では各領域のUVとCSFを比較できます。**「従来の全段階を計算してT2D Dual Hingeを表示」**ボタンから、元のOneStringのK3D・T3D・K2D・T2D Dual Hingeソルバーを実行します。実行後は **ZIP保存** から新UV付きOBJと新M3D四角形OBJを取得できます。
@@ -113,3 +113,13 @@ python3 -m streamlit run app_postcut_rebff.py
 ## 実験結果と本番OptCutsモードの違い
 
 本実験は初期矩形BFF→Split→各領域再BFFを検証します。OptCutsのソースや既存の本番モードは変更しません。下流の最適化には従来のK3D・T3D・K2D・T2D Dual Hinge実装を呼びます。各領域に新しく敷く四角形グリッドは、元のM2Dに近い枚数となるよう共通間隔を探索します。ただしこれは厳密なタイル保存ではなく、元論文の手法の忠実な再現やT2Dの品質を保証しません。実際のソルバーが失敗した場合、成功したかのように表示せずエラーを表示します。
+
+## Split後にも矩形境界BFFを使う場合（現在の既定設定）
+
+- サイドバーの「Split後のBFF境界条件」は **「矩形境界（初期BFFと同じ・推奨）」** が既定値です。
+- 初回のBFF、最初のSplit後の両領域、追加Split後の両領域のすべてに矩形BFFを実行します。
+- 矩形の四隅の位相は初期BFFと各子領域で共通です。各子領域の境界上で四隅が独立に選ばれます。
+- 公式の矩形BFFアダプターが返すUVを検査し、4辺からなる矩形境界であると検証できない場合は失敗扱いとします。自由境界BFFへは自動的にフォールバックしません。
+- `comparison.json` には `postcut_bff: target_rectangle`、`all_postcut_patches_rectangle_verified: true` と、各SplitのCSF履歴が記録されます。
+- 矩形条件の方が自由境界より歪みが大きくなりやすく、Splitを繰り返してもCSF≤2へ収束する保証はありません。最大Split数、候補なし、BFF失敗で停止した場合は未達と表示します。
+- CSFが2を超えたままでも、**明示的に同意する試験用チェックボックス**を使うとK3D→T2D Dual Hingeの計算を試せます。ただし品質・製造可能性を示すものではなく、下流ソルバーが失敗すればエラーを表示します。
