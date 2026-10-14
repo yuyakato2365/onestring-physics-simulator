@@ -176,16 +176,34 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
             )
         else:
             new_uv, metadata = rebff(xyz, faces)
-        new_uv = np.asarray(new_uv, float)
-        if new_uv.shape != (len(xyz), 2) or not np.isfinite(new_uv).all():
+        raw_bff_uv = np.asarray(new_uv, float)
+        if raw_bff_uv.shape != (len(xyz), 2) or not np.isfinite(raw_bff_uv).all():
             raise ValueError("Official BFF returned invalid UV dimensions or nonfinite values")
         prior = field(xyz, uv_old, faces)
+        raw_post = field(xyz, raw_bff_uv, faces)
+        if corners_xyz is not None:
+            # Independently computed conformal rectangles do NOT, in
+            # general, share the same nonlinear seam parameterization.
+            # Every later Split must instead cut the already-registered
+            # global rectangular atlas. The raw official BFF remains a
+            # separate recorded diagnostic, not the solver's UV geometry.
+            from postcut_rebff_joint_atlas import seam_constrained_rectangular_atlas
+            new_uv, joint_audit=seam_constrained_rectangular_atlas(
+                xyz,faces,uv_old,raw_bff_uv
+            )
+        else:
+            new_uv=raw_bff_uv
+            joint_audit={}
         post = field(xyz, new_uv, faces)
         if not np.isfinite(post["linear_span"]):
-            raise ValueError("Postcut CSF is nonfinite")
+            raise ValueError("Postcut joint-atlas CSF is nonfinite")
         children.append(dict(
             side=patch["side"] + ("_positive" if positive else "_negative"),
             xyz=xyz, faces=faces, original_uv=uv_old, new_uv=new_uv,
+            independent_bff_uv=raw_bff_uv,
+            independent_bff_post=raw_post,
+            postcut_joint_atlas=bool(corners_xyz is not None),
+            postcut_joint_atlas_metadata=joint_audit,
             pre=prior, post=post, bff_metadata=metadata,
             seam_rectangle_corners_xyz=corners_xyz,
             seam_rectangle_corners_constrained=bool(corners_xyz is not None),
