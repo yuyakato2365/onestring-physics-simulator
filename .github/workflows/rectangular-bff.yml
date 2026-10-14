@@ -1,7 +1,7 @@
 name: Rectangular Boundary First Flattening
 on:
   push:
-    branches: [agent/paper-rectangular-bff-20261013]
+    branches: [agent/paper-rectangular-bff-20261013, agent/paper-split-area-verified-20261014]
     paths:
       - "onestring-physics-simulator/tools/bff_rectangle/**"
       - "onestring-physics-simulator/scripts/setup_bff_rectangle.py"
@@ -19,6 +19,7 @@ on:
       - "onestring-physics-simulator/pyproject.toml"
       - "onestring-physics-simulator/tests/test_rectangular_bff.py"
       - "onestring-physics-simulator/tests/test_paper_fidelity_computation_mode.py"
+      - "onestring-physics-simulator/tests/test_paper_split_area_bound.py"
       - ".github/workflows/rectangular-bff.yml"
   workflow_dispatch:
 jobs:
@@ -53,6 +54,7 @@ jobs:
             tests/test_split_process_view_pandas.py \
             tests/test_split_previous_acceptance.py \
             tests/test_paper_fidelity_computation_mode.py \
+            tests/test_paper_split_area_bound.py \
             tests/test_paper_pd_deployment.py
   compile-and-run:
     runs-on: ubuntu-latest
