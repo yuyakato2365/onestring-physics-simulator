@@ -514,7 +514,7 @@ def main() -> None:
         rect = st.text_input("矩形BFF実行ファイル（空欄なら自動検出）", value="")
         standard = st.text_input("通常BFF実行ファイル（空欄なら自動検出）", value="")
         phase = st.select_slider(
-            "矩形BFFの四隅の位相",
+            "矩形BFFの四隅の位相（初期・Split後）",
             options=[0.0, 0.0625, 0.125, 0.1875], value=0.0,
         )
         cut_mode = st.radio(
@@ -589,6 +589,8 @@ def main() -> None:
         f"最大CSF比={report['max_postcut_patch_linear_span']:.4f}、"
         f"停止理由={report['stop_reason']}"
     )
+    st.caption(f"初期BFF: {report['initial_bff']} ｜ Split後BFF: {report['postcut_bff']} ｜ "
+               f"全子領域の矩形検証: {report.get('all_postcut_patches_rectangle_verified')}")
     if passed:
         st.success("全領域のCSFが2以下になりました。" + summary)
     else:
