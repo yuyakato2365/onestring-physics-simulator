@@ -9,6 +9,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -65,6 +67,25 @@ def main() -> None:
         exe=build_dir/"Release/bff-rect-command-line.exe"
     if not exe.is_file():
         raise SystemExit("Compiled bff-rect-command-line executable was not produced")
+    # Build provenance must come from the EXACT upstream BFF source checkout.
+    # The output executable lives inside the OneString checkout; walking
+    # parents for .git would otherwise misidentify OneString's commit as BFF's.
+    proc = subprocess.run(
+        ["git", "-C", str(src), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=False,
+    )
+    bff_sha = proc.stdout.strip() if proc.returncode == 0 else "UNSPECIFIED_BY_BINARY"
+    digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+    manifest = dict(
+        official_bff_repository="https://github.com/GeometryCollective/boundary-first-flattening",
+        official_bff_source_commit_sha=bff_sha,
+        official_bff_source_directory=str(src),
+        bff_rect_executable_sha256=digest,
+    )
+    provenance = exe.with_name("bff-rect-command-line.provenance.json")
+    provenance.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print("Rectangular BFF upstream SHA:", bff_sha, flush=True)
+    print("Provenance manifest:", provenance, flush=True)
     print("Rectangular BFF executable:", exe, flush=True)
     print('export ONESTRING_BFF_RECTANGLE_EXECUTABLE="'+str(exe)+'"',flush=True)
 
