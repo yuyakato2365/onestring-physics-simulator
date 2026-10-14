@@ -1,4 +1,4 @@
-name: OneString complete Lilium geometry S-to-T3D and T2D
+name: OneString complete Lilium geometry grid14 S-to-T3D and T2D
 on:
   push:
     branches: [agent/paper-split-area-verified-20261014]
@@ -38,14 +38,14 @@ jobs:
       - name: Run actual full S to M2D M3D K3D T3D K2D T2D
         run: |
           python scripts/run_paper_full_pipeline.py /tmp/lilium.obj \
-            --grid 7 --corner-selection min_whole_source_area_span_4phase \
+            --grid 14 --corner-selection min_whole_source_area_span_4phase \
             --max-3d-iterations 10 --max-2d-iterations 10 \
-            --output output/lilium_full_geometry
+            --output output/lilium_full_geometry_grid14
       - name: Upload actual stage geometry and failure diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: onestring-Lilium-full-stage-geometry
+          name: onestring-Lilium-grid14-full-stage-geometry
           path: |
-            onestring-physics-simulator/output/lilium_full_geometry/
+            onestring-physics-simulator/output/lilium_full_geometry_grid14/
           if-no-files-found: warn
