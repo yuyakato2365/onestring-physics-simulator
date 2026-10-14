@@ -146,9 +146,28 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
                 if seam_pairs.get(pair,0)<1
             ]
             if missing_pairs:
+                # The grid already includes every rectangle boundary as a
+                # mandatory line. If a real positive-length 3D Split seam
+                # has no coincident UV edge, the independent rectangular BFF
+                # charts themselves are geometrically incompatible. Changing
+                # pitch or suppressing this assertion cannot repair it.
+                mismatch = seam_uv_audit.get(
+                    "postcut_seam_interior_correspondence_by_pair",{}
+                )
+                physical_detail = [{
+                    "patches":list(pair),
+                    "source_seam_samples":len(source_pairs[pair]),
+                    "source_to_uv_max_gap":mismatch.get(
+                        f"{pair[0]}-{pair[1]}",{}
+                    ).get("max_uv_difference"),
+                } for pair in missing_pairs]
                 raise RuntimeError(
-                    "One global grid failed to give exactly matching Split "
-                    f"seam panel edges for source-adjacent charts: {missing_pairs}."
+                    "Real positive-length 3D Split seams cannot be represented "
+                    "by coincident edges in the independently rectangular-BFF "
+                    "UV charts. This is a chart compatibility problem, NOT "
+                    "an Omega coverage/grid pitch problem. Physical pairs: "
+                    f"{physical_detail}. Joint seam-constrained reparameterization "
+                    "is required; silently dropping source seam contacts is forbidden."
                 )
         widths = [
             min(float(cell["min_cell_width"]),float(cell["min_cell_height"]))
