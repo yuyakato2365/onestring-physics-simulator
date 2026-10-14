@@ -56,6 +56,27 @@ Stages actually selected:
   Lift optimization. This is not the independent Native total-rope-length
   solver and does not use IPC.
 
+## Lilium single-Split figure comparison (explicit benchmark)
+
+With Paper mode ON, upload a file named `lilium.obj`. The UI offers
+**Lilium figure comparison: one full Split**, enabled by default for that
+filename. It creates exactly one topology-separating grid-column cut
+approximately 30% of the grid width from the left, following the visual
+placement of the long slit in the supplied Lilium published layout.
+It keeps complete grid connectivity on each side and records the cut
+in the Split Map and `output/paper_reference_diagnostics.json`.
+
+**This is a figure-conditioned comparator, not an author's automated
+Split optimizer reproduction.** In particular, it does not certify
+`sigma<=2` and it is possible for residual CSF to remain above two.
+The diagnostic keys `csf_split_lilium_one_split_reference`,
+`csf_split_reference_target_count_met`,
+`csf_split_reference_is_paper_solver_fidelity`,
+`max_csf_after_split` and `csf_split_status` make this explicit.
+Disable the checkbox for the general curvature/area-span research solver.
+Never imply that the picture-matched single cut alone proves paper
+fidelity, and do not apply it silently to other input shapes.
+
 ## Important, unresolved fidelity gaps
 
 A fixed UV map does **not** change pointwise Jacobian just because its
