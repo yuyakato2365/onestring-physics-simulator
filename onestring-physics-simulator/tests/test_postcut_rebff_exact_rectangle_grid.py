@@ -121,3 +121,59 @@ def test_four_chart_source_corner_contacts_do_not_block_full_m2d_assembly():
     for pair in ("0-1","0-2","1-3","2-3"):
         assert matched.get(pair,0)>0
     assert "0-3" not in matched and "1-2" not in matched
+
+
+
+def test_recursive_joint_atlas_seam_edges_and_physical_points_match():
+    """A second-stage T-junction keeps every S seam physically registered.
+
+    Raw child BFFs deliberately have independent nonlinear seam sampling.
+    A mere per-island similarity cannot align those seam interior vertices.
+    """
+    from postcut_rebff_iterative import _split_and_rebff
+    from postcut_rebff_joint_atlas import verify_joint_source_seams
+    from postcut_rebff_full_pipeline import _assemble_patches
+    from postcut_rebff_seam_registration import _boundary_point_groups
+
+    xyz=np.array([[i/6.,j/6.,0.] for j in range(7) for i in range(7)])
+    faces=np.array([
+        [7*j+i,7*j+i+1,7*(j+1)+i+1]
+        for j in range(6) for i in range(6)
+    ]+[
+        [7*j+i,7*(j+1)+i+1,7*(j+1)+i]
+        for j in range(6) for i in range(6)
+    ],int)
+    original={"xyz":xyz,"new_uv":xyz[:,:2].copy(),
+              "faces":faces,"side":"initial"}
+    call=[0]
+    def nonlinear_raw_bff(x,f,*,rectangle_corner_positions):
+        call[0]+=1
+        uv=np.asarray(x[:,:2],float).copy()
+        uv[:,0]=uv[:,0]*(1.2+0.07*call[0])+5.*call[0]
+        uv[:,1]=uv[:,1]*(1.4+0.03*call[0])+.025*np.sin(
+            2*np.pi*uv[:,1]
+        )-3.*call[0]
+        return uv,{"bff_rectangle_verified":True}
+    nonlinear_raw_bff.seam_corners_required=True
+    first=_split_and_rebff(original,"row",.5,nonlinear_raw_bff)
+    assert len(first)==2
+    pieces=[]
+    for parent in first:
+        pieces.extend(_split_and_rebff(
+            parent,"col",.5,nonlinear_raw_bff
+        ))
+    assert len(pieces)==4
+    assert all(p["postcut_joint_atlas"] for p in pieces)
+    assert all(p["independent_bff_post"]["linear_span"]>0 for p in pieces)
+    source_pairs=_boundary_point_groups(pieces)
+    assert len(source_pairs)>=4
+    seam=verify_joint_source_seams(pieces)
+    assert seam["postcut_seam_uv_full_physical_correspondence_verified"]
+    assert seam["postcut_seam_interior_correspondence_error_max"]<1e-8
+    packed=_assemble_patches(pieces,None,8,64)
+    matched=packed["audit"]["postcut_seam_exact_uv_edge_pairs"]
+    assert all(matched.get(f"{a}-{b}",0)>=1 for a,b in source_pairs)
+    assert all(
+        abs(fraction-1.)<1e-10 for fraction in
+        packed["audit"]["postcut_omega_rectangles_area_fraction_covered"]
+    )
