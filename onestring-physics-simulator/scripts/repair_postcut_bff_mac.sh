@@ -71,10 +71,10 @@ if [[ ! -x "$cli" ]]; then
   exit 1
 fi
 
-if [[ ! -x "$rectangle_cli" ]]; then
-  echo "Rectangular BFF adapter also missing; building it."
-  python3 scripts/setup_bff_rectangle.py --source "$source_dir" --jobs 4
-fi
+# Rebuild even if an older rectangle CLI is present: new versions support
+# explicit 3D boundary-corner coordinates (--corner-xyz). CMake is incremental.
+echo "Building/updating rectangular BFF adapter (including source-boundary corners)."
+python3 scripts/setup_bff_rectangle.py --source "$source_dir" --jobs 4
 if [[ ! -x "$rectangle_cli" ]]; then
   echo "Expected rectangle BFF CLI is missing after compilation: $rectangle_cli" >&2
   exit 1
