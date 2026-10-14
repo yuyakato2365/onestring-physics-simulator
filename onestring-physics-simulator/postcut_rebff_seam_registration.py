@@ -351,14 +351,39 @@ def align_rectangular_bff_charts_on_source_seam(patches):
     used={root}
     history=[]
 
-    def get_uv_at_source(patch_index,point):
+    # A recursive T-junction can terminate inside an older boundary EDGE.
+    # Interpolate the physical point on that source edge instead of snapping
+    # to an unrelated nearest vertex of the older re-BFF chart.
+    boundary_cache={}
+    def get_uv_at_source(patch_index,point,values=None):
         xyz=np.asarray(patches[patch_index]["xyz"],float)
-        distances=np.linalg.norm(xyz-point,axis=1)
-        where=int(np.argmin(distances))
+        if patch_index not in boundary_cache:
+            from onestring_physics.reference_bff import validate_reference_mesh
+            boundary_cache[patch_index]=np.asarray(
+                validate_reference_mesh(
+                    xyz,np.asarray(patches[patch_index]["faces"],int)
+                )["boundary_loops"][0],int
+            )
+        loop=boundary_cache[patch_index]
+        starts=xyz[loop]
+        ends=xyz[np.roll(loop,-1)]
+        direction=ends-starts
+        denom=np.sum(direction*direction,axis=1)
+        t=np.clip(np.sum((np.asarray(point)-starts)*direction,axis=1)/
+                  np.maximum(denom,1e-30),0.,1.)
+        candidate=starts+t[:,None]*direction
+        residuals=np.linalg.norm(candidate-np.asarray(point),axis=1)
+        nearest=int(np.argmin(residuals))
         tol=1e-7*max(1.,float(np.max(np.ptp(xyz,axis=0))))
-        if distances[where]>tol:
-            raise RuntimeError("Physical 3D seam endpoint absent from a BFF child")
-        return raw[patch_index][where]
+        if residuals[nearest]>tol:
+            raise RuntimeError(
+                "Physical Split seam point is absent from this chart's "
+                f"3D boundary (distance={residuals[nearest]:.6g})"
+            )
+        u=raw[patch_index] if values is None else np.asarray(values,float)
+        v0=int(loop[nearest])
+        v1=int(loop[(nearest+1)%len(loop)])
+        return (1.-t[nearest])*u[v0]+t[nearest]*u[v1]
 
     while len(used)<len(patches):
         active=[]
@@ -367,21 +392,19 @@ def align_rectangular_bff_charts_on_source_seam(patches):
             if (a in used)==(b in used) or len(seam)<2:
                 continue
             base,child=(a,b) if a in used else (b,a)
-            # Farthest physically shared pair are the seam endpoints.
-            distances=np.sum((seam[:,None,:]-seam[None,:,:])**2,axis=2)
+            # Farthest projected UV points delimit the shared RECTANGLE-edge
+            # interval, even when its 3D source curve bends across triangles.
+            base_seam_uv=np.asarray([
+                get_uv_at_source(base,point,transformed[base]) for point in seam
+            ])
+            distances=np.sum(
+                (base_seam_uv[:,None,:]-base_seam_uv[None,:,:])**2,axis=2
+            )
             i,j=np.unravel_index(np.argmax(distances),distances.shape)
             if i==j:
                 continue
             p,q=seam[i],seam[j]
-            target=np.asarray([
-                get_uv_at_source(base,p),get_uv_at_source(base,q)
-            ])
-            if base in transformed:
-                # Raw/base similarity already applied. Locate the explicit
-                # seam points in transformed vertex coordinates.
-                xyz=np.asarray(patches[base]["xyz"],float)
-                ids=[int(np.argmin(np.linalg.norm(xyz-pt,axis=1))) for pt in (p,q)]
-                target=transformed[base][ids]
+            target=base_seam_uv[[i,j]]
             source=np.asarray([
                 get_uv_at_source(child,p),get_uv_at_source(child,q)
             ])
@@ -396,16 +419,13 @@ def align_rectangular_bff_charts_on_source_seam(patches):
             R=np.array([[c,si],[-si,c]],float)
             scale=na/nb
             mapped=(raw[child]-source[0])@R*scale+target[0]
-            # Rectangular BFF guarantees straight-line seam ONLY when its
-            # endpoints are consecutive 90-degree rectangle corners.
-            xyz=np.asarray(patches[child]["xyz"],float)
-            uv=np.asarray(raw[child],float)
-            seam_ids=np.array([
-                int(np.argmin(np.linalg.norm(xyz-pt,axis=1)))
-                for pt in seam
+            # Test the ACTUAL physical boundary correspondence, including
+            # any virtual seam endpoint inside a T-junction boundary edge.
+            seam_uv=np.asarray([
+                get_uv_at_source(child,point) for point in seam
             ])
             d=np.abs(np.cross(
-                source[1]-source[0],uv[seam_ids]-source[0]
+                source[1]-source[0],seam_uv-source[0]
             ))/nb
             relative=float(np.max(d)/nb)
             if relative>1e-5:
@@ -455,21 +475,8 @@ def align_rectangular_bff_charts_on_source_seam(patches):
                               history[0]["moving_piece"])))
     seam=seams[first_pair]
     end0=seam[0]
-    root_vertex=np.asarray(patches[root]["xyz"],float)
-    idx=int(np.argmin(np.linalg.norm(root_vertex-end0,axis=1)))
-    shift=np.zeros(2)
-    uvzero=transformed[root][idx]
-    neighbor=transformed[root]
-    # BFF rectangle sides are parallel to a coordinate axis.
-    other_shared=seam[-1]
-    jdx=int(np.argmin(np.linalg.norm(root_vertex-other_shared,axis=1)))
-    tangent=neighbor[jdx]-neighbor[idx]
-    if abs(tangent[0])<abs(tangent[1]):
-        shift[0]=-uvzero[0]
-        shift[1]=-uvzero[1]
-    else:
-        shift[0]=-uvzero[0]
-        shift[1]=-uvzero[1]
+    uvzero=get_uv_at_source(root,end0,transformed[root])
+    shift=-uvzero
     for i,patch in enumerate(patches):
         patch["new_uv_before_seam_alignment"]=raw[i]
         patch["new_uv"]=transformed[i]+shift
@@ -480,15 +487,13 @@ def align_rectangular_bff_charts_on_source_seam(patches):
     seam_interior_mismatch = {}
     global_max=0.
     for (a,b),points in seams.items():
-        xa=np.asarray(patches[a]["xyz"],float)
-        xb=np.asarray(patches[b]["xyz"],float)
         ua=np.asarray(patches[a]["new_uv"],float)
         ub=np.asarray(patches[b]["new_uv"],float)
         deviations=[]
         for source_point in points:
-            ia=int(np.argmin(np.linalg.norm(xa-source_point,axis=1)))
-            ib=int(np.argmin(np.linalg.norm(xb-source_point,axis=1)))
-            deviations.append(float(np.linalg.norm(ua[ia]-ub[ib])))
+            pa=get_uv_at_source(a,source_point,ua)
+            pb=get_uv_at_source(b,source_point,ub)
+            deviations.append(float(np.linalg.norm(pa-pb)))
         maximum=float(max(deviations)) if deviations else 0.
         global_max=max(global_max,maximum)
         seam_interior_mismatch[f"{a}-{b}"]={
