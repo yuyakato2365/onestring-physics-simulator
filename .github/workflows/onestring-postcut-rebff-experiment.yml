@@ -48,10 +48,18 @@ jobs:
           python scripts/test_lilium_postcut_bff_hypothesis.py /tmp/lilium.obj \
             --bff-executable /tmp/official-bff-cli-build/bff-command-line \
             --report output/lilium_postcut_bff_hypothesis.json
+      - name: Exhaustively evaluate every initial full-grid cut with independent free-BFF patches
+        run: |
+          python scripts/test_lilium_postcut_bff_hypothesis.py /tmp/lilium.obj \
+            --bff-executable /tmp/official-bff-cli-build/bff-command-line \
+            --all-initial-grid-cuts --free-only \
+            --report output/lilium_all_initial_grid_cut_free_bff_bounds.json
       - name: Upload diagnostic regardless of result
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: postcut-rebff-research-diagnostic
-          path: onestring-physics-simulator/output/lilium_postcut_bff_hypothesis.json
+          path: |
+            onestring-physics-simulator/output/lilium_postcut_bff_hypothesis.json
+            onestring-physics-simulator/output/lilium_all_initial_grid_cut_free_bff_bounds.json
           if-no-files-found: warn
