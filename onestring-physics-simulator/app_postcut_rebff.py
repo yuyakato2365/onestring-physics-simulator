@@ -254,10 +254,24 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         source_vertex, curvature = None, None
 
     def _rebff(x, f):
+        # Every newly created child uses a freshly solved rectangular boundary.
+        # The iterative driver invokes this callback for BOTH children on
+        # EVERY accepted cut (not just the initial split).
         bff = run_official_bff(
             x, f, executable=standard_path,
-            rectangle_executable=rectangle_path, boundary_policy=post_policy,
+            rectangle_executable=rectangle_path,
+            rectangle_corner_phase_fraction=(
+                float(phase) if post_policy == "target_rectangle" else 0.0
+            ),
+            boundary_policy=post_policy,
         )
+        if post_policy == "target_rectangle":
+            if (bff.metrics.get("bff_boundary_policy_effective") != "target_rectangle"
+                    or bff.metrics.get("bff_rectangle_verified") is not True):
+                raise RuntimeError(
+                    "Split child did not return geometrically verified rectangular BFF; "
+                    "refusing fallback to free-boundary parameterization."
+                )
         return np.asarray(bff.uv_vertices, float), bff.metrics
 
     trial = iterative_postcut_rebff(
@@ -291,6 +305,10 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         "official_bff_executable": standard_path,
         "rectangular_bff_executable": rectangle_path,
         "initial_bff": "target_rectangle", "postcut_bff": post_policy,
+        "all_postcut_patches_rectangle_verified": all(
+            p.get("bff_metadata", {}).get("bff_rectangle_verified") is True
+            for p in patches
+        ) if post_policy == "target_rectangle" else None,
         "rectangle_corner_phase": float(phase),
         "split_count": trial["split_count"],
         "split_history": trial["split_history"],
@@ -323,9 +341,9 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         "new_piece_m2d_errors": [p.get("quad_preview_error") for p in patches],
         "max_postcut_patch_linear_span": float(worst),
         "linear_limit_two_satisfied": trial["all_pass"],
-        "caution": "Independent per-patch M2D/M3D previews are computed on "
-                   "the new BFF UVs. These UV islands are not globally packed "
-                   "or integrated into K3D/T2D. Fabrication not certified.",
+        "caution": "Intermediate per-island M2D/M3D previews are not the full "
+                   "design. Full-solver K3D/T3D/K2D/T2D is available separately; "
+                   "its fabrication quality is not certified.",
     }
     return {"report": report, "patches": patches, "initial": {
         "xyz": xyz, "uv": uv, "faces": faces,
@@ -483,7 +501,7 @@ def _show_existing_pipeline_state(state, audit):
 def main() -> None:
     st.set_page_config(page_title="OneString Split → re-BFF", layout="wide")
     st.title("OneString: Split後のBFF再計算（Mac実験モード）")
-    st.caption("矩形BFF → 初回Split → CSF>2の領域を追加Split → 各領域で公式BFFを反復再計算")
+    st.caption("矩形BFF → Split → 各子領域を矩形境界BFFで再展開 → CSF>2なら追加Splitして再び矩形BFF")
     st.warning(
         "研究用の独立した実験画面です。新しいUVとOBJを実際に生成しますが、"
         "領域別プレビューはK3D/T2Dではありません。下の既存ソルバー連携を実行すると実際のDual Hinge結果を計算します。"
@@ -507,12 +525,20 @@ def main() -> None:
         if cut_mode == "手動指定":
             axis = st.selectbox("切断方向", ["row", "col"])
             fraction = st.slider("UV境界幅に対する切断位置", 0.05, 0.95, 0.5, 0.01)
+        # Keep a free-boundary comparison only as an explicit optional mode;
+        # never choose it silently when the user wants rectangles.
         post_policy = st.selectbox(
             "Split後のBFF境界条件",
-            ["automatic_reference", "target_rectangle"],
+            ["target_rectangle", "automatic_reference"],
             index=0,
-            help="自由境界BFF（推奨の検証候補）か、再度矩形BFFにするかを比較",
+            format_func=lambda value: (
+                "矩形境界（初期BFFと同じ・推奨）"
+                if value == "target_rectangle" else
+                "自由境界（比較実験のみ）"
+            ),
+            help="既定は矩形境界。初回および追加Split後、各子領域を公式の矩形BFFアダプターで解き直します。",
         )
+        st.caption("矩形境界モードではすべての子領域で矩形性を幾何学的に検査します。")
         max_splits = int(st.number_input(
             "最大Split数（初回を含む）", min_value=1, max_value=64, value=8, step=1,
             help="CSF>2の領域だけを切断。切れない・予算到達なら停止理由を表示。",
