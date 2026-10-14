@@ -325,7 +325,7 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
 
     worst = max(p["post"]["linear_span"] for p in patches)
     report = {
-        "experiment": "Iterative high-curvature cuts and independent official BFF until CSF <= 2",
+        "experiment": "Initial rectangular BFF CSF gate -> grid-aligned cuts -> repeated rectangular BFF until CSF <= 2",
         "not_paper_author_verified": True,
         "not_applied_to_K3D_or_T2D": True,
         "input_mesh": str(mesh_path), "grid": int(grid),
@@ -584,6 +584,8 @@ def main() -> None:
         start = st.button("Split → BFF再計算を収束まで繰り返す", type="primary")
 
     if start:
+        # Do not show a stale run as success when the new grid/BFF attempt fails.
+        st.session_state.pop("postcut_rebff_data", None)
         st.session_state.pop("postcut_rebff_full_pipeline_state", None)
         st.session_state.pop("postcut_rebff_full_pipeline_audit", None)
         path = Path(mesh).expanduser().resolve()
