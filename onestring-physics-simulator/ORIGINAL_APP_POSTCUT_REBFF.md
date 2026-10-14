@@ -59,3 +59,12 @@ python3 -m streamlit run app.py
 ```
 
 再BFFを有効にしたまま「Run OneString pipeline」を再実行して、View stage の **T2D Dual Hinge** を確認します。以前の結果がStreamlitセッションに残っていても再計算しない限り新しい配置にはなりません。
+
+## 共通境界を保った再BFF矩形と共有グリッド（追加修正）
+
+- 初回のS→ΩとGrid Splitの後、**実際のSの同一切断線の両端を、切られた2領域のBFF矩形の角として固定**します。もはや各領域の境界周長を独立に4等分して縫い目の位置をずらしません。
+- 各BFF出力は一様倍率・回転・平行移動（相似変換）のみで物理的なSplit境界の両端を一致させます。異方性のある伸縮や個々のUV三角形の変形はしないため、計測した線形CSF比は変わりません。
+- それらの矩形UVに**共通原点・共通間隔の格子**を敷き、Split境界の両側に同じ座標のM2Dグリッド頂点が2つ以上存在するかを検査します。対応がなければT2Dへの成功として扱いません。
+- T2D Dual Hingeの最終レイアウトでは、近傍3D頂点の曖昧な推定に代わり、**共有M2D格子で一致していた同じ頂点**を優先して剛体位置合わせします。その後のGap graph、Lift points、String pathも再生成します。
+- `postcut_seam_shared_grid_vertex_count` が正の値、`split_seam_alignment: shared_source_seam_grid_rigid_SE2` であればこの経路が使用されています。`split_seam_fit_rms_relative_to_tile` は最終剛体位置合わせの残差です。
+- 注意：共通UV格子の座標が同じでも、独立BFFでのSへの逆写像が縫い目上で完全に同一の3D点を表すとは限りません。**最終T2D全角点の一致と製造可能性を保証するのは、追加の3D縫い目対応・ヒンジ最適化の検証が必要です。**
