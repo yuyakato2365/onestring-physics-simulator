@@ -20,7 +20,7 @@ export CMAKE_PREFIX_PATH="$(brew --prefix suite-sparse);$(brew --prefix openblas
 # It can resolve the libraries while missing SuiteSparse's CHOLMOD headers.
 # Give Clang the ACTUAL cholmod.h directory instead of assuming include paths.
 suitesparse_prefix="$(brew --prefix suite-sparse)"
-cholmod_header="$(find "$suitesparse_prefix" -type f -name cholmod.h -print -quit)"
+cholmod_header="$(find -L "$suitesparse_prefix" -type f -name cholmod.h -print -quit)"
 if [[ -z "$cholmod_header" ]]; then
   echo "SuiteSparse is installed but cholmod.h is missing beneath:" >&2
   echo "  $suitesparse_prefix" >&2
