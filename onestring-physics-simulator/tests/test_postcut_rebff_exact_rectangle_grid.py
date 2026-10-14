@@ -177,3 +177,57 @@ def test_recursive_joint_atlas_seam_edges_and_physical_points_match():
         abs(fraction-1.)<1e-10 for fraction in
         packed["audit"]["postcut_omega_rectangles_area_fraction_covered"]
     )
+
+
+
+def test_eight_recursive_rectangles_retain_full_source_seams():
+    from postcut_rebff_iterative import _split_and_rebff
+    from postcut_rebff_joint_atlas import verify_joint_source_seams
+    from postcut_rebff_full_pipeline import _assemble_patches
+    from postcut_rebff_seam_registration import _boundary_point_groups
+
+    xyz=np.array([[i/8.,j/8.,0.] for j in range(9) for i in range(9)])
+    triangles=np.array([
+        [9*j+i,9*j+i+1,9*(j+1)+i+1]
+        for j in range(8) for i in range(8)
+    ]+[
+        [9*j+i,9*(j+1)+i+1,9*(j+1)+i]
+        for j in range(8) for i in range(8)
+    ],int)
+    root={"xyz":xyz,"new_uv":xyz[:,:2].copy(),
+          "faces":triangles,"side":"initial"}
+    call=[0]
+    def rebff(x,f,*,rectangle_corner_positions):
+        call[0]+=1
+        uv=np.asarray(x[:,:2],float).copy()
+        uv[:,0]=uv[:,0]*(1.3+.01*call[0])+3.*call[0]
+        uv[:,1]=uv[:,1]*(1.7+.02*call[0])+0.03*np.sin(
+            np.pi*uv[:,1]
+        )-5.*call[0]
+        return uv,{"bff_rectangle_verified":True}
+    rebff.seam_corners_required=True
+    first=_split_and_rebff(root,"row",.5,rebff)
+    four=[]
+    for p in first:
+        four.extend(_split_and_rebff(p,"col",.5,rebff))
+    eight=[]
+    for i,p in enumerate(four):
+        lo=np.min(p["new_uv"],axis=0)
+        hi=np.max(p["new_uv"],axis=0)
+        axis="row" if i%2==0 else "col"
+        dim={"row":1,"col":0}[axis]
+        eight.extend(_split_and_rebff(
+            p,axis,float((lo[dim]+hi[dim])/2.),rebff
+        ))
+    assert len(eight)==8
+    seams=_boundary_point_groups(eight)
+    assert len(seams)>=8
+    metrics=verify_joint_source_seams(eight)
+    assert metrics["postcut_seam_interior_correspondence_error_max"]<1e-8
+    packed=_assemble_patches(eight,None,12,144)
+    matched=packed["audit"]["postcut_seam_exact_uv_edge_pairs"]
+    assert all(matched.get(f"{a}-{b}",0)>0 for a,b in seams)
+    assert all(
+        abs(coverage-1.)<1e-10 for coverage in
+        packed["audit"]["postcut_omega_rectangles_area_fraction_covered"]
+    )
