@@ -15,6 +15,15 @@ fi
 
 brew install cmake suite-sparse openblas python@3.11
 export CMAKE_PREFIX_PATH="$(brew --prefix suite-sparse);$(brew --prefix openblas)"
+suitesparse_prefix="$(brew --prefix suite-sparse)"
+cholmod_header="$(find "$suitesparse_prefix" -type f -name cholmod.h -print -quit)"
+if [[ -z "$cholmod_header" ]]; then
+  echo "cholmod.h not found in Homebrew SuiteSparse: $suitesparse_prefix" >&2
+  echo "Try: brew reinstall suite-sparse" >&2
+  exit 1
+fi
+cholmod_include="$(dirname "$cholmod_header")"
+echo "Using official SuiteSparse CHOLMOD header: $cholmod_header"
 if ! command -v python3.11 >/dev/null 2>&1; then
   echo "Could not find python3.11 after Homebrew installation." >&2
   exit 1
@@ -36,7 +45,8 @@ fi
 
 cmake -S "$bff_src" -B "$bff_src/build" \
   -DBFF_BUILD_GUI=OFF -DBFF_BUILD_CLI=ON \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  "-DCMAKE_CXX_FLAGS=-I$cholmod_include -include cstdint"
 cmake --build "$bff_src/build" --target bff-command-line --parallel 4
 python scripts/setup_bff_rectangle.py --source "$bff_src" --jobs 4
 
