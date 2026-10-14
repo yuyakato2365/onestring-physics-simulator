@@ -281,6 +281,25 @@ jobs:
                 audit_rect["postcut_rebff_final_quad_count"],
                 audit_rect["postcut_omega_rectangles_area_fraction_covered"],
                 audit_rect["postcut_seam_exact_uv_edge_pairs"],flush=True)
+          # Run the actual existing Dual Hinge solver for the exact-coverage
+          # rectangular charts. CSF violation is opt-in research preview ONLY.
+          # This is intentionally a separate validation from the free-boundary
+          # baseline above.
+          rect_state,rect_final_audit=run_existing_pipeline_through_dual_hinge(
+              mesh,rectangular,grid=14,base_params=solver_params,
+              allow_csf_violation_preview=True,
+              progress=lambda stage,fraction,msg: print(
+                  "RECT-T2D STAGE",stage,round(fraction,3),msg,flush=True),
+          )
+          assert rect_final_audit["postcut_omega_grid_no_cells_cropped"] is True
+          assert rect_final_audit["postcut_rebff_unconverged_visualization_only"] is True
+          assert len(rect_state.tiles_2d_dual_hinge.vertices)==rect_final_audit["postcut_rebff_final_quad_count"]
+          print("LILIUM RECTANGULAR FULL T2D",
+                rect_final_audit["split_seam_alignment"],
+                rect_final_audit["split_seam_fit_rms_relative_to_tile"],
+                rect_final_audit["postcut_seam_interior_correspondence_error_max"],
+                rect_final_audit["postcut_omega_rectangles_area_fraction_covered"],
+                flush=True)
           import numpy as np
           # Real BFF initial Omega fits corners to S rather than forcing
           # every initial corner to a quarter of source perimeter.
