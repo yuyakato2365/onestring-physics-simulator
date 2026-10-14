@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
             for (int d=0; d<3; ++d) {
                 char* end=nullptr;
                 values[d]=std::strtod(argv[5+3*k+d],&end);
-                if (!end || *end!='\\0' || !std::isfinite(values[d])) {
+                if (!end || *end!='\0' || !std::isfinite(values[d])) {
                     std::cerr << "Invalid explicit boundary corner coordinate\n";
                     return EXIT_FAILURE;
                 }
