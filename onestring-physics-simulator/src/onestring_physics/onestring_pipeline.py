@@ -2748,8 +2748,10 @@ def _build_surface_parameterization(surface, target, grid, params):
             "parameterization_exactness_label": "official_bff_backend",
             "parameterization_warning": (
                 "BFF rectangle with four prescribed 90-degree exterior angles; "
-                "the four corner locations are selected by boundary arclength "
-                "and are not specified by the OneString authors."
+                + ("corner positions selected experimentally to match the 3D source boundary. "
+                   if selection_mode=="source_boundary_shape_fit" else
+                   "corner positions selected experimentally from boundary arclength. ")
+                + "This corner selection is not specified by the OneString authors."
                 if boundary_policy=="target_rectangle" else
                 "OneString boundary condition is UNSPECIFIED_IN_PAPER; official BFF CLI policy is recorded explicitly."
             ),
