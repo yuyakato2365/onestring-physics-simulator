@@ -23,13 +23,17 @@
 using namespace bff;
 
 int main(int argc, char** argv) {
-    if ((argc != 4 && argc != 6) || std::string(argv[3]) != "--writeOnlyUVs" ||
+    const bool customCornerPositions =
+        argc == 17 && std::string(argv[4]) == "--corner-xyz";
+    if ((argc != 4 && argc != 6 && !customCornerPositions) ||
+        std::string(argv[3]) != "--writeOnlyUVs" ||
         (argc == 6 && std::string(argv[4]) != "--corner-phase")) {
-        std::cerr << "Usage: bff-rect-command-line input.obj output.obj --writeOnlyUVs [--corner-phase frac]\\n";
+        std::cerr << "Usage: bff-rect-command-line input.obj output.obj --writeOnlyUVs "
+                  << "[--corner-phase frac | --corner-xyz x0 y0 z0 x1 y1 z1 "
+                  << "x2 y2 z2 x3 y3 z3]\\n";
         return EXIT_FAILURE;
     }
-    // Diagnostic-only phase of equally spaced boundary-arclength corners.
-    // The zero default preserves the historical Paper rectangle EXACTLY.
+    // The original quarter-arclength behavior remains the default.
     const double cornerPhase = argc == 6 ? std::atof(argv[5]) : 0.0;
     if (!std::isfinite(cornerPhase) || cornerPhase < 0.0 || cornerPhase >= 0.25) {
         std::cerr << "--corner-phase must be in [0, 0.25)\\n";
@@ -77,24 +81,62 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     std::vector<int> corners(4,0);
-    int previous=-1;
-    for (int k=0; k<4; ++k) {
-        int best=-1;
-        double best_error=std::numeric_limits<double>::infinity();
-        const int last_allowed=n-(4-k);
-        for (int i=previous+1; i<=last_allowed; ++i) {
-            const double discrepancy=std::abs(cumulative[i]-perimeter*(cornerPhase+k/4.0));
-            if (discrepancy<best_error) {
-                best_error=discrepancy;
-                best=i;
+    if (customCornerPositions) {
+        // Candidate corners come from PCA extrema on the actual 3D source
+        // boundary. Passing xyz avoids relying on the OBJ/BFF wedge index
+        // ordering, which may differ across implementations.
+        for (int k=0; k<4; ++k) {
+            double values[3];
+            for (int d=0; d<3; ++d) {
+                char* end=nullptr;
+                values[d]=std::strtod(argv[5+3*k+d],&end);
+                if (!end || *end!='\\0' || !std::isfinite(values[d])) {
+                    std::cerr << "Invalid explicit boundary corner coordinate\n";
+                    return EXIT_FAILURE;
+                }
             }
+            int best=-1;
+            double minDist=std::numeric_limits<double>::infinity();
+            for (int i=0; i<n; ++i) {
+                Vector v=boundary[i]->vertex()->position;
+                double dist=0.;
+                for (int d=0; d<3; ++d) {
+                    const double delta=v[d]-values[d];
+                    dist+=delta*delta;
+                }
+                if (dist<minDist) { minDist=dist; best=i; }
+            }
+            if (best<0 || minDist>1e-12*perimeter*perimeter) {
+                std::cerr << "Explicit corner is not an original boundary vertex\n";
+                return EXIT_FAILURE;
+            }
+            corners[k]=best;
         }
-        if (best<0) {
-            std::cerr << "Cannot select four noncoincident rectangle corners\n";
+        std::sort(corners.begin(),corners.end());
+        if (std::unique(corners.begin(),corners.end())!=corners.end()) {
+            std::cerr << "Explicit rectangle corners are not distinct\n";
             return EXIT_FAILURE;
         }
-        corners[k]=best;
-        previous=best;
+    } else {
+        int previous=-1;
+        for (int k=0; k<4; ++k) {
+            int best=-1;
+            double best_error=std::numeric_limits<double>::infinity();
+            const int last_allowed=n-(4-k);
+            for (int i=previous+1; i<=last_allowed; ++i) {
+                const double discrepancy=std::abs(cumulative[i]-perimeter*(cornerPhase+k/4.0));
+                if (discrepancy<best_error) {
+                    best_error=discrepancy;
+                    best=i;
+                }
+            }
+            if (best<0) {
+                std::cerr << "Cannot select four noncoincident rectangle corners\n";
+                return EXIT_FAILURE;
+            }
+            corners[k]=best;
+            previous=best;
+        }
     }
 
     // BFF::flatten(..., false) uses its protected meanScaling gauge,
