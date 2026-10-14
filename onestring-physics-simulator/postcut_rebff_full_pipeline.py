@@ -159,6 +159,7 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
         "source_xyz": joined_xyz, "source_uv": joined_uv,
         "source_faces": joined_source_faces,
         "quad_vertices": joined_quad_vertices, "quad_faces": joined_quads,
+        "tile_patch_ids": np.asarray(tile_components,int),
         "audit": audit,
     }
 
@@ -261,6 +262,13 @@ def run_existing_pipeline_through_dual_hinge(
     if (len(state.tiles_3d.vertices) != len(state.tiles_2d_dual_hinge.vertices)
         or len(state.tiles_2d_dual_hinge.vertices) != len(state.mesh_2d_initial.faces)):
         raise RuntimeError("Dual Hinge output does not match split tile count")
+    from postcut_rebff_seam_registration import align_t2d_at_source_split_seams
+    seam_metrics = align_t2d_at_source_split_seams(
+        state, patches, packed["tile_patch_ids"],
+    )
+    packed["audit"].update(seam_metrics)
     state.tiles_2d_dual_hinge.metrics.update(packed["audit"])
+    state.tiles_2d_top_hinge.metrics.update(seam_metrics)
+    state.hinge_graph.metrics.update(seam_metrics)
     state.tiles_2d_dual_hinge.metrics["postcut_rebff_full_T2D_dual_hinge_computed"] = True
     return state, packed["audit"]
