@@ -284,15 +284,15 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
             origin="manual_grid_snapped", source_vertex=None, curvature=None,
         )
 
-    def _rebff(x, f):
-        # Every newly created child uses a freshly solved rectangular boundary.
-        # The iterative driver invokes this callback for BOTH children on
-        # EVERY accepted cut (not just the initial split).
+    def _rebff(x, f, *, rectangle_corner_positions):
+        # Both ends of the physical cut are common 3D vertices of the child
+        # patches. Fix them as neighboring rectangle corners in BOTH BFFs.
         bff = run_official_bff(
             x, f, executable=standard_path,
             rectangle_executable=rectangle_path,
-            rectangle_corner_phase_fraction=(
-                float(phase) if post_policy == "target_rectangle" else 0.0
+            rectangle_corner_positions=(
+                np.asarray(rectangle_corner_positions,float)
+                if post_policy == "target_rectangle" else None
             ),
             boundary_policy=post_policy,
         )
