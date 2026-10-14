@@ -95,4 +95,29 @@ jobs:
           assert len(_download_zip(result))>1000
           print("RESULT",record["split"],record["max_postcut_patch_linear_span"],
                 record["linear_limit_two_satisfied"])
+          # Integration stress-check: a stricter research-only bound (1.50)
+          # ensures the same Lilium requires a second official BFF cut.
+          # Production/UI threshold remains fixed at 2.0.
+          from postcut_rebff_iterative import iterative_postcut_rebff
+          from onestring_physics.reference_bff import run_official_bff
+          def real_rebff(x, f):
+              b = run_official_bff(
+                  x, f,
+                  executable="/tmp/onestring-postcut-bff-cli/bff-command-line",
+                  boundary_policy="automatic_reference",
+              )
+              return b.uv_vertices, b.metrics
+          extra=iterative_postcut_rebff(
+              result["initial"]["xyz"], result["initial"]["uv"],
+              result["initial"]["faces"],
+              first_cut=dict(axis=record["split"]["axis"],
+                             coordinate=record["split"]["uv_coordinate"]),
+              rebff=real_rebff, grid=14,
+              csf_limit=1.50, max_splits=2,
+          )
+          print("REAL REPEATED SPLIT",extra["stop_reason"],extra["split_history"])
+          assert extra["split_count"]==2,extra
+          assert len(extra["patches"])==3,extra
+          assert extra["split_history"][0]["violating_patch_count"]>=1
+
           PY
