@@ -10,6 +10,7 @@ on:
       - "onestring-physics-simulator/tests/test_paper_fidelity_computation_mode.py"
       - "onestring-physics-simulator/tests/test_paper_split_area_bound.py"
       - "onestring-physics-simulator/tests/test_paper_csf_discrete.py"
+      - "onestring-physics-simulator/tests/test_paper_csf_physical_bound_interpretation.py"
       - "onestring-physics-simulator/src/onestring_physics/paper_csf_discrete.py"
       - ".github/workflows/paper-fidelity-computation.yml"
   workflow_dispatch:
@@ -41,6 +42,7 @@ jobs:
             tests/test_paper_fidelity_computation_mode.py \
             tests/test_paper_split_area_bound.py \
             tests/test_paper_csf_discrete.py \
+            tests/test_paper_csf_physical_bound_interpretation.py \
             tests/test_paper_reproduction_audit.py \
             tests/test_paper_pd_deployment.py \
             tests/test_paper_t2d.py \
