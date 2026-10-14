@@ -234,24 +234,53 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
     faces = np.asarray(param.surface_faces, int)
     initial_report = field(xyz, uv, faces)
 
+    from onestring_physics.reference_bff import (
+        validate_reference_mesh, validate_rectangular_boundary,
+    )
+    rect_loop = validate_reference_mesh(xyz, faces)["boundary_loops"][0]
+    initial_rectangle_check = validate_rectangular_boundary(uv, rect_loop)
+    initial_rect_metadata = {
+        **dict(param.metrics),
+        **initial_rectangle_check,
+        "bff_boundary_policy_effective": "target_rectangle",
+    }
     cut_records = initial.mesh_2d_initial.metrics.get("csf_split_step_analysis") or []
-    if cut_mode == "曲率優先の最初のSplit":
-        if not cut_records:
-            raise RuntimeError(
-                "A curvature-guided Split was not produced by the current M2D. "
-                "Use manual cut mode; no implicit center-cut fallback is performed."
+    needs_split = bool(initial_report["linear_span"] > 2.0 + 1e-10)
+    first_cut = None
+    axis = coordinate = source_vertex = curvature = None
+    if needs_split and cut_mode == "曲率優先の最初のSplit":
+        if cut_records:
+            first = cut_records[0]
+            axis = str(first["axis"])
+            coordinate = float(first["snapped_value"])
+            source_vertex = first.get("curvature_vertex_id")
+            curvature = first.get("gaussian_curvature")
+            first_cut = dict(
+                axis=axis, coordinate=coordinate, origin=cut_mode,
+                source_vertex=source_vertex, curvature=curvature,
             )
-        first = cut_records[0]
-        axis = str(first["axis"])
-        coordinate = float(first["snapped_value"])
-        source_vertex = first.get("curvature_vertex_id")
-        curvature = first.get("gaussian_curvature")
-    else:
+        # If the original M2D split analysis has no candidate, the iterative
+        # routine searches the ACTUAL current grid, never an arbitrary center cut.
+    elif needs_split:
         axis = manual_axis
         dim = {"row": 1, "col": 0}[axis]
-        coordinate = float(np.min(uv[:, dim]) +
-                           manual_fraction * np.ptp(uv[:, dim]))
-        source_vertex, curvature = None, None
+        requested = float(np.min(uv[:, dim]) +
+                          manual_fraction * np.ptp(uv[:, dim]))
+        # Snap manual requests to the same reference-grid lattice as M2D.
+        reference_domain = initial.conformal_domain
+        spacing = float(reference_domain.reference_grid_spacing)
+        origin = np.asarray(reference_domain.reference_grid_origin, float)
+        coordinate = float(origin[dim] + round((requested-origin[dim])/spacing)*spacing)
+        if not (float(np.min(uv[:, dim])) + 1e-9 < coordinate
+                < float(np.max(uv[:, dim])) - 1e-9):
+            raise ValueError(
+                "Manual Split snapped outside the interior of Omega; "
+                "adjust its position along the reference grid."
+            )
+        first_cut = dict(
+            axis=axis, coordinate=coordinate,
+            origin="manual_grid_snapped", source_vertex=None, curvature=None,
+        )
 
     def _rebff(x, f):
         # Every newly created child uses a freshly solved rectangular boundary.
@@ -277,11 +306,9 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
     trial = iterative_postcut_rebff(
         xyz, uv, faces, grid=int(grid), rebff=_rebff, max_splits=int(max_splits),
         csf_limit=2.0, progress=progress,
-        first_cut=dict(
-            axis=axis, coordinate=coordinate,
-            origin=cut_mode, source_vertex=source_vertex,
-            curvature=curvature,
-        ),
+        first_cut=first_cut,
+        initial_linear_span=float(initial_report["linear_span"]),
+        initial_bff_metadata=initial_rect_metadata,
     )
     patches = trial["patches"]
     # Regenerate real square M2D panels and 3D inverse-map lifts on the NEW UV.
@@ -305,6 +332,9 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         "official_bff_executable": standard_path,
         "rectangular_bff_executable": rectangle_path,
         "initial_bff": "target_rectangle", "postcut_bff": post_policy,
+        "initial_bff_linear_csf": float(initial_report["linear_span"]),
+        "initial_bff_satisfies_csf_limit": not needs_split,
+        "initial_bff_rectangle_verified": True,
         "all_postcut_patches_rectangle_verified": all(
             p.get("bff_metadata", {}).get("bff_rectangle_verified") is True
             for p in patches
@@ -317,7 +347,8 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         "csf_limit": trial["csf_limit"],
         "max_splits_budget": trial["max_splits"],
         "split": {
-            "axis": axis, "uv_coordinate": coordinate, "origin": cut_mode,
+            "axis": axis, "uv_coordinate": coordinate,
+            "origin": (cut_mode if first_cut is not None else "no_split_required"),
             "source_curvature_vertex": source_vertex, "gaussian_curvature": curvature,
         },
         "initial_source_triangle_csf": initial_report,
@@ -505,7 +536,7 @@ def _show_existing_pipeline_state(state, audit):
 def main() -> None:
     st.set_page_config(page_title="OneString Split → re-BFF", layout="wide")
     st.title("OneString: Split後のBFF再計算（Mac実験モード）")
-    st.caption("矩形BFF → Split → 各子領域を矩形境界BFFで再展開 → CSF>2なら追加Splitして再び矩形BFF")
+    st.caption("まず初期矩形BFFのCSFを評価 → 2を超えた領域だけGridに沿ってSplit → 各子領域で矩形BFFを再計算")
     st.warning(
         "研究用の独立した実験画面です。新しいUVとOBJを実際に生成しますが、"
         "領域別プレビューはK3D/T2Dではありません。下の既存ソルバー連携を実行すると実際のDual Hinge結果を計算します。"
@@ -542,7 +573,9 @@ def main() -> None:
             ),
             help="既定は矩形境界。初回および追加Split後、各子領域を公式の矩形BFFアダプターで解き直します。",
         )
-        st.caption("矩形境界モードではすべての子領域で矩形性を幾何学的に検査します。")
+        st.caption("初回BFFだけでCSF≤2ならSplitは0本。"
+                   "再BFF後も違反があればGridに沿って追加Splitします。"
+                   "矩形境界モードでは子領域も幾何学的に検証します。")
         max_splits = int(st.number_input(
             "最大Split数（初回を含む）", min_value=1, max_value=64, value=8, step=1,
             help="CSF>2の領域だけを切断。切れない・予算到達なら停止理由を表示。",
