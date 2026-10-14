@@ -74,6 +74,81 @@ def candidate_lines(xyz, uv, faces, grid: int, *, max_candidates: int = 24):
             sorted(proposals.values(), key=lambda pair: pair[0])[:max_candidates]]
 
 
+def _cut_child_rectangular_corners(parent, child_xyz, child_uv, child_faces,
+                                   axis, coordinate, positive):
+    """Exactly the 4 boundary corners of a rectangle cut by an interior line.
+
+    The *two seam endpoints* MUST be rectangle corners on BOTH newly created
+    charts; the remaining corners are inherited from the parent's rectangle.
+    Any fallback to arbitrary arclength quartiles invalidates common seam
+    registration and is intentionally rejected.
+    """
+    from onestring_physics.reference_bff import validate_reference_mesh
+    parent_uv=np.asarray(parent["new_uv"],float)
+    child_uv=np.asarray(child_uv,float)
+    child_xyz=np.asarray(child_xyz,float)
+    parent_faces=np.asarray(parent["faces"],int)
+    parent_loop=np.asarray(
+        validate_reference_mesh(np.asarray(parent["xyz"],float),parent_faces)
+        ["boundary_loops"][0],int)
+    child_loop=np.asarray(
+        validate_reference_mesh(child_xyz,np.asarray(child_faces,int))
+        ["boundary_loops"][0],int)
+    dim={"row":1,"col":0}[axis]
+    other=1-dim
+    span=float(np.max(np.ptp(parent_uv,axis=0)))
+    tol=max(1e-8*span,1e-10)
+    parent_min,parent_max=np.min(parent_uv,axis=0),np.max(parent_uv,axis=0)
+    seam=child_loop[
+        np.abs(child_uv[child_loop,dim]-float(coordinate))<=tol
+    ]
+    if len(seam)<2:
+        raise ValueError("Grid Split does not intersect source boundary at two seam endpoints")
+    endpoints=[int(seam[np.argmin(child_uv[seam,other])]),
+               int(seam[np.argmax(child_uv[seam,other])])]
+    if endpoints[0]==endpoints[1]:
+        raise ValueError("Grid Split seam endpoints are coincident")
+    original=[]
+    for x in (parent_min[0],parent_max[0]):
+        for y in (parent_min[1],parent_max[1]):
+            target=np.array([x,y],float)
+            dist=np.linalg.norm(parent_uv[parent_loop]-target,axis=1)
+            if float(np.min(dist))>tol:
+                raise ValueError("Parent BFF boundary is not a four-corner rectangle")
+            pvid=int(parent_loop[np.argmin(dist)])
+            pos=parent_uv[pvid]
+            if (pos[dim]>=float(coordinate)-tol if positive
+                    else pos[dim]<=float(coordinate)+tol):
+                hits=np.linalg.norm(child_uv[child_loop]-pos,axis=1)
+                if float(np.min(hits))>tol:
+                    raise ValueError("Grid-cut child lost a parent rectangle corner")
+                original.append(int(child_loop[np.argmin(hits)]))
+    corners=endpoints+original
+    if len(original)!=2 or len(set(corners))!=4:
+        raise ValueError(
+            f"Grid Split requires two old corners + two seam corners; "
+            f"found {len(original)} old and {len(set(corners))} unique."
+        )
+    # Verify the seam is a single uninterrupted boundary arc. Both BFF charts
+    # must use the two endpoints as adjacent rectangle corners.
+    positions={int(v):i for i,v in enumerate(child_loop)}
+    i,j=positions[endpoints[0]],positions[endpoints[1]]
+    arc1=[int(child_loop[k%len(child_loop)])
+          for k in range(i,j+1)] if i<=j else [
+          int(child_loop[k%len(child_loop)])
+          for k in range(i,j+len(child_loop)+1)]
+    arc2=[int(child_loop[k%len(child_loop)])
+          for k in range(j,i+1)] if j<=i else [
+          int(child_loop[k%len(child_loop)])
+          for k in range(j,i+len(child_loop)+1)]
+    if not (
+        all(abs(child_uv[v,dim]-coordinate)<=tol for v in arc1)
+        or all(abs(child_uv[v,dim]-coordinate)<=tol for v in arc2)
+    ):
+        raise ValueError("Seam is not a full rectangular boundary side")
+    return child_xyz[corners].copy()
+
+
 def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
     dim = {"row": 1, "col": 0}[axis]
     children = []
@@ -84,7 +159,19 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
         )
         if not topo["disk_topology"] or len(faces) < 4:
             raise ValueError("Split would produce a nondisk or fewer than 4 triangles")
-        new_uv, metadata = rebff(xyz, faces)
+        corners_xyz=_cut_child_rectangular_corners(
+            patch,xyz,uv_old,faces,axis,float(coordinate),positive,
+        )
+        import inspect
+        signature=inspect.signature(rebff)
+        if "rectangle_corner_positions" not in signature.parameters:
+            raise ValueError(
+                "Rectangular post-cut BFF must accept explicit seam corner positions; "
+                "silent arclength-quartile fallback is forbidden"
+            )
+        new_uv, metadata = rebff(
+            xyz, faces, rectangle_corner_positions=corners_xyz
+        )
         new_uv = np.asarray(new_uv, float)
         if new_uv.shape != (len(xyz), 2) or not np.isfinite(new_uv).all():
             raise ValueError("Official BFF returned invalid UV dimensions or nonfinite values")
@@ -96,6 +183,8 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
             side=patch["side"] + ("_positive" if positive else "_negative"),
             xyz=xyz, faces=faces, original_uv=uv_old, new_uv=new_uv,
             pre=prior, post=post, bff_metadata=metadata,
+            seam_rectangle_corners_xyz=corners_xyz,
+            seam_rectangle_corners_constrained=True,
         ))
     return children
 
