@@ -265,6 +265,22 @@ jobs:
               and p["bff_metadata"].get("bff_rectangle_verified") is True
               for p in rectangular["patches"]
           )
+          # This checks the REAL rectangular Lilium chart against the new
+          # full-coverage mesher (not just synthetic rectangles).
+          from postcut_rebff_full_pipeline import _assemble_patches
+          packed_rect=_assemble_patches(
+              rectangular["patches"], solver_params,14,
+              int(rectangular["report"]["initial_m2d"]["quads"]),
+          )
+          audit_rect=packed_rect["audit"]
+          assert audit_rect["postcut_omega_grid_no_cells_cropped"] is True,audit_rect
+          assert all(abs(f-1)<1e-9 for f in
+                     audit_rect["postcut_omega_rectangles_area_fraction_covered"])
+          assert sum(audit_rect["postcut_seam_exact_uv_edge_pairs"].values())>=1
+          print("LILIUM RECTANGULAR OMEGA NO CROP",
+                audit_rect["postcut_rebff_final_quad_count"],
+                audit_rect["postcut_omega_rectangles_area_fraction_covered"],
+                audit_rect["postcut_seam_exact_uv_edge_pairs"],flush=True)
           import numpy as np
           # Real BFF initial Omega fits corners to S rather than forcing
           # every initial corner to a quarter of source perimeter.
