@@ -1,0 +1,105 @@
+"""Optional original-OneString UI backend: S -> rectangular BFF -> grid Split ->
+rectangular re-BFF per child -> original K3D/T3D/K2D/T2D Dual Hinge.
+
+This adapter returns a real OneStringState, preserving the original View
+stage and export workflows. Original OptCuts pathways remain available.
+"""
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+from app_postcut_rebff import _execute
+from postcut_rebff_full_pipeline import run_existing_pipeline_through_dual_hinge
+
+
+class PostcutReBFFDidNotConverge(RuntimeError):
+    def __init__(self, report):
+        self.report=report
+        rejection_list=report.get("rejected_candidates",[])
+        details=", ".join(
+            f"{row.get('axis')}={float(row.get('coordinate',0)):.4g}: {row.get('reason')}"
+            for row in rejection_list[:3]
+        )
+        super().__init__(
+            "Repeated rectangular BFF did not satisfy CSF<=2. "
+            f"Split={report.get('split_count')}, "
+            f"worst CSF={report.get('max_postcut_patch_linear_span'):.6g}, "
+            f"stop={report.get('stop_reason')}; "
+            f"rejected candidates={len(rejection_list)}. "
+            f"First rejections: {details or '(none)'}"
+        )
+
+
+def _save_target_obj(target, path: Path):
+    xyz=np.asarray(target.vertices,float)
+    faces=np.asarray(target.faces,int)
+    if xyz.ndim!=2 or xyz.shape[1]!=3 or len(xyz)<4:
+        raise ValueError("Rectangular BFF requires a real 3D source mesh S")
+    if faces.ndim!=2 or faces.shape[1]!=3 or not len(faces):
+        raise ValueError("Rectangular BFF requires an open triangular disk; triangulate S first")
+    if not np.isfinite(xyz).all() or np.min(faces)<0 or np.max(faces)>=len(xyz):
+        raise ValueError("Invalid S vertex or triangle data")
+    from onestring_physics.reference_bff import validate_reference_mesh
+    validate_reference_mesh(xyz,faces)
+    with path.open("w",encoding="utf-8") as out:
+        for vertex in xyz:
+            out.write("v "+" ".join(f"{v:.17g}" for v in vertex)+"\n")
+        for face in faces:
+            out.write("f "+" ".join(str(int(v)+1) for v in face)+"\n")
+
+
+def run_original_onestring_with_postcut_rebff(
+    target, params, *, max_splits=8,
+    initial_rectangle_mode="source_boundary_shape_fit",
+    postcut_boundary_policy="target_rectangle",
+    allow_unconverged_t2d_preview=False,
+    progress_callback=None, diagnostic_callback=None,
+):
+    """Return (original OneStringState, audit, cut/CSF report).
+
+    Diagnostic callback fires BEFORE expensive K3D/T2D and on unconverged
+    results, so the original Streamlit UI can display rejected-cut reasons.
+    """
+    def update(stage,frac,info):
+        if progress_callback is not None:
+            progress_callback(stage,frac,info)
+    with tempfile.TemporaryDirectory(prefix="onestring_rebff_source_") as directory:
+        path=Path(directory)/"original_source_S.obj"
+        _save_target_obj(target,path)
+        update("S -> Omega rectangular BFF",0.04,"Fit input source boundary, compute initial CSF")
+        result=_execute(
+            path,int(params.nx),
+            str(getattr(params,"bff_executable",None) or ""),
+            str(getattr(params,"bff_rectangle_executable",None) or ""),
+            0.0,
+            "曲率優先の最初のSplit", "row", 0.5,
+            postcut_boundary_policy,
+            max_splits=int(max_splits),
+            progress=lambda message:update(
+                "Recursive grid Split -> rectangular BFF",0.12,message),
+            initial_rectangle_mode=initial_rectangle_mode,
+        )
+        report=result["report"]
+        if diagnostic_callback is not None:
+            diagnostic_callback(report)
+        if not report["linear_limit_two_satisfied"] and not allow_unconverged_t2d_preview:
+            raise PostcutReBFFDidNotConverge(report)
+        update("M2D / M3D merged chart",0.18,"Retile independently re-BFFed patches")
+        state,audit=run_existing_pipeline_through_dual_hinge(
+            path,result,grid=int(params.nx),base_params=params,
+            progress=progress_callback,
+            allow_csf_violation_preview=allow_unconverged_t2d_preview,
+        )
+        audit=dict(audit)
+        audit["postcut_rebff_initial_rectangle_mode"]=initial_rectangle_mode
+        audit["postcut_rebff_postcut_boundary_policy"]=postcut_boundary_policy
+        audit["postcut_rebff_split_stop_reason"]=report["stop_reason"]
+        audit["postcut_rebff_all_candidate_rejections"]=len(report["rejected_candidates"])
+        audit["postcut_rebff_csf_condition_met"]=bool(report["linear_limit_two_satisfied"])
+        state.mesh_2d_initial.metrics.update(audit)
+        state.tiles_2d_dual_hinge.metrics.update(audit)
+        state.tiles_2d_dual_hinge.metrics["postcut_rebff_full_T2D_dual_hinge_computed"]=True
+        return state,audit,report
