@@ -2121,7 +2121,10 @@ if _postcut_report is not None:
         "metrics",{}
     )
     _seam_mode=_state_metrics.get("split_seam_alignment")
-    if _seam_mode == "source_surface_3d_matched_rigid_SE2":
+    if _seam_mode in (
+        "source_surface_3d_matched_rigid_SE2",
+        "shared_source_seam_grid_rigid_SE2",
+    ):
         _seam_rms=float(_state_metrics["split_seam_fit_rms_max"])
         _seam_rel=float(_state_metrics["split_seam_fit_rms_relative_to_tile"])
         st.info(
