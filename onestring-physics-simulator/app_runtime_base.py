@@ -413,18 +413,19 @@ with st.sidebar:
         value=True,
         help="Selects official rectangular BFF, rigid eight-vertex tiles, "
              "enhanced T2D refinement, and Paper Snap/Lift PD. "
-             "Split uses exactly the same CSF estimator, selection, "
-             "acceptance checks, settings and stopping as normal OFF mode.",
+             "Paper Split uses per-component area-Jacobian spans and "
+             "strictly improving high-curvature full-grid cuts; OFF keeps its legacy method.",
         key="paper_fidelity_computation_mode",
     )
     if paper_fidelity_enabled:
         st.info(
             "Paperモード：公式BFFの4つの90°外角による矩形Ω、"
             "8頂点剛体、T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
-            "Splitは通常版OFFと完全に同じ処理です：CSF計算、"
-            "対象領域・曲率点の選択、切断採否判定、停止条件、"
-            "閾値および最大分割回数を変更しません。"
-            "これは論文の面積拡張率上限2の完全再現ではありません。"
+            "Splitは通常版OFFとは別に、各領域の面積ヤコビアン比を評価し、"
+            "ガウス曲率を優先した完全格子切断で比が改善するものだけ採用します。"
+            "2を超える領域で改善不能なら停止して未達成と報告します。"
+            "分割後のUV再写像・独立スケール変更は未実装のため、"
+            "論文の製造可能性条件を完全に証明するものではありません。"
         )
     st.header("Version")
     # Experimental 2026-09-21 deployability-aware K3D variant.
