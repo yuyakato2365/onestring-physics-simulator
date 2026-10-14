@@ -40,6 +40,30 @@ jobs:
               for m in list(re.finditer(re.escape(term),supp,re.I))[:2]:
                   print('SUPPLEMENT',term,supp[max(0,m.start()-220):m.end()+1000])
           PY
+      - name: Exact mesh-split paragraph in raw PDF extraction (without two-column interleaving)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          t=Path("/tmp/onestring_raw.txt").read_text()
+          for phrase,limit in [
+              ("Mesh Splitting",8000),
+              ("The bounded conformal scale factor",6500),
+              ("We introduce splits only",2000),
+              ("After generating the quad mesh",2000),
+              ("If the conformal scale factor",2200),
+              ("Conformal mapping with a bounded scale factor",950),
+              ("maximum local stretching",1500),
+          ]:
+              hits=[]
+              start=0
+              while True:
+                  pos=t.find(phrase,start)
+                  if pos<0: break
+                  hits.append(pos);start=pos+len(phrase)
+              print("===== EXTRACT",phrase,"hits",len(hits),"=====")
+              for pos in hits[:2]:
+                  print("PAGE",t[:pos].count(chr(12))+1,t[max(0,pos-250):pos+limit],flush=True)
+          PY
       - name: Inspect primary-source Sections 4.1, 4.5, references and related sections
         run: |
           python - <<'PY'
