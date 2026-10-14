@@ -77,6 +77,55 @@ def test_recursive_grid_cut_point_contacts_are_not_physical_seams():
     assert (0,3) not in seams and (1,2) not in seams
 
 
+def test_partial_source_seam_without_shared_vertices_is_still_detected():
+    # Independent repeated cuts can leave an overlap that begins/ends in
+    # the middle of the OLD patch edge. No 3D boundary vertices coincide.
+    left={
+        "xyz":np.array([[0.,0.,0.],[1.,0.,0.],
+                        [1.,1.,0.],[0.,1.,0.]]),
+        "faces":np.array([[0,1,2],[0,2,3]],int),
+    }
+    child={
+        "xyz":np.array([[1.,.2,0.],[2.,.2,0.],
+                        [2.,.7,0.],[1.,.7,0.]]),
+        "faces":np.array([[0,1,2],[0,2,3]],int),
+    }
+    seams=_boundary_point_groups([left,child])
+    assert (0,1) in seams
+    assert np.allclose(
+        sorted(seams[(0,1)].tolist(),key=lambda p:p[1]),
+        [[1.,.2,0.],[1.,.7,0.]],atol=1e-9
+    )
+
+
+def test_partial_source_seam_registers_bff_and_exact_grid():
+    from postcut_rebff_seam_registration import (
+        align_rectangular_bff_charts_on_source_seam,
+    )
+    from postcut_rebff_exact_rectangle_grid import grid_at_pitch,matching_seam_edges
+    left={
+        "xyz":np.array([[0.,0.,0.],[1.,0.,0.],
+                        [1.,1.,0.],[0.,1.,0.]]),
+        "faces":np.array([[0,1,2],[0,2,3]],int),
+    }
+    child={
+        "xyz":np.array([[1.,.2,0.],[2.,.2,0.],
+                        [2.,.7,0.],[1.,.7,0.]]),
+        "faces":np.array([[0,1,2],[0,2,3]],int),
+    }
+    left["new_uv"]=left["xyz"][:,:2].copy()
+    child["new_uv"]=0.5*child["xyz"][:,:2]+[6.,-3.]
+    for p in (left,child):
+        p["seam_rectangle_corners_constrained"]=True
+    audit=align_rectangular_bff_charts_on_source_seam([left,child])
+    assert audit["postcut_seam_uv_pair_count"]==1
+    assert audit["postcut_seam_interior_correspondence_error_max"]<1e-9
+    assert audit["postcut_seam_uv_full_physical_correspondence_verified"]
+    meshes=grid_at_pitch([left,child],.19)
+    assert matching_seam_edges(meshes).get((0,1),0)>=2
+    assert all(abs(m["area_fraction_covered"]-1.)<1e-10 for m in meshes)
+
+
 def test_seam_aligned_without_changing_panel_dimensions():
     state,pieces=make_case()
     old=state.tiles_2d_dual_hinge.vertices.copy()
