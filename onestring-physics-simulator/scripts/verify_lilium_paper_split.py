@@ -70,6 +70,39 @@ def main() -> int:
     result = build_paper_reference_initialization(target, p)
     m = result.mesh_2d_initial.metrics
     para = result.surface_parameterization.metrics
+    # Read-only coverage audit. A low cut count from a cropped M2D
+    # cannot be claimed as a better BFF map unless comparable target
+    # surface coverage is demonstrated.
+    chart = result.surface_parameterization
+    uv_tri = np.asarray(chart.uv_vertices_2d)[np.asarray(chart.uv_faces)]
+    xyz_tri = np.asarray(chart.surface_vertices_3d)[np.asarray(chart.surface_faces)]
+    initial_uv = np.asarray(result.mesh_2d_initial.vertices)[:, :2]
+    initial_faces = np.asarray(result.mesh_2d_initial.faces)
+    uv_quads = initial_uv[initial_faces]
+    lifted_xyz = np.asarray(result.mesh_3d_initial.vertices)
+    lifted_quads = lifted_xyz[np.asarray(result.mesh_3d_initial.faces)]
+    def areas_2d(tri):
+        e1, e2 = tri[:,1]-tri[:,0], tri[:,2]-tri[:,0]
+        return 0.5*np.abs(e1[:,0]*e2[:,1] - e1[:,1]*e2[:,0])
+    def areas_3d(tri):
+        return 0.5*np.linalg.norm(np.cross(tri[:,1]-tri[:,0],
+                                            tri[:,2]-tri[:,0]),axis=1)
+    uv_chart_area = float(areas_2d(uv_tri).sum())
+    surface_source_area = float(areas_3d(xyz_tri).sum())
+    quad_uv_area = float((areas_2d(uv_quads[:,[0,1,2]])+
+                          areas_2d(uv_quads[:,[0,2,3]])).sum())
+    lifted_tile_area = float((areas_3d(lifted_quads[:,[0,1,2]])+
+                              areas_3d(lifted_quads[:,[0,2,3]])).sum())
+    coverage_audit = dict(
+        total_omega_uv_area=uv_chart_area,
+        covered_m2d_uv_area=quad_uv_area,
+        m2d_omega_uv_area_fraction=quad_uv_area/uv_chart_area,
+        input_source_surface_area=surface_source_area,
+        lifted_quad_proxy_surface_area=lifted_tile_area,
+        lifted_quad_proxy_surface_area_fraction=lifted_tile_area/surface_source_area,
+        caution="3D quadrilateral triangulation is a geometric proxy; "
+                "not a certified exactly integrated conformal surface footprint",
+    )
     records = m.get("csf_split_step_analysis", [])
     cuts = []
     for rec in records:
@@ -93,6 +126,7 @@ def main() -> int:
         },
         "grid_request": {"n": args.grid, "margin": args.margin, "rotation": args.rotation},
         "actual_m2d_quads": len(result.mesh_2d_initial.faces),
+        "coverage_audit": coverage_audit,
         "csf_sampling_method": args.sampling_method,
         "bff_boundary_policy": args.bff_boundary_policy,
         "csf_sampling_diagnostics": para.get("split_csf_sampling_diagnostics"),
@@ -129,6 +163,7 @@ def main() -> int:
     print("bff boundary policy:", args.bff_boundary_policy)
     print("mesh_sha256:", report["mesh_sha256"])
     print("quads:", report["actual_m2d_quads"])
+    print("coverage fractions [UV, lifted 3D proxy]:", coverage_audit["m2d_omega_uv_area_fraction"], coverage_audit["lifted_quad_proxy_surface_area_fraction"])
     print("splits:", report["number_of_splits"])
     print("cut lines:", report["split_lines"])
     print("linear CSF:", report["linear_csf_before"], "->", report["linear_csf_after"])
