@@ -160,6 +160,28 @@ jobs:
           assert state.tiles_2d_dual_hinge.metrics.get(
               "postcut_rebff_full_T2D_dual_hinge_computed"
           )
+          # Default rectangular reBFF: verify both child boundaries geometrically.
+          # CSF convergence is deliberately not assumed for rectangle patches.
+          rectangular = _execute(
+              mesh,14,
+              "/tmp/onestring-postcut-bff-cli/bff-command-line",
+              "third_party/bff_rectangle_build/bff-rect-command-line",
+              0.0,"曲率優先の最初のSplit","row",0.5,
+              "target_rectangle",max_splits=1,
+          )
+          rect_report=rectangular["report"]
+          assert rect_report["initial_bff"]=="target_rectangle"
+          assert rect_report["postcut_bff"]=="target_rectangle"
+          assert rect_report["all_postcut_patches_rectangle_verified"] is True
+          assert len(rectangular["patches"])==2
+          assert all(
+              p["bff_metadata"].get("bff_boundary_policy_effective")=="target_rectangle"
+              and p["bff_metadata"].get("bff_rectangle_verified") is True
+              for p in rectangular["patches"]
+          )
+          print("RECTANGULAR POSTCUT BFF RESULT",rect_report["split_count"],
+                rect_report["max_postcut_patch_linear_span"],
+                rect_report["stop_reason"],flush=True)
 
           PY
 
