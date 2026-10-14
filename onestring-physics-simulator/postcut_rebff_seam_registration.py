@@ -425,8 +425,39 @@ def align_rectangular_bff_charts_on_source_seam(patches):
     for i,patch in enumerate(patches):
         patch["new_uv_before_seam_alignment"]=raw[i]
         patch["new_uv"]=transformed[i]+shift
+    # Endpoint equality does NOT ensure that the TWO independent BFF solvers
+    # assign the same parameter to every internal source-S seam vertex.
+    # Record the actual seam-parameter mismatch; the quad meshes can have
+    # identical UV boundary edges while their inverse lifts differ in 3D.
+    seam_interior_mismatch = {}
+    global_max=0.
+    for (a,b),points in seams.items():
+        xa=np.asarray(patches[a]["xyz"],float)
+        xb=np.asarray(patches[b]["xyz"],float)
+        ua=np.asarray(patches[a]["new_uv"],float)
+        ub=np.asarray(patches[b]["new_uv"],float)
+        deviations=[]
+        for source_point in points:
+            ia=int(np.argmin(np.linalg.norm(xa-source_point,axis=1)))
+            ib=int(np.argmin(np.linalg.norm(xb-source_point,axis=1)))
+            deviations.append(float(np.linalg.norm(ua[ia]-ub[ib])))
+        maximum=float(max(deviations)) if deviations else 0.
+        global_max=max(global_max,maximum)
+        seam_interior_mismatch[f"{a}-{b}"]={
+            "sample_count":int(len(deviations)),
+            "max_uv_difference":maximum,
+            "mean_uv_difference":float(np.mean(deviations)) if deviations else 0.,
+        }
     return {
         "postcut_seam_uv_registration":"physical_seam_ends_uniform_BFF_similarity",
+        "postcut_seam_interior_correspondence_error_max":global_max,
+        "postcut_seam_interior_correspondence_by_pair":seam_interior_mismatch,
+        "postcut_seam_uv_full_physical_correspondence_verified":bool(
+            global_max <= 1e-8*max(1.,max(
+                float(np.max(np.ptp(np.asarray(p["new_uv"],float),axis=0)))
+                for p in patches
+            ))
+        ),
         "postcut_seam_uv_pair_count":len(history),
         "postcut_seam_uv_transform_steps":history,
         "postcut_seam_uv_global_grid_origin":[0.,0.],
