@@ -197,6 +197,7 @@ jobs:
                   "FULL STAGE",stage,round(fraction,3),msg,flush=True),
           )
           print("FULL DUAL HINGE OK",len(state.tiles_2d_dual_hinge.vertices),audit)
+          import numpy as np
           assert audit["split_seam_alignment"]=="source_surface_3d_matched_rigid_SE2",audit
           assert audit["split_seam_anchor_pair_count"]>=2,audit
           assert np.isfinite(audit["split_seam_fit_rms_max"]),audit
