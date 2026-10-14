@@ -472,6 +472,21 @@ def run_official_bff(
                 f"exit={completed.returncode}, stdout={completed.stdout[-2000:]!r}, stderr={completed.stderr[-2000:]!r}"
             )
         uv = _read_write_only_uv_obj(output_path, len(vertices), np.asarray(faces, dtype=int))
+    # Independent rectangle adapter reports wedges from its native boundary
+    # traversal. Preserve exact four chosen boundary slots; NOT necessarily
+    # original OBJ vertex IDs due BFF's mesh import/renumbering.
+    rect_wedges = None
+    if boundary_policy == "target_rectangle":
+        records = [line.split("=",1)[1].strip() for line in completed.stderr.splitlines()
+                   if line.startswith("BFF_RECTANGLE_CORNERS=")]
+        if records:
+            try:
+                ids=[int(x) for x in records[-1].split(",")]
+            except ValueError:
+                raise ReferenceBFFUnavailableError("Malformed rectangle corner wedge report")
+            if len(ids)!=4 or sorted(set(ids)) != ids:
+                raise ReferenceBFFUnavailableError("Rectangle adapter reported invalid corner order")
+            rect_wedges=ids
     rectangle_metrics=(
         validate_rectangular_boundary(uv,topology["boundary_loops"][0])
         if boundary_policy == "target_rectangle" else {}
@@ -500,6 +515,7 @@ def run_official_bff(
             ),
             "bff_rectangle_corner_selection":"four approximate 3D boundary-arclength quartiles with optional cyclic phase" if boundary_policy=="target_rectangle" else None,
             "bff_rectangle_corner_phase_fraction":corner_phase if boundary_policy=="target_rectangle" else None,
+            "bff_rectangle_corner_boundary_wedge_indices":rect_wedges,
             **rectangle_metrics,
             "fallbacks_used": [],
             "input_topology": topology,
