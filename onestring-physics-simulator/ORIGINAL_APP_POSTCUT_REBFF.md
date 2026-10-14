@@ -36,3 +36,26 @@ CSFが2以下ならそのまま既存のソルバーで最終T2Dへ進みます�
 6. 複数のUV領域を統合したM2Dを作り、**既存のOneStringのK3D/T3D/K2D/T2D Dual Hinge最適化器**へ渡す
 
 この方式は再BFF後にGridを再生成する研究用処理であり、元のM2Dタイル数を厳密には保存しません。タイル枚数・CSF・T2D評価値は画面で確認してください。既存のOptCuts分岐の挙動は今回の変更対象外です。
+
+## Split境界のT2Dパネル位置合わせ
+
+再BFFした各領域は独立のUV島です。元の実装では島のUVを横方向へ機械的にずらし、さらにT2Dで別々のヒンジ成分を自動的に引き離していたため、物理的に元Sでつながっていた切断境界でも2D表示に大きな隙間ができていました。
+
+現行の実験モードは、元Sの同じ切断境界に由来する3D位置を抽出し、M3Dの対応パネル角を特定します。T2D Dual HingeとTop Hingeの該当領域を**剛体SE(2)変換（回転・平行移動のみ）**して位置合わせします。領域内パネルの厚み・辺長・ヒンジを変形させず、ヒンジ座標を更新して、必要なGap graph・Lift points・String pathも再計算します。
+
+結果の `split_seam_fit_rms_max` と `split_seam_fit_rms_relative_to_tile` は、対応境界点の合わせ込み残差です。元S上に同じ切断点がなければ位置合わせは失敗として停止します。対応関係が乏しい場合も成功の偽装をしません。
+
+**これは縫い目のパネル完全一致を証明するものではありません。** 両側の矩形BFFから別々に再格子化した四角形は、境界上のパネル数・角点位置が一致しない可能性があります。完全一致には、元Ωの共通切断格子を保持するか、両側のBFF後に共通境界頂点・接続対応を制約して再メッシュ化する必要があります。今回の修正は「物理的に対応する境界を使うrigidな2D位置合わせ」であり、形の異なるパネルを引き延ばして一致したふりをするものではありません。
+
+### 更新して表示
+
+```bash
+cd ~/Documents/onestring-postcut-rebff/onestring-physics-simulator
+git status --short
+git fetch origin
+git switch --detach origin/agent/postcut-rebff-mac-20261014
+source .venv-postcut-rebff/bin/activate
+python3 -m streamlit run app.py
+```
+
+再BFFを有効にしたまま「Run OneString pipeline」を再実行して、View stage の **T2D Dual Hinge** を確認します。以前の結果がStreamlitセッションに残っていても再計算しない限り新しい配置にはなりません。
