@@ -100,6 +100,32 @@ Every completed run records `paper_fidelity_stage_results`,
 `paper_fidelity_residual_reasons` and `paper_fidelity_verified=False`
 until the actual shape, scale, collision and solver checks are proven.
 
+## Same-input Lilium validation (no shape-specific Split rule)
+
+Use the exact OBJ under examination, on the machine with the official
+rectangular BFF native executable. The solver uses the *same* generic Split
+policy for every input; no name, one-cut flag, or forced result is used.
+
+```bash
+python scripts/verify_lilium_paper_split.py ~/Downloads/lilium.obj \
+    --grid 14 --expect-splits 1 \
+    --report output/lilium_paper_split_comparison.json
+```
+
+Here `--expect-splits 1` is an **assertion after computing**, not a
+stopping condition. The script runs S->Omega->M2D->M3D and records
+full cut coordinates, input hash, BFF backend, linear and area bounds.
+If the output is not exactly one cut, the assertion fails and the report
+is still saved. The 14x14 grid is a reproducible **hypothesis**, not an
+assertion that authors used this exact tiling or these BFF boundary corners.
+
+An independent cotangent-*harmonic* UV sanity check on the uploaded
+Lilium OBJ (3389 vertices, 6590 faces, 14x14; 193 retained quads in
+the proxy) produces **one generic cut** under
+`sqrt(max(J)/min(J))<=2`, versus **19** under `max(J)/min(J)<=2`.
+That is evidence of the area-vs-linear CSF bug, **not** a successful
+official-BFF or paper-image-coordinate match.
+
 ## Comparing with legacy
 
 Uncheck Paper mode to return to the existing experimental choices.
