@@ -411,7 +411,7 @@ def main() -> None:
     st.caption("矩形BFF → 初回Split → CSF>2の領域を追加Split → 各領域で公式BFFを反復再計算")
     st.warning(
         "研究用の独立した実験画面です。新しいUVとOBJを実際に生成しますが、"
-        "各領域で再BFF後のM2D/M3Dも生成しますがK3D/T2Dは未接続です。"
+        "領域別プレビューはK3D/T2Dではありません。下の既存ソルバー連携を実行すると実際のDual Hinge結果を計算します。"
         "通常のシミュレーターの計算経路は変更しません。"
     )
     with st.sidebar:
@@ -577,7 +577,7 @@ def main() -> None:
     st.warning("この領域別プレビューは最終設計ではありません。"
                "最終タイル配置とT2D Dual Hingeは上の「従来の全段階を計算」から確認してください。")
     st.caption("各領域に共通間隔の正方形タイルを作り、新しいBFFの逆写像で"
-               "3Dへリフトしました。K3D/T2Dにはまだ接続していません。")
+               "3Dへリフトしました。ここでは中間比較のみを表示します。最終段階は既存ソルバーのDual Hinge結果を参照してください。")
     for patch in data["patches"]:
         if "quad_preview" not in patch:
             st.error(f"{patch['side']}: M2D→M3D生成失敗: {patch.get('quad_preview_error')}")
