@@ -305,6 +305,10 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
                 )
         return np.asarray(bff.uv_vertices, float), bff.metrics
 
+    # Enforce a common physical seam edge only for rectangular BFF.
+    # Free-boundary comparison intentionally retains its original behavior.
+    _rebff.seam_corners_required = (post_policy == "target_rectangle")
+
     trial = iterative_postcut_rebff(
         xyz, uv, faces, grid=int(grid), rebff=_rebff, max_splits=int(max_splits),
         csf_limit=2.0, progress=progress,
