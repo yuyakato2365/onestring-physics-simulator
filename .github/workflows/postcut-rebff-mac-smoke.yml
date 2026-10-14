@@ -200,7 +200,14 @@ jobs:
           )
           print("FULL DUAL HINGE OK",len(state.tiles_2d_dual_hinge.vertices),audit)
           import numpy as np
-          assert audit["split_seam_alignment"]=="source_surface_3d_matched_rigid_SE2",audit
+          assert audit["split_seam_alignment"] in (
+              "source_surface_3d_matched_rigid_SE2",
+              "shared_source_seam_grid_rigid_SE2",
+          ),audit
+          # The free-boundary test path is NOT a rectangular Omega, so it
+          # cannot claim exact rectangular coverage or shared-square-grid
+          # panel segmentation. Verify that separately in the rectangle run.
+          assert audit["postcut_omega_grid_policy"]=="legacy_clipped_nonrectangular_comparison"
           assert audit["split_seam_anchor_pair_count"]>=2,audit
           assert np.isfinite(audit["split_seam_fit_rms_max"]),audit
           assert audit["postcut_rebff_string_path_recomputed_after_seam_alignment"],audit
