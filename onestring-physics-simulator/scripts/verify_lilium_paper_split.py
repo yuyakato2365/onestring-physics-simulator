@@ -32,6 +32,11 @@ def main() -> int:
     ap.add_argument("--rotation", type=float, default=0., help="Grid angle degrees")
     ap.add_argument("--report", type=Path, default=Path("output/lilium_paper_split_comparison.json"))
     ap.add_argument("--expect-splits", type=int, default=None, help="Optional benchmark assertion; never changes computation")
+    ap.add_argument("--bff-boundary-policy", choices=("target_rectangle", "automatic_reference"),
+                    default="target_rectangle",
+                    help="Compare two official BFF boundary policies without changing Split policy.")
+    ap.add_argument("--bff-executable", type=Path, default=None,
+                    help="Official standard bff-command-line, for automatic_reference.")
     ap.add_argument("--sampling-method", choices=("overlap_extrema", "interpolated_grid_vertices"),
                     default="overlap_extrema",
                     help="Research comparison of two generic discrete CSF estimators. Neither method forces a Split count.")
@@ -51,13 +56,16 @@ def main() -> int:
         omega_overlay_margin=args.margin,
         reference_grid_rotation_degrees=args.rotation,
         omega_parameterization_mode="paper_reference_bff",
-        bff_boundary_policy="target_rectangle",
+        bff_boundary_policy=args.bff_boundary_policy,
         max_csf_splits=64,
         csf_split_threshold=2.,
         paper_fidelity_mode=True,
     )
     p, _ = configure_paper_fidelity(p)
     p.paper_csf_sampling_method = args.sampling_method
+    p.bff_boundary_policy = args.bff_boundary_policy
+    if args.bff_executable is not None:
+        p.bff_executable = str(args.bff_executable)
     p.reference_diagnostics_path = str(args.report.parent / "lilium_reference_initialization.json")
     result = build_paper_reference_initialization(target, p)
     m = result.mesh_2d_initial.metrics
@@ -86,6 +94,7 @@ def main() -> int:
         "grid_request": {"n": args.grid, "margin": args.margin, "rotation": args.rotation},
         "actual_m2d_quads": len(result.mesh_2d_initial.faces),
         "csf_sampling_method": args.sampling_method,
+        "bff_boundary_policy": args.bff_boundary_policy,
         "csf_sampling_diagnostics": para.get("split_csf_sampling_diagnostics"),
         "number_of_splits": len(records),
         "one_split_picture_count_matches": len(records) == 1,
@@ -117,6 +126,7 @@ def main() -> int:
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     print("csf sampling method:", args.sampling_method)
+    print("bff boundary policy:", args.bff_boundary_policy)
     print("mesh_sha256:", report["mesh_sha256"])
     print("quads:", report["actual_m2d_quads"])
     print("splits:", report["number_of_splits"])
