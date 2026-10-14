@@ -955,6 +955,7 @@ class PipelineParameters(_original.PipelineParameters):
     # Experimental paper-interpretation studies; defaults remain unchanged.
     bff_rectangle_selection_mode: Literal["fixed_phase", "min_whole_source_area_span_4phase"] = "fixed_phase"
     paper_split_area_limit_experiment: bool = False
+    paper_csf_sampling_method: Literal["overlap_extrema", "interpolated_grid_vertices"] = "overlap_extrema"
     model_version: str = "2026-07-12-one-sided-t3d"
     use_principal_curvature_grid: bool = False
     use_extrusion_aware_k3d: bool = False
