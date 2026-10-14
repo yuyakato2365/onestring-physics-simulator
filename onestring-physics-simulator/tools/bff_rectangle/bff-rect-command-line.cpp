@@ -23,8 +23,16 @@
 using namespace bff;
 
 int main(int argc, char** argv) {
-    if (argc != 4 || std::string(argv[3]) != "--writeOnlyUVs") {
-        std::cerr << "Usage: bff-rect-command-line input.obj output.obj --writeOnlyUVs\n";
+    if ((argc != 4 && argc != 6) || std::string(argv[3]) != "--writeOnlyUVs" ||
+        (argc == 6 && std::string(argv[4]) != "--corner-phase")) {
+        std::cerr << "Usage: bff-rect-command-line input.obj output.obj --writeOnlyUVs [--corner-phase frac]\\n";
+        return EXIT_FAILURE;
+    }
+    // Diagnostic-only phase of equally spaced boundary-arclength corners.
+    // The zero default preserves the historical Paper rectangle EXACTLY.
+    const double cornerPhase = argc == 6 ? std::atof(argv[5]) : 0.0;
+    if (!std::isfinite(cornerPhase) || cornerPhase < 0.0 || cornerPhase >= 0.25) {
+        std::cerr << "--corner-phase must be in [0, 0.25)\\n";
         return EXIT_FAILURE;
     }
     std::string error;
@@ -69,13 +77,13 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     std::vector<int> corners(4,0);
-    int previous=0;
-    for (int k=1; k<4; ++k) {
+    int previous=-1;
+    for (int k=0; k<4; ++k) {
         int best=-1;
         double best_error=std::numeric_limits<double>::infinity();
         const int last_allowed=n-(4-k);
         for (int i=previous+1; i<=last_allowed; ++i) {
-            const double discrepancy=std::abs(cumulative[i]-perimeter*k/4.0);
+            const double discrepancy=std::abs(cumulative[i]-perimeter*(cornerPhase+k/4.0));
             if (discrepancy<best_error) {
                 best_error=discrepancy;
                 best=i;
@@ -117,5 +125,6 @@ int main(int argc, char** argv) {
     std::cerr << "BFF_RECTANGLE_CORNERS="
               << corners[0] << "," << corners[1] << ","
               << corners[2] << "," << corners[3] << "\n";
+    std::cerr << "BFF_RECTANGLE_CORNER_PHASE=" << cornerPhase << "\\n";
     return EXIT_SUCCESS;
 }
