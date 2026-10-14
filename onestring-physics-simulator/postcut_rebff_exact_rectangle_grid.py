@@ -157,11 +157,13 @@ def choose_exact_grid(patches, target_tiles, *, grid=14, max_tiles=15000):
     if not np.isfinite(guess) or guess<=0:
         raise ValueError("Degenerate total BFF rectangle area")
     best=None
+    grid_failures=[]
     for factor in np.geomspace(.6,1.7,19):
         pitch=guess*factor
         try:
             meshes=grid_at_pitch(patches,pitch,max_tiles=max_tiles)
-        except RuntimeError:
+        except RuntimeError as exc:
+            grid_failures.append(f"pitch={pitch:.6g}: {exc}")
             continue
         count=sum(len(x["faces"]) for x in meshes)
         mismatch=abs(count-int(target_tiles))
@@ -173,7 +175,10 @@ def choose_exact_grid(patches, target_tiles, *, grid=14, max_tiles=15000):
         if best is None or key<best[0]:
             best=(key,float(pitch),meshes)
     if best is None:
-        raise RuntimeError("No valid non-cropping rectangle grid at bounded density")
+        raise RuntimeError(
+            "No valid non-cropping rectangle grid at bounded density. "
+            "First failures: "+ "; ".join(grid_failures[:4])
+        )
     _,pitch,meshes=best
     return pitch,meshes
 
