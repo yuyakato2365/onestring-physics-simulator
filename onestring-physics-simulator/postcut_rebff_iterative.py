@@ -37,12 +37,16 @@ def candidate_lines(xyz, uv, faces, grid: int, *, max_candidates: int = 24):
     spacing = max(float(np.max(bounds_max-bounds_min))/max(grid, 2), 1e-10)
     by_axis = {}
     for axis, dim in (("row", 1), ("col", 0)):
-        # Local candidate grid anchored to the current chart bounding box.
+        # Match the per-chart M2D lattice origin at 0, instead of shifting
+        # grid lines to an arbitrary UV bounding-box minimum after every BFF.
         low = float(bounds_min[dim])
         high = float(bounds_max[dim])
-        coords = low + spacing*np.arange(1, int(np.floor((high-low)/spacing))+1)
-        coords = [float(v) for v in coords if low + 1e-8 < v < high - 1e-8]
-        by_axis[axis] = coords
+        start = int(np.floor(low / spacing)) + 1
+        stop = int(np.ceil(high / spacing)) - 1
+        by_axis[axis] = [
+            float(k * spacing) for k in range(start, stop + 1)
+            if low + 1e-8 < k*spacing < high - 1e-8
+        ]
 
     proposals = {}
     for v in order[:min(len(order), 24)]:
@@ -98,27 +102,46 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
 
 def iterative_postcut_rebff(
     xyz, uv, faces, *,
-    first_cut: dict, rebff: Callable, grid: int,
+    first_cut: dict | None, rebff: Callable, grid: int,
     csf_limit: float = 2.0, max_splits: int = 8,
     progress: Callable | None = None,
+    initial_linear_span: float | None = None,
+    initial_bff_metadata: dict | None = None,
 ):
     """Return final patches, split log and honest convergence status.
 
-    First cut is user-selected or from the existing OneString curvature split.
-    Extra cuts occur ONLY if a final piece still violates the post-BFF CSF
-    bound, and only within violating pieces. Accepted cuts are atomic: both
-    children must have valid disk topology, BFF, and finite scale statistics.
+    Initially measure the complete BFF chart. If CSF <= the bound, return
+    without any Split. Otherwise cut on the configured grid, then re-BFF
+    BOTH children; repeat only on CSF-violating pieces. Every cut remains
+    atomic and rejects malformed topologies and invalid BFF solutions.
     """
     if not (1.0 < float(csf_limit) < 100.0):
         raise ValueError("CSF limit must be between 1 and 100")
     if not (1 <= int(max_splits) <= 64):
         raise ValueError("max_splits must be between 1 and 64")
-    source = dict(side="initial", xyz=np.asarray(xyz, float),
-                  new_uv=np.asarray(uv, float), faces=np.asarray(faces, int))
+    xyz = np.asarray(xyz, float)
+    uv = np.asarray(uv, float)
+    faces = np.asarray(faces, int)
+    initial = float(field(xyz, uv, faces)["linear_span"]) if initial_linear_span is None else float(initial_linear_span)
+    if not np.isfinite(initial) or initial < 1.0 - 1e-9:
+        raise ValueError(f"Invalid initial BFF CSF ratio: {initial}")
+    source = dict(
+        side="initial", xyz=xyz, new_uv=uv, original_uv=uv.copy(), faces=faces,
+        pre={"linear_span": initial}, post={"linear_span": initial},
+        bff_metadata=dict(initial_bff_metadata or {}),
+    )
     pending = [source]
     history = []
     rejected = []
     stop_reason = None
+    if initial <= csf_limit + 1e-10:
+        return dict(
+            patches=pending, split_history=history,
+            rejected_candidates=rejected, stop_reason="initial_bff_satisfies_limit",
+            split_count=0, max_linear_span=float(initial), all_pass=True,
+            initial_linear_span=float(initial), csf_limit=float(csf_limit),
+            max_splits=int(max_splits),
+        )
 
     def notify(message):
         if progress is not None:
@@ -127,13 +150,18 @@ def iterative_postcut_rebff(
     while len(history) < max_splits:
         if not history:
             patch = source
-            options = [dict(
-                axis=first_cut["axis"],
-                coordinate=float(first_cut["coordinate"]),
-                curvature_vertex=first_cut.get("source_vertex"),
-                curvature=first_cut.get("curvature"),
-                proposal_method=first_cut.get("origin", "initial"),
-            )]
+            if first_cut is not None:
+                options = [dict(
+                    axis=first_cut["axis"],
+                    coordinate=float(first_cut["coordinate"]),
+                    curvature_vertex=first_cut.get("source_vertex"),
+                    curvature=first_cut.get("curvature"),
+                    proposal_method=first_cut.get("origin", "initial_grid_cut"),
+                )]
+            else:
+                options = candidate_lines(
+                    patch["xyz"], patch["new_uv"], patch["faces"], grid
+                )
         else:
             violating = [p for p in pending
                          if p["post"]["linear_span"] > csf_limit + 1e-10]
@@ -200,6 +228,7 @@ def iterative_postcut_rebff(
         rejected_candidates=rejected, stop_reason=stop_reason,
         split_count=len(history),
         max_linear_span=final_worst, all_pass=passes,
+        initial_linear_span=float(initial),
         csf_limit=float(csf_limit),
         max_splits=int(max_splits),
     )
