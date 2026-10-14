@@ -221,6 +221,12 @@ def choose_rectangle_by_source_boundary_fit(
             output=runner(x,f,**kw)
             if output.metrics.get("bff_rectangle_verified") is not True:
                 raise ValueError("BFF output boundary failed rectangle verification")
+            uvfaces=np.asarray(output.uv_vertices,float)[f]
+            e=uvfaces[:,1]-uvfaces[:,0]
+            g=uvfaces[:,2]-uvfaces[:,0]
+            det=e[:,0]*g[:,1]-e[:,1]*g[:,0]
+            if np.any(det>1e-14) and np.any(det < -1e-14):
+                raise ValueError("Rectangular BFF candidate has mixed UV triangle orientations")
             span=whole_surface_area_span(x,output.uv_vertices,f)
             error=_boundary_similarity_error(projected,np.asarray(output.uv_vertices)[loop],w)
             # Source PCA bounding rectangle is a weak aspect target. Keep this
