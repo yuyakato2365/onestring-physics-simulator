@@ -5,6 +5,7 @@ on:
     branches: [agent/paper-split-area-verified-20261014]
     paths:
       - "onestring-physics-simulator/src/onestring_physics/paper_mesh_splitting.py"
+      - "onestring-physics-simulator/src/onestring_physics/paper_csf_discrete.py"
       - "onestring-physics-simulator/src/onestring_physics/onestring_pipeline.py"
       - "onestring-physics-simulator/src/onestring_physics/reference_bff.py"
       - "onestring-physics-simulator/scripts/verify_lilium_paper_split.py"
@@ -49,6 +50,9 @@ jobs:
       - name: Run unforced Paper Split on exact Lilium mesh and save full audit
         run: |
           python scripts/verify_lilium_paper_split.py /tmp/lilium.obj --grid 14 --report output/lilium_paper_split_comparison.json
+      - name: Run alternative finite-element vertex CSF estimator on SAME mesh/BFF
+        run: |
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj --grid 14 --sampling-method interpolated_grid_vertices --report output/lilium_bff_vertex_csf_comparison.json
       - name: Upload independent numerical diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,5 +60,6 @@ jobs:
           name: official-bff-lilium-split-audit
           path: |
             onestring-physics-simulator/output/lilium_paper_split_comparison.json
+            onestring-physics-simulator/output/lilium_bff_vertex_csf_comparison.json
             onestring-physics-simulator/output/lilium_reference_initialization.json
           if-no-files-found: warn
