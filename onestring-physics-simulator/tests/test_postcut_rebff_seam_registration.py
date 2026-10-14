@@ -150,3 +150,35 @@ def test_required_rectangular_children_receive_explicit_corners():
     assert len(children)==2
     assert len(seen)==2
     assert all(c['seam_rectangle_corners_constrained'] for c in children)
+
+
+def test_independent_rectangular_bff_uvs_share_a_single_grid_after_similarity():
+    from postcut_rebff_seam_registration import align_rectangular_bff_charts_on_source_seam
+    _,patches=make_case()
+    for p in patches:
+        p['seam_rectangle_corners_constrained']=True
+    patches[0]['new_uv']=patches[0]['xyz'][:,:2].copy()
+    # Different global scale/translation from the independently solved BFF.
+    patches[1]['new_uv']=.5*patches[1]['xyz'][:,:2]+[7.,-3.]
+    before=[p['new_uv'].copy() for p in patches]
+    audit=align_rectangular_bff_charts_on_source_seam(patches)
+    assert audit['postcut_seam_uv_pair_count']==1
+    # Common physical Split endpoints are now identical UV points.
+    assert np.allclose(
+        patches[0]['new_uv'][[1,2]],patches[1]['new_uv'][[0,3]],atol=1e-10
+    )
+    assert np.allclose(before[0][1]-before[0][2],
+                       patches[0]['new_uv'][1]-patches[0]['new_uv'][2])
+    assert audit['postcut_seam_uv_preserves_csf_ratio']
+    # Child rectangle stays on the opposite side of the physical seam.
+    assert np.mean(patches[0]['new_uv'][:,0])<0.
+    assert np.mean(patches[1]['new_uv'][:,0])>0.
+
+
+def test_rebff_charts_without_seam_corner_constraints_are_rejected():
+    from postcut_rebff_seam_registration import align_rectangular_bff_charts_on_source_seam
+    _,patches=make_case()
+    patches[0]['new_uv']=patches[0]['xyz'][:,:2].copy()
+    patches[1]['new_uv']=patches[1]['xyz'][:,:2].copy()
+    with pytest.raises(RuntimeError,match='did not constrain BOTH'):
+        align_rectangular_bff_charts_on_source_seam(patches)
