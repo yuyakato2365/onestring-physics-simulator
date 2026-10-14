@@ -3773,17 +3773,54 @@ def _reference_proper_segment_intersection(a: np.ndarray, b: np.ndarray, c: np.n
 
 
 def _reference_quad_fully_inside(points: np.ndarray, polygon: np.ndarray) -> bool:
+    """Require the ENTIRE closed quad in Omega, including concave boundary touches.
+
+    Checking just corners and proper intersections misses a boundary that
+    touches a quad edge twice and leaves Omega between the touches.
+    Partition every quad edge at boundary-line intersections AND at
+    collinear polygon vertices; sample every open edge interval.
+    For a simple single-boundary polygon, if all four edges are inside
+    and every quad corner lies inside, the quad is fully covered.
+    """
     quad = np.asarray(points, dtype=float)
     poly = np.asarray(polygon, dtype=float)
+    if quad.shape != (4, 2) or poly.ndim != 2 or poly.shape[1] != 2:
+        raise ValueError("Expected quadrilateral and 2D polygon boundary")
+    if len(poly) < 3 or not np.isfinite(quad).all() or not np.isfinite(poly).all():
+        raise ValueError("Expected finite nondegenerate polygon and quad")
     if not all(_reference_point_in_polygon_inclusive(point, poly) for point in quad):
         return False
+    eps = 1e-12
     for edge_id in range(4):
-        a = quad[edge_id]
-        b = quad[(edge_id + 1) % 4]
+        a, b = quad[edge_id], quad[(edge_id + 1) % 4]
+        ab = b - a
+        length2 = float(np.dot(ab, ab))
+        if length2 <= eps * eps:
+            return False
+        cuts = [0.0, 1.0]
         for boundary_id in range(len(poly)):
-            c = poly[boundary_id]
-            d = poly[(boundary_id + 1) % len(poly)]
-            if _reference_proper_segment_intersection(a, b, c, d):
+            c, d = poly[boundary_id], poly[(boundary_id + 1) % len(poly)]
+            cd = d - c
+            ca = c - a
+            den = float(ab[0] * cd[1] - ab[1] * cd[0])
+            if abs(den) > eps:
+                t = float((ca[0] * cd[1] - ca[1] * cd[0]) / den)
+                u = float((ca[0] * ab[1] - ca[1] * ab[0]) / den)
+                if -eps <= t <= 1.0 + eps and -eps <= u <= 1.0 + eps:
+                    cuts.append(float(np.clip(t, 0.0, 1.0)))
+            elif abs(float(ca[0] * ab[1] - ca[1] * ab[0])) <= eps:
+                # Coincident segments may introduce boundary-run endpoints
+                # without any proper intersection.
+                for p in (c, d):
+                    t = float(np.dot(p - a, ab) / length2)
+                    if -eps <= t <= 1.0 + eps:
+                        cuts.append(float(np.clip(t, 0.0, 1.0)))
+        breaks = np.unique(np.asarray(cuts, dtype=float))
+        for t0, t1 in zip(breaks[:-1], breaks[1:]):
+            if t1 - t0 <= eps:
+                continue
+            point = a + (0.5 * (t0 + t1)) * ab
+            if not _reference_point_in_polygon_inclusive(point, poly):
                 return False
     return True
 
@@ -3814,7 +3851,7 @@ def _build_reference_m2d(grid, domain, params=None):
     split_diagnostics = dict(getattr(domain, "reference_split_diagnostics", {}))
     metrics = {
         "m2d_grid_overlay": "explicit regular square grid over official-BFF Omega",
-        "m2d_crop_policy": "all_vertices_inside_and_no_boundary_crossing",
+        "m2d_crop_policy": "entire_quad_covered_by_simple_omega_polygon",
         "m2d_boundary_clipping_policy": "all_vertices_inside",
         "m2d_requested_grid_nx": int(getattr(domain, "original_requested_nx", grid.nx)),
         "m2d_requested_grid_ny": int(getattr(domain, "original_requested_ny", grid.ny)),
