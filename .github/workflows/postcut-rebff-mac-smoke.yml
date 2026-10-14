@@ -49,32 +49,6 @@ jobs:
           blob=_download_zip({"patches":patch,"report":{"test":True}})
           assert len(blob)>100
           print("PASS: both source-mesh halves form disks, CSF=1, OBJ + ZIP exported")
-          # Full integration regression: no stand-in optimizer and no fake tiles.
-          from postcut_rebff_full_pipeline import run_existing_pipeline_through_dual_hinge
-          from onestring_physics.onestring_pipeline import PipelineParameters
-          solver_params=PipelineParameters(
-              nx=14, ny=14,
-              omega_parameterization_mode="paper_reference_bff",
-              paper_fidelity_mode=False,
-              bff_executable="/tmp/onestring-postcut-bff-cli/bff-command-line",
-              bff_rectangle_executable="third_party/bff_rectangle_build/bff-rect-command-line",
-              max_3d_iterations=8,
-              max_2d_iterations=8,
-              hinge_layout_iterations=25,
-              hinge_layout_time_budget_sec=6.0,
-          )
-          state,audit=run_existing_pipeline_through_dual_hinge(
-              mesh,result,grid=14,base_params=solver_params,
-              progress=lambda stage,fraction,msg: print(
-                  "FULL STAGE",stage,round(fraction,3),msg,flush=True),
-          )
-          print("FULL DUAL HINGE OK",len(state.tiles_2d_dual_hinge.vertices),audit)
-          assert len(state.tiles_2d_dual_hinge.vertices)>=int(
-              .75*record["initial_m2d"]["quads"]
-          )
-          assert state.tiles_2d_dual_hinge.metrics.get(
-              "postcut_rebff_full_T2D_dual_hinge_computed"
-          )
 
           PY
 
@@ -151,6 +125,33 @@ jobs:
           assert extra["split_count"]==2,extra
           assert len(extra["patches"])==3,extra
           assert extra["split_history"][0]["violating_patch_count"]>=1
+
+          # Full integration regression: no stand-in optimizer and no fake tiles.
+          from postcut_rebff_full_pipeline import run_existing_pipeline_through_dual_hinge
+          from onestring_physics.onestring_pipeline import PipelineParameters
+          solver_params=PipelineParameters(
+              nx=14, ny=14,
+              omega_parameterization_mode="paper_reference_bff",
+              paper_fidelity_mode=False,
+              bff_executable="/tmp/onestring-postcut-bff-cli/bff-command-line",
+              bff_rectangle_executable="third_party/bff_rectangle_build/bff-rect-command-line",
+              max_3d_iterations=8,
+              max_2d_iterations=8,
+              hinge_layout_iterations=25,
+              hinge_layout_time_budget_sec=6.0,
+          )
+          state,audit=run_existing_pipeline_through_dual_hinge(
+              mesh,result,grid=14,base_params=solver_params,
+              progress=lambda stage,fraction,msg: print(
+                  "FULL STAGE",stage,round(fraction,3),msg,flush=True),
+          )
+          print("FULL DUAL HINGE OK",len(state.tiles_2d_dual_hinge.vertices),audit)
+          assert len(state.tiles_2d_dual_hinge.vertices)>=int(
+              .75*record["initial_m2d"]["quads"]
+          )
+          assert state.tiles_2d_dual_hinge.metrics.get(
+              "postcut_rebff_full_T2D_dual_hinge_computed"
+          )
 
           PY
 
