@@ -68,7 +68,7 @@ def test_unconverged_preview_reuses_real_pipeline_and_remains_marked(monkeypatch
     monkeypatch.setattr(integrated,
                         "run_existing_pipeline_through_dual_hinge",full_pipeline)
     result,audit,diagnostic=integrated.run_original_onestring_with_postcut_rebff(
-        target(),SimpleNamespace(nx=14),
+        target(),PipelineParameters(nx=14,ny=14),
         max_splits=8,
         initial_rectangle_mode="source_boundary_shape_fit",
         allow_unconverged_t2d_preview=True,
@@ -93,7 +93,7 @@ def test_fully_converged_rebff_runs_original_full_solver(monkeypatch):
     monkeypatch.setattr(integrated,"run_existing_pipeline_through_dual_hinge",
                         lambda *a,**kw:(state,{}))
     _,audit,_=integrated.run_original_onestring_with_postcut_rebff(
-        target(),SimpleNamespace(nx=14))
+        target(),PipelineParameters(nx=14,ny=14))
     assert audit["postcut_rebff_csf_condition_met"] is True
     assert not audit["postcut_rebff_all_candidate_rejections"]
 
