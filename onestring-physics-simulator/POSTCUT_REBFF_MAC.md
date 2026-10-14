@@ -129,3 +129,27 @@ python3 -m streamlit run app_postcut_rebff.py
 ### CSFの改善と停止判定
 
 「改善したか」は切断前後の数値で表示しますが、成功と判定する条件は**全領域でCSF≤2**です。例えばCSFが3→2.4へ改善しても続けてSplitし、CSFが2以下ならSplitなしでも終了します。矩形BFFで歪みが増えたり、切断可能なGrid線がなくなった場合には最大Split数や失敗理由で停止します。元のOptCuts本番処理とK3D/T2D実装は変更しません。
+
+## 初期ΩをSの境界に合った矩形へ自動選択（最新）
+
+- 初期設定の **「入力メッシュSの境界に合わせて自動探索」** を使うと、Sの3D境界の主成分平面を求め、その境界の方向別の外接矩形から4隅候補を生成します。
+- 複数方向の四隅候補と従来の周長4等分候補を、実際に公式の**矩形BFFアダプター**で解き直します。選択スコアは、Sの境界への相似変換のみでの一致誤差、矩形の縦横比、3D/2D面積ヤコビアンの倍率比を組み合わせます。UVを異方的に後から引き伸ばすことはしません。
+- サイドバーから **「境界周長の4等分（従来方式）」** を選べば、以前の初期Ωを再現できます。初期Ωの選び方以外の反復Split・再BFF・T2D Dual Hingeの処理は維持します。
+- 候補ごとの境界一致誤差、縦横比、CSF、失敗理由は、アプリの **「入力S境界に合わせた初期矩形の候補と比較結果」** から確認できます。
+- この選択は**初回S→Ωに限ります**。Split後の各子領域は引き続き矩形境界BFFで再計算されます。
+- 複数の公式BFFを実際に計算するため、初回処理時間は増えます。入力形状の非平面性が非常に大きい場合は主成分投影による近似誤差もあるため、元論文の最適な境界処理を再現したと断言はできません。
+
+### Macでは矩形BFFアダプターを更新する必要があります
+
+古い `bff-rect-command-line` は入力S境界の四隅を明示的に指定するオプションに未対応です。実験用worktreeで一度だけ次を実行してください。
+
+```bash
+cd ~/Documents/onestring-postcut-rebff/onestring-physics-simulator
+git fetch origin
+git switch --detach origin/agent/postcut-rebff-mac-20261014
+bash scripts/repair_postcut_bff_mac.sh
+source .venv-postcut-rebff/bin/activate
+python3 -m streamlit run app_postcut_rebff.py
+```
+
+修復スクリプトは既に実行ファイルがある場合も矩形BFFを再ビルドするよう修正済みです。通常のOneString/OptCuts作業フォルダには変更を加えません。
