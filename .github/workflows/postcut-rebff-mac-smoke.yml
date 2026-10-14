@@ -7,6 +7,8 @@ on:
       - "onestring-physics-simulator/postcut_rebff_iterative.py"
       - "onestring-physics-simulator/tests/test_postcut_rebff_iterative.py"
       - "onestring-physics-simulator/tests/test_postcut_bff_auto_discovery.py"
+      - "onestring-physics-simulator/scripts/repair_postcut_bff_mac.sh"
+      - "onestring-physics-simulator/scripts/setup_postcut_rebff_mac.sh"
       - ".github/workflows/postcut-rebff-mac-smoke.yml"
   workflow_dispatch:
 jobs:
@@ -123,3 +125,22 @@ jobs:
           assert extra["split_history"][0]["violating_patch_count"]>=1
 
           PY
+
+
+  mac-build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile both official BFF CLIs with Homebrew SuiteSparse
+        run: |
+          bash scripts/repair_postcut_bff_mac.sh
+      - name: Verify native macOS executables
+        run: |
+          test -x third_party/boundary-first-flattening/build/bff-command-line
+          test -x third_party/bff_rectangle_build/bff-rect-command-line
+          file third_party/boundary-first-flattening/build/bff-command-line
+          file third_party/bff_rectangle_build/bff-rect-command-line
