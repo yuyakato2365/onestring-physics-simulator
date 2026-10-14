@@ -119,7 +119,7 @@ def align_t2d_at_source_split_seams(
 
     seams=_boundary_point_groups(patches)
     if not seams:
-        raise RuntimeError("Split S patches have no matching duplicated 3D boundary vertices")
+        raise RuntimeError("Cannot align re-BFF T2D: Split S patches have no matching duplicated 3D boundary vertices")
     all_m3d=np.asarray(state.mesh_3d_initial.vertices,float)
     all_faces=np.asarray(state.mesh_3d_initial.faces,int)
     tops=np.asarray(state.tiles_2d_dual_hinge.vertices,float)
