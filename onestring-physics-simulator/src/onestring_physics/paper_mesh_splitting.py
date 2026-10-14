@@ -237,14 +237,17 @@ def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=Fa
         split_quad_coverage_floor_sweep={f'{f:g}': {'chart_sigma': report[f][0], 'quads_over_threshold': report[f][1],
                                                     'worst_quad_sigma': report[f][2]} for f in floors},
     )
-    print('[FACE-SAMPLES] quads=%d threshold=%.4g active_coverage_floor=1e-12 (unchanged)' % (len(faces), threshold), flush=True)
+    print('[FACE-SAMPLES] quads=%d threshold=%.4g sampling=%s active_coverage_floor=%s'
+          % (len(faces), threshold, sampling_method,
+             'none (grid-vertex samples)' if sampling_method=='interpolated_grid_vertices'
+             else '1e-12 (overlap extrema)'), flush=True)
     print('  quad sigma ' + ('sqrt(hi/lo)' if linear_csf else 'hi/lo') + '  ' + '  '.join('p%g=%.4g' % (x, v) for x, v in zip(q, np.percentile(quad_sigma, q)))
           + '   irreducible(>thr)=%d/%d' % (int(np.count_nonzero(quad_sigma > threshold+1e-10)), len(faces)), flush=True)
     print('  lo set by a triangle covering <1%% of the quad: %d quads  (<0.01%%: %d)'
           % (int(np.count_nonzero(lo_cover < .01)), int(np.count_nonzero(lo_cover < 1e-4))), flush=True)
     print('  hi set by a triangle covering <1%% of the quad: %d quads  (<0.01%%: %d)'
           % (int(np.count_nonzero(hi_cover < .01)), int(np.count_nonzero(hi_cover < 1e-4))), flush=True)
-    print('  coverage-floor sweep (report only, nothing changed):', flush=True)
+    print('  overlap-extrema coverage-floor sweep (diagnostic only; not the interpolated sampler):', flush=True)
     for f in floors:
         s, n, w = report[f]
         print('    floor=%-8g chart_sigma=%-8.4g worst_quad_sigma=%-8.4g quads_over_threshold=%d' % (f, s, w, n), flush=True)
