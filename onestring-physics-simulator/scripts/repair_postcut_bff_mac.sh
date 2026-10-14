@@ -15,6 +15,20 @@ fi
 
 brew install cmake suite-sparse openblas
 export CMAKE_PREFIX_PATH="$(brew --prefix suite-sparse);$(brew --prefix openblas)"
+
+# Upstream BFF's FindSuiteSparse.cmake predates current Homebrew layouts.
+# It can resolve the libraries while missing SuiteSparse's CHOLMOD headers.
+# Give Clang the ACTUAL cholmod.h directory instead of assuming include paths.
+suitesparse_prefix="$(brew --prefix suite-sparse)"
+cholmod_header="$(find "$suitesparse_prefix" -type f -name cholmod.h -print -quit)"
+if [[ -z "$cholmod_header" ]]; then
+  echo "SuiteSparse is installed but cholmod.h is missing beneath:" >&2
+  echo "  $suitesparse_prefix" >&2
+  echo "Try: brew reinstall suite-sparse" >&2
+  exit 1
+fi
+cholmod_include="$(dirname "$cholmod_header")"
+echo "Using official SuiteSparse CHOLMOD header: $cholmod_header"
 source_dir="third_party/boundary-first-flattening"
 cli="$source_dir/build/bff-command-line"
 rectangle_cli="third_party/bff_rectangle_build/bff-rect-command-line"
@@ -46,7 +60,8 @@ echo "Building standard BFF CLI at: $cli"
 cmake -S "$source_dir" -B "$source_dir/build" \
   -DBFF_BUILD_GUI=OFF \
   -DBFF_BUILD_CLI=ON \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  "-DCMAKE_CXX_FLAGS=-I$cholmod_include -include cstdint"
 cmake --build "$source_dir/build" --target bff-command-line --parallel 4
 
 if [[ ! -x "$cli" ]]; then
