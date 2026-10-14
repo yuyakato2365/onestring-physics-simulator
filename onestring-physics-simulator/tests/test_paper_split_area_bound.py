@@ -129,3 +129,30 @@ def test_paper_one_split_when_ratio_crosses_linear_threshold(monkeypatch):
     assert metrics["max_csf_before_split"] == pytest.approx(np.sqrt(4.08))
     assert metrics["max_csf_after_split"] <= 2
     assert metrics["csf_split_stopping_reason"] == "threshold_met"
+
+
+def test_experimental_physical_area_limit_can_require_a_cut_where_linear_two_does_not(monkeypatch):
+    # Whole component linear ratio sqrt(3.02), lying between sqrt(2) and 2.
+    # A generic bisection across x=2 separates both Jacobian bands.
+    by_col = [(1.,1.01),(1.1,1.12),(2.90,2.92),(3.0,3.02)]
+    v,f,d = _fixture(monkeypatch, by_col)
+    legacy=SimpleNamespace(paper_fidelity_mode=True,collision_split_forced_lines=())
+    _,_,old_records,old_metrics=splitting._split_mesh_single(v,f,d,legacy)
+    assert len(old_records)==0
+    assert old_metrics["csf_split_stopping_reason"]=="threshold_met"
+    assert old_metrics["csf_split_area_ratio_after"] > 2.
+
+    v,f,d=_fixture(monkeypatch,by_col)
+    trial=SimpleNamespace(paper_fidelity_mode=True,
+                          paper_split_area_limit_experiment=True,
+                          collision_split_forced_lines=())
+    _,_,records,metrics=splitting._split_mesh_single(v,f,d,trial)
+    assert len(records)==1
+    assert metrics["csf_split_effective_linear_threshold"]==pytest.approx(np.sqrt(2.))
+    assert metrics["csf_split_requested_area_threshold"]==2.
+    assert metrics["csf_split_area_limit_experiment"]
+    assert metrics["csf_split_stopping_reason"]=="threshold_met"
+    assert metrics["csf_split_candidate_area_bound_satisfied"]
+    assert metrics["csf_split_area_ratio_after"] <= 2.
+    # CSF fit alone is NOT fabrication certification.
+    assert metrics["csf_split_bound_certified"] is False
