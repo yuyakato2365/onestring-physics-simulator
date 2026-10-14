@@ -337,6 +337,66 @@ def _component_conformal_scale_span(lo, hi, component):
     return float(np.sqrt(_component_area_span(lo, hi, component)))
 
 
+def _initial_single_cut_exhaustive_audit(vertices, faces, ratio, limit):
+    """Read-only audit of every complete row/column split from the INITIAL M2D.
+
+    This evaluates the same fixed UV/Jacobian field used by Split itself.
+    No candidates are committed, no search policy or count is changed.
+    Consequently a residual >limit is a proof that one fixed-chart
+    full-grid cut CANNOT satisfy this discretized CSF model. It is
+    NOT a claim about the authors' UV charts or post-cut remapping.
+    """
+    from .simple_split_panel_patch import _edge_components
+    from .final_split_panel_pass import _complete_cut_once
+
+    comps = _edge_components(faces)
+    baseline = max((ratio(c) for c in comps), default=1.)
+    floor_candidates = []
+    scanned = 0
+    for component in comps:
+        bounds = vertices[np.unique(faces[component]), :2]
+        for axis, coordinate in (("col", 0), ("row", 1)):
+            for value in np.unique(np.round(bounds[:, coordinate], 12))[1:-1]:
+                _, subfaces, record = _complete_cut_once(
+                    vertices, faces[component], axis, float(value)
+                )
+                if record is None:
+                    continue
+                children = _edge_components(subfaces)
+                if len(children) != 2:
+                    continue
+                child_csfs = [ratio(component[child]) for child in children]
+                untouched = [ratio(other) for other in comps
+                             if other is not component]
+                worst = max(child_csfs + untouched)
+                scanned += 1
+                floor_candidates.append(dict(
+                    axis=axis,
+                    coordinate=float(record["snapped_value"]),
+                    component_id=int(component.min()),
+                    worst_linear_csf=float(worst),
+                    child_linear_csf=[float(v) for v in child_csfs],
+                    improvement=float(baseline-worst),
+                    one_cut_below_threshold=bool(worst <= limit+1e-10),
+                ))
+    floor_candidates.sort(key=lambda c: (
+        c["worst_linear_csf"], -c["improvement"],
+        c["axis"], c["coordinate"]
+    ))
+    return dict(
+        scope="initial M2D fixed UV; complete cuts in any grid row/column; "
+              "potential per-component scale normalization only",
+        initial_component_count=len(comps),
+        initial_max_linear_csf=float(baseline),
+        complete_cut_candidate_count=int(scanned),
+        best_single_cut=floor_candidates[0] if floor_candidates else None,
+        any_single_cut_below_threshold=any(
+            c["one_cut_below_threshold"] for c in floor_candidates
+        ),
+        candidates=floor_candidates,
+    )
+
+
 def _split_mesh_single(vertices, faces, domain, params=None):
     from .simple_split_panel_patch import _edge_components
     from .final_split_panel_pass import _complete_cut_once
@@ -375,6 +435,10 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         return float(np.sqrt(hi[component].max()))
     initial_components = _edge_components(faces)
     before = max(map(ratio, initial_components), default=1.)
+    initial_single_cut_audit = (
+        _initial_single_cut_exhaustive_audit(vertices, faces, ratio, threshold)
+        if paper_fidelity else None
+    )
     while enabled and len(records) < budget:
         components = _edge_components(faces)
         bad = [c for c in components
@@ -621,6 +685,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             float((paper_quad_floor if paper_fidelity else irreducible)[c].max())
             for c in final
         ],
+        csf_split_initial_one_cut_exhaustive_audit=initial_single_cut_audit,
         csf_split_irreducible_quad_count=int(np.count_nonzero(
             (paper_quad_floor if paper_fidelity else irreducible) > threshold+1e-10
         )),
