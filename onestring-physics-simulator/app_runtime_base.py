@@ -2120,6 +2120,27 @@ if _postcut_report is not None:
         getattr(st.session_state.get("onestring_state"),"tiles_2d_dual_hinge",None),
         "metrics",{}
     )
+    if _state_metrics.get("postcut_omega_grid_no_cells_cropped"):
+        st.success(
+            "各矩形Ωは端の長方形セルまで使って100%被覆されています。"
+            "Split境界のGrid辺も共通座標で生成しています。"
+        )
+        if not _state_metrics.get(
+            "postcut_seam_uv_full_physical_correspondence_verified",False
+        ):
+            st.warning(
+                "UV上のパネル境界は揃っていますが、元Sの同じ"
+                "Split境界点が2領域のUVで完全に一致するとは限りません。"
+                "物理境界の内部対応誤差（UV）="
+                f"{_state_metrics.get('postcut_seam_interior_correspondence_error_max')}。"
+                "矩形の端が一致することは最終T2Dの完全一致を保証しません。"
+            )
+        ratio=_state_metrics.get("postcut_omega_grid_min_cell_to_pitch_ratio")
+        if ratio is not None and ratio<0.999:
+            st.caption(
+                f"外周まで欠けなく覆うため、境界セルは正方形でない場合があります。"
+                f"最小辺長/基本格子間隔 = {ratio:.3f}。"
+            )
     _seam_mode=_state_metrics.get("split_seam_alignment")
     if _seam_mode in (
         "source_surface_3d_matched_rigid_SE2",
