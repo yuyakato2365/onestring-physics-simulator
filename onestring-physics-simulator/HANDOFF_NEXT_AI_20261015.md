@@ -86,3 +86,22 @@ https://github.com/yuyakato2365/onestring-physics-simulator/actions/workflows/po
 - 未収束CSFや大きな縫い目残差を成功と表現しない。
 - 修正箇所と、成功したテスト、失敗したテストを区別する。
 - 元のMac研究用フォルダの未コミット変更は保全する。
+
+## 実測更新: Lilium矩形BFFでGrid完全被覆を確認
+
+GitHub Actions Run: https://github.com/yuyakato2365/onestring-physics-simulator/actions/runs/38604968677 （成功）。
+
+- 自動テスト：**36 passed**。
+- 矩形BFF Split後、**矩形領域2つ**、新M2D **156タイル**。
+- 各Ωの **面積被覆率 [1.0, 1.0]（外周まで欠落なし）**。
+- 実Sの物理Split線に対応する**共通UV Grid辺が12組完全一致**（postcut_seam_exact_uv_edge_pairs: {'0-1': 12}）。
+- 初回Split 1本、矩形再BFF後の最大CSF **15.286436644865034**（2を超えているため**未収束**、最大Split 1本の検証）。
+- 旧自由境界モードの158枚・CSF 1.566、T2D境界ずれ0.765は**矩形モードの結果と混同しない**。
+- 続いて **矩形再BFFの厳密被覆Gridから本物のT2D Dual Hingeまで**流す統合検証を追加。GitHub Actionsの最新版を要確認。CSF未達なので allow_csf_violation_preview=True で試験計算するだけ。成功しても研究結果として合格ではない。
+
+### 新たに見つかった物理対応の注意点
+
+- 両矩形のUV seam端点、境界Grid線分が一致しても、**元のS上で同じ内部境界点が両矩形で同じUV位置に写る保証はない**（独立BFFの境界パラメータが異なる）。
+- postcut_rebff_seam_registration.py に元S境界内部点のUVパラメータ不一致を実測する postcut_seam_interior_correspondence_error_max、postcut_seam_uv_full_physical_correspondence_verified を追加。
+- 本当に**Sに持ち上げた両側M3D境界を一致**させるなら、この誤差を0まで減らす**共有境界パラメータ制約付き再展開**が要る場合がある。T2Dでの残差だけでなく、UV境界上の内部位置ズレも別途検証すべし。
+- app_runtime_base.py に面積100%、共有UV辺、内部シーム誤差、非正方形境界セルの注意書きを追加済み。
