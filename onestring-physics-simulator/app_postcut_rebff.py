@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""Interactive, REAL post-cut official-BFF experiment (not a full T2D pipeline).
+
+Run on Mac: streamlit run app_postcut_rebff.py
+Original OneString design/split algorithms are left untouched.
+"""
+from __future__ import annotations
+
+import io
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+import numpy as np
+import plotly.graph_objects as go
+import streamlit as st
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
+
+from onestring_physics.input_shape import load_target_shape
+from onestring_physics.onestring_pipeline import (
+    PipelineParameters, build_paper_reference_initialization,
+)
+from onestring_physics.paper_fidelity_mode import configure_paper_fidelity
+from onestring_physics.reference_bff import (
+    run_official_bff, find_official_bff_executable,
+    find_rectangular_bff_executable,
+)
+from scripts.test_lilium_postcut_bff_hypothesis import clip_piece, field
+
+
+def _jacobian(xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    points3 = np.asarray(xyz, float)[faces]
+    points2 = np.asarray(uv, float)[faces]
+    a3, b3 = points3[:, 1] - points3[:, 0], points3[:, 2] - points3[:, 0]
+    a2, b2 = points2[:, 1] - points2[:, 0], points2[:, 2] - points2[:, 0]
+    j = np.linalg.norm(np.cross(a3, b3), axis=1) / np.maximum(
+        np.abs(a2[:, 0] * b2[:, 1] - a2[:, 1] * b2[:, 0]), 1e-300
+    )
+    return np.sqrt(j)
+
+
+def _figure(xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray, *,
+            surface: bool, title: str) -> go.Figure:
+    coords = np.asarray(xyz if surface else np.column_stack(
+        (uv, np.zeros(len(uv)))), float)
+    lam = _jacobian(xyz, uv, faces)
+    fig = go.Figure(go.Mesh3d(
+        x=coords[:, 0], y=coords[:, 1], z=coords[:, 2],
+        i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+        intensity=np.log(np.maximum(lam, 1e-12)), intensitymode="cell",
+        colorscale="Viridis", opacity=1, flatshading=True, showscale=True,
+        colorbar=dict(title="log(CSF)", len=0.7),
+        hovertemplate="log(CSF): %{intensity:.3f}<extra></extra>",
+    ))
+    camera = dict(eye=dict(x=0, y=0, z=2.4)) if not surface else None
+    fig.update_layout(
+        title=title, margin=dict(l=0, r=0, t=48, b=0), height=440,
+        scene=dict(aspectmode="data", camera=camera,
+                   xaxis_title="u" if not surface else "X",
+                   yaxis_title="v" if not surface else "Y",
+                   zaxis_title="" if not surface else "Z"),
+    )
+    return fig
+
+
+def _obj_bytes(xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray) -> bytes:
+    out = ["# Post-cut BFF experiment. v = source 3D positions, vt = new BFF UV."]
+    out.extend(f"v {p[0]:.17g} {p[1]:.17g} {p[2]:.17g}" for p in xyz)
+    out.extend(f"vt {q[0]:.17g} {q[1]:.17g}" for q in uv)
+    for a, b, c in np.asarray(faces, int):
+        a, b, c = int(a) + 1, int(b) + 1, int(c) + 1
+        out.append(f"f {a}/{a} {b}/{b} {c}/{c}")
+    return ("\n".join(out) + "\n").encode("utf-8")
+
+
+def _download_zip(result: dict) -> bytes:
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("comparison.json", json.dumps(result["report"], indent=2,
+                                                        ensure_ascii=False))
+        for patch in result["patches"]:
+            name = patch["side"]
+            archive.writestr(
+                f"{name}_postcut_rebff.obj",
+                _obj_bytes(patch["xyz"], patch["new_uv"], patch["faces"]),
+            )
+            archive.writestr(
+                f"{name}_fixed_original_uv.obj",
+                _obj_bytes(patch["xyz"], patch["original_uv"], patch["faces"]),
+            )
+    return data.getvalue()
+
+
+def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
+             phase: float, cut_mode: str, manual_axis: str,
+             manual_fraction: float, post_policy: str) -> dict:
+    standard_path = str(find_official_bff_executable(standard_exe or None))
+    rectangle_path = str(find_rectangular_bff_executable(rect_exe or None))
+
+    params = PipelineParameters(
+        nx=grid, ny=grid, omega_parameterization_mode="paper_reference_bff",
+        bff_boundary_policy="target_rectangle", paper_fidelity_mode=True,
+        max_csf_splits=1,
+        bff_executable=standard_path, bff_rectangle_executable=rectangle_path,
+        bff_rectangle_corner_phase_fraction=float(phase),
+    )
+    params, _ = configure_paper_fidelity(params)
+    params.bff_executable = standard_path
+    params.bff_rectangle_executable = rectangle_path
+    params.bff_rectangle_corner_phase_fraction = float(phase)
+    params.max_csf_splits = 1
+    initial = build_paper_reference_initialization(load_target_shape(mesh_path), params)
+    param = initial.surface_parameterization
+    xyz = np.asarray(param.surface_vertices_3d, float)
+    uv = np.asarray(param.uv_vertices_2d, float)
+    faces = np.asarray(param.surface_faces, int)
+    initial_report = field(xyz, uv, faces)
+
+    cut_records = initial.mesh_2d_initial.metrics.get("csf_split_step_analysis") or []
+    if cut_mode == "曲率優先の最初のSplit":
+        if not cut_records:
+            raise RuntimeError(
+                "A curvature-guided Split was not produced by the current M2D. "
+                "Use manual cut mode; no implicit center-cut fallback is performed."
+            )
+        first = cut_records[0]
+        axis = str(first["axis"])
+        coordinate = float(first["snapped_value"])
+        source_vertex = first.get("curvature_vertex_id")
+        curvature = first.get("gaussian_curvature")
+    else:
+        axis = manual_axis
+        dim = {"row": 1, "col": 0}[axis]
+        coordinate = float(np.min(uv[:, dim]) +
+                           manual_fraction * np.ptp(uv[:, dim]))
+        source_vertex, curvature = None, None
+
+    dim = {"row": 1, "col": 0}[axis]
+    patches = []
+    for is_positive in (False, True):
+        x, old_uv, f, topology = clip_piece(
+            xyz, uv, faces, dim, coordinate, is_positive
+        )
+        if not bool(topology["disk_topology"]):
+            raise ValueError("Post-cut patch is not a topological disk")
+        bff = run_official_bff(
+            x, f, executable=standard_path,
+            rectangle_executable=rectangle_path, boundary_policy=post_policy,
+        )
+        new_uv = np.asarray(bff.uv_vertices, float)
+        pre = field(x, old_uv, f)
+        post = field(x, new_uv, f)
+        patches.append({
+            "side": "positive" if is_positive else "negative",
+            "xyz": x, "original_uv": old_uv, "new_uv": new_uv,
+            "faces": f, "pre": pre, "post": post,
+            "bff_metadata": bff.metrics,
+        })
+    worst = max(p["post"]["linear_span"] for p in patches)
+    report = {
+        "experiment": "One cut followed by independently rerun official BFF",
+        "not_paper_author_verified": True,
+        "not_applied_to_K3D_or_T2D": True,
+        "input_mesh": str(mesh_path), "grid": int(grid),
+        "initial_bff": "target_rectangle", "postcut_bff": post_policy,
+        "rectangle_corner_phase": float(phase),
+        "split": {
+            "axis": axis, "uv_coordinate": coordinate, "origin": cut_mode,
+            "source_curvature_vertex": source_vertex, "gaussian_curvature": curvature,
+        },
+        "initial_source_triangle_csf": initial_report,
+        "initial_m2d": {
+            "quads": int(len(initial.mesh_2d_initial.faces)),
+            "initial_linear_csf": initial.mesh_2d_initial.metrics.get("max_csf_before_split"),
+            "after_single_cut_linear_csf": initial.mesh_2d_initial.metrics.get("max_csf_after_split"),
+        },
+        "patches": [
+            {
+                "side": p["side"], "triangles": int(len(p["faces"])),
+                "fixed_original_chart": p["pre"],
+                "postcut_rebff": p["post"],
+            } for p in patches
+        ],
+        "max_postcut_patch_linear_span": float(worst),
+        "linear_limit_two_satisfied": bool(worst <= 2.0 + 1e-10),
+        "caution": "Source triangle-patch evaluation only. M2D/M3D are not "
+                   "regenerated on the new UV islands, and T2D is not recomputed. "
+                   "New UV islands are independent and not globally packed.",
+    }
+    return {"report": report, "patches": patches, "initial": {
+        "xyz": xyz, "uv": uv, "faces": faces,
+    }}
+
+
+def main() -> None:
+    st.set_page_config(page_title="OneString Split → re-BFF", layout="wide")
+    st.title("OneString: Split後のBFF再計算（Mac実験モード）")
+    st.caption("矩形BFF → 高曲率候補で1本Split → 2つの3D曲面パッチをそれぞれ公式BFFで再展開")
+    st.warning(
+        "研究用の独立した実験画面です。新しいUVとOBJを実際に生成しますが、"
+        "この段階では再BFF後のM2D/M3D/K3D/T2Dを再構築しません。"
+        "通常のシミュレーターの計算経路は変更しません。"
+    )
+    with st.sidebar:
+        st.header("実験条件")
+        mesh = st.text_input("OBJのパス", value="~/Downloads/lilium.obj")
+        grid = st.number_input("グリッド（nx=ny）", min_value=2, max_value=60, value=14)
+        rect = st.text_input("矩形BFF実行ファイル（空欄なら自動検出）", value="")
+        standard = st.text_input("通常BFF実行ファイル（空欄なら自動検出）", value="")
+        phase = st.select_slider(
+            "矩形BFFの四隅の位相",
+            options=[0.0, 0.0625, 0.125, 0.1875], value=0.0,
+        )
+        cut_mode = st.radio(
+            "切断位置", ["曲率優先の最初のSplit", "手動指定"], index=0,
+        )
+        axis = "row"
+        fraction = 0.5
+        if cut_mode == "手動指定":
+            axis = st.selectbox("切断方向", ["row", "col"])
+            fraction = st.slider("UV境界幅に対する切断位置", 0.05, 0.95, 0.5, 0.01)
+        post_policy = st.selectbox(
+            "Split後のBFF境界条件",
+            ["automatic_reference", "target_rectangle"],
+            index=0,
+            help="自由境界BFF（推奨の検証候補）か、再度矩形BFFにするかを比較",
+        )
+        start = st.button("1本Split → BFF再計算を実行", type="primary")
+
+    if start:
+        path = Path(mesh).expanduser().resolve()
+        if not path.is_file():
+            st.error(f"OBJが存在しません: {path}")
+        else:
+            try:
+                with st.spinner("矩形BFF → 1本Split → 両側を独立に公式BFFで再計算中…"):
+                    st.session_state["postcut_rebff_data"] = _execute(
+                        path, int(grid), standard, rect, float(phase),
+                        cut_mode, axis, float(fraction), post_policy,
+                    )
+            except Exception as exc:
+                st.exception(exc)
+    data = st.session_state.get("postcut_rebff_data")
+    if data is None:
+        st.info(
+            "最初に公式BFFの実行ファイルを用意してください。"
+            "READMEのMacセットアップ手順に従い、実行ボタンを押します。"
+        )
+        return
+
+    report = data["report"]
+    split = report["split"]
+    st.success(
+        f"実測: {split['axis']}={split['uv_coordinate']:.6f} で1本切断。"
+        f"再BFF後の最大CSF比={report['max_postcut_patch_linear_span']:.4f}、"
+        f"上限2の判定={'PASS' if report['linear_limit_two_satisfied'] else 'FAIL'}"
+    )
+    a, b, c = st.columns(3)
+    a.metric("元BFF（元メッシュ全体）CSF比",
+             f"{report['initial_source_triangle_csf']['linear_span']:.4f}")
+    b.metric("再BFF後の最大CSF比",
+             f"{report['max_postcut_patch_linear_span']:.4f}")
+    c.metric("切断数", "1")
+
+    st.subheader("2D展開の比較")
+    st.caption(
+        "各パッチの位置・回転・拡大率は独立です。左＝切断前のUVを保持、"
+        "右＝実際に再計算されたBFFのUV。色は各三角形のlog(CSF)。"
+    )
+    for patch in data["patches"]:
+        st.markdown(f"**{patch['side']} 領域（{len(patch['faces'])} triangles）**")
+        m1, m2 = st.columns(2)
+        m1.metric("既存UVのCSF比", f"{patch['pre']['linear_span']:.4f}")
+        m2.metric("再BFFのCSF比", f"{patch['post']['linear_span']:.4f}")
+        left, right = st.columns(2)
+        with left:
+            st.plotly_chart(_figure(
+                patch["xyz"], patch["original_uv"], patch["faces"],
+                surface=False, title="切断前のUVを維持",
+            ), use_container_width=True)
+        with right:
+            st.plotly_chart(_figure(
+                patch["xyz"], patch["new_uv"], patch["faces"],
+                surface=False, title="Split後にBFFを再計算",
+            ), use_container_width=True)
+    st.subheader("切断された実際の3D形状")
+    left, right = st.columns(2)
+    for col, patch in zip((left, right), data["patches"]):
+        with col:
+            st.plotly_chart(_figure(
+                patch["xyz"], patch["new_uv"], patch["faces"],
+                surface=True, title=f"{patch['side']}：切断後の3D三角形メッシュ",
+            ), use_container_width=True)
+
+    st.download_button(
+        "両領域の再BFF OBJとCSF比較JSONをZIP保存",
+        data=_download_zip(data), file_name="onestring_postcut_rebff.zip",
+        mime="application/zip",
+    )
+    with st.expander("詳細CSFと実験条件"):
+        st.json(report)
+
+
+if __name__ == "__main__":
+    main()
