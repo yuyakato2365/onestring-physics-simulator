@@ -284,7 +284,9 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
             origin="manual_grid_snapped", source_vertex=None, curvature=None,
         )
 
-    def _rebff(x, f, *, rectangle_corner_positions):
+    def _rebff(x, f, *, rectangle_corner_positions=None):
+        if post_policy == "target_rectangle" and rectangle_corner_positions is None:
+            raise RuntimeError("Split BFF rectangle requires exact physical seam endpoints")
         # Both ends of the physical cut are common 3D vertices of the child
         # patches. Fix them as neighboring rectangle corners in BOTH BFFs.
         bff = run_official_bff(
