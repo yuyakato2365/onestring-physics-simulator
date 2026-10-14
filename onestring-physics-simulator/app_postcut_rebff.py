@@ -23,7 +23,10 @@ sys.path.insert(0, str(ROOT))
 from onestring_physics.input_shape import load_target_shape
 from onestring_physics.onestring_pipeline import (
     PipelineParameters, build_paper_reference_initialization,
+    create_quad_grid, _reference_flatten_to_domain,
+    _build_reference_m2d, _lift_m2d_to_m3d,
 )
+from onestring_physics.legacy_pipeline_base import SurfaceParameterization
 from onestring_physics.paper_fidelity_mode import configure_paper_fidelity
 from onestring_physics.reference_bff import (
     run_official_bff, find_official_bff_executable,
@@ -67,6 +70,56 @@ def _figure(xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray, *,
     return fig
 
 
+
+def _rebff_piece_m2d_m3d(patch: dict, params: PipelineParameters,
+                         grid_resolution: int, spacing: float) -> dict:
+    """Actually retile one newly BFF-mapped source patch, then lift M2D to M3D.
+
+    The two results are separate UV islands and are not wired into K3D/T2D.
+    """
+    from onestring_physics.reference_bff import validate_reference_mesh
+    from copy import copy
+    xyz, uv, faces = patch["xyz"], patch["new_uv"], patch["faces"]
+    topo = validate_reference_mesh(xyz, faces)
+    loop = [int(v) for v in topo["boundary_loops"][0]]
+    chart = SurfaceParameterization(
+        method="paper_reference_bff",
+        surface_vertices_3d=xyz,
+        surface_faces=faces,
+        uv_vertices_2d=uv,
+        uv_faces=faces,
+        omega_boundary=uv[loop + [loop[0]]],
+        metrics={"boundary_loop": loop,
+                 "per_triangle_lambda": _jacobian(xyz, uv, faces).tolist()},
+    )
+    piece_params = copy(params)
+    piece_params.reference_grid_spacing = float(spacing)
+    piece_params.reference_grid_rotation_degrees = 0.0
+    piece_params.reference_grid_origin_u = 0.0
+    piece_params.reference_grid_origin_v = 0.0
+    piece_grid = create_quad_grid(
+        int(grid_resolution), int(grid_resolution),
+        piece_params.tile_size, piece_params.gap_size,
+    )
+    domain = _reference_flatten_to_domain(chart, piece_grid, piece_params)
+    m2d = _build_reference_m2d(piece_grid, domain, piece_params)
+    m3d, _ = _lift_m2d_to_m3d(None, m2d, chart, piece_params)
+    return {"uv": np.asarray(m2d.vertices, float)[:, :2],
+            "xyz": np.asarray(m3d.vertices, float),
+            "quads": np.asarray(m2d.faces, int),
+            "roundtrip_max": float(m3d.metrics.get("m3d_round_trip_error_max", 0.0))}
+
+
+def _quad_preview_obj(xyz: np.ndarray, uv: np.ndarray, quads: np.ndarray) -> bytes:
+    lines = ["# Post-cut BFF quad preview with 3D vertices and new UV coordinates"]
+    lines.extend(f"v {v[0]:.17g} {v[1]:.17g} {v[2]:.17g}" for v in xyz)
+    lines.extend(f"vt {v[0]:.17g} {v[1]:.17g}" for v in uv)
+    for face in quads:
+        ids = [int(i)+1 for i in face]
+        lines.append("f " + " ".join(f"{i}/{i}" for i in ids))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 def _obj_bytes(xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray) -> bytes:
     out = ["# Post-cut BFF experiment. v = source 3D positions, vt = new BFF UV."]
     out.extend(f"v {p[0]:.17g} {p[1]:.17g} {p[2]:.17g}" for p in xyz)
@@ -92,6 +145,12 @@ def _download_zip(result: dict) -> bytes:
                 f"{name}_fixed_original_uv.obj",
                 _obj_bytes(patch["xyz"], patch["original_uv"], patch["faces"]),
             )
+            if "quad_preview" in patch:
+                q = patch["quad_preview"]
+                archive.writestr(
+                    f"{name}_new_M3D_tiles.obj",
+                    _quad_preview_obj(q["xyz"], q["uv"], q["quads"]),
+                )
     return data.getvalue()
 
 
@@ -159,6 +218,18 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
             "faces": f, "pre": pre, "post": post,
             "bff_metadata": bff.metrics,
         })
+    # Regenerate real square M2D panels and 3D inverse-map lifts on the NEW UV.
+    # Keep one shared spacing across the two patches for meaningful comparison.
+    maximum_span = max(float(np.max(np.ptp(p["new_uv"], axis=0))) for p in patches)
+    common_spacing = max(maximum_span / max(int(grid), 1), 1e-8)
+    for patch in patches:
+        try:
+            patch["quad_preview"] = _rebff_piece_m2d_m3d(
+                patch, params, int(grid), common_spacing
+            )
+        except Exception as exc:
+            patch["quad_preview_error"] = f"{type(exc).__name__}: {exc}"
+
     worst = max(p["post"]["linear_span"] for p in patches)
     report = {
         "experiment": "One cut followed by independently rerun official BFF",
@@ -184,11 +255,17 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
                 "postcut_rebff": p["post"],
             } for p in patches
         ],
+        "new_piece_m2d_quad_counts": [
+            int(len(p["quad_preview"]["quads"])) if "quad_preview" in p else None
+            for p in patches
+        ],
+        "new_piece_m2d_grid_spacing": float(common_spacing),
+        "new_piece_m2d_errors": [p.get("quad_preview_error") for p in patches],
         "max_postcut_patch_linear_span": float(worst),
         "linear_limit_two_satisfied": bool(worst <= 2.0 + 1e-10),
-        "caution": "Source triangle-patch evaluation only. M2D/M3D are not "
-                   "regenerated on the new UV islands, and T2D is not recomputed. "
-                   "New UV islands are independent and not globally packed.",
+        "caution": "Independent per-patch M2D/M3D previews are computed on "
+                   "the new BFF UVs. These UV islands are not globally packed "
+                   "or integrated into K3D/T2D. Fabrication not certified.",
     }
     return {"report": report, "patches": patches, "initial": {
         "xyz": xyz, "uv": uv, "faces": faces,
@@ -201,7 +278,7 @@ def main() -> None:
     st.caption("矩形BFF → 高曲率候補で1本Split → 2つの3D曲面パッチをそれぞれ公式BFFで再展開")
     st.warning(
         "研究用の独立した実験画面です。新しいUVとOBJを実際に生成しますが、"
-        "この段階では再BFF後のM2D/M3D/K3D/T2Dを再構築しません。"
+        "再BFF後のM2D/M3Dは別領域として生成しますが、K3D/T2Dは未接続です。"
         "通常のシミュレーターの計算経路は変更しません。"
     )
     with st.sidebar:
@@ -295,8 +372,32 @@ def main() -> None:
                 surface=True, title=f"{patch['side']}：切断後の3D三角形メッシュ",
             ), use_container_width=True)
 
+    st.subheader("再BFF後のUVを使ったM2D / M3D（新規計算）")
+    st.caption("各領域に共通間隔の正方形タイルを作り、新しいBFFの逆写像で"
+               "3Dへリフトしました。K3D/T2Dにはまだ接続していません。")
+    for patch in data["patches"]:
+        if "quad_preview" not in patch:
+            st.error(f"{patch['side']}: M2D→M3D生成失敗: {patch.get('quad_preview_error')}")
+            continue
+        q = patch["quad_preview"]
+        st.markdown(f"**{patch['side']}：{len(q['quads'])}枚の新M2D/M3Dタイル**")
+        triangles = np.concatenate((
+            q["quads"][:, [0, 1, 2]], q["quads"][:, [0, 2, 3]],
+        ), axis=0)
+        left, right = st.columns(2)
+        with left:
+            st.plotly_chart(_figure(
+                q["xyz"], q["uv"], triangles,
+                surface=False, title="再BFF後に生成したM2D",
+            ), use_container_width=True)
+        with right:
+            st.plotly_chart(_figure(
+                q["xyz"], q["uv"], triangles,
+                surface=True, title="再BFFからリフトしたM3D",
+            ), use_container_width=True)
+
     st.download_button(
-        "両領域の再BFF OBJとCSF比較JSONをZIP保存",
+        "再BFFのUV・新M3DタイルOBJ・CSF比較JSONをZIP保存",
         data=_download_zip(data), file_name="onestring_postcut_rebff.zip",
         mime="application/zip",
     )
