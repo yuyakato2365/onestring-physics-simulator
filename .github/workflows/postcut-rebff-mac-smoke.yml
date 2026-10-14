@@ -1,0 +1,44 @@
+name: Mac post-cut re-BFF preview smoke
+on:
+  push:
+    branches: [agent/postcut-rebff-mac-20261014]
+    paths:
+      - "onestring-physics-simulator/app_postcut_rebff.py"
+      - ".github/workflows/postcut-rebff-mac-smoke.yml"
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e .
+      - run: python -m py_compile app_postcut_rebff.py scripts/test_lilium_postcut_bff_hypothesis.py
+      - name: Smoke-test exact seam clipping and OBJ export
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from scripts.test_lilium_postcut_bff_hypothesis import clip_piece, field
+          from app_postcut_rebff import _obj_bytes, _download_zip
+          xyz=np.array([[0.,0.,0.],[1.,0.,0.],[1.,1.,0.],[0.,1.,0.]])
+          uv=xyz[:,:2].copy()
+          faces=np.array([[0,1,2],[0,2,3]])
+          cut=[]
+          for pos in (False, True):
+              a,b,c,topo=clip_piece(xyz,uv,faces,1,0.5,pos)
+              assert topo["disk_topology"],topo
+              assert len(c) >= 2 and field(a,b,c)["linear_span"]==1.0
+              assert b"vt " in _obj_bytes(a,b,c)
+              cut.append((a,b,c))
+          patch=[]
+          for i,(a,b,c) in enumerate(cut):
+              patch.append({"side":str(i),"xyz":a,"new_uv":b,"original_uv":b,"faces":c})
+          blob=_download_zip({"patches":patch,"report":{"test":True}})
+          assert len(blob)>100
+          print("PASS: both source-mesh halves form disks, CSF=1, OBJ + ZIP exported")
+          PY
