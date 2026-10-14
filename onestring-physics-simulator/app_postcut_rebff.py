@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -34,6 +35,59 @@ from onestring_physics.reference_bff import (
 )
 from scripts.test_lilium_postcut_bff_hypothesis import field
 from postcut_rebff_iterative import iterative_postcut_rebff
+
+
+def _find_bff_in_other_mac_worktrees(*, rectangle: bool) -> Path | None:
+    """Reuse separately built official BFF executables from another worktree.
+
+    git worktree includes tracked sources but not ignored CMake build binaries.
+    Avoid changing the existing research worktree or recompiling needlessly.
+    """
+    relative = (
+        Path("third_party/bff_rectangle_build/bff-rect-command-line")
+        if rectangle else
+        Path("third_party/boundary-first-flattening/build/bff-command-line")
+    )
+    documents = Path.home() / "Documents"
+    candidates = [
+        ROOT / relative,
+        documents / "OneString-large-steps-mesh-conditioning" /
+        "onestring-physics-simulator" / relative,
+    ]
+    if documents.is_dir():
+        # Look only one folder below Documents, not every file in home.
+        candidates.extend(
+            p / relative for p in documents.glob("*/onestring-physics-simulator")
+            if p.is_dir()
+        )
+        candidates.extend(
+            p / relative for p in documents.glob("onestring-physics-simulator")
+            if p.is_dir()
+        )
+    for path in candidates:
+        if path.is_file() and os.access(path, os.X_OK):
+            return path.resolve()
+    return None
+
+
+def _locate_bff_cli(explicit: str, *, rectangle: bool) -> Path:
+    finder = (find_rectangular_bff_executable if rectangle
+              else find_official_bff_executable)
+    if explicit.strip():
+        # Respect a manually entered path, including a misspelled one.
+        return finder(explicit.strip())
+    try:
+        return finder()
+    except ReferenceBFFUnavailableError as original_error:
+        candidate = _find_bff_in_other_mac_worktrees(rectangle=rectangle)
+        if candidate is not None:
+            return finder(str(candidate))
+        raise ReferenceBFFUnavailableError(
+            str(original_error)
+            + "\nChecked sibling OneString worktrees under ~/Documents for an "
+              "existing official BFF executable; none was available. "
+              "Build with: bash scripts/repair_postcut_bff_mac.sh"
+        ) from original_error
 
 
 def _jacobian(xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -159,8 +213,8 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
              phase: float, cut_mode: str, manual_axis: str,
              manual_fraction: float, post_policy: str,
              max_splits: int = 8, progress=None) -> dict:
-    standard_path = str(find_official_bff_executable(standard_exe or None))
-    rectangle_path = str(find_rectangular_bff_executable(rect_exe or None))
+    standard_path = str(_locate_bff_cli(standard_exe, rectangle=False))
+    rectangle_path = str(_locate_bff_cli(rect_exe, rectangle=True))
 
     params = PipelineParameters(
         nx=grid, ny=grid, omega_parameterization_mode="paper_reference_bff",
