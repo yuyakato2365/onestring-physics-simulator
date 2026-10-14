@@ -279,10 +279,10 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
 def main() -> None:
     st.set_page_config(page_title="OneString Split → re-BFF", layout="wide")
     st.title("OneString: Split後のBFF再計算（Mac実験モード）")
-    st.caption("矩形BFF → 高曲率候補で1本Split → 2つの3D曲面パッチをそれぞれ公式BFFで再展開")
+    st.caption("矩形BFF → 初回Split → CSF>2の領域を追加Split → 各領域で公式BFFを反復再計算")
     st.warning(
         "研究用の独立した実験画面です。新しいUVとOBJを実際に生成しますが、"
-        "再BFF後のM2D/M3Dは別領域として生成しますが、K3D/T2Dは未接続です。"
+        "各領域で再BFF後のM2D/M3Dも生成しますがK3D/T2Dは未接続です。"
         "通常のシミュレーターの計算経路は変更しません。"
     )
     with st.sidebar:
@@ -309,7 +309,12 @@ def main() -> None:
             index=0,
             help="自由境界BFF（推奨の検証候補）か、再度矩形BFFにするかを比較",
         )
-        start = st.button("1本Split → BFF再計算を実行", type="primary")
+        max_splits = int(st.number_input(
+            "最大Split数（初回を含む）", min_value=1, max_value=64, value=8, step=1,
+            help="CSF>2の領域だけを切断。切れない・予算到達なら停止理由を表示。",
+        ))
+        st.caption("CSF判定は全領域の sqrt(max(J)/min(J)) ≤ 2（J=3D/2D面積倍率）")
+        start = st.button("Split → BFF再計算を収束まで繰り返す", type="primary")
 
     if start:
         path = Path(mesh).expanduser().resolve()
@@ -317,11 +322,15 @@ def main() -> None:
             st.error(f"OBJが存在しません: {path}")
         else:
             try:
-                with st.spinner("矩形BFF → 1本Split → 両側を独立に公式BFFで再計算中…"):
+                live = st.empty()
+                with st.spinner("各Split後にBFFを再計算し、CSFを再判定中…"):
                     st.session_state["postcut_rebff_data"] = _execute(
                         path, int(grid), standard, rect, float(phase),
                         cut_mode, axis, float(fraction), post_policy,
+                        max_splits=max_splits,
+                        progress=lambda message: live.info(message),
                     )
+                live.empty()
             except Exception as exc:
                 st.exception(exc)
     data = st.session_state.get("postcut_rebff_data")
@@ -333,18 +342,34 @@ def main() -> None:
         return
 
     report = data["report"]
-    split = report["split"]
-    st.success(
-        f"実測: {split['axis']}={split['uv_coordinate']:.6f} で1本切断。"
-        f"再BFF後の最大CSF比={report['max_postcut_patch_linear_span']:.4f}、"
-        f"上限2の判定={'PASS' if report['linear_limit_two_satisfied'] else 'FAIL'}"
+    passed = bool(report["linear_limit_two_satisfied"])
+    summary = (
+        f"Split={report['split_count']}本（上限{report['max_splits_budget']}本）、"
+        f"領域={len(data['patches'])}、"
+        f"最大CSF比={report['max_postcut_patch_linear_span']:.4f}、"
+        f"停止理由={report['stop_reason']}"
     )
-    a, b, c = st.columns(3)
-    a.metric("元BFF（元メッシュ全体）CSF比",
-             f"{report['initial_source_triangle_csf']['linear_span']:.4f}")
-    b.metric("再BFF後の最大CSF比",
-             f"{report['max_postcut_patch_linear_span']:.4f}")
-    c.metric("切断数", "1")
+    if passed:
+        st.success("全領域のCSFが2以下になりました。" + summary)
+    else:
+        st.error("全領域のCSFを2以下にできませんでした。" + summary)
+    left, middle, right = st.columns(3)
+    left.metric("元BFF（元3Dメッシュ）CSF比",
+                f"{report['initial_source_triangle_csf']['linear_span']:.4f}")
+    middle.metric("最終の最大CSF比",
+                  f"{report['max_postcut_patch_linear_span']:.4f}")
+    right.metric("Split本数", str(report["split_count"]))
+    st.subheader("Split履歴")
+    for item in report["split_history"]:
+        st.write(
+            f"**#{item['step']}**　{item['parent']} → {item['axis']}="
+            f"{item['uv_coordinate']:.6f}　|　"
+            f"全領域最大CSF={item['all_patches_max_linear_span']:.4f}　|　"
+            f"CSF>2の領域={item['violating_patch_count']}"
+        )
+    if report["rejected_candidates"]:
+        with st.expander("採用できなかった切断候補"):
+            st.json(report["rejected_candidates"])
 
     st.subheader("2D展開の比較")
     st.caption(
@@ -367,13 +392,12 @@ def main() -> None:
                 patch["xyz"], patch["new_uv"], patch["faces"],
                 surface=False, title="Split後にBFFを再計算",
             ), use_container_width=True)
-    st.subheader("切断された実際の3D形状")
-    left, right = st.columns(2)
-    for col, patch in zip((left, right), data["patches"]):
-        with col:
+    st.subheader("切断後の3D形状")
+    for patch in data["patches"]:
+        with st.expander(f"{patch['side']}（{len(patch['faces'])} triangles）"):
             st.plotly_chart(_figure(
                 patch["xyz"], patch["new_uv"], patch["faces"],
-                surface=True, title=f"{patch['side']}：切断後の3D三角形メッシュ",
+                surface=True, title=f"{patch['side']}：最終3D形状",
             ), use_container_width=True)
 
     st.subheader("再BFF後のUVを使ったM2D / M3D（新規計算）")
@@ -401,7 +425,7 @@ def main() -> None:
             ), use_container_width=True)
 
     st.download_button(
-        "再BFFのUV・新M3DタイルOBJ・CSF比較JSONをZIP保存",
+        "最終全領域のBFF UV・M3D四角形・Split履歴をZIP保存",
         data=_download_zip(data), file_name="onestring_postcut_rebff.zip",
         mime="application/zip",
     )
