@@ -424,12 +424,18 @@ def run_official_bff(
     *,
     executable: str | os.PathLike[str] | None = None,
     rectangle_executable: str | os.PathLike[str] | None = None,
+    rectangle_corner_phase_fraction: float = 0.0,
     boundary_policy: Literal["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"] = "automatic_reference",
     timeout_seconds: float = 120.0,
 ) -> BFFRunResult:
     """Run the official BFF CLI and return its UV vertices in input order."""
 
     topology = validate_reference_mesh(vertices, faces)
+    corner_phase=float(rectangle_corner_phase_fraction)
+    if not math.isfinite(corner_phase) or not 0 <= corner_phase < 0.25:
+        raise ValueError("BFF rectangle corner phase must be in [0, 0.25)")
+    if corner_phase and boundary_policy != "target_rectangle":
+        raise ValueError("Rectangle corner phase only applies to target_rectangle")
     exe = (find_rectangular_bff_executable(rectangle_executable)
            if boundary_policy == "target_rectangle"
            else find_official_bff_executable(executable))
@@ -445,6 +451,8 @@ def run_official_bff(
         command = [str(exe), str(input_path), str(output_path), "--writeOnlyUVs"]
         if boundary_policy == "target_disk":
             command.append("--flattenToDisk")
+        if boundary_policy == "target_rectangle" and corner_phase:
+            command.extend(["--corner-phase", format(corner_phase, ".17g")])
         try:
             completed = subprocess.run(
                 command,
@@ -490,7 +498,8 @@ def run_official_bff(
                 "RECTANGLE_USER_SELECTED_CORNER_POSITIONS_NOT_SPECIFIED_BY_PAPER"
                 if boundary_policy=="target_rectangle" else "UNSPECIFIED_IN_PAPER"
             ),
-            "bff_rectangle_corner_selection":"four approximate 3D boundary-arclength quartiles" if boundary_policy=="target_rectangle" else None,
+            "bff_rectangle_corner_selection":"four approximate 3D boundary-arclength quartiles with optional cyclic phase" if boundary_policy=="target_rectangle" else None,
+            "bff_rectangle_corner_phase_fraction":corner_phase if boundary_policy=="target_rectangle" else None,
             **rectangle_metrics,
             "fallbacks_used": [],
             "input_topology": topology,
