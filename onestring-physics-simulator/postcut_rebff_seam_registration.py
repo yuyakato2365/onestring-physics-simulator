@@ -52,8 +52,8 @@ def _boundary_point_groups(patches):
             ba,bb,blo,bhi=segments[j]
             if not len(aa) or not len(ba):
                 continue
-            if np.any(np.max(alo,axis=0)>np.min(bhi,axis=0)+tol) or np.any(
-                np.max(blo,axis=0)>np.min(ahi,axis=0)+tol
+            if np.any(np.min(alo,axis=0)>np.max(bhi,axis=0)+tol) or np.any(
+                np.min(blo,axis=0)>np.max(ahi,axis=0)+tol
             ):
                 continue
             common=[]
