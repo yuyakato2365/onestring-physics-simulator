@@ -1,0 +1,63 @@
+name: Lilium BFF rectangle-corner sensitivity exact-input matrix
+
+on:
+  push:
+    branches: [agent/paper-split-area-verified-20261014]
+    paths:
+      - "onestring-physics-simulator/tools/bff_rectangle/bff-rect-command-line.cpp"
+      - "onestring-physics-simulator/src/onestring_physics/reference_bff.py"
+      - "onestring-physics-simulator/src/onestring_physics/onestring_pipeline.py"
+      - "onestring-physics-simulator/scripts/verify_lilium_paper_split.py"
+      - ".github/workflows/lilium-bff-rectangle-phase-matrix.yml"
+  workflow_dispatch:
+
+jobs:
+  phase-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [0.0, 0.0625, 0.125, 0.1875]
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install official BFF native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake build-essential libsuitesparse-dev libopenblas-dev liblapack-dev
+      - name: Build adapter linked against unmodified official BFF
+        run: |
+          git clone --depth 1 --recursive https://github.com/GeometryCollective/boundary-first-flattening.git /tmp/official-bff
+          python scripts/setup_bff_rectangle.py --source /tmp/official-bff --jobs 4
+      - name: Install python modules
+        run: python -m pip install -e ".[dev]"
+      - name: Same bytes as user-provided Lilium OBJ
+        run: |
+          curl -fL --retry 3 -o /tmp/lilium.obj https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected="4f62ff741b41bd629ccbeaeb0bb2e44ac060cdff88f090129911bede790e8ab3"
+          got=hashlib.sha256(Path("/tmp/lilium.obj").read_bytes()).hexdigest()
+          assert got==expected,(got,expected)
+          print("Verified actual mesh SHA-256:", got)
+          PY
+      - name: Run identical general Split with phase-only BFF perturbation
+        run: |
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj \
+            --grid 14 --rectangle-corner-phase ${{ matrix.phase }} \
+            --sampling-method interpolated_grid_vertices \
+            --report output/lilium_rectangle_phase_${{ matrix.phase }}.json
+      - name: Save all numerical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lilium-rectangle-phase-${{ matrix.phase }}
+          path: onestring-physics-simulator/output/lilium_rectangle_phase_${{ matrix.phase }}.json
+          if-no-files-found: warn
