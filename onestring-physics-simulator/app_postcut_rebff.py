@@ -645,7 +645,9 @@ def main() -> None:
         st.write(
             f"**#{item['step']}**　{item['parent']} → {item['axis']}="
             f"{item['uv_coordinate']:.6f}　|　"
-            f"全領域最大CSF={item['all_patches_max_linear_span']:.4f}　|　"
+            f"CSF={item['all_patches_max_csf_before']:.4f} → "
+            f"{item['all_patches_max_linear_span']:.4f}　|　"
+            f"改善={'あり' if item['csf_improved'] else 'なし'}　|　"
             f"CSF>2の領域={item['violating_patch_count']}"
         )
     if report["rejected_candidates"]:
