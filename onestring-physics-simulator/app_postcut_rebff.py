@@ -446,6 +446,8 @@ def main() -> None:
         start = st.button("Split → BFF再計算を収束まで繰り返す", type="primary")
 
     if start:
+        st.session_state.pop("postcut_rebff_full_pipeline_state", None)
+        st.session_state.pop("postcut_rebff_full_pipeline_audit", None)
         path = Path(mesh).expanduser().resolve()
         if not path.is_file():
             st.error(f"OBJが存在しません: {path}")
@@ -508,64 +510,6 @@ def main() -> None:
         with st.expander("採用できなかった切断候補"):
             st.json(report["rejected_candidates"])
 
-    st.subheader("2D展開の比較")
-    st.caption(
-        "各パッチの位置・回転・拡大率は独立です。左＝切断前のUVを保持、"
-        "右＝実際に再計算されたBFFのUV。色は各三角形のlog(CSF)。"
-    )
-    for patch in data["patches"]:
-        st.markdown(f"**{patch['side']} 領域（{len(patch['faces'])} triangles）**")
-        m1, m2 = st.columns(2)
-        m1.metric("既存UVのCSF比", f"{patch['pre']['linear_span']:.4f}")
-        m2.metric("再BFFのCSF比", f"{patch['post']['linear_span']:.4f}")
-        left, right = st.columns(2)
-        with left:
-            st.plotly_chart(_figure(
-                patch["xyz"], patch["original_uv"], patch["faces"],
-                surface=False, title="切断前のUVを維持",
-            ), use_container_width=True)
-        with right:
-            st.plotly_chart(_figure(
-                patch["xyz"], patch["new_uv"], patch["faces"],
-                surface=False, title="Split後にBFFを再計算",
-            ), use_container_width=True)
-    st.subheader("切断後の3D形状")
-    for patch in data["patches"]:
-        with st.expander(f"{patch['side']}（{len(patch['faces'])} triangles）"):
-            st.plotly_chart(_figure(
-                patch["xyz"], patch["new_uv"], patch["faces"],
-                surface=True, title=f"{patch['side']}：最終3D形状",
-            ), use_container_width=True)
-
-    st.subheader("再BFF後のUVを使ったM2D / M3D（新規計算）")
-    st.caption("各領域に共通間隔の正方形タイルを作り、新しいBFFの逆写像で"
-               "3Dへリフトしました。K3D/T2Dにはまだ接続していません。")
-    for patch in data["patches"]:
-        if "quad_preview" not in patch:
-            st.error(f"{patch['side']}: M2D→M3D生成失敗: {patch.get('quad_preview_error')}")
-            continue
-        q = patch["quad_preview"]
-        st.markdown(f"**{patch['side']}：{len(q['quads'])}枚の新M2D/M3Dタイル**")
-        triangles = np.concatenate((
-            q["quads"][:, [0, 1, 2]], q["quads"][:, [0, 2, 3]],
-        ), axis=0)
-        left, right = st.columns(2)
-        with left:
-            st.plotly_chart(_figure(
-                q["xyz"], q["uv"], triangles,
-                surface=False, title="再BFF後に生成したM2D",
-            ), use_container_width=True)
-        with right:
-            st.plotly_chart(_figure(
-                q["xyz"], q["uv"], triangles,
-                surface=True, title="再BFFからリフトしたM3D",
-            ), use_container_width=True)
-
-    st.download_button(
-        "最終全領域のBFF UV・M3D四角形・Split履歴をZIP保存",
-        data=_download_zip(data), file_name="onestring_postcut_rebff.zip",
-        mime="application/zip",
-    )
     st.divider()
     st.subheader("従来OneStringに接続してT2D Dual Hingeまで実計算")
     st.caption("従来のOptCuts対応OneStringパイプラインのK3D・T3D・K2D・"
@@ -600,6 +544,66 @@ def main() -> None:
     if final_state is not None and final_audit is not None:
         _show_existing_pipeline_state(final_state, final_audit)
 
+    st.subheader("2D展開の比較")
+    st.caption(
+        "各パッチの位置・回転・拡大率は独立です。左＝切断前のUVを保持、"
+        "右＝実際に再計算されたBFFのUV。色は各三角形のlog(CSF)。"
+    )
+    for patch in data["patches"]:
+        st.markdown(f"**{patch['side']} 領域（{len(patch['faces'])} triangles）**")
+        m1, m2 = st.columns(2)
+        m1.metric("既存UVのCSF比", f"{patch['pre']['linear_span']:.4f}")
+        m2.metric("再BFFのCSF比", f"{patch['post']['linear_span']:.4f}")
+        left, right = st.columns(2)
+        with left:
+            st.plotly_chart(_figure(
+                patch["xyz"], patch["original_uv"], patch["faces"],
+                surface=False, title="切断前のUVを維持",
+            ), use_container_width=True)
+        with right:
+            st.plotly_chart(_figure(
+                patch["xyz"], patch["new_uv"], patch["faces"],
+                surface=False, title="Split後にBFFを再計算",
+            ), use_container_width=True)
+    st.subheader("切断後の3D形状")
+    for patch in data["patches"]:
+        with st.expander(f"{patch['side']}（{len(patch['faces'])} triangles）"):
+            st.plotly_chart(_figure(
+                patch["xyz"], patch["new_uv"], patch["faces"],
+                surface=True, title=f"{patch['side']}：最終3D形状",
+            ), use_container_width=True)
+
+    st.subheader("中間検証のみ：再BFF後の各領域のM2D / M3D")
+    st.warning("この領域別プレビューは最終設計ではありません。"
+               "最終タイル配置とT2D Dual Hingeは上の「従来の全段階を計算」から確認してください。")
+    st.caption("各領域に共通間隔の正方形タイルを作り、新しいBFFの逆写像で"
+               "3Dへリフトしました。K3D/T2Dにはまだ接続していません。")
+    for patch in data["patches"]:
+        if "quad_preview" not in patch:
+            st.error(f"{patch['side']}: M2D→M3D生成失敗: {patch.get('quad_preview_error')}")
+            continue
+        q = patch["quad_preview"]
+        st.markdown(f"**{patch['side']}：{len(q['quads'])}枚の新M2D/M3Dタイル**")
+        triangles = np.concatenate((
+            q["quads"][:, [0, 1, 2]], q["quads"][:, [0, 2, 3]],
+        ), axis=0)
+        left, right = st.columns(2)
+        with left:
+            st.plotly_chart(_figure(
+                q["xyz"], q["uv"], triangles,
+                surface=False, title="再BFF後に生成したM2D",
+            ), use_container_width=True)
+        with right:
+            st.plotly_chart(_figure(
+                q["xyz"], q["uv"], triangles,
+                surface=True, title="再BFFからリフトしたM3D",
+            ), use_container_width=True)
+
+    st.download_button(
+        "最終全領域のBFF UV・M3D四角形・Split履歴をZIP保存",
+        data=_download_zip(data), file_name="onestring_postcut_rebff.zip",
+        mime="application/zip",
+    )
     with st.expander("詳細CSFと実験条件"):
         st.json(report)
 
