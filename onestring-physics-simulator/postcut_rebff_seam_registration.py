@@ -17,7 +17,13 @@ import numpy as np
 
 
 def _boundary_point_groups(patches):
-    """Source 3D seam vertices with a copy in >=2 *distinct* chart pieces."""
+    """Return real source-S seam pairs, never mere point-contact pairs.
+
+    Recursive cuts can leave two chart boundaries touching at one 3D vertex
+    without sharing a physical edge. Requiring a matched *grid edge* for
+    such a zero-length contact incorrectly aborts otherwise exact retile.
+    A seam needs at least two distinct matching physical boundary points.
+    """
     all_x = np.concatenate([np.asarray(p["xyz"], float) for p in patches])
     scale = max(1., float(np.max(np.ptp(all_x, axis=0))))
     tol = 1e-7 * scale
@@ -43,7 +49,22 @@ def _boundary_point_groups(patches):
             for b in sorted(ids):
                 if a<b:
                     by_pair[(a,b)].append(center)
-    return {pair:np.asarray(points,float) for pair,points in by_pair.items()}
+    # A single shared 3D vertex is a T-junction/corner contact, NOT a
+    # positive-length Split seam. It cannot own a matching panel edge.
+    # De-duplicate source points geometrically as a vertex may be repeated
+    # across matching boundary buckets after multiple recursive cuts.
+    actual_seams={}
+    for pair,points in by_pair.items():
+        distinct=[]
+        for point in points:
+            if all(np.linalg.norm(point-prior)>2*tol for prior in distinct):
+                distinct.append(np.asarray(point,float))
+        if len(distinct)<2:
+            continue
+        if np.max(np.linalg.norm(np.asarray(distinct)-distinct[0],axis=1))<=2*tol:
+            continue
+        actual_seams[pair]=np.asarray(distinct,float)
+    return actual_seams
 
 
 def _rigid_2d(source, destination):
