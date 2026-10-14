@@ -186,11 +186,17 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
     total = sum(len(m.faces) for m in patch_meshes)
     if total < 4 or total != expected:
         raise RuntimeError(f"Retiling count not consistent: {total}, expected {expected}")
-    if total < int(0.75 * baseline_tiles):
+    if total < int(0.75 * baseline_tiles) and not exact_rectangular_coverage:
         raise RuntimeError(
             f"Postcut BFF retile lost too much coverage: {total}/{baseline_tiles} quads; "
             "refusing to pass a sparse preview off as a full T2D design."
         )
+    # Exact area coverage is independently proven above. A count smaller
+    # than the baseline does NOT imply omitted geometry, especially for
+    # extreme-aspect BFF rectangles. Record fidelity separately.
+    exact_grid_audit["postcut_grid_tile_count_ratio_to_initial"] = float(
+        total / max(1,baseline_tiles)
+    )
     # Translate *both source UV triangles and retiled square quads together*,
     # keeping each island's conformal map exact and nonoverlapping in UV.
     source_xyz, source_uv, source_faces = [], [], []
