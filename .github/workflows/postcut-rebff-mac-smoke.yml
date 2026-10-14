@@ -112,6 +112,26 @@ jobs:
               assert p["post"]["linear_span"]>0
               print(p["side"],"original",p["pre"]["linear_span"],"new",p["post"]["linear_span"])
           assert len(_download_zip(result))>1000
+          # Evaluate ACTUAL Lilium source-boundary-fit candidate selection,
+          # not only the small synthetic fan test.
+          from onestring_physics.bff_rectangle_selection import choose_rectangle_by_source_boundary_fit
+          fitted_lilium=choose_rectangle_by_source_boundary_fit(
+              result["initial"]["xyz"],result["initial"]["faces"],
+              rectangle_executable="third_party/bff_rectangle_build/bff-rect-command-line",
+          )
+          fit_report=fitted_lilium.metrics
+          assert fit_report["bff_rectangle_verified"]
+          assert fit_report["bff_corner_selection_valid_count"]>=1
+          scores=[c["total_boundary_fit_score"]
+                  for c in fit_report["bff_corner_selection_attempts"]
+                  if "total_boundary_fit_score" in c]
+          assert abs(fit_report["bff_corner_selection_selected_score"]
+                     -min(scores))<1e-9
+          print("LILIUM INITIAL SOURCE-BOUNDARY RECTANGLE",
+                fit_report["bff_corner_selection_valid_count"],
+                fit_report["bff_corner_selection_selected_source_vertex_ids"],
+                fit_report["bff_corner_selection_selected_score"],flush=True)
+
           print("RESULT",record["split"],record["max_postcut_patch_linear_span"],
                 record["linear_limit_two_satisfied"])
           # Integration stress-check: a stricter research-only bound (1.50)
