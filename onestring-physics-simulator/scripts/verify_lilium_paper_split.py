@@ -32,6 +32,9 @@ def main() -> int:
     ap.add_argument("--rotation", type=float, default=0., help="Grid angle degrees")
     ap.add_argument("--report", type=Path, default=Path("output/lilium_paper_split_comparison.json"))
     ap.add_argument("--expect-splits", type=int, default=None, help="Optional benchmark assertion; never changes computation")
+    ap.add_argument("--sampling-method", choices=("overlap_extrema", "interpolated_grid_vertices"),
+                    default="overlap_extrema",
+                    help="Research comparison of two generic discrete CSF estimators. Neither method forces a Split count.")
     args = ap.parse_args()
     source = args.mesh.expanduser().resolve()
     if not source.is_file():
@@ -54,6 +57,7 @@ def main() -> int:
         paper_fidelity_mode=True,
     )
     p, _ = configure_paper_fidelity(p)
+    p.paper_csf_sampling_method = args.sampling_method
     p.reference_diagnostics_path = str(args.report.parent / "lilium_reference_initialization.json")
     result = build_paper_reference_initialization(target, p)
     m = result.mesh_2d_initial.metrics
@@ -81,6 +85,8 @@ def main() -> int:
         },
         "grid_request": {"n": args.grid, "margin": args.margin, "rotation": args.rotation},
         "actual_m2d_quads": len(result.mesh_2d_initial.faces),
+        "csf_sampling_method": args.sampling_method,
+        "csf_sampling_diagnostics": para.get("split_csf_sampling_diagnostics"),
         "number_of_splits": len(records),
         "one_split_picture_count_matches": len(records) == 1,
         "linear_csf_before": m.get("max_csf_before_split"),
@@ -110,6 +116,7 @@ def main() -> int:
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+    print("csf sampling method:", args.sampling_method)
     print("mesh_sha256:", report["mesh_sha256"])
     print("quads:", report["actual_m2d_quads"])
     print("splits:", report["number_of_splits"])
