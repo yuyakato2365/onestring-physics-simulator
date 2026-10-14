@@ -95,3 +95,61 @@ def test_off_mode_keeps_its_original_invariant_behavior(monkeypatch):
     assert records == []
     assert metrics["csf_split_algorithm_same_as_normal"]
     assert not metrics["csf_split_paper_area_span_active"]
+
+
+def test_lilium_figure_benchmark_emits_exactly_one_complete_split(monkeypatch):
+    vertices, faces, domain = _fixture(monkeypatch, [
+        (1., 1.03), (1.1, 1.12), (4., 4.1), (4.2, 4.4)])
+    params = SimpleNamespace(
+        paper_fidelity_mode=True,
+        lilium_one_split_reference=True,
+        collision_split_forced_lines=(),
+    )
+    out_vertices, out_faces, records, metrics = splitting._split_mesh_single(
+        vertices, faces, domain, params
+    )
+    from onestring_physics.simple_split_panel_patch import _edge_components
+    assert len(records) == 1
+    assert records[0]["axis"] == "col"
+    assert records[0]["split_boundary_pairs"]
+    assert records[0]["lilium_figure_one_split_reference"]
+    assert len(_edge_components(out_faces)) == 2
+    assert metrics["csf_split_lilium_one_split_reference"]
+    assert metrics["csf_split_reference_target_count_met"]
+    assert metrics["csf_split_reference_is_paper_solver_fidelity"] is False
+    assert metrics["csf_split_stopping_reason"] == "lilium_one_split_reference"
+    assert not metrics["csf_split_bound_certified"]
+    assert not metrics["csf_split_budget_exhausted"]
+    assert np.isfinite(out_vertices).all()
+
+
+def test_lilium_figure_benchmark_reports_unresolved_csf(monkeypatch):
+    vertices, faces, domain = _fixture(monkeypatch, [
+        (1., 1.02), (1., 1.04), (5., 5.2), (5., 5.2)])
+    params = SimpleNamespace(
+        paper_fidelity_mode=True,
+        lilium_one_split_reference=True,
+        collision_split_forced_lines=(),
+    )
+    _, _, records, metrics = splitting._split_mesh_single(
+        vertices, faces, domain, params
+    )
+    assert len(records) == 1
+    assert metrics["max_csf_after_split"] > 2.
+    assert metrics["csf_split_status"] == "lilium_reference_one_cut_csf_unresolved"
+    assert not metrics["csf_split_candidate_area_bound_satisfied"]
+
+
+def test_lilium_figure_benchmark_is_opt_in_and_off_mode_unaffected(monkeypatch):
+    verts, faces, domain = _fixture(monkeypatch, [
+        (1., 1.02), (1.1, 1.12), (4., 4.02), (4.1, 4.12)])
+    params = SimpleNamespace(
+        paper_fidelity_mode=False,
+        lilium_one_split_reference=True,
+        collision_split_forced_lines=(),
+    )
+    _, _, records, metrics = splitting._split_mesh_single(
+        verts, faces, domain, params
+    )
+    assert not records
+    assert not metrics["csf_split_lilium_one_split_reference"]
