@@ -165,11 +165,20 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
 
 def run_existing_pipeline_through_dual_hinge(
     target_path: Path, experiment: dict, *, grid: int,
-    base_params=None, progress=None,
+    base_params=None, progress=None, allow_csf_violation_preview: bool = False,
 ):
-    """Run REAL existing K3D...T2D Dual Hinge with re-BFF M2D correspondence."""
-    if not experiment["report"]["linear_limit_two_satisfied"]:
-        raise RuntimeError("Postcut BFF still exceeds CSF=2; refusing to run downstream")
+    """Run REAL existing K3D...T2D Dual Hinge with re-BFF M2D correspondence.
+
+    By default, reject a chart violating the CSF bound. A user may explicitly
+    allow a VISUALIZATION-ONLY downstream preview of an unvalidated chart;
+    this does not certify a deployable assembly.
+    """
+    csf_converged = bool(experiment["report"]["linear_limit_two_satisfied"])
+    if not csf_converged and not allow_csf_violation_preview:
+        raise RuntimeError(
+            "Postcut BFF still exceeds CSF=2; refusing downstream by default. "
+            "Visualization-only bypass requires explicit user opt-in."
+        )
     patches = experiment["patches"]
     if not patches:
         raise RuntimeError("No postcut pieces to assemble")
@@ -192,6 +201,13 @@ def run_existing_pipeline_through_dual_hinge(
     # explicitly audited. The tile count is never arbitrarily cut in half.
     baseline = int(experiment["report"]["initial_m2d"]["quads"])
     packed = _assemble_patches(patches, params, int(grid), baseline, progress)
+    packed["audit"]["postcut_rebff_csf_limit_satisfied"] = csf_converged
+    packed["audit"]["postcut_rebff_unconverged_visualization_only"] = bool(
+        not csf_converged and allow_csf_violation_preview
+    )
+    packed["audit"]["postcut_rebff_measured_max_csf"] = float(
+        experiment["report"]["max_postcut_patch_linear_span"]
+    )
     original = pipe._original
     original_build_m2d = original._build_m2d
     active = {"called": False}
