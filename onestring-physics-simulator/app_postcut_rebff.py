@@ -106,7 +106,6 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         bff_boundary_policy="target_rectangle", paper_fidelity_mode=True,
         max_csf_splits=1,
         bff_executable=standard_path, bff_rectangle_executable=rectangle_path,
-        bff_rectangle_corner_phase_fraction=float(phase),
     )
     params, _ = configure_paper_fidelity(params)
     params.bff_executable = standard_path
