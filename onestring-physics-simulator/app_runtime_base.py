@@ -677,6 +677,31 @@ with st.sidebar:
                 "矩形用BFFは既存の通常CLIと異なります。公式BFFライブラリを用いた"
                 "専用アダプタがない場合は、矩形調和写像に切り替えず停止します。"
             )
+        st.caption("以下は論文の著者実装が未確認の研究用設定です。既定値なら従来のPaperモードと同じです。")
+        bff_rectangle_selection_mode = st.selectbox(
+            "矩形BFF 四隅の選び方（実験）",
+            ["fixed_phase", "min_whole_source_area_span_4phase"],
+            format_func=lambda v: (
+                "従来の周長4等分（変更なし）" if v == "fixed_phase"
+                else "4位相から元曲面の面積ヤコビアン比最小を選択"
+            ),
+            index=0,
+            help="同じ3D入力の4つの矩形BFFから、Split数を参照せずに選択。論文にこの手順の記載はありません。",
+        )
+        paper_csf_sampling_method = st.selectbox(
+            "CSF離散評価（実験）",
+            ["overlap_extrema", "interpolated_grid_vertices"],
+            format_func=lambda v: (
+                "従来の重複三角形極値" if v == "overlap_extrema"
+                else "M2D頂点へ面積重み付きlog(J)補間（研究用）"
+            ),
+            index=0,
+        )
+        paper_split_area_limit_experiment = st.checkbox(
+            "面積倍率比 ≤ 2 でSplitを判定（実験）",
+            value=False,
+            help="長さのCSF閾値をsqrt(2)に設定。まだ物理的な製造可能性を証明するものではありません。",
+        )
         reference_grid_spacing_value = float(st.number_input("reference grid spacing (0 = derive hypothesis_a)", min_value=0.0, value=0.0, step=0.05))
         reference_grid_rotation_degrees = float(st.number_input("reference grid rotation (degrees)", value=0.0, step=1.0))
         reference_grid_origin_u = float(st.number_input("reference grid origin u", value=0.0, step=0.05))
@@ -1667,6 +1692,9 @@ def current_pipeline_key() -> tuple:
         omega_boundary_mode,
         omega_parameterization_mode,
         bff_boundary_policy,
+        bff_rectangle_selection_mode,
+        paper_csf_sampling_method,
+        paper_split_area_limit_experiment,
         bff_executable,
         bff_rectangle_executable,
         reference_grid_spacing_value,
@@ -1813,6 +1841,9 @@ pipeline_params = PipelineParameters(
     bff_rectangle_executable=bff_rectangle_executable or None,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
+    bff_rectangle_selection_mode=bff_rectangle_selection_mode,
+    paper_csf_sampling_method=paper_csf_sampling_method,
+    paper_split_area_limit_experiment=paper_split_area_limit_experiment,
     reference_grid_spacing=reference_grid_spacing_value if reference_grid_spacing_value > 0.0 else None,
     reference_grid_rotation_degrees=reference_grid_rotation_degrees,
     reference_grid_origin_u=reference_grid_origin_u,
