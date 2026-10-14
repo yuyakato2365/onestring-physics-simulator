@@ -2693,6 +2693,7 @@ def _build_surface_parameterization(surface, target, grid, params):
             surface_faces,
             executable=getattr(params, "bff_executable", None),
             rectangle_executable=getattr(params, "bff_rectangle_executable", None),
+            rectangle_corner_phase_fraction=float(getattr(params, "bff_rectangle_corner_phase_fraction", 0.0)),
             boundary_policy=boundary_policy,
             timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
         )
