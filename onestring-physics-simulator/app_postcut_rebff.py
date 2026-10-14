@@ -669,6 +669,47 @@ def main() -> None:
     middle.metric("最終の最大CSF比",
                   f"{report['max_postcut_patch_linear_span']:.4f}")
     right.metric("Split本数", str(report["split_count"]))
+    st.subheader("初期Ωの自動矩形選択：入力Sと矩形UV")
+    st.caption("初期BFFの結果です。オレンジ色の点はSの境界から選択した四隅です。"
+               "Split後の子領域の矩形BFFとは別の計算です。")
+    initial_data = data["initial"]
+    source_xyz = np.asarray(initial_data["xyz"], float)
+    source_uv = np.asarray(initial_data["uv"], float)
+    source_faces = np.asarray(initial_data["faces"], int)
+    source_fig = _figure(
+        source_xyz, source_uv, source_faces,
+        surface=True, title="入力S：初期BFFで使用したメッシュ",
+    )
+    uv_fig = _figure(
+        source_xyz, source_uv, source_faces,
+        surface=False, title="選択された初期Ω：矩形BFF",
+    )
+    chosen_corners = report.get("initial_rectangle_selected_corner_vertex_ids")
+    if chosen_corners:
+        ids = np.asarray(chosen_corners, int)
+        if np.all((ids >= 0) & (ids < len(source_xyz))):
+            pos = source_xyz[ids]
+            uvpos = source_uv[ids]
+            source_fig.add_trace(go.Scatter3d(
+                x=pos[:, 0], y=pos[:, 1], z=pos[:, 2],
+                mode="markers+text", text=["A", "B", "C", "D"],
+                textposition="top center",
+                marker=dict(size=5, color="#f3982c"),
+                name="選択した矩形の四隅",
+            ))
+            uv_fig.add_trace(go.Scatter3d(
+                x=uvpos[:, 0], y=uvpos[:, 1],
+                z=np.zeros(len(ids)), mode="markers+text",
+                text=["A", "B", "C", "D"], textposition="top center",
+                marker=dict(size=6, color="#f3982c"),
+                name="矩形の四隅",
+            ))
+    left_fig, right_fig = st.columns(2)
+    with left_fig:
+        st.plotly_chart(source_fig, use_container_width=True)
+    with right_fig:
+        st.plotly_chart(uv_fig, use_container_width=True)
+
     st.subheader("Split履歴")
     for item in report["split_history"]:
         st.write(
