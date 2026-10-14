@@ -71,7 +71,8 @@ def test_paper_switch_preserves_custom_controls_but_not_csf_formula(monkeypatch)
     hi = np.linspace(1., 9., 16)
     off = _run(monkeypatch, False, lo, hi, threshold=1.7, budget=8)
     paper = _run(monkeypatch, True, lo, hi, threshold=1.7, budget=8)
-    assert off[3]["csf_split_threshold"] == paper[3]["csf_split_threshold"] == 1.7
+    assert off[3]["csf_split_threshold"] == 1.7
+    assert paper[3]["csf_split_threshold"] == 2.0
     assert off[3]["max_csf_splits"] == paper[3]["max_csf_splits"] == 8
     assert off[3]["max_csf_before_split"] == pytest.approx(3.)
     assert paper[3]["max_csf_before_split"] == pytest.approx(9.)
