@@ -12,6 +12,8 @@ on:
       - "onestring-physics-simulator/tests/test_paper_csf_discrete.py"
       - "onestring-physics-simulator/tests/test_paper_csf_physical_bound_interpretation.py"
       - "onestring-physics-simulator/src/onestring_physics/paper_csf_discrete.py"
+      - "onestring-physics-simulator/src/onestring_physics/bff_rectangle_selection.py"
+      - "onestring-physics-simulator/tests/test_bff_rectangle_selection.py"
       - ".github/workflows/paper-fidelity-computation.yml"
   workflow_dispatch:
 jobs:
@@ -33,6 +35,7 @@ jobs:
             src/onestring_physics/paper_fidelity_mode.py \
             src/onestring_physics/paper_mesh_splitting.py \
             src/onestring_physics/paper_csf_discrete.py \
+            src/onestring_physics/bff_rectangle_selection.py \
             src/onestring_physics/onestring_pipeline.py \
             app_runtime_base.py \
             tests/test_paper_fidelity_computation_mode.py
@@ -43,6 +46,7 @@ jobs:
             tests/test_paper_split_area_bound.py \
             tests/test_paper_csf_discrete.py \
             tests/test_paper_csf_physical_bound_interpretation.py \
+            tests/test_bff_rectangle_selection.py \
             tests/test_paper_reproduction_audit.py \
             tests/test_paper_pd_deployment.py \
             tests/test_paper_t2d.py \
