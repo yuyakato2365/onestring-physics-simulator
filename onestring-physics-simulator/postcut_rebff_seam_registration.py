@@ -63,6 +63,41 @@ def _rigid_2d(source, destination):
     return rotation,shift,rms
 
 
+def _matching_shared_grid_corner_anchors(state, labels, reference, child, tol):
+    """Use one-to-one exact square-grid seam vertices, not nearest 3D tiles.
+
+    The two rectangular BFF charts were aligned along the physical S seam
+    BEFORE retiling. All common 2D positions at the interface are therefore
+    known correspondences at the M2D stage. No arbitrary nearest-neighbor
+    seam mismatch is introduced.
+    """
+    uv=np.asarray(state.mesh_2d_initial.vertices,float)[:,:2]
+    faces=np.asarray(state.mesh_2d_initial.faces,int)
+    tile=np.asarray(state.tiles_2d_dual_hinge.vertices,float)
+    collections=[]
+    for patch_id in (reference,child):
+        mapping={}
+        for tile_id in np.flatnonzero(labels==patch_id):
+            for corner,vid in enumerate(faces[tile_id]):
+                key=tuple(np.rint(uv[int(vid)]/tol).astype(np.int64))
+                mapping.setdefault(key,(int(tile_id),corner))
+        collections.append(mapping)
+    common=sorted(set(collections[0]).intersection(collections[1]))
+    if len(common)<2:
+        return None
+    a=np.asarray([
+        tile[collections[0][key][0],collections[0][key][1],:2]
+        for key in common
+    ],float)
+    b=np.asarray([
+        tile[collections[1][key][0],collections[1][key][1],:2]
+        for key in common
+    ],float)
+    if np.linalg.norm(np.ptp(a,axis=0))<1e-8 or np.linalg.norm(np.ptp(b,axis=0))<1e-8:
+        return None
+    return a,b,len(common)
+
+
 def _source_matching_anchors(seam_xyz, corner_xyz_a, corner_xyz_b, cutoff):
     """Nearest SAME-3D-source-seam sample for both patches, no fabricated IDs."""
     from scipy.spatial import cKDTree
@@ -152,22 +187,38 @@ def align_t2d_at_source_split_seams(
                 continue
             reference,child=(a,b) if a in placed else (b,a)
             ra,rb=ids_by_piece[reference],ids_by_piece[child]
-            matches=_source_matching_anchors(
-                xyz,tile_source[ra].reshape(-1,3),
-                tile_source[rb].reshape(-1,3),cutoff)
-            if len(matches)<2:
-                continue
-            # Use the same tile-local corner identity in 3D and 2D.
-            xy_r=tops[ra].reshape(-1,8,3)[:,:4,:2].reshape(-1,2)
-            xy_b=tops[rb].reshape(-1,8,3)[:,:4,:2].reshape(-1,2)
-            anchor_ref=np.asarray([xy_r[i] for i,j,_ in matches])
-            anchor_child=np.asarray([xy_b[j] for i,j,_ in matches])
+            seam_grid_verified=bool(
+                state.mesh_2d_initial.metrics.get(
+                    "postcut_seam_shared_grid_vertex_count",0
+                )>=2
+            ) if hasattr(state.mesh_2d_initial,"metrics") else False
+            corners=(
+                _matching_shared_grid_corner_anchors(
+                    state,labels,reference,child,tol=max(1e-10,typical*1e-8)
+                ) if seam_grid_verified else None
+            )
+            if corners is not None:
+                anchor_ref,anchor_child,matching_count=corners
+                correspondence_method="shared_original_grid_seam_vertices"
+            else:
+                matches=_source_matching_anchors(
+                    xyz,tile_source[ra].reshape(-1,3),
+                    tile_source[rb].reshape(-1,3),cutoff)
+                if len(matches)<2:
+                    continue
+                xy_r=tops[ra,:4,:2].reshape(-1,2)
+                xy_b=tops[rb,:4,:2].reshape(-1,2)
+                anchor_ref=np.asarray([xy_r[i] for i,j,_ in matches])
+                anchor_child=np.asarray([xy_b[j] for i,j,_ in matches])
+                matching_count=len(matches)
+                correspondence_method="closest_3D_source_tile_corners"
             if np.linalg.norm(np.ptp(anchor_ref,axis=0))<1e-8 or np.linalg.norm(np.ptp(anchor_child,axis=0))<1e-8:
                 continue
             rot,delta,rms=_rigid_2d(anchor_child,anchor_ref)
             # Prefer many genuinely corresponding physical seam samples and
             # low residual. No artificial scaling or deformation is allowed.
-            candidates.append((len(matches),-rms,reference,child,rot,delta,rms))
+            candidates.append((matching_count,-rms,reference,child,rot,delta,rms,
+                               correspondence_method))
         if not candidates:
             raise RuntimeError(
                 "Cannot align re-BFF T2D at the physical Split seam: "
@@ -176,7 +227,7 @@ def align_t2d_at_source_split_seams(
                 "produce incompatible seam panels; exact seam-preserving "
                 "M2D retopology is required rather than moving a picture."
             )
-        _,_,reference,child,rotation,translation,rms=max(
+        count,_,reference,child,rotation,translation,rms,method=max(
             candidates,key=lambda item:(item[0],item[1]))
         children=ids_by_piece[child]
         for assembly in (state.tiles_2d_dual_hinge,state.tiles_2d_top_hinge):
@@ -192,11 +243,8 @@ def align_t2d_at_source_split_seams(
                         transforms[tile_id]=left@transforms[tile_id]
         placed.add(child)
         history.append({"reference_piece":int(reference),"moved_piece":int(child),
-                        "anchor_count":int(_source_matching_anchors(
-                            seams[tuple(sorted((reference,child)))],
-                            tile_source[ids_by_piece[reference]].reshape(-1,3),
-                            tile_source[ids_by_piece[child]].reshape(-1,3),cutoff
-                        ).__len__()),
+                        "anchor_count":int(count),
+                        "correspondence_method":method,
                         "residual_rms":float(rms)})
     for h in state.hinge_graph.hinges:
         a,b=int(h.tile_a),int(h.tile_b)
@@ -206,7 +254,13 @@ def align_t2d_at_source_split_seams(
     # Conformally reBFFed, independently retiled panels have no exact guarantee
     # of a shared seam-grid; never certify based solely on rigid registration.
     return {
-        "split_seam_alignment":"source_surface_3d_matched_rigid_SE2",
+        "split_seam_alignment":(
+            "shared_source_seam_grid_rigid_SE2"
+            if history and all(
+                h["correspondence_method"]=="shared_original_grid_seam_vertices"
+                for h in history
+            ) else "source_surface_3d_matched_rigid_SE2"
+        ),
         "split_seam_pair_count":int(len(history)),
         "split_seam_anchor_pair_count":int(sum(row["anchor_count"] for row in history)),
         "split_seam_fit_rms_max":float(max_rms),
