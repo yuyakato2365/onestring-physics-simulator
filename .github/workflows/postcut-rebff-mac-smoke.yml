@@ -49,6 +49,14 @@ jobs:
           blob=_download_zip({"patches":patch,"report":{"test":True}})
           assert len(blob)>100
           print("PASS: both source-mesh halves form disks, CSF=1, OBJ + ZIP exported")
+          from app_postcut_rebff import _real_tile_stage_figure, _tile_stage_obj_bytes
+          cuboid=np.array([[[0,0,0],[1,0,0],[1,1,0],[0,1,0],
+                            [0,0,-.1],[1,0,-.1],[1,1,-.1],[0,1,-.1]]])
+          assert b"f " in _tile_stage_obj_bytes(cuboid, "T2D")
+          figure=_real_tile_stage_figure(cuboid, "T2D Dual Hinge", flat=True)
+          assert len(figure.data)>=2
+          print("PASS: real tile solid OBJ and 8-corner T2D graph")
+
 
           PY
 
