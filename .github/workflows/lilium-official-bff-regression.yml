@@ -1,0 +1,60 @@
+name: Lilium exact-mesh official BFF split audit
+
+on:
+  push:
+    branches: [agent/paper-split-area-verified-20261014]
+    paths:
+      - "onestring-physics-simulator/src/onestring_physics/paper_mesh_splitting.py"
+      - "onestring-physics-simulator/src/onestring_physics/onestring_pipeline.py"
+      - "onestring-physics-simulator/src/onestring_physics/reference_bff.py"
+      - "onestring-physics-simulator/scripts/verify_lilium_paper_split.py"
+      - ".github/workflows/lilium-official-bff-regression.yml"
+  workflow_dispatch:
+
+jobs:
+  exact-mesh-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install official BFF native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake build-essential libsuitesparse-dev libopenblas-dev liblapack-dev
+      - name: Build rectangular BFF against unforked upstream source
+        run: |
+          git clone --depth 1 --recursive https://github.com/GeometryCollective/boundary-first-flattening.git /tmp/official-bff
+          python scripts/setup_bff_rectangle.py --source /tmp/official-bff --jobs 4
+      - name: Install Python dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Download Lilium and verify exact user mesh SHA-256
+        run: |
+          curl -fL --retry 3 -o /tmp/lilium.obj https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected = "4f62ff741b41bd629ccbeaeb0bb2e44ac060cdff88f090129911bede790e8ab3"
+          actual = hashlib.sha256(Path("/tmp/lilium.obj").read_bytes()).hexdigest()
+          print("Downloaded Lilium SHA-256:", actual, flush=True)
+          print("User Lilium SHA-256:", expected, flush=True)
+          if actual != expected:
+              raise SystemExit("UPSTREAM_LILIUM_MESH_DIFFERS_FROM_USER: cannot call this a same-input test")
+          PY
+      - name: Run unforced Paper Split on exact Lilium mesh and save full audit
+        run: |
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj --grid 14 --report output/lilium_paper_split_comparison.json
+      - name: Upload independent numerical diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-bff-lilium-split-audit
+          path: |
+            onestring-physics-simulator/output/lilium_paper_split_comparison.json
+            onestring-physics-simulator/output/lilium_reference_initialization.json
+          if-no-files-found: warn
