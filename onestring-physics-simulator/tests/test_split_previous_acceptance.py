@@ -1,7 +1,7 @@
 """Legacy OFF Split regression plus intentional separation of Paper policy.
 
 The original OFF policy remains invariant; Paper now uses the distinct
-per-component area-Jacobian span required for a Sec.4.5 candidate.
+per-component *linear* conformal span sqrt(area-Jacobian ratio).
 """
 from types import SimpleNamespace
 
@@ -60,8 +60,9 @@ def test_off_mode_preserves_invariant_floor(monkeypatch, peak_jacobian):
         else "no_admissible_cut_remaining"
     )
     assert off[3]["csf_split_algorithm_same_as_normal"] is True
-    # The area span of the *same* chart is a different physical quantity.
-    assert paper[3]["max_csf_before_split"] == pytest.approx(peak_jacobian)
+    # The Paper CSF is re-normalized by each component's local minimum;
+    # this matches the same numeric value for a uniform minimum of 1.
+    assert paper[3]["max_csf_before_split"] == pytest.approx(np.sqrt(peak_jacobian))
     assert paper[3]["csf_split_algorithm_same_as_normal"] is False
     assert paper[3]["number_of_splits"] == 0
 
@@ -75,7 +76,7 @@ def test_paper_switch_preserves_custom_controls_but_not_csf_formula(monkeypatch)
     assert paper[3]["csf_split_threshold"] == 2.0
     assert off[3]["max_csf_splits"] == paper[3]["max_csf_splits"] == 8
     assert off[3]["max_csf_before_split"] == pytest.approx(3.)
-    assert paper[3]["max_csf_before_split"] == pytest.approx(9.)
+    assert paper[3]["max_csf_before_split"] == pytest.approx(3.)
     assert not paper[3]["csf_split_bound_certified"]
 
 
