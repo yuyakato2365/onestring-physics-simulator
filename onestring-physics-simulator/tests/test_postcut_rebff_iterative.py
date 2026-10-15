@@ -72,7 +72,10 @@ def test_missing_candidate_does_not_silently_pass(monkeypatch):
     result = _run(monkeypatch, candidate=False)
     assert result["split_count"] == 1
     assert not result["all_pass"]
-    assert result["stop_reason"] == "no_curvature_guided_interior_grid_candidate"
+    assert result["stop_reason"] == "no_splittable_violating_regions"
+    assert result["unsplittable_region_count"] == 1
+    assert result["unsplittable_regions"][0]["reason"] == "no_interior_full_grid_cut_candidate"
+    assert result["violating_patch_count"] == 1
 
 
 def test_initial_bff_below_limit_never_cuts(monkeypatch):
@@ -119,3 +122,107 @@ def test_grid_candidates_on_zero_anchored_grid():
     assert cuts
     assert all(abs(c['coordinate']*10 - round(c['coordinate']*10)) < 1e-8
                for c in cuts)
+
+
+def test_unsplittable_single_cell_does_not_block_other_region(monkeypatch):
+    calls=[]
+    def fake_cut(patch, axis, coordinate, rebff):
+        calls.append(patch["side"])
+        if patch["side"]=="initial":
+            spans=(3.4, 2.6)
+        elif patch["side"]=="initial_positive":
+            spans=(1.2,1.5)
+        else:
+            raise AssertionError("One-cell region must not be split")
+        return [
+            dict(
+                side=patch["side"]+("_negative" if i==0 else "_positive"),
+                xyz=patch["xyz"],new_uv=patch["new_uv"],faces=patch["faces"],
+                pre={"linear_span":float(patch["post"]["linear_span"])},
+                post={"linear_span":span},bff_metadata={},
+            ) for i,span in enumerate(spans)
+        ]
+    monkeypatch.setattr(mod,"_split_and_rebff",fake_cut)
+    def cuts(xyz,uv,faces,grid):
+        # Initial negative has a higher CSF than the positive region but its
+        # chart is already a single cell; the positive region is splittable.
+        return [dict(axis="col",coordinate=.5)]
+    monkeypatch.setattr(mod,"candidate_lines",cuts)
+    # Mark only the negative child as a single cell by exposing a unique
+    # source shape. This ensures the planner really skips that region.
+    def cut_with_single_cell(patch,axis,coordinate,rebff):
+        children=fake_cut(patch,axis,coordinate,rebff)
+        if patch["side"]=="initial":
+            children[0]["faces"]=np.empty((0,3),int)
+        return children
+    monkeypatch.setattr(mod,"_split_and_rebff",cut_with_single_cell)
+    def finite_cut_candidates(xyz,uv,faces,grid):
+        return [] if len(faces)==0 else [dict(axis="col",coordinate=.5)]
+    monkeypatch.setattr(mod,"candidate_lines",finite_cut_candidates)
+    xyz,uv,faces,first=_fake_seed()
+    result=mod.iterative_postcut_rebff(
+        xyz,uv,faces,first_cut=first,rebff=lambda *a:None,
+        grid=14,max_splits=64,initial_linear_span=3.,
+    )
+    assert calls==["initial","initial_positive"]
+    assert result["split_count"]==2
+    assert result["stop_reason"]=="no_splittable_violating_regions"
+    assert not result["all_pass"]
+    assert result["max_linear_span"]==3.4
+    assert result["violating_patch_count"]==1
+    assert result["unsplittable_region_count"]==1
+    assert result["unsplittable_regions"][0]["side"]=="initial_negative"
+    assert result["unsplittable_regions"][0]["linear_span"]==3.4
+
+
+def test_all_failed_candidates_in_worst_region_do_not_block_other(monkeypatch):
+    tried=[]
+    def fake_cut(patch,axis,coordinate,rebff):
+        tried.append(patch["side"])
+        if patch["side"]=="initial":
+            spans=(3.3,2.5)
+        elif patch["side"]=="initial_negative":
+            raise ValueError("Split creates invalid BFF child")
+        elif patch["side"]=="initial_positive":
+            spans=(1.3,1.4)
+        else:
+            raise AssertionError("Unexpected region was split")
+        return [
+            dict(
+                side=patch["side"]+("_negative" if i==0 else "_positive"),
+                xyz=patch["xyz"],new_uv=patch["new_uv"],faces=patch["faces"],
+                pre={"linear_span":float(patch["post"]["linear_span"])},
+                post={"linear_span":span},bff_metadata={},
+            ) for i,span in enumerate(spans)
+        ]
+    monkeypatch.setattr(mod,"_split_and_rebff",fake_cut)
+    monkeypatch.setattr(mod,"candidate_lines",lambda *a,**kw: [
+        dict(axis="row",coordinate=.5)
+    ])
+    xyz,uv,faces,first=_fake_seed()
+    result=mod.iterative_postcut_rebff(
+        xyz,uv,faces,first_cut=first,rebff=lambda *a:None,
+        grid=14,max_splits=64,initial_linear_span=3.,
+    )
+    assert tried==["initial","initial_negative","initial_positive"]
+    assert result["split_count"]==2
+    assert result["stop_reason"]=="no_splittable_violating_regions"
+    assert not result["all_pass"]
+    assert result["unsplittable_region_count"]==1
+    assert result["unsplittable_regions"][0]["attempted_candidates"]==1
+    assert result["unsplittable_regions"][0]["reason"]=="all_candidate_cuts_failed"
+    assert len(result["rejected_candidates"])==1
+
+
+def test_no_first_cut_no_candidates_is_unconverged(monkeypatch):
+    monkeypatch.setattr(mod,"candidate_lines",lambda *a,**kw: [])
+    xyz,uv,faces,_=_fake_seed()
+    result=mod.iterative_postcut_rebff(
+        xyz,uv,faces,first_cut=None,rebff=lambda *a:None,
+        grid=14,max_splits=64,initial_linear_span=3.,
+    )
+    assert not result["all_pass"]
+    assert result["split_count"]==0
+    assert result["max_linear_span"]==3.
+    assert result["unsplittable_region_count"]==1
+    assert result["stop_reason"]=="no_splittable_violating_regions"
