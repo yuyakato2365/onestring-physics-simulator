@@ -1,7 +1,7 @@
 name: Mac post-cut re-BFF preview smoke
 on:
   push:
-    branches: [agent/postcut-rebff-mac-20261014]
+    branches: [agent/postcut-rebff-mac-20261014, agent/postcut-continue-unsplittable-20261015]
     paths:
       - "onestring-physics-simulator/app_postcut_rebff.py"
       - "onestring-physics-simulator/app_runtime_base.py"
