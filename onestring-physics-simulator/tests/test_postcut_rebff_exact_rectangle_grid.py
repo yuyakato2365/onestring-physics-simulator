@@ -231,3 +231,51 @@ def test_eight_recursive_rectangles_retain_full_source_seams():
         abs(coverage-1.)<1e-10 for coverage in
         packed["audit"]["postcut_omega_rectangles_area_fraction_covered"]
     )
+
+
+def test_recursive_split_reuses_exact_initial_grid_without_density_search():
+    """After reBFF only source triangles/UV interiors change, never M2D cells."""
+    from postcut_rebff_exact_rectangle_grid import (
+        build_initial_omega_grid, verify_no_inserted_grid_lines,
+    )
+    from postcut_rebff_full_pipeline import _assemble_patches
+    root=patch(.07,1.03,.11,.95)
+    initial_grid=build_initial_omega_grid(root,.2,origin=(0.,0.))
+    base=grid_at_pitch([root],.2,initial_grid=initial_grid)[0]
+    assert np.min(np.diff(initial_grid["x"]))>0.
+    cut=.4  # exactly the original square lattice, not a new child boundary
+    children=[patch(.07,cut,.11,.95),patch(cut,1.03,.11,.95)]
+    grids=grid_at_pitch(children,.2,initial_grid=initial_grid)
+    verify_no_inserted_grid_lines(initial_grid,grids)
+    assert sum(len(g["faces"]) for g in grids)==len(base["faces"])
+    assert matching_seam_edges(grids).get((0,1),0)>0
+    assert np.array_equal(np.unique(np.concatenate([g["x"] for g in grids])),
+                          initial_grid["x"])
+    assert np.array_equal(np.unique(np.concatenate([g["y"] for g in grids])),
+                          initial_grid["y"])
+    out=_assemble_patches(children,None,14,len(base["faces"]),
+                          initial_grid=initial_grid)
+    assert out["audit"]["postcut_omega_grid_reconfigured_after_bff"] is False
+    assert out["audit"]["postcut_omega_grid_policy"]=="immutable_initial_omega_lines"
+    assert out["audit"]["postcut_rebff_final_quad_count"]==len(base["faces"])
+
+
+def test_split_cannot_insert_a_new_grid_line_for_postcut_chart():
+    """A nongrid-aligned cut is rejected, not patched by new narrow tiles."""
+    from postcut_rebff_exact_rectangle_grid import build_initial_omega_grid
+    root=patch(.07,1.03,.11,.95)
+    initial_grid=build_initial_omega_grid(root,.2,origin=(0.,0.))
+    children=[patch(.07,.403,.11,.95),patch(.403,1.03,.11,.95)]
+    with pytest.raises(RuntimeError,match="Global grid lost an exact rectangular boundary"):
+        grid_at_pitch(children,.2,initial_grid=initial_grid)
+
+
+def test_original_omega_grid_origin_is_preserved():
+    from postcut_rebff_exact_rectangle_grid import build_initial_omega_grid
+    root=patch(.1,1.2,.15,1.25)
+    initial_grid=build_initial_omega_grid(root,.25,origin=(.1,.15))
+    assert np.allclose(initial_grid["x"],[.1,.35,.6,.85,1.1,1.2])
+    assert np.allclose(initial_grid["y"],[.15,.4,.65,.9,1.15,1.25])
+    result=grid_at_pitch([root],.25,initial_grid=initial_grid)
+    assert np.array_equal(result[0]["x"],initial_grid["x"])
+    assert np.array_equal(result[0]["y"],initial_grid["y"])
