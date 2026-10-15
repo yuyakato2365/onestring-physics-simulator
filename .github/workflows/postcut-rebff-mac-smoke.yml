@@ -252,6 +252,7 @@ jobs:
           seam_packed=_assemble_patches(
               rectangular["patches"],seam_params,14,
               rect_report["initial_m2d"]["quads"],
+              initial_grid=rectangular["initial_grid"],
           )
           assert seam_packed["audit"]["postcut_seam_uv_registration"]==(
               "joint_parent_atlas_fixed_boundary"
@@ -273,8 +274,11 @@ jobs:
           packed_rect=_assemble_patches(
               rectangular["patches"], solver_params,14,
               int(rectangular["report"]["initial_m2d"]["quads"]),
+              initial_grid=rectangular["initial_grid"],
           )
           audit_rect=packed_rect["audit"]
+          assert audit_rect["postcut_omega_grid_policy"]=="immutable_initial_omega_lines",audit_rect
+          assert audit_rect["postcut_omega_grid_reconfigured_after_bff"] is False,audit_rect
           assert audit_rect["postcut_omega_grid_no_cells_cropped"] is True,audit_rect
           assert all(abs(f-1)<1e-9 for f in
                      audit_rect["postcut_omega_rectangles_area_fraction_covered"])
