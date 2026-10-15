@@ -294,20 +294,27 @@ def iterative_postcut_rebff(
 
         accepted = None
         for patch in candidates:
+            options = candidate_lines(
+                patch["xyz"], patch["new_uv"], patch["faces"], grid,
+                fixed_spacing=getattr(rebff,"fixed_grid_spacing",None),
+                fixed_origin=getattr(rebff,"fixed_grid_origin",None),
+            )
             if not history and patch is source and first_cut is not None:
-                options = [dict(
+                preferred = dict(
                     axis=first_cut["axis"],
                     coordinate=float(first_cut["coordinate"]),
                     curvature_vertex=first_cut.get("source_vertex"),
                     curvature=first_cut.get("curvature"),
                     proposal_method=first_cut.get("origin", "initial_grid_cut"),
-                )]
-            else:
-                options = candidate_lines(
-                    patch["xyz"], patch["new_uv"], patch["faces"], grid,
-                    fixed_spacing=getattr(rebff,"fixed_grid_spacing",None),
-                    fixed_origin=getattr(rebff,"fixed_grid_origin",None),
                 )
+                # Give the original paper-grid cut highest priority, but
+                # do not label a region physically UNSPLITTABLE simply
+                # because this one preferred attempt failed.
+                options = [preferred] + [
+                    cut for cut in options
+                    if cut["axis"] != preferred["axis"]
+                    or abs(float(cut["coordinate"])-preferred["coordinate"])>1e-10
+                ]
             if not options:
                 unsplittable_by_side[patch["side"]] = {
                     "side": patch["side"],
