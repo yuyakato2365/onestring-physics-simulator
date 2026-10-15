@@ -258,3 +258,32 @@ def test_fixed_grid_respects_original_origin():
         dim=1 if cut["axis"]=="row" else 0
         origin=[.12,.15][dim]
         assert abs((cut["coordinate"]-origin)/.5-1.)<1e-9
+
+
+def test_invalid_initial_preferred_cut_can_try_a_different_legal_cut(monkeypatch):
+    attempts=[]
+    def simulate(patch,axis,coordinate,rebff):
+        attempts.append((patch["side"],axis))
+        if axis=="row":
+            raise ValueError("Initial preferred BFF cut was invalid")
+        return [
+            dict(
+                side=patch["side"]+suffix,
+                xyz=patch["xyz"],new_uv=patch["new_uv"],faces=patch["faces"],
+                pre={"linear_span":3.0},post={"linear_span":1.5},
+                bff_metadata={}
+            ) for suffix in ("_negative","_positive")
+        ]
+    monkeypatch.setattr(mod,"_split_and_rebff",simulate)
+    monkeypatch.setattr(mod,"candidate_lines",
+                        lambda *args,**kw:[dict(axis="col",coordinate=.5)])
+    xyz,uv,faces,first=_fake_seed()
+    result=mod.iterative_postcut_rebff(
+        xyz,uv,faces,first_cut=first,rebff=lambda *a:None,
+        grid=14,max_splits=3,initial_linear_span=3.,
+    )
+    assert attempts==[("initial","row"),("initial","col")]
+    assert result["split_count"]==1
+    assert result["all_pass"]
+    assert result["unsplittable_region_count"]==0
+    assert len(result["rejected_candidates"])==1
