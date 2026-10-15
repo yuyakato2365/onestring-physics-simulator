@@ -16,7 +16,8 @@ from onestring_physics.paper_mesh_splitting import gaussian_curvature
 from scripts.test_lilium_postcut_bff_hypothesis import clip_piece, field
 
 
-def candidate_lines(xyz, uv, faces, grid: int, *, max_candidates: int = 24):
+def candidate_lines(xyz, uv, faces, grid: int, *, max_candidates: int = 24,
+                    fixed_spacing=None, fixed_origin=None):
     """Curvature-prioritized, interior full-grid cut lines on the CURRENT UV chart.
 
     Re-BFF changes the patch chart. Recompute line locations and curvature for
@@ -34,18 +35,25 @@ def candidate_lines(xyz, uv, faces, grid: int, *, max_candidates: int = 24):
         return []
     order = viable[np.argsort(-curvature[viable], kind="stable")]
     bounds_min, bounds_max = np.min(uv, axis=0), np.max(uv, axis=0)
-    spacing = max(float(np.max(bounds_max-bounds_min))/max(grid, 2), 1e-10)
+    spacing = (float(fixed_spacing) if fixed_spacing is not None else
+               max(float(np.max(bounds_max-bounds_min))/max(grid, 2), 1e-10))
+    if not np.isfinite(spacing) or spacing <= 0:
+        raise ValueError("Split grid spacing must be positive and finite")
+    origin = (np.asarray(fixed_origin,float).reshape(2)
+              if fixed_origin is not None else np.zeros(2,float))
+    if not np.all(np.isfinite(origin)):
+        raise ValueError("Split grid origin must be finite")
     by_axis = {}
     for axis, dim in (("row", 1), ("col", 0)):
         # Match the per-chart M2D lattice origin at 0, instead of shifting
         # grid lines to an arbitrary UV bounding-box minimum after every BFF.
         low = float(bounds_min[dim])
         high = float(bounds_max[dim])
-        start = int(np.floor(low / spacing)) + 1
-        stop = int(np.ceil(high / spacing)) - 1
+        start = int(np.floor((low-origin[dim]) / spacing)) + 1
+        stop = int(np.ceil((high-origin[dim]) / spacing)) - 1
         by_axis[axis] = [
-            float(k * spacing) for k in range(start, stop + 1)
-            if low + 1e-8 < k*spacing < high - 1e-8
+            float(origin[dim] + k * spacing) for k in range(start, stop + 1)
+            if low + 1e-8 < origin[dim]+k*spacing < high - 1e-8
         ]
 
     proposals = {}
@@ -296,7 +304,9 @@ def iterative_postcut_rebff(
                 )]
             else:
                 options = candidate_lines(
-                    patch["xyz"], patch["new_uv"], patch["faces"], grid
+                    patch["xyz"], patch["new_uv"], patch["faces"], grid,
+                    fixed_spacing=getattr(rebff,"fixed_grid_spacing",None),
+                    fixed_origin=getattr(rebff,"fixed_grid_origin",None),
                 )
             if not options:
                 unsplittable_by_side[patch["side"]] = {
