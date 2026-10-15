@@ -2116,6 +2116,14 @@ if _postcut_report is not None:
         st.success("再BFFのCSF≤2を満たしました。" + _postcut_status)
     else:
         st.error("再BFFはCSF≤2を満たしていません（T2Dは試験計算）。"+_postcut_status)
+    _unsplittable=_postcut_report.get("unsplittable_regions") or []
+    if _unsplittable:
+        st.warning(
+            f"現在のGridで切断できない領域が{len(_unsplittable)}個残っています。"
+            "他の領域のSplitは継続しましたが、未解決領域はCSF≤2を満たしていません。"
+            "Split上限だけを増やしても、この領域の切断可能性は変わりません。"
+        )
+        st.dataframe(_unsplittable, use_container_width=True)
     _state_metrics=getattr(
         getattr(st.session_state.get("onestring_state"),"tiles_2d_dual_hinge",None),
         "metrics",{}
@@ -2166,6 +2174,8 @@ if _postcut_report is not None:
             "initial_csf":_postcut_report.get("initial_bff_linear_csf"),
             "split_history":_postcut_report.get("split_history"),
             "rejected_candidates":_postcut_report.get("rejected_candidates"),
+            "unsplittable_regions":_postcut_report.get("unsplittable_regions",[]),
+            "violating_patch_count":_postcut_report.get("violating_patch_count"),
             "rectangle_boundary_verified":
                 _postcut_report.get("all_postcut_patches_rectangle_verified"),
         })
