@@ -1,5 +1,5 @@
 """Optional original-OneString UI backend: S -> rectangular BFF -> grid Split ->
-rectangular re-BFF per child -> original K3D/T3D/K2D/T2D Dual Hinge.
+fixed initial BFF (or legacy joint-atlas comparison) -> K3D/T3D/K2D/T2D.
 
 This adapter returns a real OneStringState, preserving the original View
 stage and export workflows. Original OptCuts pathways remain available.
@@ -24,7 +24,7 @@ class PostcutReBFFDidNotConverge(RuntimeError):
             for row in rejection_list[:3]
         )
         super().__init__(
-            "Repeated rectangular BFF did not satisfy CSF<=2. "
+            "Split chart did not satisfy CSF<=2. "
             f"Split={report.get('split_count')}, "
             f"worst CSF={report.get('max_postcut_patch_linear_span'):.6g}, "
             f"stop={report.get('stop_reason')}; "
@@ -74,6 +74,7 @@ def run_original_onestring_with_postcut_rebff(
     initial_rectangle_mode="source_boundary_shape_fit",
     postcut_boundary_policy="target_rectangle",
     allow_unconverged_t2d_preview=False,
+    geometry_policy="fixed_initial_bff",
     progress_callback=None, diagnostic_callback=None,
 ):
     """Return (original OneStringState, audit, cut/CSF report).
@@ -99,13 +100,14 @@ def run_original_onestring_with_postcut_rebff(
             progress=lambda message:update(
                 "Recursive grid Split -> rectangular BFF",0.12,message),
             initial_rectangle_mode=initial_rectangle_mode,
+            geometry_policy=geometry_policy,
         )
         report=result["report"]
         if diagnostic_callback is not None:
             diagnostic_callback(report)
         if not report["linear_limit_two_satisfied"] and not allow_unconverged_t2d_preview:
             raise PostcutReBFFDidNotConverge(report)
-        update("M2D / M3D merged chart",0.18,"Retile independently re-BFFed patches")
+        update("M2D / M3D merged chart",0.18,"Build corresponding cut regions on the selected chart")
         state,audit=run_existing_pipeline_through_dual_hinge(
             path,result,grid=int(params.nx),base_params=params,
             progress=progress_callback,

@@ -430,19 +430,28 @@ with st.sidebar:
     # Opt-in extension of the ORIGINAL OneString pipeline, not a separate
     # viewer. Leaves OptCuts / legacy BFF untouched when disabled.
     postcut_rebff_integrated_mode = st.checkbox(
-        "Split後の矩形BFF再計算 → T2D Dual Hinge（実験）",
+        "固定BFF・格子Split → 論文式K3D / T2D（比較実験）",
         value=False,
         disabled=not paper_fidelity_enabled,
         key="onestring_postcut_rebff_integrated_enabled",
         help="元のRun OneString pipeline / View stage内で、S→初期矩形BFF→CSF判定"
-             "→高曲率点付近のGrid Split→各子領域で矩形BFFを再計算し、"
+             "→高曲率点付近の同一格子上のSplit。初期BFFを維持して、"
              "既存のK3D/T3D/K2D/T2D Dual Hingeへ接続します。",
     )
+    postcut_geometry_policy = "fixed_initial_bff"
     postcut_rebff_budget = 8
     postcut_rebff_preview_unconverged = False
     if postcut_rebff_integrated_mode:
+        postcut_geometry_policy = st.selectbox(
+            "Split geometry", ["fixed_initial_bff", "legacy_joint_atlas"],
+            format_func=lambda value: {"fixed_initial_bff": "修正版：初期BFF・格子を固定",
+                                       "legacy_joint_atlas": "旧版との比較：非等角joint atlas"}[value],
+            key="onestring_postcut_geometry_policy",
+        )
+        st.caption("修正版は子BFFを診断値として保存し、形状には初期BFFを使用します。"
+                   "矩形の完全被覆のため外周端数セルは残ります。これは論文のcropに対する拡張です。")
         postcut_rebff_budget = int(st.number_input(
-            "再BFFの最大Split数",min_value=1,max_value=64,value=8,step=1,
+            "固定格子上の最大Split数",min_value=1,max_value=64,value=8,step=1,
             key="onestring_postcut_rebff_split_budget",
         ))
         postcut_rebff_preview_unconverged = st.checkbox(
@@ -1724,6 +1733,7 @@ def current_pipeline_key() -> tuple:
         bff_rectangle_selection_mode,
         postcut_rebff_integrated_mode,
         postcut_rebff_budget,
+        postcut_geometry_policy,
         postcut_rebff_preview_unconverged,
         paper_csf_sampling_method,
         paper_split_area_limit_experiment,
@@ -2006,6 +2016,7 @@ if run_pipeline:
                     run_original_onestring_with_postcut_rebff(
                         build_target(), pipeline_params,
                         max_splits=postcut_rebff_budget,
+                        geometry_policy=postcut_geometry_policy,
                         initial_rectangle_mode=bff_rectangle_selection_mode,
                         postcut_boundary_policy="target_rectangle",
                         allow_unconverged_t2d_preview=postcut_rebff_preview_unconverged,

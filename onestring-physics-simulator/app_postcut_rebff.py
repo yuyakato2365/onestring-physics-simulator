@@ -213,7 +213,10 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
              phase: float, cut_mode: str, manual_axis: str,
              manual_fraction: float, post_policy: str,
              max_splits: int = 8, progress=None,
-             initial_rectangle_mode: str = "source_boundary_shape_fit") -> dict:
+             initial_rectangle_mode: str = "source_boundary_shape_fit",
+             geometry_policy: str = "fixed_initial_bff") -> dict:
+    if geometry_policy not in ("fixed_initial_bff", "legacy_joint_atlas"):
+        raise ValueError("Unknown Split geometry policy")
     standard_path = str(_locate_bff_cli(standard_exe, rectangle=False))
     rectangle_path = str(_locate_bff_cli(rect_exe, rectangle=True))
 
@@ -310,6 +313,10 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
     # Enforce a common physical seam edge only for rectangular BFF.
     # Free-boundary comparison intentionally retains its original behavior.
     _rebff.seam_corners_required = (post_policy == "target_rectangle")
+    _rebff.geometry_policy = (geometry_policy if post_policy == "target_rectangle"
+                             else "legacy_joint_atlas")
+    if _rebff.geometry_policy == "fixed_initial_bff":
+        _rebff.fixed_grid_spacing = float(initial.conformal_domain.reference_grid_spacing)
 
     trial = iterative_postcut_rebff(
         xyz, uv, faces, grid=int(grid), rebff=_rebff, max_splits=int(max_splits),
@@ -319,6 +326,10 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         initial_bff_metadata=initial_rect_metadata,
     )
     patches = trial["patches"]
+    if _rebff.geometry_policy == "fixed_initial_bff":
+        for patch in patches:
+            patch["fixed_initial_bff"] = True
+            patch["fixed_grid_spacing"] = _rebff.fixed_grid_spacing
     # Regenerate real square M2D panels and 3D inverse-map lifts on the NEW UV.
     # Keep one shared spacing across the two patches for meaningful comparison.
     maximum_span = max(float(np.max(np.ptp(p["new_uv"], axis=0))) for p in patches)
@@ -419,6 +430,19 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
                    "boundary is a nonconformal experimental coupling, NOT "
                    "an author-verified independent BFF result.",
     }
+    report["geometry_policy"] = _rebff.geometry_policy
+    if _rebff.geometry_policy == "fixed_initial_bff":
+        report["experiment"] = "Initial BFF -> fixed-lattice Split -> inverse of initial BFF"
+        report["postcut_joint_atlas_note"] = (
+            "The actual chart is a restriction of the initial BFF, with no harmonic "
+            "or affine boundary warp. Child re-BFF results are diagnostics only."
+        )
+        report["postcut_csf_measurement_chart"] = "restriction_of_initial_BFF"
+        report["caution"] = (
+            "Fixed initial BFF/lattice; full rectangle coverage retains only the "
+            "outer residual strips (an extension to the paper's cropping rule). "
+            "CSF and downstream fabrication must still be checked."
+        )
     return {"report": report, "patches": patches, "initial": {
         "xyz": xyz, "uv": uv, "faces": faces,
     }}
@@ -579,7 +603,7 @@ def _show_existing_pipeline_state(state, audit):
 def main() -> None:
     st.set_page_config(page_title="OneString Split → re-BFF", layout="wide")
     st.title("OneString: Split後のBFF再計算（Mac実験モード）")
-    st.caption("まず初期矩形BFFのCSFを評価 → 2を超えた領域だけGridに沿ってSplit → 各子領域で矩形BFFを再計算")
+    st.caption("初期矩形BFF → 固定格子Split → 論文式K3D / T2D。子BFFは比較診断として保存します。")
     st.warning(
         "研究用の独立した実験画面です。新しいUVとOBJを実際に生成しますが、"
         "領域別プレビューはK3D/T2Dではありません。下の既存ソルバー連携を実行すると実際のDual Hinge結果を計算します。"
@@ -587,6 +611,8 @@ def main() -> None:
     )
     with st.sidebar:
         st.header("実験条件")
+        geometry_policy = st.selectbox("Split geometry", ["fixed_initial_bff", "legacy_joint_atlas"],
+            format_func=lambda p: "修正版：初期BFF・格子を固定" if p == "fixed_initial_bff" else "旧版：非等角joint atlas")
         mesh = st.text_input("OBJのパス", value="~/Downloads/lilium.obj")
         grid = st.number_input("グリッド（nx=ny）", min_value=2, max_value=60, value=14)
         rect = st.text_input("矩形BFF実行ファイル（空欄なら自動検出）", value="")
@@ -659,6 +685,7 @@ def main() -> None:
                         max_splits=max_splits,
                         progress=lambda message: live.info(message),
                         initial_rectangle_mode=initial_rectangle_mode,
+                        geometry_policy=geometry_policy,
                     )
                 live.empty()
             except ReferenceBFFUnavailableError as exc:
@@ -680,6 +707,7 @@ def main() -> None:
         return
 
     report = data["report"]
+    st.caption(report.get("postcut_joint_atlas_note", ""))
     passed = bool(report["linear_limit_two_satisfied"])
     summary = (
         f"Split={report['split_count']}本（上限{report['max_splits_budget']}本）、"
@@ -761,11 +789,9 @@ def main() -> None:
 
     st.divider()
     st.subheader("従来OneStringに接続してT2D Dual Hingeまで実計算")
-    st.caption("従来のOptCuts対応OneStringパイプラインのK3D・T3D・K2D・"
-               "T2D Top Hinge・Dual Hinge最適化器をそのまま使用します。"
-               "再BFF後は全領域のタイルを対応付きで統合し、元M2Dに近い"
-               "タイル数になる共通格子間隔を探索します。"
-               "K3D以降の制約違反や最適化失敗は隠さず表示します。")
+    st.caption("修正版は初期BFFと格子を維持し、既存のEq.(1) K3D・Eq.(2) T3D・"
+               "Eq.(5) K2D・剛体Dual Hingeへ明示的に接続します。"
+               "旧joint atlasとの比較も選択できます。制約違反は結果に残ります。")
     opt_in_preview = False
     if not report["linear_limit_two_satisfied"]:
         st.warning(

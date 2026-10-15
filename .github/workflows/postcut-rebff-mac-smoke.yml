@@ -38,7 +38,7 @@ jobs:
       - run: python -m pip install -e .
       - run: bash -n scripts/repair_postcut_bff_mac.sh && bash -n scripts/setup_postcut_rebff_mac.sh
       - run: python -m py_compile app_postcut_rebff.py app_runtime_base.py postcut_rebff_iterative.py postcut_rebff_full_pipeline.py postcut_rebff_exact_rectangle_grid.py postcut_rebff_seam_registration.py postcut_rebff_integrated.py scripts/test_lilium_postcut_bff_hypothesis.py
-      - run: python -m pip install pytest && python -m pytest -q tests/test_postcut_rebff_iterative.py tests/test_postcut_bff_auto_discovery.py tests/test_bff_boundary_shape_selection.py tests/test_postcut_rebff_integrated.py tests/test_postcut_rebff_seam_registration.py tests/test_postcut_rebff_exact_rectangle_grid.py
+      - run: python -m pip install pytest && python -m pytest -q tests/test_postcut_fixed_initial_bff.py tests/test_postcut_rebff_iterative.py tests/test_postcut_bff_auto_discovery.py tests/test_bff_boundary_shape_selection.py tests/test_postcut_rebff_integrated.py tests/test_postcut_rebff_seam_registration.py tests/test_postcut_rebff_exact_rectangle_grid.py
       - name: Smoke-test exact seam clipping and OBJ export
         run: |
           python - <<'PY'
@@ -229,7 +229,7 @@ jobs:
               "/tmp/onestring-postcut-bff-cli/bff-command-line",
               "third_party/bff_rectangle_build/bff-rect-command-line",
               0.0,"曲率優先の最初のSplit","row",0.5,
-              "target_rectangle",max_splits=1,
+              "target_rectangle",max_splits=1,geometry_policy="legacy_joint_atlas",
               initial_rectangle_mode="fixed_phase",
           )
           rect_report=rectangular["report"]

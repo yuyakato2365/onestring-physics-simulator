@@ -1,4 +1,4 @@
-"""Bridge independently re-BFFed, truly retiled pieces into existing full OneString.
+"""Bridge cut BFF regions into explicit assembled/flat OneString stages.
 
 This is NOT an OptCuts replacement and does not invent a standalone hinge solver.
 The existing OneString K3D/T3D/K2D/T2D Dual Hinge pipeline executes on the
@@ -27,7 +27,8 @@ def _piece_chart(patch):
                 for k in ("xyz", "new_uv", "faces"))
     topology = validate_reference_mesh(x, f)
     loop = [int(j) for j in topology["boundary_loops"][0]]
-    return SurfaceParameterization(
+    from onestring_physics.paper_mesh_splitting import area_field
+    chart = SurfaceParameterization(
         method="paper_reference_bff",
         surface_vertices_3d=x,
         surface_faces=f,
@@ -36,10 +37,12 @@ def _piece_chart(patch):
         omega_boundary=uv[loop + [loop[0]]],
         metrics={
             "boundary_loop": loop,
-            "per_triangle_lambda": np.ones(len(f)).tolist(),
-            "postcut_independent_bff": True,
+            "postcut_independent_bff": not patch.get("postcut_joint_atlas", False),
         },
     )
+    _, triangle, _ = area_field(chart)
+    chart.metrics["per_triangle_lambda"] = np.asarray(triangle).tolist()
+    return chart
 
 
 def _piece_m2d_only(patch, params, n, spacing):
@@ -136,11 +139,15 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
         # edges included as mandatory lines. Edge cells can be non-square.
         from types import SimpleNamespace
         from postcut_rebff_exact_rectangle_grid import (
-            choose_exact_grid, matching_seam_edges,
+            choose_exact_grid, matching_seam_edges, grid_at_pitch,
         )
-        spacing, grids = choose_exact_grid(
-            patches, baseline_tiles, grid=n,
-        )
+        if all(p.get("fixed_initial_bff", False) for p in patches):
+            spacing = float(patches[0]["fixed_grid_spacing"])
+            if not all(np.isclose(p["fixed_grid_spacing"], spacing) for p in patches):
+                raise ValueError("Fixed BFF patches must use one source lattice")
+            grids = grid_at_pitch(patches, spacing)
+        else:
+            spacing, grids = choose_exact_grid(patches, baseline_tiles, grid=n)
         patch_meshes = [
             SimpleNamespace(vertices=patch_grid["vertices"],
                             faces=patch_grid["faces"])
@@ -305,6 +312,14 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
         "postcut_rebff_original_optcuts_pipeline_preserved": True,
         "postcut_rebff_export_caution": "experimental BFF split hypothesis; not paper-author verified",
     }
+    if all(p.get("fixed_initial_bff", False) for p in patches):
+        # Separate exported IDs across the cut, but one assembled coordinate.
+        # Only coincident chart vertices are paired, never arbitrary nearby 3D
+        # points. This does not create physical hinges across a Split.
+        from scipy.spatial import cKDTree
+        pairs = sorted(cKDTree(joined_quad_vertices).query_pairs(spacing * 1e-9))
+        audit["split_vertex_pairs"] = [list(pair) for pair in pairs]
+        audit["postcut_geometry_policy"] = "fixed_initial_bff"
     return {
         "source_xyz": joined_xyz, "source_uv": joined_uv,
         "source_faces": joined_source_faces,
@@ -348,6 +363,7 @@ def run_existing_pipeline_through_dual_hinge(
     params.collision_split_enabled = False
     params.max_csf_splits = 1
     params.reference_stop_on_required_split = False
+    fixed_chart = experiment["report"].get("geometry_policy") == "fixed_initial_bff"
     # Cover every rectangular Omega exactly. The desired tile count is only a
     # density target; never delete boundary panels to hit a number.
     baseline = int(experiment["report"]["initial_m2d"]["quads"])
@@ -379,9 +395,15 @@ def run_existing_pipeline_through_dual_hinge(
         param.metrics["postcut_rebff_multi_island"] = True
         param.metrics["postcut_rebff_source_triangles"] = len(packed["source_faces"])
         param.metrics.update(packed["audit"])
+        # Diagnostic arrays from the initial unsplit triangulation have the
+        # wrong length after clipping. Recompute on the actual injected chart.
+        from onestring_physics.paper_mesh_splitting import area_field
+        _, triangle, _ = area_field(param)
+        param.metrics["per_triangle_lambda"] = np.asarray(triangle).tolist()
         domain.paper_split_policy = False
         domain.split_lines = []
-        domain.csf_model = "postcut independent BFF per-piece conformal area span"
+        domain.csf_model = ("fixed initial BFF restricted to cut regions" if fixed_chart
+                            else "postcut joint atlas per-piece area span")
         domain.parameterization = param
         mesh = original.QuadMesh(
             np.asarray(packed["quad_vertices"], float),
@@ -392,6 +414,30 @@ def run_existing_pipeline_through_dual_hinge(
 
     with _PIPELINE_HOOK_LOCK:
         original._build_m2d = replacement_m2d
+        saved_stages = {}
+        if fixed_chart:
+            # Select numerical stages explicitly: importing the UI must not be
+            # necessary to get a real Eq.(1) solve instead of the legacy large-
+            # grid nearest-surface no-op. Restore every hook on success/failure.
+            from onestring_physics.paper_local_global_solvers import optimize_paper_local_global_k3d
+            from onestring_physics.paper_extrusion import extrude_paper_face_planarity
+            from onestring_physics.paper_eq5_k2d_solver import optimize_paper_eq5
+            saved_stages = {name: getattr(original, name) for name in
+                            ("_optimize_k3d", "_extrude_tiles", "_optimize_k2d")}
+            original._optimize_k3d = lambda target, mesh, chart, p: optimize_paper_local_global_k3d(
+                target, mesh, chart, p, pipeline=pipe)
+            def extrude_with_snapshot(mesh, thickness, stage):
+                mesh.k3d_before_extrusion_vertices = np.asarray(mesh.vertices).copy()
+                assembly, report = extrude_paper_face_planarity(mesh, thickness, stage, pipe)
+                # Eq.(2) promotes its top vertices back into K3D. Preserve the
+                # Eq.(1) result separately; its history does not describe this
+                # later top-surface update.
+                mesh.metrics["k3d_history_geometry_stage"] = "before_T3D_Eq2"
+                mesh.metrics["k3d_display_geometry_stage"] = "after_T3D_Eq2"
+                return assembly, report
+            original._extrude_tiles = extrude_with_snapshot
+            original._optimize_k2d = lambda m2d, k3d, p, progress_callback=None: optimize_paper_eq5(
+                m2d, k3d, p, progress_callback=progress_callback, pipeline=pipe)
         try:
             state = pipe._ORIGINAL_BUILD_ONESTRING_DESIGN(
                 load_target_shape(Path(target_path)), params,
@@ -399,6 +445,8 @@ def run_existing_pipeline_through_dual_hinge(
             )
         finally:
             original._build_m2d = original_build_m2d
+            for name, function in saved_stages.items():
+                setattr(original, name, function)
     if not active["called"]:
         raise RuntimeError("M2D injection was not reached")
     for stage, mesh in [
@@ -413,9 +461,12 @@ def run_existing_pipeline_through_dual_hinge(
         or len(state.tiles_2d_dual_hinge.vertices) != len(state.mesh_2d_initial.faces)):
         raise RuntimeError("Dual Hinge output does not match split tile count")
     from postcut_rebff_seam_registration import align_t2d_at_source_split_seams
-    seam_metrics = align_t2d_at_source_split_seams(
-        state, patches, packed["tile_patch_ids"],
-    )
+    # The optimized flat pose is authoritative. Moving whole components AFTER
+    # collision optimization can reintroduce overlaps and invalidate its history.
+    # A physical cut is not a coincident hinge in the flat configuration.
+    seam_metrics = ({"split_seam_alignment": "fixed_chart_no_postsolve_motion",
+                     "postcut_t2d_pose_is_solver_result": True} if fixed_chart else
+                    align_t2d_at_source_split_seams(state, patches, packed["tile_patch_ids"]))
     packed["audit"].update(seam_metrics)
     if seam_metrics.get("split_seam_alignment") in (
         "source_surface_3d_matched_rigid_SE2",

@@ -172,13 +172,14 @@ def verify_joint_source_seams(patches, *, relative_tolerance=1e-7):
             "Joint seam-constrained atlas itself failed source-to-UV "
             f"correspondence: {evidence}"
         )
+    fixed = all(p.get("fixed_initial_bff", False) for p in patches)
     return {
-        "postcut_seam_uv_registration":"joint_parent_atlas_fixed_boundary",
+        "postcut_seam_uv_registration":("initial_BFF_restriction" if fixed else "joint_parent_atlas_fixed_boundary"),
         "postcut_seam_uv_full_physical_correspondence_verified":True,
         "postcut_seam_interior_correspondence_error_max":float(overall),
         "postcut_seam_interior_correspondence_by_pair":evidence,
         "postcut_seam_uv_pair_count":len(seams),
         "postcut_joint_atlas_active":True,
-        "postcut_seam_uv_preserves_csf_ratio":False,
+        "postcut_seam_uv_preserves_csf_ratio":fixed,
         "postcut_joint_atlas_csf_must_be_rechecked":True,
     }

@@ -1,0 +1,106 @@
+{
+  "source_bbox_diagonal": 2.181851225031752,
+  "M2D": {
+    "tiles": 196,
+    "aspect_median": 1.420221636230886,
+    "aspect_p95": 20.95074483986475,
+    "aspect_max": 21.240378446597123,
+    "angle_min_deg": 90.0,
+    "angle_max_deg": 90.0,
+    "planarity_max": 0.0,
+    "planarity_rms": 0.0,
+    "area_min": 7.098737156200705e-05,
+    "area_median": 0.006621885874185042,
+    "edge_median": 0.10260528867997099
+  },
+  "M3D": {
+    "tiles": 196,
+    "aspect_median": 1.5340403352183607,
+    "aspect_p95": 21.282439758607048,
+    "aspect_max": 22.30423762633287,
+    "angle_min_deg": 55.174624576952674,
+    "angle_max_deg": 159.60631047684396,
+    "planarity_max": 0.016796803932653193,
+    "planarity_rms": 0.004110736001754361,
+    "area_min": 0.00024111860907413332,
+    "area_median": 0.014172297584491894,
+    "edge_median": 0.13859328706109947,
+    "source_distance_vertices": {
+      "rms": 6.17430345401574e-17,
+      "max": 2.220446049250313e-16
+    },
+    "seam_vertex_gap_max": 8.419826675941385e-16
+  },
+  "K3D": {
+    "tiles": 196,
+    "aspect_median": 1.5895906838782485,
+    "aspect_p95": 22.122629679798667,
+    "aspect_max": 23.647333167550812,
+    "angle_min_deg": 37.788126328188525,
+    "angle_max_deg": 178.6811436453543,
+    "planarity_max": 0.005690102774424631,
+    "planarity_rms": 0.0016147124311205385,
+    "area_min": 0.00020405185647897624,
+    "area_median": 0.014015150705937549,
+    "edge_median": 0.13562075800028364,
+    "source_distance_vertices": {
+      "rms": 0.007990119509173133,
+      "max": 0.048325115768839876
+    },
+    "source_centroid_sample_distance": {
+      "rms": 0.01274861650831786,
+      "max": 0.03651299210446963
+    },
+    "panel_center_distance": {
+      "rms": 0.013065387113743478,
+      "max": 0.04190811198061639
+    },
+    "seam_vertex_gap_max": 0.04933581348633282
+  },
+  "T3D": {
+    "tiles": 196,
+    "aspect_median": 1.5895906838782485,
+    "aspect_p95": 22.122629679798667,
+    "aspect_max": 23.647333167550812,
+    "angle_min_deg": 37.788126328188525,
+    "angle_max_deg": 178.6811436453543,
+    "planarity_max": 0.005690102774424631,
+    "planarity_rms": 0.0016147124311205385,
+    "area_min": 0.00020405185647897624,
+    "area_median": 0.014015150705937549,
+    "edge_median": 0.13562075800028364
+  },
+  "T2D": {
+    "tiles": 196,
+    "aspect_median": 1.5895906838782479,
+    "aspect_p95": 22.122629679799115,
+    "aspect_max": 23.647333167548865,
+    "angle_min_deg": 37.78812632819518,
+    "angle_max_deg": 178.68114364535734,
+    "planarity_max": 0.005690102774424652,
+    "planarity_rms": 0.0016147124311205383,
+    "area_min": 0.00020405185647895532,
+    "area_median": 0.014015150705937562,
+    "edge_median": 0.13562075800028373,
+    "footprint_colliding_pairs": 378,
+    "footprint_penetration_max": 0.09766518856292694,
+    "footprint_penetration_rms": 0.02402918998001227,
+    "footprint_energy": 0.21825794507410737,
+    "solid_collisions": 346,
+    "rigidity_max": 4.052314039881821e-15
+  },
+  "k3d_solver": "numpy/scipy/torch least_squares_or_projective_approximation",
+  "split_csf": 2.5913144161825636,
+  "coverage": [
+    0.9999999999999999,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    0.9999999999999999,
+    1.0
+  ],
+  "section_4_3_linkage": false
+}

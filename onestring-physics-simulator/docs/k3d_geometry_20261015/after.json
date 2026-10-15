@@ -1,0 +1,119 @@
+{
+  "source_bbox_diagonal": 2.181851225031752,
+  "M2D": {
+    "tiles": 225,
+    "aspect_median": 1.0000000000000016,
+    "aspect_p95": 1.0079067518869138,
+    "aspect_max": 1.0088348171256536,
+    "angle_min_deg": 90.0,
+    "angle_max_deg": 90.0,
+    "planarity_max": 0.0,
+    "planarity_rms": 0.0,
+    "area_min": 0.005214074496518266,
+    "area_median": 0.0052601443509599855,
+    "edge_median": 0.07252685261997785
+  },
+  "M3D": {
+    "tiles": 225,
+    "aspect_median": 1.0782828349454092,
+    "aspect_p95": 1.267147827615304,
+    "aspect_max": 1.8646399821671966,
+    "angle_min_deg": 59.90797039493928,
+    "angle_max_deg": 159.6062504384019,
+    "planarity_max": 0.009540881356866059,
+    "planarity_rms": 0.0033162238129011614,
+    "area_min": 0.002846138333748842,
+    "area_median": 0.011372279017945939,
+    "edge_median": 0.10752575804906152,
+    "source_distance_vertices": {
+      "rms": 5.2900114866975875e-17,
+      "max": 1.638464459957408e-16
+    },
+    "seam_vertex_gap_max": 4.440892098500626e-16
+  },
+  "K3D": {
+    "tiles": 225,
+    "aspect_median": 1.2237666395107416,
+    "aspect_p95": 2.0276180365002623,
+    "aspect_max": 3.4512672185671103,
+    "angle_min_deg": 37.75367227008555,
+    "angle_max_deg": 176.52159663446616,
+    "planarity_max": 0.0007283249670679628,
+    "planarity_rms": 0.0001722255931399694,
+    "area_min": 0.0007335921232024026,
+    "area_median": 0.011190158372163892,
+    "edge_median": 0.10675195224470609,
+    "source_distance_vertices": {
+      "rms": 0.015917435406567162,
+      "max": 0.04656790278922294
+    },
+    "source_centroid_sample_distance": {
+      "rms": 0.01290637638002631,
+      "max": 0.04230402428786774
+    },
+    "panel_center_distance": {
+      "rms": 0.015095957684719432,
+      "max": 0.042291001891140295
+    },
+    "seam_vertex_gap_max": 0.0
+  },
+  "K3D_before_T3D": {
+    "tiles": 225,
+    "aspect_median": 1.2166264639911901,
+    "aspect_p95": 2.0528502441753536,
+    "aspect_max": 2.589177283325873,
+    "angle_min_deg": 49.21345925867333,
+    "angle_max_deg": 179.614919675758,
+    "planarity_max": 9.329377805879224e-09,
+    "planarity_rms": 2.046107817327664e-09,
+    "area_min": 0.0011792844640600665,
+    "area_median": 0.011315891445528099,
+    "edge_median": 0.10628925270005284
+  },
+  "T3D": {
+    "tiles": 225,
+    "aspect_median": 1.2237666395107416,
+    "aspect_p95": 2.0276180365002623,
+    "aspect_max": 3.4512672185671103,
+    "angle_min_deg": 37.75367227008555,
+    "angle_max_deg": 176.52159663446616,
+    "planarity_max": 0.0007283249670679628,
+    "planarity_rms": 0.0001722255931399694,
+    "area_min": 0.0007335921232024026,
+    "area_median": 0.011190158372163892,
+    "edge_median": 0.10675195224470609
+  },
+  "T2D": {
+    "tiles": 225,
+    "aspect_median": 1.2237666395107427,
+    "aspect_p95": 2.0276180365002636,
+    "aspect_max": 3.4512672185670987,
+    "angle_min_deg": 37.753672270085914,
+    "angle_max_deg": 176.52159663446596,
+    "planarity_max": 0.0007283249670679309,
+    "planarity_rms": 0.00017222559313997068,
+    "area_min": 0.0007335921232024043,
+    "area_median": 0.011190158372163889,
+    "edge_median": 0.1067519522447061,
+    "footprint_colliding_pairs": 217,
+    "footprint_penetration_max": 0.07517314127506802,
+    "footprint_penetration_rms": 0.008356181097266057,
+    "footprint_energy": 0.015152190469076527,
+    "solid_collisions": 168,
+    "rigidity_max": 5.689893001203927e-16
+  },
+  "k3d_solver": "paper_aligned_projection_local_global",
+  "split_csf": 2.372640984849139,
+  "coverage": [
+    1.0,
+    1.0000000000000002,
+    0.9999999999999998,
+    1.0,
+    0.9999999999999999,
+    1.0,
+    1.0,
+    0.9999999999999999,
+    1.0
+  ],
+  "section_4_3_linkage": true
+}

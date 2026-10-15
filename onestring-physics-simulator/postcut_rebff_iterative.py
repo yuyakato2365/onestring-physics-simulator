@@ -16,7 +16,8 @@ from onestring_physics.paper_mesh_splitting import gaussian_curvature
 from scripts.test_lilium_postcut_bff_hypothesis import clip_piece, field
 
 
-def candidate_lines(xyz, uv, faces, grid: int, *, max_candidates: int = 24):
+def candidate_lines(xyz, uv, faces, grid: int, *, max_candidates: int = 24,
+                    fixed_spacing=None):
     """Curvature-prioritized, interior full-grid cut lines on the CURRENT UV chart.
 
     Re-BFF changes the patch chart. Recompute line locations and curvature for
@@ -34,7 +35,8 @@ def candidate_lines(xyz, uv, faces, grid: int, *, max_candidates: int = 24):
         return []
     order = viable[np.argsort(-curvature[viable], kind="stable")]
     bounds_min, bounds_max = np.min(uv, axis=0), np.max(uv, axis=0)
-    spacing = max(float(np.max(bounds_max-bounds_min))/max(grid, 2), 1e-10)
+    spacing = (float(fixed_spacing) if fixed_spacing is not None else
+               max(float(np.max(bounds_max-bounds_min))/max(grid, 2), 1e-10))
     by_axis = {}
     for axis, dim in (("row", 1), ("col", 0)):
         # Match the per-chart M2D lattice origin at 0, instead of shifting
@@ -181,7 +183,18 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
             raise ValueError("Official BFF returned invalid UV dimensions or nonfinite values")
         prior = field(xyz, uv_old, faces)
         raw_post = field(xyz, raw_bff_uv, faces)
-        if corners_xyz is not None:
+        fixed_chart = getattr(rebff, "geometry_policy", "legacy_joint_atlas") == "fixed_initial_bff"
+        if fixed_chart:
+            # Sec.4.1/4.5 cuts M2D, then lifts through the SAME conformal map.
+            # Clipping interpolates both xyz and UV on the parent triangles:
+            # their piecewise affine inverse is unchanged by this restriction.
+            # Independent child BFF is diagnostic only; never warp its boundary
+            # to masquerade as a new conformal chart.
+            new_uv = uv_old.copy()
+            joint_audit = dict(postcut_joint_atlas=True,
+                              postcut_joint_atlas_policy="restriction_of_initial_BFF",
+                              postcut_joint_atlas_conformality_preserved=True)
+        elif corners_xyz is not None:
             # Independently computed conformal rectangles do NOT, in
             # general, share the same nonlinear seam parameterization.
             # Every later Split must instead cut the already-registered
@@ -204,6 +217,8 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
             independent_bff_post=raw_post,
             postcut_joint_atlas=bool(corners_xyz is not None),
             postcut_joint_atlas_metadata=joint_audit,
+            fixed_initial_bff=fixed_chart,
+            fixed_grid_spacing=getattr(rebff, "fixed_grid_spacing", None),
             pre=prior, post=post, bff_metadata=metadata,
             seam_rectangle_corners_xyz=corners_xyz,
             seam_rectangle_corners_constrained=bool(corners_xyz is not None),
@@ -271,7 +286,8 @@ def iterative_postcut_rebff(
                 )]
             else:
                 options = candidate_lines(
-                    patch["xyz"], patch["new_uv"], patch["faces"], grid
+                    patch["xyz"], patch["new_uv"], patch["faces"], grid,
+                    fixed_spacing=getattr(rebff, "fixed_grid_spacing", None),
                 )
         else:
             violating = [p for p in pending
@@ -282,6 +298,7 @@ def iterative_postcut_rebff(
             patch = max(violating, key=lambda p: p["post"]["linear_span"])
             options = candidate_lines(
                 patch["xyz"], patch["new_uv"], patch["faces"], grid,
+                fixed_spacing=getattr(rebff, "fixed_grid_spacing", None),
             )
 
         if not options:
