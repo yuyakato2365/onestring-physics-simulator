@@ -88,7 +88,8 @@ def _find_tiling_spacing(patches, params, n, target_tiles, progress=None):
     return float(samples[best_id]), int(counts[best_id])
 
 
-def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
+def _assemble_patches(patches, params, n, baseline_tiles, progress=None,
+                      initial_grid=None):
     from postcut_rebff_seam_registration import (
         align_rectangular_bff_charts_on_source_seam,
     )
@@ -136,11 +137,20 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
         # edges included as mandatory lines. Edge cells can be non-square.
         from types import SimpleNamespace
         from postcut_rebff_exact_rectangle_grid import (
-            choose_exact_grid, matching_seam_edges,
+            choose_exact_grid, grid_at_pitch, matching_seam_edges,
         )
-        spacing, grids = choose_exact_grid(
-            patches, baseline_tiles, grid=n,
-        )
+        if initial_grid is not None:
+            # Preserve the ONLY original Omega grid (pitch, origin and all
+            # x/y coordinates). Split duplicates seams but MUST NOT retile.
+            spacing = float(initial_grid["pitch"])
+            grids = grid_at_pitch(
+                patches, spacing, initial_grid=initial_grid,
+            )
+        else:
+            # Retained for independent legacy diagnostic tests only.
+            spacing, grids = choose_exact_grid(
+                patches, baseline_tiles, grid=n,
+            )
         patch_meshes = [
             SimpleNamespace(vertices=patch_grid["vertices"],
                             faces=patch_grid["faces"])
@@ -184,7 +194,17 @@ def _assemble_patches(patches, params, n, baseline_tiles, progress=None):
             for cell in grids
         ]
         exact_grid_audit = {
-            "postcut_omega_grid_policy":"exact_rectangle_coverage_shared_global_lines",
+            "postcut_omega_grid_policy":(
+                "immutable_initial_omega_lines" if initial_grid is not None
+                else "legacy_exact_rectangle_coverage_shared_global_lines"
+            ),
+            "postcut_omega_grid_reconfigured_after_bff":False if initial_grid is not None else True,
+            "postcut_omega_grid_initial_x_count":(
+                len(initial_grid["x"]) if initial_grid is not None else None
+            ),
+            "postcut_omega_grid_initial_y_count":(
+                len(initial_grid["y"]) if initial_grid is not None else None
+            ),
             "postcut_omega_grid_no_cells_cropped":True,
             "postcut_omega_rectangles_area_fraction_covered":[
                 float(cell["area_fraction_covered"]) for cell in grids
@@ -351,7 +371,10 @@ def run_existing_pipeline_through_dual_hinge(
     # Cover every rectangular Omega exactly. The desired tile count is only a
     # density target; never delete boundary panels to hit a number.
     baseline = int(experiment["report"]["initial_m2d"]["quads"])
-    packed = _assemble_patches(patches, params, int(grid), baseline, progress)
+    packed = _assemble_patches(
+        patches, params, int(grid), baseline, progress,
+        initial_grid=experiment.get("initial_grid"),
+    )
     packed["audit"]["postcut_rebff_csf_limit_satisfied"] = csf_converged
     packed["audit"]["postcut_rebff_unconverged_visualization_only"] = bool(
         not csf_converged and allow_csf_violation_preview
