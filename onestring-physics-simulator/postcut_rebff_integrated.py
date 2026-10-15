@@ -28,6 +28,8 @@ class PostcutReBFFDidNotConverge(RuntimeError):
             f"Split={report.get('split_count')}, "
             f"worst CSF={report.get('max_postcut_patch_linear_span'):.6g}, "
             f"stop={report.get('stop_reason')}; "
+            f"unsplittable regions={report.get('unsplittable_region_count',0)}, "
+            f"violating regions={report.get('violating_patch_count','unknown')}; "
             f"rejected candidates={len(rejection_list)}. "
             f"First rejections: {details or '(none)'}"
         )
