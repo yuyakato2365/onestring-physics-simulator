@@ -127,7 +127,8 @@ def _figure(xyz: np.ndarray, uv: np.ndarray, faces: np.ndarray, *,
 
 
 def _rebff_piece_m2d_m3d(patch: dict, params: PipelineParameters,
-                         grid_resolution: int, spacing: float) -> dict:
+                         grid_resolution: int, spacing: float,
+                         initial_grid=None) -> dict:
     """Actually retile one newly BFF-mapped source patch, then lift M2D to M3D.
 
     The two results are separate UV islands and are not wired into K3D/T2D.
@@ -150,14 +151,31 @@ def _rebff_piece_m2d_m3d(patch: dict, params: PipelineParameters,
     piece_params = copy(params)
     piece_params.reference_grid_spacing = float(spacing)
     piece_params.reference_grid_rotation_degrees = 0.0
-    piece_params.reference_grid_origin_u = 0.0
-    piece_params.reference_grid_origin_v = 0.0
-    piece_grid = create_quad_grid(
-        int(grid_resolution), int(grid_resolution),
-        piece_params.tile_size, piece_params.gap_size,
-    )
-    domain = _reference_flatten_to_domain(chart, piece_grid, piece_params)
-    m2d = _build_reference_m2d(piece_grid, domain, piece_params)
+    if initial_grid is not None:
+        # The preview uses the SAME immutable global tile coordinates that
+        # will feed K3D, not another per-piece regular-grid construction.
+        from postcut_rebff_exact_rectangle_grid import grid_at_pitch
+        tile=grid_at_pitch([patch],float(spacing),initial_grid=initial_grid)[0]
+        piece_grid=create_quad_grid(
+            int(grid_resolution),int(grid_resolution),
+            piece_params.tile_size,piece_params.gap_size,
+        )
+        from onestring_physics.legacy_pipeline_base import QuadMesh
+        m2d=QuadMesh(
+            np.asarray(tile["vertices"],float),
+            np.asarray(tile["faces"],int),
+            piece_grid,"M2D",
+            {"m2d_grid_origin_policy":"immutable_initial_omega"},[],
+        )
+    else:
+        piece_params.reference_grid_origin_u = 0.0
+        piece_params.reference_grid_origin_v = 0.0
+        piece_grid = create_quad_grid(
+            int(grid_resolution), int(grid_resolution),
+            piece_params.tile_size, piece_params.gap_size,
+        )
+        domain = _reference_flatten_to_domain(chart, piece_grid, piece_params)
+        m2d = _build_reference_m2d(piece_grid, domain, piece_params)
     m3d, _ = _lift_m2d_to_m3d(None, m2d, chart, piece_params)
     return {"uv": np.asarray(m2d.vertices, float)[:, :2],
             "xyz": np.asarray(m3d.vertices, float),
@@ -322,6 +340,16 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         _rebff.fixed_grid_spacing = spacing
         _rebff.fixed_grid_origin = origin
 
+    # Establish immutable M2D coordinates BEFORE the first BFF Split.
+    # Subsequent BFF calls may change chart interiors, never panel layout.
+    initial_grid = None
+    if post_policy == "target_rectangle":
+        from postcut_rebff_exact_rectangle_grid import build_initial_omega_grid
+        initial_grid = build_initial_omega_grid(
+            {"xyz":xyz,"new_uv":uv,"faces":faces},
+            spacing,origin,
+        )
+
     trial = iterative_postcut_rebff(
         xyz, uv, faces, grid=int(grid), rebff=_rebff, max_splits=int(max_splits),
         csf_limit=2.0, progress=progress,
@@ -330,14 +358,18 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         initial_bff_metadata=initial_rect_metadata,
     )
     patches = trial["patches"]
-    # Regenerate real square M2D panels and 3D inverse-map lifts on the NEW UV.
-    # Keep one shared spacing across the two patches for meaningful comparison.
+    # Preview the ORIGINAL Omega grid partitioned by Split. No new tile
+    # density, origins or boundary line insertion is allowed after re-BFF.
     maximum_span = max(float(np.max(np.ptp(p["new_uv"], axis=0))) for p in patches)
-    common_spacing = max(maximum_span / max(int(grid), 1), 1e-8)
+    common_spacing = (
+        float(initial_grid["pitch"]) if initial_grid is not None
+        else max(maximum_span / max(int(grid), 1), 1e-8)
+    )
     for patch in patches:
         try:
             patch["quad_preview"] = _rebff_piece_m2d_m3d(
-                patch, params, int(grid), common_spacing
+                patch, params, int(grid), common_spacing,
+                initial_grid=initial_grid,
             )
         except Exception as exc:
             patch["quad_preview_error"] = f"{type(exc).__name__}: {exc}"
@@ -384,6 +416,12 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
         ),
         "rectangle_corner_phase": float(phase),
         "split_grid_policy": "fixed_initial_rectangle_lattice" if post_policy == "target_rectangle" else "per_child_preview_lattice",
+        "m2d_grid_policy": ("immutable_initial_omega_lines"
+                            if initial_grid is not None else "legacy_retiling"),
+        "m2d_initial_grid_x": (initial_grid["x"].tolist()
+                              if initial_grid is not None else None),
+        "m2d_initial_grid_y": (initial_grid["y"].tolist()
+                              if initial_grid is not None else None),
         "split_grid_pitch": getattr(_rebff,"fixed_grid_spacing",None),
         "split_grid_origin": (
             _rebff.fixed_grid_origin.tolist()
@@ -439,9 +477,9 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
                    "boundary is a nonconformal experimental coupling, NOT "
                    "an author-verified independent BFF result.",
     }
-    return {"report": report, "patches": patches, "initial": {
-        "xyz": xyz, "uv": uv, "faces": faces,
-    }}
+    return {"report": report, "patches": patches,
+            "initial_grid": initial_grid,
+            "initial": {"xyz": xyz, "uv": uv, "faces": faces}}
 
 
 def _mesh_top_stage_figure(vertices, faces, *, title: str):
