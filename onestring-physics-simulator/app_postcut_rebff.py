@@ -310,6 +310,17 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
     # Enforce a common physical seam edge only for rectangular BFF.
     # Free-boundary comparison intentionally retains its original behavior.
     _rebff.seam_corners_required = (post_policy == "target_rectangle")
+    # A recursive Split must stay on the same GLOBAL Omega lattice. Deriving
+    # a new pitch from each smaller child's bbox would manufacture cuts inside
+    # cells already proven indivisible by the original grid.
+    if post_policy == "target_rectangle":
+        lattice = initial.conformal_domain
+        spacing = float(lattice.reference_grid_spacing)
+        origin = np.asarray(lattice.reference_grid_origin,float).reshape(2)
+        if not np.isfinite(spacing) or spacing <= 0 or not np.isfinite(origin).all():
+            raise RuntimeError("Original M2D lattice is invalid; cannot continue Split")
+        _rebff.fixed_grid_spacing = spacing
+        _rebff.fixed_grid_origin = origin
 
     trial = iterative_postcut_rebff(
         xyz, uv, faces, grid=int(grid), rebff=_rebff, max_splits=int(max_splits),
@@ -372,6 +383,12 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
             if post_policy == "target_rectangle" else None
         ),
         "rectangle_corner_phase": float(phase),
+        "split_grid_policy": "fixed_initial_rectangle_lattice" if post_policy == "target_rectangle" else "per_child_preview_lattice",
+        "split_grid_pitch": getattr(_rebff,"fixed_grid_spacing",None),
+        "split_grid_origin": (
+            _rebff.fixed_grid_origin.tolist()
+            if hasattr(_rebff,"fixed_grid_origin") else None
+        ),
         "split_count": trial["split_count"],
         "split_history": trial["split_history"],
         "rejected_candidates": trial["rejected_candidates"],
