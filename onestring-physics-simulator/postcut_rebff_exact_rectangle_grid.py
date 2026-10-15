@@ -95,7 +95,48 @@ def _within(values,low,high,pitch):
     return points
 
 
-def grid_at_pitch(patches,pitch,*, max_tiles=15000):
+
+def build_initial_omega_grid(root_patch, pitch, origin=(0., 0.)):
+    """Freeze one Omega lattice before any Split or re-BFF.
+
+    Its exterior boundaries are inserted once. Every interior line belongs
+    to the original pitch-and-origin lattice, never to a child BFF chart.
+    """
+    lo,hi=rectangle_bounds(root_patch)
+    pitch=float(pitch)
+    origin=np.asarray(origin,float).reshape(2)
+    if not np.isfinite(pitch) or pitch<=0 or not np.isfinite(origin).all():
+        raise ValueError("Initial BFF grid requires finite positive pitch and origin")
+    axes=[]
+    for dim in range(2):
+        start=int(np.floor((lo[dim]-origin[dim])/pitch))+1
+        stop=int(np.ceil((hi[dim]-origin[dim])/pitch))-1
+        if stop-start>20000:
+            raise RuntimeError("Initial Omega lattice is unreasonably fine")
+        interior=[float(origin[dim]+k*pitch)
+                  for k in range(start,stop+1)
+                  if lo[dim]+1e-11*pitch < origin[dim]+k*pitch < hi[dim]-1e-11*pitch]
+        coords=np.asarray([float(lo[dim]),*interior,float(hi[dim])],float)
+        if len(coords)<2 or np.any(np.diff(coords)<=1e-11*pitch):
+            raise RuntimeError("Initial Omega has a collapsed grid cell")
+        axes.append(coords)
+    return {"x":axes[0],"y":axes[1],"pitch":pitch,"origin":origin}
+
+
+def verify_no_inserted_grid_lines(initial_grid, meshes, *, tolerance=1e-8):
+    """Postcut grids may only reuse coordinates present before any Split."""
+    for dim,key in enumerate(("x","y")):
+        allowed=np.asarray(initial_grid[key],float)
+        for mesh in meshes:
+            actual=np.unique(np.asarray(mesh["vertices"],float)[:,dim])
+            for v in actual:
+                if np.min(np.abs(allowed-v)) > tolerance*max(1.,abs(v)):
+                    raise RuntimeError(
+                        "Postcut BFF introduced a NEW M2D grid line; "
+                        f"axis={key} value={v:.12g}"
+                    )
+
+def grid_at_pitch(patches,pitch,*, max_tiles=15000, initial_grid=None):
     bounds=[rectangle_bounds(p) for p in patches]
     # Two rectangles must not have overlapping interiors: matching seam edges
     # are okay, but overlapping charts invalidate the 1:1 tiling.
@@ -119,8 +160,17 @@ def grid_at_pitch(patches,pitch,*, max_tiles=15000):
                     f"by {penetration.tolist()}; "
                     "no valid seam-preserving grid exists"
                 )
-    xs=_coordinate_grid(bounds,pitch,0)
-    ys=_coordinate_grid(bounds,pitch,1)
+    if initial_grid is None:
+        xs=_coordinate_grid(bounds,pitch,0)
+        ys=_coordinate_grid(bounds,pitch,1)
+    else:
+        if abs(float(initial_grid["pitch"])-float(pitch))>1e-10*max(1.,pitch):
+            raise RuntimeError("Postcut Grid pitch differs from the initial Omega")
+        xs=np.asarray(initial_grid["x"],float)
+        ys=np.asarray(initial_grid["y"],float)
+        if (len(xs)<2 or len(ys)<2
+            or np.any(np.diff(xs)<=0) or np.any(np.diff(ys)<=0)):
+            raise ValueError("Original Omega grid coordinates are invalid")
     results=[]
     quad_total=0
     for i,((lo,hi),patch) in enumerate(zip(bounds,patches)):
@@ -154,6 +204,8 @@ def grid_at_pitch(patches,pitch,*, max_tiles=15000):
             "min_cell_width":float(np.min(np.diff(xx))),
             "min_cell_height":float(np.min(np.diff(yy))),
         })
+    if initial_grid is not None:
+        verify_no_inserted_grid_lines(initial_grid,results)
     return results
 
 
