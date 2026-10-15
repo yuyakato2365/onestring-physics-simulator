@@ -244,6 +244,10 @@ def iterative_postcut_rebff(
     pending = [source]
     history = []
     rejected = []
+    # Memoize only FINAL failed regions. A later successful split of a
+    # DIFFERENT piece does not make an unchanged region newly splittable.
+    # Each branch path is unique in the binary cut tree.
+    unsplittable_by_side = {}
     stop_reason = None
     if initial <= csf_limit + 1e-10:
         return dict(
@@ -252,6 +256,8 @@ def iterative_postcut_rebff(
             split_count=0, max_linear_span=float(initial), all_pass=True,
             initial_linear_span=float(initial), csf_limit=float(csf_limit),
             max_splits=int(max_splits),
+            unsplittable_regions=[], unsplittable_region_count=0,
+            violating_patch_count=0,
         )
 
     def notify(message):
@@ -259,9 +265,28 @@ def iterative_postcut_rebff(
             progress(message)
 
     while len(history) < max_splits:
-        if not history:
-            patch = source
-            if first_cut is not None:
+        violating = sorted(
+            (p for p in pending
+             if p["post"]["linear_span"] > csf_limit + 1e-10),
+            key=lambda p: (-float(p["post"]["linear_span"]), p["side"]),
+        )
+        if not violating:
+            stop_reason = "all_patches_pass"
+            break
+
+        # Crucial: do NOT stop all Split work merely because the currently
+        # highest-CSF region occupies a single cell, has no interior full-grid
+        # cut, or has only invalid BFF children. Try the next violating region.
+        candidates = [
+            p for p in violating if p["side"] not in unsplittable_by_side
+        ]
+        if not candidates:
+            stop_reason = "no_splittable_violating_regions"
+            break
+
+        accepted = None
+        for patch in candidates:
+            if not history and patch is source and first_cut is not None:
                 options = [dict(
                     axis=first_cut["axis"],
                     coordinate=float(first_cut["coordinate"]),
@@ -273,40 +298,56 @@ def iterative_postcut_rebff(
                 options = candidate_lines(
                     patch["xyz"], patch["new_uv"], patch["faces"], grid
                 )
-        else:
-            violating = [p for p in pending
-                         if p["post"]["linear_span"] > csf_limit + 1e-10]
-            if not violating:
-                stop_reason = "all_patches_pass"
+            if not options:
+                unsplittable_by_side[patch["side"]] = {
+                    "side": patch["side"],
+                    "linear_span": float(patch["post"]["linear_span"]),
+                    "source_triangles": int(len(patch["faces"])),
+                    "reason": "no_interior_full_grid_cut_candidate",
+                    "attempted_candidates": 0,
+                }
+                notify(
+                    "Unresolved: %s has CSF=%.4f but no interior grid cut. "
+                    "Continuing other regions."
+                    % (patch["side"], patch["post"]["linear_span"])
+                )
+                continue
+
+            for cut in options:
+                try:
+                    children = _split_and_rebff(
+                        patch, cut["axis"], cut["coordinate"], rebff,
+                    )
+                    accepted = (patch, cut, children)
+                    break
+                except (ValueError, RuntimeError) as exc:
+                    rejected.append(dict(
+                        parent=patch["side"], axis=cut["axis"],
+                        coordinate=float(cut["coordinate"]),
+                        reason=f"{type(exc).__name__}: {str(exc)[:280]}",
+                    ))
+            if accepted is not None:
                 break
-            patch = max(violating, key=lambda p: p["post"]["linear_span"])
-            options = candidate_lines(
-                patch["xyz"], patch["new_uv"], patch["faces"], grid,
+            # All cut candidates for THIS region failed. Preserve the
+            # region and its failing CSF, then try other violating regions.
+            unsplittable_by_side[patch["side"]] = {
+                "side": patch["side"],
+                "linear_span": float(patch["post"]["linear_span"]),
+                "source_triangles": int(len(patch["faces"])),
+                "reason": "all_candidate_cuts_failed",
+                "attempted_candidates": len(options),
+            }
+            notify(
+                "Unresolved: %s has CSF=%.4f, all %d cuts rejected. "
+                "Continuing other regions."
+                % (patch["side"], patch["post"]["linear_span"], len(options))
             )
 
-        if not options:
-            stop_reason = "no_curvature_guided_interior_grid_candidate"
-            break
-
-        accepted = None
-        for cut in options:
-            try:
-                children = _split_and_rebff(
-                    patch, cut["axis"], cut["coordinate"], rebff,
-                )
-                accepted = (cut, children)
-                break
-            except (ValueError, RuntimeError) as exc:
-                rejected.append(dict(
-                    parent=patch["side"], axis=cut["axis"],
-                    coordinate=float(cut["coordinate"]),
-                    reason=f"{type(exc).__name__}: {str(exc)[:280]}",
-                ))
         if accepted is None:
-            stop_reason = "all_candidate_cuts_failed"
+            stop_reason = "no_splittable_violating_regions"
             break
 
-        cut, children = accepted
+        patch, cut, children = accepted
         before_worst = max(p["post"]["linear_span"] for p in pending)
         parent_csf = float(patch["post"]["linear_span"])
         pending = [p for p in pending if p is not patch] + children
@@ -328,16 +369,28 @@ def iterative_postcut_rebff(
             all_patches_max_linear_span=float(worst),
             violating_patch_count=sum(p["post"]["linear_span"] >
                                       csf_limit + 1e-10 for p in pending),
+            unsplittable_region_count=len(unsplittable_by_side),
         ))
-        notify("Split %d/%d → %s; max CSF=%.4f, violating=%d"
-               % (len(history), max_splits, patch["side"], worst,
-                  history[-1]["violating_patch_count"]))
+        notify(
+            "Split %d/%d -> %s; max CSF=%.4f, violating=%d, "
+            "unsplittable=%d"
+            % (len(history), max_splits, patch["side"], worst,
+               history[-1]["violating_patch_count"],
+               len(unsplittable_by_side))
+        )
         if worst <= csf_limit + 1e-10:
             stop_reason = "all_patches_pass"
             break
 
-    final_worst = max(p["post"]["linear_span"] for p in pending) if history else None
-    passes = bool(history and final_worst <= csf_limit + 1e-10)
+    final_worst = max(p["post"]["linear_span"] for p in pending)
+    passes = bool(final_worst <= csf_limit + 1e-10)
+    unresolved = [
+        unsplittable_by_side[p["side"]]
+        for p in pending if p["side"] in unsplittable_by_side
+    ]
+    violating_count = sum(
+        p["post"]["linear_span"] > csf_limit + 1e-10 for p in pending
+    )
     if stop_reason is None:
         stop_reason = "all_patches_pass" if passes else "max_split_budget_exhausted"
     return dict(
@@ -348,4 +401,7 @@ def iterative_postcut_rebff(
         initial_linear_span=float(initial),
         csf_limit=float(csf_limit),
         max_splits=int(max_splits),
+        unsplittable_regions=unresolved,
+        unsplittable_region_count=len(unresolved),
+        violating_patch_count=int(violating_count),
     )
