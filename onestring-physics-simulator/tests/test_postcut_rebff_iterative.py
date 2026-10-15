@@ -143,11 +143,8 @@ def test_unsplittable_single_cell_does_not_block_other_region(monkeypatch):
             ) for i,span in enumerate(spans)
         ]
     monkeypatch.setattr(mod,"_split_and_rebff",fake_cut)
-    def cuts(xyz,uv,faces,grid):
-        # Initial negative has a higher CSF than the positive region but its
-        # chart is already a single cell; the positive region is splittable.
-        return [dict(axis="col",coordinate=.5)]
-    monkeypatch.setattr(mod,"candidate_lines",cuts)
+    # Initial negative has a higher CSF than the positive region but its
+    # chart is already a single cell; the positive region is splittable.
     # Mark only the negative child as a single cell by exposing a unique
     # source shape. This ensures the planner really skips that region.
     def cut_with_single_cell(patch,axis,coordinate,rebff):
@@ -156,7 +153,7 @@ def test_unsplittable_single_cell_does_not_block_other_region(monkeypatch):
             children[0]["faces"]=np.empty((0,3),int)
         return children
     monkeypatch.setattr(mod,"_split_and_rebff",cut_with_single_cell)
-    def finite_cut_candidates(xyz,uv,faces,grid):
+    def finite_cut_candidates(xyz,uv,faces,grid,**kwargs):
         return [] if len(faces)==0 else [dict(axis="col",coordinate=.5)]
     monkeypatch.setattr(mod,"candidate_lines",finite_cut_candidates)
     xyz,uv,faces,first=_fake_seed()
@@ -226,3 +223,38 @@ def test_no_first_cut_no_candidates_is_unconverged(monkeypatch):
     assert result["max_linear_span"]==3.
     assert result["unsplittable_region_count"]==1
     assert result["stop_reason"]=="no_splittable_violating_regions"
+
+
+def test_fixed_global_grid_has_no_internal_cut_in_single_cell():
+    # The old algorithm recalculated span / grid on EACH child and could
+    # invent extra Split lines inside a single original grid cell.
+    xyz=np.array([
+        [.12,.15,0.],[.22,.15,0.],[.22,.25,0.],[.12,.25,0.],
+        [.17,.20,.05],
+    ],float)
+    uv=xyz[:,:2].copy()
+    faces=np.array([[0,1,4],[1,2,4],[2,3,4],[3,0,4]],int)
+    assert mod.candidate_lines(xyz,uv,faces,grid=14)
+    cuts=mod.candidate_lines(
+        xyz,uv,faces,grid=14,fixed_spacing=.5,
+        fixed_origin=np.array([0.,0.])
+    )
+    assert cuts==[]
+
+
+def test_fixed_grid_respects_original_origin():
+    xyz=np.array([
+        [.12,.15,0.],[.72,.15,0.],[.72,.75,0.],[.12,.75,0.],
+        [.42,.45,.2],
+    ],float)
+    uv=xyz[:,:2].copy()
+    faces=np.array([[0,1,4],[1,2,4],[2,3,4],[3,0,4]],int)
+    cuts=mod.candidate_lines(
+        xyz,uv,faces,grid=14,fixed_spacing=.5,
+        fixed_origin=np.array([.12,.15])
+    )
+    assert cuts
+    for cut in cuts:
+        dim=1 if cut["axis"]=="row" else 0
+        origin=[.12,.15][dim]
+        assert abs((cut["coordinate"]-origin)/.5-1.)<1e-9
