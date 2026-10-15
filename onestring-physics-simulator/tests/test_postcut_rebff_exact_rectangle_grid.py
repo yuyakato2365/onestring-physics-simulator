@@ -245,6 +245,10 @@ def test_recursive_split_reuses_exact_initial_grid_without_density_search():
     assert np.min(np.diff(initial_grid["x"]))>0.
     cut=.4  # exactly the original square lattice, not a new child boundary
     children=[patch(.07,cut,.11,.95),patch(cut,1.03,.11,.95)]
+    # These represent real recursive children: source seams already share
+    # their parent's UV and MUST NOT be realigned as independent raw BFFs.
+    for child in children:
+        child["postcut_joint_atlas"]=True
     grids=grid_at_pitch(children,.2,initial_grid=initial_grid)
     verify_no_inserted_grid_lines(initial_grid,grids)
     assert sum(len(g["faces"]) for g in grids)==len(base["faces"])
