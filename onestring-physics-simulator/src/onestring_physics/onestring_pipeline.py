@@ -953,6 +953,9 @@ _ORIGINAL_SPATIAL_CANDIDATE_PAIRS_FOR_TILES = _original._spatial_candidate_pairs
 
 @dataclass
 class PipelineParameters(_original.PipelineParameters):
+    # User-selected defaults for this app; not the paper authors' weights.
+    w_square: float = 100.0
+    hinge_layout_iterations: int = 1000
     paper_fidelity_mode: bool = False
     # Experimental paper-interpretation studies; defaults remain unchanged.
     bff_rectangle_selection_mode: Literal[
@@ -1055,8 +1058,8 @@ class PipelineParameters(_original.PipelineParameters):
     csf_split_local_margin_fraction: float = 0.08
     csf_split_local_cluster_gap_fraction: float = 0.16
     csf_split_local_max_length_fraction: float = 0.62
-    hinge_layout_connection_weight: float = 8.0
-    hinge_layout_collision_weight: float = 4.0
+    hinge_layout_connection_weight: float = 1.0
+    hinge_layout_collision_weight: float = 100.0
     hinge_layout_anchor_weight: float = 0.0
     hinge_layout_initial_expansion: float = 1.0
     # Compatibility with older K2D/local-global layout paths only.
@@ -1067,7 +1070,7 @@ class PipelineParameters(_original.PipelineParameters):
     # The full build uses its stage time budget once PER requested attempt,
     # while the dedicated rerun can distribute a total budget across attempts.
     hinge_layout_search_mode: str = "single"
-    hinge_layout_collision_mode: str = "soft"
+    hinge_layout_collision_mode: str = "hard"
     hinge_layout_budget_mode: str = "per_trial"
     hinge_layout_restart_count: int = 6
     hinge_layout_perturb_translation: float = 0.35
@@ -1078,10 +1081,10 @@ class PipelineParameters(_original.PipelineParameters):
     collision_split_enabled: bool = False
     collision_split_max_additional: int = 3
     collision_split_boundary_weight: float = 1.0
-    # Extra opening distance applied only when trial M2D actually contains a
-    # collision-driven seam. Helps distinguish insufficient seam clearance
-    # from intra-component clashes that larger Split gaps cannot repair.
-    collision_split_gap_multiplier: float = 1.0
+    # Experimental final T2D separation of disconnected hinge components.
+    # Applies to Paper-oriented CSF Splits and collision-driven Split trials.
+    # Does not change BFF Omega, M2D Grid, rigid panels, or hinge links.
+    collision_split_gap_multiplier: float = 3.0
     collision_split_min_relative_improvement: float = 0.03
     collision_split_candidate_attempts: int = 3
     # Opt-in: inspect a promising but rejected first cut and up to N second
