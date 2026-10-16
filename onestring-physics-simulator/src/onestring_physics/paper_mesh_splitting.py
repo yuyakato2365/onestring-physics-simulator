@@ -811,11 +811,17 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     if dual_mode:
         face_sigma = np.ones(len(faces), float)
         covered = np.zeros(len(faces), bool)
-        if len(dual_field["jacobian"]):
-            reference_min = float(np.min(dual_field["jacobian"]))
-            for member_ids, j in zip(dual_field["face_ids"], dual_field["jacobian"]):
+        intact_dual_ids = sorted({
+            idx for summary in final_dual_stats
+            for idx in summary["used_dual_ids"]
+        })
+        if intact_dual_ids:
+            reference_min = float(np.min(dual_field["jacobian"][intact_dual_ids]))
+            for idx in intact_dual_ids:
+                member_ids = dual_field["face_ids"][idx]
+                j = float(dual_field["jacobian"][idx])
                 face_sigma[member_ids] = np.maximum(
-                    face_sigma[member_ids], np.sqrt(float(j)/reference_min)
+                    face_sigma[member_ids], np.sqrt(j/reference_min)
                 )
                 covered[member_ids] = True
         dual_uncovered_quad_count = int((~covered).sum())
@@ -833,6 +839,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             'local inverse length scale sqrt(dA_S/dA_Omega); retained UV chart'
         ),
         csf_split_exactness_label=(
+            'Experimental four-tile centroid dual area span; '
+            'not a closed-to-open auxetic expansion or manufacturability certificate'
+            if dual_mode else
             ('EXPERIMENTAL paper Figure 18 area-span<=2 interpreted via '
              'sqrt(area Jacobian span)<=sqrt(2); no actual UV rescale/remap, '
              'reparameterization or fabrication certificate')
