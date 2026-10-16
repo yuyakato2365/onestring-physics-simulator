@@ -216,6 +216,11 @@ def _split_and_rebff(patch, axis, coordinate, rebff: Callable):
             seam_rectangle_corners_xyz=corners_xyz,
             seam_rectangle_corners_constrained=bool(corners_xyz is not None),
         ))
+    if getattr(rebff, "match_free_seam", False):
+        from postcut_free_bff_matched_seam import match_free_bff_split_children
+        children = match_free_bff_split_children(
+            children, axis, coordinate, evaluate=field
+        )
     return children
 
 
