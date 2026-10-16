@@ -129,7 +129,7 @@ def test_unsplittable_single_cell_does_not_block_other_region(monkeypatch):
     def fake_cut(patch, axis, coordinate, rebff):
         calls.append(patch["side"])
         if patch["side"]=="initial":
-            spans=(3.4, 2.6)
+            spans=(3.0, 2.6)
         elif patch["side"]=="initial_positive":
             spans=(1.2,1.5)
         else:
@@ -165,11 +165,11 @@ def test_unsplittable_single_cell_does_not_block_other_region(monkeypatch):
     assert result["split_count"]==2
     assert result["stop_reason"]=="no_splittable_violating_regions"
     assert not result["all_pass"]
-    assert result["max_linear_span"]==3.4
+    assert result["max_linear_span"]==3.0
     assert result["violating_patch_count"]==1
     assert result["unsplittable_region_count"]==1
     assert result["unsplittable_regions"][0]["side"]=="initial_negative"
-    assert result["unsplittable_regions"][0]["linear_span"]==3.4
+    assert result["unsplittable_regions"][0]["linear_span"]==3.0
 
 
 def test_all_failed_candidates_in_worst_region_do_not_block_other(monkeypatch):
@@ -177,7 +177,7 @@ def test_all_failed_candidates_in_worst_region_do_not_block_other(monkeypatch):
     def fake_cut(patch,axis,coordinate,rebff):
         tried.append(patch["side"])
         if patch["side"]=="initial":
-            spans=(3.3,2.5)
+            spans=(3.0,2.5)
         elif patch["side"]=="initial_negative":
             raise ValueError("Split creates invalid BFF child")
         elif patch["side"]=="initial_positive":
@@ -287,3 +287,60 @@ def test_invalid_initial_preferred_cut_can_try_a_different_legal_cut(monkeypatch
     assert result["all_pass"]
     assert result["unsplittable_region_count"]==0
     assert len(result["rejected_candidates"])==1
+
+
+def test_743_csf_regression_is_rejected_and_next_grid_line_is_tried(monkeypatch):
+    """An almost-collapsed registered chart must not be committed as a Split."""
+    attempts=[]
+    def artificial_cut(patch, axis, coordinate, rebff):
+        attempts.append(axis)
+        values=(1.4,743.245) if axis=="row" else (1.4,1.8)
+        return [
+            dict(side=patch["side"]+suffix,
+                 xyz=patch["xyz"],new_uv=patch["new_uv"],faces=patch["faces"],
+                 pre={"linear_span":3.0},
+                 post={"linear_span":v},
+                 independent_bff_post={"linear_span":1.6},
+                 bff_metadata={})
+            for suffix,v in zip(("_negative","_positive"),values)
+        ]
+    monkeypatch.setattr(mod,"_split_and_rebff",artificial_cut)
+    monkeypatch.setattr(mod,"candidate_lines",lambda *a,**k: [
+        dict(axis="col",coordinate=.5)
+    ])
+    xyz,uv,faces,first=_fake_seed()
+    result=mod.iterative_postcut_rebff(
+        xyz,uv,faces,first_cut=first,rebff=lambda *a:None,
+        grid=14,max_splits=1,initial_linear_span=3.,
+    )
+    assert attempts==["row","col"]
+    assert result["all_pass"]
+    assert result["split_count"]==1
+    assert result["max_linear_span"]==1.8
+    assert len(result["rejected_candidates"])==1
+    assert "CSF regression" in result["rejected_candidates"][0]["reason"]
+    assert "743.245" in result["rejected_candidates"][0]["reason"]
+
+
+def test_all_csf_regressive_grid_cuts_leave_parent_unchanged(monkeypatch):
+    """Failed reBFF is honestly unresolved, never a fabricated successful cut."""
+    monkeypatch.setattr(mod,"_split_and_rebff",lambda patch,axis,coordinate,rebff: [
+        dict(side=patch["side"]+suffix,
+             xyz=patch["xyz"],new_uv=patch["new_uv"],faces=patch["faces"],
+             post={"linear_span":v})
+        for suffix,v in zip(("_negative","_positive"),(2.2,20.0))
+    ])
+    monkeypatch.setattr(mod,"candidate_lines",lambda *a,**k: [
+        dict(axis="row",coordinate=.5)
+    ])
+    xyz,uv,faces,_=_fake_seed()
+    result=mod.iterative_postcut_rebff(
+        xyz,uv,faces,first_cut=None,rebff=lambda *a:None,
+        grid=14,max_splits=8,initial_linear_span=3.0,
+    )
+    assert result["split_count"]==0
+    assert not result["all_pass"]
+    assert result["max_linear_span"]==3.0
+    assert result["stop_reason"]=="no_splittable_violating_regions"
+    assert result["unsplittable_regions"][0]["reason"]=="all_candidate_cuts_failed"
+    assert "CSF regression" in result["rejected_candidates"][0]["reason"]
