@@ -7055,10 +7055,8 @@ def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_call
     tile_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-9)
     split_multiplier = (
         float(getattr(params, "collision_split_gap_multiplier", 1.0))
-        if params is not None and (
-            getattr(params, "collision_split_enabled", False)
-            or getattr(params, "collision_split_forced_lines", ())
-        ) else 1.0
+        if params is not None and getattr(params, "collision_split_forced_lines", ())
+        else 1.0
     )
     if not np.isfinite(split_multiplier) or not 1.0 <= split_multiplier <= 10.0:
         raise ValueError("Split component gap multiplier must be between 1 and 10")
