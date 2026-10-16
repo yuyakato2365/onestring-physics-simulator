@@ -62,6 +62,34 @@ def _quad_mesh_heatmap(vertices, faces, values, title: str, colorbar_title: str)
     return fig
 
 
+def figure_k3d_plain_blue(mesh) -> go.Figure:
+    """Show the *same optimized K3D* as opaque blue quads with dark outlines.
+
+    This view is purely visual: it deliberately omits planarity intensities,
+    distortion colors, correspondence gradients and new geometry processing.
+    It reuses the existing quad mesh renderer, including the actual Split
+    seams and original face connectivity.
+    """
+    from .visualization import figure_quad_mesh
+
+    fig = figure_quad_mesh(
+        mesh,
+        title="K3D — blue geometry (no distortion colors)",
+        show_csf=False,
+    )
+    # figure_quad_mesh normally chooses blue/teal from z-range. K3D must
+    # be blue even if the optimized geometry happens to be nearly planar.
+    for trace in fig.data:
+        if isinstance(trace, go.Mesh3d):
+            trace.color = "#5097f5"
+            trace.vertexcolor = None
+            trace.facecolor = None
+            trace.intensity = None
+            trace.opacity = 0.90
+            trace.showscale = False
+    return fig
+
+
 def figure_k3d_planarity(mesh) -> go.Figure:
     residuals=quad_planarity_residuals(mesh.vertices,mesh.faces)
     return _quad_mesh_heatmap(mesh.vertices,mesh.faces,residuals,"K3D — panel planarity residual","max plane distance")
@@ -159,6 +187,6 @@ def add_t2d_collision_overlay(fig: go.Figure, assembly, hinge_graph=None) -> tup
 
 
 __all__=[
-    "quad_planarity_residuals","figure_k3d_planarity","planarized_k3d_from_t3d",
+    "quad_planarity_residuals","figure_k3d_plain_blue","figure_k3d_planarity","planarized_k3d_from_t3d",
     "figure_t3d_planarized_k3d","t2d_collision_tile_ids","add_t2d_collision_overlay",
 ]
