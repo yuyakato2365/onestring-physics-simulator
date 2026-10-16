@@ -421,9 +421,9 @@ with st.sidebar:
         st.info(
             "Paperモード：公式BFFの4つの90°外角による矩形Ω、"
             "8頂点剛体、T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
-            "Splitは通常版OFFとは別に、各領域の面積ヤコビアン比の平方根（線形CSF）を評価し、"
-            "ガウス曲率を優先した完全格子切断で比が改善するものだけ採用します。"
-            "2を超える領域で改善不能なら停止して未達成と報告します。"
+            "Splitは通常版OFFとは別に、未分割M2D→M3Dのquad面積比を領域ごとに評価し、"
+            "その最大/最小比の平方根が2を超えれば、ガウス曲率優先の完全格子切断を試します。"
+            "このM2D/M3D基準は独自の実験設定で、元のBFF三角形CSFとは異なります。"
             "分割後のUV再写像・独立スケール変更は未実装のため、"
             "論文の製造可能性条件を完全に証明するものではありません。"
         )
@@ -719,12 +719,16 @@ with st.sidebar:
         )
         paper_csf_sampling_method = st.selectbox(
             "CSF離散評価（実験）",
-            ["overlap_extrema", "interpolated_grid_vertices"],
-            format_func=lambda v: (
-                "従来の重複三角形極値" if v == "overlap_extrema"
-                else "M2D頂点へ面積重み付きlog(J)補間（研究用）"
-            ),
+            ["m2d_m3d_panel_area", "overlap_extrema", "interpolated_grid_vertices"],
+            format_func=lambda v: {
+                "m2d_m3d_panel_area": "M2D/M3D 四角形パネルの面積比（現在の既定）",
+                "overlap_extrema": "従来のBFF三角形重複の極値",
+                "interpolated_grid_vertices": "M2D頂点へ面積重み付きlog(J)補間（研究用）",
+            }[v],
             index=0,
+            help="まず未分割のM2D格子頂点をBFF逆写像でM3Dへ持ち上げ、各quadの"
+                 "面積(M3D)/面積(M2D)を計算します。これを全連結成分でmax/min比較します。"
+                 "BFF三角形ごとの歪み極値とは異なり、元論文の製造保証ではありません。",
         )
         paper_split_area_limit_experiment = st.checkbox(
             "面積倍率比 ≤ 2 でSplitを判定（実験）",
