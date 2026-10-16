@@ -537,8 +537,23 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     sampling_method = (str(getattr(params, "paper_csf_sampling_method",
                                   "m2d_m3d_panel_area")) if paper_fidelity
                        else "overlap_extrema")
-    lo, hi, samples = _face_samples(vertices, faces, parameterization,
-                                    threshold, paper_fidelity, sampling_method)
+    # Curvature-candidate association still uses which source BFF triangles
+    # overlap an M2D quad. The NEW dual-centroid area field, when selected,
+    # is separately computed from M2D/M3D tile-centroid geometry and is the
+    # ONLY field used for Split's CSF acceptance test.
+    dual_mode = paper_fidelity and sampling_method == "m2d_m3d_dual_centroid"
+    lo, hi, samples = _face_samples(
+        vertices, faces, parameterization, threshold, paper_fidelity,
+        "overlap_extrema" if dual_mode else sampling_method,
+    )
+    dual_field = None
+    if dual_mode:
+        from .paper_dual_csf import build_dual_centroid_field, component_dual_stats
+        dual_field = build_dual_centroid_field(vertices, faces, parameterization)
+        parameterization.metrics["split_csf_sampling_method"] = sampling_method
+        parameterization.metrics["split_csf_sampling_diagnostics"] = dict(
+            dual_field["diagnostics"]
+        )
     # In Sec.4.5, lambda is the conformal scale factor of the map;
     # the area Jacobian is lambda^2. A disconnected piece can, in
     # principle, be uniformly rescaled, so its *linear* scale span is
@@ -557,7 +572,19 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     budget = max(0, int(getattr(domain, 'max_csf_splits', 64)))
     enabled = bool(getattr(domain, 'csf_split_enabled', True))
     records, rejected, pairs, blocked = [], [], [], set()
-    def ratio(component):
+    def dual_stats(component, active_faces=None):
+        return component_dual_stats(
+            component, faces if active_faces is None else active_faces,
+            dual_field,
+        )
+
+    def ratio(component, active_faces=None):
+        if dual_mode:
+            result = dual_stats(component, active_faces)
+            # Display-only placeholder when there is no complete dual cell.
+            # This is NEVER used to accept a child cut without coverage,
+            # and the final status explicitly marks unmeasured components.
+            return float(result["span"]) if result["measurable"] else 1.0
         if paper_fidelity:
             return _component_conformal_scale_span(lo, hi, component)
         # Exact original OFF calculation: global-min-normalized linear scale.
@@ -566,7 +593,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     before = max(map(ratio, initial_components), default=1.)
     initial_single_cut_audit = (
         _initial_single_cut_exhaustive_audit(vertices, faces, ratio, threshold)
-        if paper_fidelity else None
+        if paper_fidelity and not dual_mode else None
     )
     while enabled and len(records) < budget:
         components = _edge_components(faces)
@@ -583,8 +610,11 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         # Lower bound imposed by indivisible grid quads. In Paper mode this
         # is max over each quad's local J_max / J_min. Splitting cannot
         # reduce that distortion without changing the mesh/parameterization.
-        component_floor = float((paper_quad_floor if paper_fidelity
-                                else irreducible)[component].max())
+        # An M2D tile is not itself a dual linkage cell. There is no
+        # per-quad distortion floor in the centroid-dual mode.
+        component_floor = (1.0 if dual_mode else
+                           float((paper_quad_floor if paper_fidelity
+                                  else irreducible)[component].max()))
         if component_before <= component_floor * (1. + 1e-10):
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(),
@@ -598,6 +628,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         bounds = vertices[used, :2]
         tested = set()
         complete_candidate_seen = False
+        insufficient_dual_candidate = False
         for peak in ids:
             point = uv_grid[peak]
             # The peak must belong to this part, not just its bounding box.
@@ -633,8 +664,25 @@ def _split_mesh_single(vertices, faces, domain, params=None):
                 if len(children) != 2:
                     continue  # complete bisection, not a multiway/topologically ambiguous cut
                 imbalance = abs(len(children[0])-len(children[1]))
-                child_sigmas = [ratio(component[c]) for c in children]
                 complete_candidate_seen = True
+                if dual_mode:
+                    trial_faces = faces.copy()
+                    trial_faces[component] = subset
+                    # A cut can disconnect the four tiles around the central
+                    # grid vertex. Those cross-seam dual cells cease to exist.
+                    # A child with zero complete dual cells is NOT a valid
+                    # CSF<=2 success; reject this candidate conservatively.
+                    if not all(
+                        dual_stats(component[c], trial_faces)["measurable"]
+                        for c in children
+                    ):
+                        insufficient_dual_candidate = True
+                        continue
+                    child_sigmas = [
+                        ratio(component[c], trial_faces) for c in children
+                    ]
+                else:
+                    child_sigmas = [ratio(component[c]) for c in children]
                 # A strict one-step improvement rule is NOT specified in
                 # Sec.4.5 and rejects multi-cut solutions (e.g. [1,9,1,9]).
                 # Every valid bisection has smaller nonempty child tile
@@ -654,7 +702,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         if selected is None:
             blocked.add(tuple(component))
             rejected.append({'face_ids': component.tolist(), 'sigma': component_before,
-                             'reason': ('no_distortion_reducing_grid_cut'
+                             'reason': ('all_candidate_cuts_leave_unmeasured_dual_regions'
+                                        if dual_mode and insufficient_dual_candidate else
+                                        'no_distortion_reducing_grid_cut'
                                         if complete_candidate_seen else
                                         'no_complete_grid_cut_near_source_curvature_sample'),
                              'irreducible_sigma': component_floor})
@@ -744,6 +794,8 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     final = _edge_components(faces)
     invalid_uv_count = int(parameterization.metrics.get('split_csf_degenerate_uv_face_count', 0))
     values = [ratio(c) for c in final]
+    final_dual_stats = [dual_stats(c) for c in final] if dual_mode else []
+    unmeasured_dual_regions = int(sum(not s["measurable"] for s in final_dual_stats))
     unresolved = sum(v > threshold+1e-10 for v in values)
     unresolved_mixed = 0  # legacy metric retained for dashboard compatibility
     exhausted = bool(enabled and unresolved and csf_count >= budget)
@@ -755,12 +807,26 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     )
     after = max(values, default=1.)
     face_sigma = paper_quad_floor.copy() if paper_fidelity else np.sqrt(hi).copy()
+    dual_uncovered_quad_count = 0
+    if dual_mode:
+        face_sigma = np.ones(len(faces), float)
+        covered = np.zeros(len(faces), bool)
+        if len(dual_field["jacobian"]):
+            reference_min = float(np.min(dual_field["jacobian"]))
+            for member_ids, j in zip(dual_field["face_ids"], dual_field["jacobian"]):
+                face_sigma[member_ids] = np.maximum(
+                    face_sigma[member_ids], np.sqrt(float(j)/reference_min)
+                )
+                covered[member_ids] = True
+        dual_uncovered_quad_count = int((~covered).sum())
     domain.csf_before, domain.csf_after_split = before, after
     domain.split_lines = [('row' if r['axis'] == 'row' else 'col', r['snapped_value']) for r in records]
     domain.localized_split_segments = list(domain.split_lines)
     metrics = dict(
         csf_model=(
-            ('Experimental M2D/M3D quad area span sqrt(max(A3/A2)/min(A3/A2))'
+            ('Experimental four-tile centroid dual area span sqrt(max(A3/A2)/min(A3/A2))'
+             if dual_mode else
+             'Experimental M2D/M3D quad area span sqrt(max(A3/A2)/min(A3/A2))'
              if sampling_method == "m2d_m3d_panel_area"
              else 'Paper Sec.4.5 linear conformal scale span sqrt(max(J)/min(J))')
             if paper_fidelity else
@@ -773,8 +839,10 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             if area_limit_experiment else
             'Paper candidate linear CSF only: sqrt(area Jacobian span) after hypothetical '
             'per-piece rescaling; no actual UV rescale/remap or fabrication certificate'
-            if paper_fidelity and sampling_method != "m2d_m3d_panel_area" else
-            'Experimental M2D/M3D panel area-span proxy; does not certify '
+            if paper_fidelity and sampling_method not in (
+                "m2d_m3d_panel_area", "m2d_m3d_dual_centroid"
+            ) else
+            'Experimental M2D/M3D dual-centroid area-span proxy; does not certify '
             'conformality or fabrication (no per-piece rescale/remap)'
             if paper_fidelity else
             'OFF-mode fixed-chart inverse-length CSF; no post-cut reparameterization'
@@ -793,6 +861,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_stopping_reason=stopping_reason,
         csf_split_unresolved_mixed_edges=unresolved_mixed,
         csf_split_status=(
+            'uncertified_insufficient_dual_cells' if dual_mode and unmeasured_dual_regions else
             'uncertified_uv_degeneracy' if invalid_uv_count
             else 'satisfied' if not unresolved else
             ('disabled' if not enabled else 'budget_exhausted'
@@ -803,7 +872,14 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_neutral_cut_count=int(sum(bool(r.get("neutral_sigma_step",False)) for r in records[:csf_count])),
         csf_split_locations=[['row' if r['axis']=='row' else 'col',r['snapped_value']]
                              for r in records[:csf_count]],
-        csf_split_initial_components=[{'face_ids': c.tolist(), 'sigma': ratio(c)} for c in initial_components],
+        csf_split_initial_components=[
+            dict(face_ids=c.tolist(), sigma=ratio(c), **(
+                {"dual_cell_count": dual_stats(c)["cell_count"],
+                 "dual_measurable": dual_stats(c)["measurable"]}
+                if dual_mode else {}
+            ))
+            for c in initial_components
+        ],
         # This OFF-mode CSF is a *linear* proxy; no paper Fig.18 area
         # upper bound has been geometrically certified.
         csf_split_bound_certified=False,
@@ -812,33 +888,48 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         # limit; we must not silently certify both with one comparison.
         csf_split_candidate_area_bound_satisfied=bool(
             paper_fidelity and after*after <= 2.0 + 1e-10
-            and not invalid_uv_count
+            and not invalid_uv_count and not unmeasured_dual_regions
         ),
         csf_split_candidate_linear_bound_satisfied=bool(
             paper_fidelity and after <= 2.0 + 1e-10 and not invalid_uv_count
+            and not unmeasured_dual_regions
         ),
         csf_split_area_limit_experiment=area_limit_experiment,
         csf_split_effective_linear_threshold=float(threshold),
         csf_split_requested_area_threshold=2.0 if area_limit_experiment else None,
         csf_split_component_area_ratio=[
-            float(_component_area_span(lo, hi, c)) for c in final
+            (dual_stats(c)["area_span"] if dual_mode else
+             float(_component_area_span(lo, hi, c)))
+            for c in final
         ] if paper_fidelity else [],
         csf_split_area_ratio_after=float(after*after) if paper_fidelity else None,
         csf_split_linear_csf_area_relation='lambda=sqrt(area Jacobian ratio)' if paper_fidelity else None,
         csf_split_component_rescale_applied=False,
         csf_split_paper_area_span_active=paper_fidelity,
         csf_split_sampling_method=sampling_method,
+        csf_split_dual_diagnostics=dual_field["diagnostics"] if dual_mode else None,
+        csf_split_dual_component_stats=final_dual_stats if dual_mode else None,
+        csf_split_dual_unmeasured_region_count=unmeasured_dual_regions,
+        csf_split_dual_uncovered_quad_count=dual_uncovered_quad_count,
+        csf_split_dual_cross_seam_policy=(
+            "require all four member quads and a common actual Grid vertex "
+            "inside each connected Split region; reject unmeasurable cut children"
+            if dual_mode else None
+        ),
         csf_split_panel_area_diagnostics=(
             parameterization.metrics.get('split_csf_sampling_diagnostics')
-            if sampling_method == 'm2d_m3d_panel_area' else None
+            if sampling_method in ('m2d_m3d_panel_area', 'm2d_m3d_dual_centroid') else None
         ),
         csf_split_algorithm_same_as_normal=not paper_fidelity,
         csf_split_degenerate_uv_face_count=invalid_uv_count,
         csf_split_parameterization_repair_required=bool(invalid_uv_count),
-        csf_split_evaluation_scope=('original M2D/M3D quads' if paper_fidelity and sampling_method == 'm2d_m3d_panel_area' else
+        csf_split_evaluation_scope=('intact four-tile centroid dual cells after each cut' if dual_mode else
+                                    'original M2D/M3D quads' if paper_fidelity and sampling_method == 'm2d_m3d_panel_area' else
                                     'usable source triangles only' if invalid_uv_count else 'all source triangles'),
         csf_split_step_analysis_model=(
-            ('Paper-oriented experiment: sqrt(M3D/M2D panel area-span) after strict inverse lift'
+            ('Paper-oriented experiment: four-tile centroid dual area span; crossing-cut cells excluded'
+             if dual_mode else
+             'Paper-oriented experiment: sqrt(M3D/M2D panel area-span) after strict inverse lift'
              if sampling_method == 'm2d_m3d_panel_area'
              else 'Paper: sqrt(component area-Jacobian span) candidate; no UV rescale/remap')
             if paper_fidelity else
@@ -846,13 +937,14 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         ),
         csf_split_component_sigma=values, csf_split_component_area_scale=[1.0 for _ in final],
         csf_split_component_irreducible_quad_sigma=[
-            float((paper_quad_floor if paper_fidelity else irreducible)[c].max())
+            (1.0 if dual_mode else
+             float((paper_quad_floor if paper_fidelity else irreducible)[c].max()))
             for c in final
         ],
         csf_split_initial_one_cut_exhaustive_audit=initial_single_cut_audit,
-        csf_split_irreducible_quad_count=int(np.count_nonzero(
+        csf_split_irreducible_quad_count=(0 if dual_mode else int(np.count_nonzero(
             (paper_quad_floor if paper_fidelity else irreducible) > threshold+1e-10
-        )),
+        ))),
         csf_split_quad_coverage_floor_sweep=parameterization.metrics.get('split_quad_coverage_floor_sweep'),
         csf_split_face_sigma=face_sigma.tolist(),
         csf_split_residual_high_face_count=int(np.count_nonzero(face_sigma > threshold+1e-10)),
@@ -860,6 +952,10 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             exhausted and not all(r['reason'] == 'within_quad_distortion_floor' for r in rejected)
         ),
         csf_split_stopping_rule=(
+            'Paper-oriented experiment: four-panel centroid dual areas M3D/M2D; '
+            'evaluate only intact cells wholly inside connected Split component; '
+            'reject child regions with no intact dual cell; no physical limit certificate'
+            if dual_mode else
             'Paper-oriented experiment: per-quad area(M3D)/area(M2D), then '
             'sqrt(max/min) across disconnected component; '
             'source Gaussian-curvature priority; complete Grid cuts; '
