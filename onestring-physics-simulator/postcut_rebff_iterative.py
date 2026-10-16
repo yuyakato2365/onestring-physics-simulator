@@ -335,6 +335,41 @@ def iterative_postcut_rebff(
                     children = _split_and_rebff(
                         patch, cut["axis"], cut["coordinate"], rebff,
                     )
+                    # A successful BFF subprocess does not mean that the
+                    # resulting *shared* atlas is a useful parameterization.
+                    # In particular, fixed-seam harmonic registration can
+                    # create almost-collapsed UV triangles, making Jmax/Jmin
+                    # hundreds of times larger than on the parent. Never
+                    # commit a geometrically regressive cut: keep searching
+                    # other legal lines, including plateau (neutral) cuts.
+                    # This is an explicit stability safeguard, not a claim
+                    # about the unspecified author implementation.
+                    parent_span = float(patch["post"]["linear_span"])
+                    child_spans = [float(c["post"]["linear_span"]) for c in children]
+                    if (
+                        not child_spans
+                        or any(not np.isfinite(v) or v < 1.0 - 1e-9
+                               for v in child_spans)
+                    ):
+                        raise ValueError(
+                            "Invalid postcut shared-atlas CSF: "
+                            f"parent={parent_span:.6g}, children={child_spans}"
+                        )
+                    worst_child = max(child_spans)
+                    if worst_child > parent_span + 1e-9 * max(1.0, parent_span):
+                        raw_spans = [
+                            float(c.get("independent_bff_post", {}).get(
+                                "linear_span", float("nan")
+                            ))
+                            for c in children
+                        ]
+                        raise ValueError(
+                            "Postcut shared-atlas CSF regression: "
+                            f"parent={parent_span:.6g}, "
+                            f"children={[round(v, 6) for v in child_spans]}, "
+                            f"raw_BFF={[round(v, 6) for v in raw_spans]}. "
+                            "Cut rejected; trying next initial-grid line."
+                        )
                     accepted = (patch, cut, children)
                     break
                 except (ValueError, RuntimeError) as exc:
