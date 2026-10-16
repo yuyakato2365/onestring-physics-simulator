@@ -516,7 +516,7 @@ with st.sidebar:
 
         k3d_planarity_polish = bool(st.checkbox(
             "K3D: minimum-displacement planarity polish",
-            value=str(os.environ.get("ONESTRING_K3D_PLANARITY_POLISH", "1")).strip().lower()
+            value=str(os.environ.get("ONESTRING_K3D_PLANARITY_POLISH", "0")).strip().lower()
                   not in {"0", "false", "no", "off"},
             help="K3Dの通常最適化後に、元のK3Dからの移動量を抑えながらquadの共平面性だけを追加最適化します。OFFでは通常のK3DをそのままK2D/T3Dへ渡します。",
             key="onestring_0920_k3d_planarity_polish",
@@ -955,7 +955,7 @@ with st.sidebar:
     ))
     square_tail_beta = float(st.number_input(
         "Square 最大歪み β", min_value=0.001, max_value=1000.0,
-        value=float(os.environ.get("ONESTRING_K3D_SQUARE_TAIL_BETA", "12.0")),
+        value=float(os.environ.get("ONESTRING_K3D_SQUARE_TAIL_BETA", "100.0")),
         step=1.0, format="%.3f", key="onestring_k3d_square_tail_beta",
         help="大きいほどLSEが最大歪みに近づく。0より大きい値を指定する。",
     ))
@@ -964,7 +964,7 @@ with st.sidebar:
     st.caption("d_iは4辺の隣接長さ差と対角線長さ差（計5残差）の無次元RMS。通常のlocal/global段階は従来のESquareを使用。")
     w_square = _param_row(
         "K3D の quad を極端に歪ませない重み。高いほど正方形・均整なタイルを保つ。",
-        lambda: st.number_input("w_square / ESquare", min_value=0.1, max_value=100.0, value=10.0, step=0.5, help="Weight for square-like quad shape."),
+        lambda: st.number_input("w_square / ESquare", min_value=0.1, max_value=100.0, value=100.0, step=0.5, help="Weight for square-like quad shape."),
     )
     w_surface = _param_row(
         "K3D を目標曲面 S に近づける重み。上げすぎると平面性や辺長一致と衝突しやすい。",
@@ -986,18 +986,18 @@ with st.sidebar:
     )
     hinge_layout_iterations = _param_row(
         "E_Hinge 配置最適化の最大反復回数。増やすと改善余地は増えるが、時間予算に達すると途中終了する。",
-        lambda: st.number_input("hinge layout iterations", min_value=20, max_value=10000, value=80, step=100, help="Maximum L-BFGS iterations for the T2D dual-hinge layout optimizer. Values above 1000 are supported; convergence may stop earlier."),
+        lambda: st.number_input("hinge layout iterations", min_value=20, max_value=10000, value=1000, step=100, help="Maximum L-BFGS iterations for the T2D dual-hinge layout optimizer. Values above 1000 are supported; convergence may stop earlier."),
     )
     hinge_layout_connection_weight = _param_row(
         "ヒンジ点を一致させる重み。高いほど接続は保つが、衝突回避の自由度は減る。",
-        lambda: st.slider("hinge connection weight", 0.1, 20.0, 8.0, 0.1, help="Weight for E_Conn: pairwise hinge vertex coincidence."),
+        lambda: st.slider("hinge connection weight", 0.1, 20.0, 1.0, 0.1, help="Weight for E_Conn: pairwise hinge vertex coincidence."),
     )
     hinge_layout_collision_weight = _param_row(
         "厚み付きタイル footprint の非衝突重み。高すぎるとタイルが散り、低すぎると重なりが残る。",
         lambda: st.number_input(
             "hinge collision weight",
             min_value=0.0,
-            value=4.0,
+            value=100.0,
             step=1.0,
             format="%.2f",
             help="Weight for E_Collision: separating overlapping T2D footprints. No UI upper bound; larger values prioritize collision separation more strongly.",
@@ -1067,7 +1067,7 @@ with st.sidebar:
             "T2D collision constraint (soft / hard)",
             ["soft", "hard"],
             format_func=lambda value: "Soft collision (original)" if value == "soft" else "Hard nonpenetration (repair + feasible refinement)",
-            index=1 if paper_fidelity_enabled else 0,
+            index=1,
             disabled=paper_fidelity_enabled,
         ),
     )
@@ -1117,12 +1117,13 @@ with st.sidebar:
                           1.0, 0.1, disabled=not collision_split_enabled),
     ))
     collision_split_gap_multiplier = float(_param_row(
-        "Collision-driven Splitのみ切断領域間の初期離隔を増やす倍率。"
-        "CSF Splitは元の距離のまま。後続のK2D/T2D最適化では"
-        "再び近づくことがあるため、診断表で各工程を比較してください。",
-        lambda: st.slider("Collision Split gap multiplier (experimental)",
-                          1.0, 8.0, 1.0, 0.5,
-                          disabled=not collision_split_enabled),
+        "Paper-orientedのCSF Split、またはCollision-driven Split後の"
+        "T2D最終配置で、分離したヒンジ連結成分間の目標離隔を増やす倍率。"
+        "1.0は標準の離隔。M2DやK2DのGridを変更せず、"
+        "成分全体を剛体平行移動する独自実験機能です。",
+        lambda: st.slider("Split component gap multiplier (paper / collision, experimental)",
+                          1.0, 8.0, 3.0, 0.5,
+                          disabled=not (paper_fidelity_enabled or collision_split_enabled)),
     ))
     collision_split_candidate_attempts = int(_param_row(
         "1本のSplitを決める前に試せる候補数。各候補でM2D以降を再計算し、"
