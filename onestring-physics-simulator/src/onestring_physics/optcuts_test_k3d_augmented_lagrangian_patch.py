@@ -291,12 +291,18 @@ def _square_energy_and_gradient(
     residual = np.stack(residuals, axis=1)
     d = np.sqrt(np.mean(residual * residual, axis=1) + 1e-24)
     alpha = max(0.0, _safe_float_env("ONESTRING_K3D_SQUARE_TAIL_ALPHA", 4.0))
-    beta = max(1e-6, _safe_float_env("ONESTRING_K3D_SQUARE_TAIL_BETA", 12.0))
-    z = beta * d
-    zmax = float(np.max(z))
-    expz = np.exp(z - zmax)
-    softmax = expz / np.sum(expz)
-    lse = (zmax + np.log(np.mean(expz))) / beta
+    beta = max(0.0, _safe_float_env("ONESTRING_K3D_SQUARE_TAIL_BETA", 12.0))
+    if beta == 0.0:
+        # Exact continuous extension of log(mean(exp(beta*d)))/beta:
+        # L_0=mean(d); derivative w.r.t. each d_i is 1/N.
+        lse = float(np.mean(d))
+        softmax = np.full(len(d), 1.0 / len(d))
+    else:
+        z = beta * d
+        zmax = float(np.max(z))
+        expz = np.exp(z - zmax)
+        softmax = expz / np.sum(expz)
+        lse = (zmax + np.log(np.mean(expz))) / beta
     energy = 0.5 * float(weight) * (float(np.mean(d * d)) + alpha * lse * lse)
     # dE / d(residual_ik), with five residuals per panel.
     coeffs = float(weight) * (1.0 / len(f4) + alpha * lse * softmax / d)[:, None] * residual / 5.0
