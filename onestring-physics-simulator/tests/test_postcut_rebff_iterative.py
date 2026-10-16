@@ -301,6 +301,7 @@ def test_743_csf_regression_is_rejected_and_next_grid_line_is_tried(monkeypatch)
                  pre={"linear_span":3.0},
                  post={"linear_span":v},
                  independent_bff_post={"linear_span":1.6},
+                 postcut_joint_atlas=True,
                  bff_metadata={})
             for suffix,v in zip(("_negative","_positive"),values)
         ]
@@ -327,7 +328,8 @@ def test_all_csf_regressive_grid_cuts_leave_parent_unchanged(monkeypatch):
     monkeypatch.setattr(mod,"_split_and_rebff",lambda patch,axis,coordinate,rebff: [
         dict(side=patch["side"]+suffix,
              xyz=patch["xyz"],new_uv=patch["new_uv"],faces=patch["faces"],
-             post={"linear_span":v})
+             post={"linear_span":v},
+             postcut_joint_atlas=True)
         for suffix,v in zip(("_negative","_positive"),(2.2,20.0))
     ])
     monkeypatch.setattr(mod,"candidate_lines",lambda *a,**k: [
