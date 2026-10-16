@@ -793,6 +793,50 @@ def main() -> None:
             "以下は補正後のCSFです。Gridの完全保持やT2Dの境界一致は未検証です。"
         )
         st.json(report.get("postcut_free_shared_seam_diagnostics"))
+    if report.get("postcut_free_shared_seam_mode") and len(data["patches"])==2:
+        from onestring_physics.reference_bff import validate_reference_mesh
+        from postcut_free_bff_matched_seam import _physical_seam_samples
+        import numpy as np
+        split_spec=report.get("split",{})
+        if split_spec.get("axis") in ("row","col"):
+            ids,_=_physical_seam_samples(
+                data["patches"],split_spec["axis"],
+                float(split_spec["uv_coordinate"]),
+            )
+            seam_fig=go.Figure()
+            colors=("#287bb7","#d58130")
+            for index,(patch,indices) in enumerate(zip(data["patches"],ids)):
+                xyz=np.asarray(patch["xyz"],float)
+                uv=np.asarray(patch["new_uv"],float)
+                boundary=np.asarray(
+                    validate_reference_mesh(
+                        xyz,np.asarray(patch["faces"],int)
+                    )["boundary_loops"][0],int
+                )
+                outline=uv[np.r_[boundary,boundary[:1]]]
+                seam=uv[indices]
+                seam_fig.add_trace(go.Scatter(
+                    x=outline[:,0],y=outline[:,1],mode="lines",
+                    line=dict(color=colors[index],width=2),
+                    name=f"領域{index+1} 外周",
+                ))
+                seam_fig.add_trace(go.Scatter(
+                    x=seam[:,0],y=seam[:,1],mode="lines+markers",
+                    line=dict(color=colors[index],width=4),
+                    marker=dict(size=5),
+                    name=f"領域{index+1} 共有境界",
+                ))
+            seam_fig.update_layout(
+                title="共有する物理Split境界の2D一致（2色が重なれば一致）",
+                xaxis=dict(title="u",scaleanchor="y",scaleratio=1),
+                yaxis=dict(title="v"),
+                height=510,
+            )
+            st.plotly_chart(seam_fig,use_container_width=True)
+            st.caption(
+                "境界線のUV一致は検証済みですが、これだけではGrid・K3D・"
+                "T2Dのパネル境界の一致や製造可能性は保証できません。"
+            )
     if passed:
         st.success("全領域のCSFが2以下になりました。" + summary)
     else:
