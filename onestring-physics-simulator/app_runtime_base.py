@@ -78,6 +78,7 @@ from onestring_physics.visualization import (
 from onestring_physics.panel_quality_visualization import (
     add_t2d_collision_overlay,
     figure_k3d_planarity,
+    figure_k3d_plain_blue,
     figure_t3d_planarized_k3d,
     planarized_k3d_from_t3d,
     quad_planarity_residuals,
@@ -2977,10 +2978,31 @@ elif view_stage in {"M2D", "K3D"}:
             f" · vertices={len(mesh.vertices)} · quads={len(mesh.faces)}"
         )
     if view_stage == "K3D":
+        # Display-only switch: both plots consume exactly the same optimized
+        # K3D mesh. Changing this control does NOT rerun any optimization.
+        k3d_view_style = st.radio(
+            "K3D表示",
+            ["青単色（形状・パネル境界）", "平面性ヒートマップ"],
+            horizontal=True,
+            key="onestring_k3d_view_style",
+            help="青単色はK3Dの形状を確認する表示です。平面性ヒートマップは従来の残差色表示です。",
+        )
         residuals = quad_planarity_residuals(mesh.vertices, mesh.faces)
-        st.plotly_chart(figure_k3d_planarity(mesh), use_container_width=True, key="mesh_K3D_planarity")
-        if len(residuals):
-            st.caption(f"K3D panel planarity: max={float(np.max(residuals)):.6g}, mean={float(np.mean(residuals)):.6g}. Color = max point-to-best-fit-plane distance.")
+        if k3d_view_style.startswith("青単色"):
+            st.plotly_chart(
+                figure_k3d_plain_blue(mesh),
+                use_container_width=True,
+                key="mesh_K3D_plain_blue",
+            )
+            st.caption("青＝同一K3Dパネルの形状、黒線＝四角形パネル境界。色は歪みやCSFを表しません。")
+        else:
+            st.plotly_chart(
+                figure_k3d_planarity(mesh),
+                use_container_width=True,
+                key="mesh_K3D_planarity",
+            )
+            if len(residuals):
+                st.caption(f"K3D panel planarity: max={float(np.max(residuals)):.6g}, mean={float(np.mean(residuals)):.6g}. Color = max point-to-best-fit-plane distance.")
     else:
         st.plotly_chart(figure_quad_mesh(mesh, title=view_stage, correspondence_uv=_corr_uv, correspondence_bounds=_corr_bounds), use_container_width=True, key=f"mesh_{view_stage}")
     if view_stage == "K3D":
