@@ -159,6 +159,78 @@ def _intersection_area(triangle, polygon):
     return abs(sum(_cross(a, b) for a, b in zip(points, np.roll(points, -1, axis=0))))*.5
 
 
+def _m2d_m3d_panel_area_field(vertices, faces, parameterization):
+    """Effective area expansion of each actual M2D quad into its pre-Split M3D.
+
+    Lift each *grid vertex* with exactly the same strict UV-triangle barycentric
+    interpolation as the official-BFF M2D -> M3D stage. For every quad,
+    sum the areas of triangles (0,1,2) and (0,2,3); divide by its
+    2D polygon area. These values are NOT the input BFF triangle Jacobians
+    and are NOT a pointwise conformal scale factor.
+
+    Evaluate on the canonical, unseparated M2D before any seam-gap offsets.
+    The values remain tied to face IDs through all later connectivity cuts.
+    """
+    from .reference_bff import strict_inverse_map_uv_to_surface
+
+    grid_uv = np.asarray(vertices, dtype=float)[:, :2]
+    quads = np.asarray(faces, dtype=int)
+    uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+    uv_faces = np.asarray(
+        getattr(parameterization, "uv_faces", parameterization.surface_faces),
+        dtype=int,
+    )
+    xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)
+    xyz_faces = np.asarray(parameterization.surface_faces, dtype=int)
+    if uv_faces.shape != xyz_faces.shape:
+        raise ValueError("M2D/M3D panel CSF needs paired BFF UV and surface triangles")
+    used = np.unique(quads.ravel())
+    mapped = np.full((len(grid_uv), 3), np.nan, dtype=float)
+    for vertex_id in used:
+        pos, _, _, _ = strict_inverse_map_uv_to_surface(
+            grid_uv[int(vertex_id)], uv, uv_faces, xyz, xyz_faces,
+            tolerance=1e-10, vertex_id=int(vertex_id),
+        )
+        mapped[int(vertex_id)] = pos
+
+    planar_quads = grid_uv[quads]
+    spatial_quads = mapped[quads]
+    dxy = np.roll(planar_quads, -1, axis=1)
+    area2 = .5 * np.abs(np.sum(
+        planar_quads[:, :, 0] * dxy[:, :, 1]
+        - planar_quads[:, :, 1] * dxy[:, :, 0], axis=1
+    ))
+    t1 = spatial_quads[:, 1] - spatial_quads[:, 0]
+    t2 = spatial_quads[:, 2] - spatial_quads[:, 0]
+    t3 = spatial_quads[:, 3] - spatial_quads[:, 0]
+    area3 = .5 * (
+        np.linalg.norm(np.cross(t1, t2), axis=1)
+        + np.linalg.norm(np.cross(t2, t3), axis=1)
+    )
+    scale2 = float(np.median(area2)) if len(area2) else 0.
+    if (not len(quads) or
+        not np.isfinite(area2).all() or not np.isfinite(area3).all() or
+        np.any(area2 <= max(np.finfo(float).tiny, scale2 * 1e-12)) or
+        np.any(area3 <= max(np.finfo(float).tiny, 1e-12 * float(np.median(area3))))):
+        raise ValueError("M2D/M3D panel CSF undefined: zero/invalid quad area")
+    expansion = area3 / area2
+    if not np.isfinite(expansion).all() or np.any(expansion <= 0):
+        raise ValueError("M2D/M3D panel CSF produced invalid area expansion")
+    diagnostics = {
+        "split_panel_area_source": "pre_split_M2D_M3D_strict_bff_inverse",
+        "split_panel_area_definition": "area(M3D triangulation 012+023) / area(M2D polygon)",
+        "split_panel_area_triangle_diagonal": "0-2",
+        "split_panel_area_ratio_min": float(expansion.min()),
+        "split_panel_area_ratio_max": float(expansion.max()),
+        "split_panel_area_ratio_values": expansion.tolist(),
+        "split_panel_area_m2d_values": area2.tolist(),
+        "split_panel_area_m3d_values": area3.tolist(),
+        "split_panel_m3d_uv_inverse_vertex_count": int(len(used)),
+        "split_panel_csf_is_conformal_certificate": False,
+    }
+    return expansion, diagnostics
+
+
 def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=False,
                   sampling_method="overlap_extrema"):
     uv = np.asarray(parameterization.uv_vertices_2d, float)
@@ -210,6 +282,17 @@ def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=Fa
                 max_extremum_coverage_below_one_percent=int((hi_cover<.01).sum()),
             ),
         )
+    elif sampling_method == "m2d_m3d_panel_area":
+        panel_jacobian, panel_diag = _m2d_m3d_panel_area_field(
+            vertices, faces, parameterization
+        )
+        # One effective area scale per M2D/M3D quad. Cutting along grid
+        # lines does not subdivide a quad; each split child reuses these
+        # original face IDs and area values. No BFF triangle extrema are
+        # fed into the candidate acceptance test in this mode.
+        lo = panel_jacobian.copy()
+        hi = panel_jacobian.copy()
+        parameterization.metrics.update(split_csf_sampling_diagnostics=panel_diag)
     elif sampling_method != "overlap_extrema":
         raise ValueError(f"Unknown Paper CSF sampling method: {sampling_method}")
     parameterization.metrics["split_csf_sampling_method"] = sampling_method
@@ -218,7 +301,11 @@ def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=Fa
     q = [0., 50., 90., 99., 100.]
     report = {}
     for f in floors:
-        fl, fh = np.asarray(sweep[f][0]), np.asarray(sweep[f][1])
+        if sampling_method == "m2d_m3d_panel_area":
+            # Coverage-floor sweep is not meaningful for panel-based samples.
+            fl, fh = lo, hi
+        else:
+            fl, fh = np.asarray(sweep[f][0]), np.asarray(sweep[f][1])
         ratios = fh/fl
         chart_ratio = fh.max()/fl.min()
         if linear_csf:
@@ -239,7 +326,8 @@ def _face_samples(vertices, faces, parameterization, threshold=2., linear_csf=Fa
     )
     print('[FACE-SAMPLES] quads=%d threshold=%.4g sampling=%s active_coverage_floor=%s'
           % (len(faces), threshold, sampling_method,
-             'none (grid-vertex samples)' if sampling_method=='interpolated_grid_vertices'
+             'none (M2D/M3D whole-panel area)' if sampling_method=='m2d_m3d_panel_area'
+             else 'none (grid-vertex samples)' if sampling_method=='interpolated_grid_vertices'
              else '1e-12 (overlap extrema)'), flush=True)
     print('  quad sigma ' + ('sqrt(hi/lo)' if linear_csf else 'hi/lo') + '  ' + '  '.join('p%g=%.4g' % (x, v) for x, v in zip(q, np.percentile(quad_sigma, q)))
           + '   irreducible(>thr)=%d/%d' % (int(np.count_nonzero(quad_sigma > threshold+1e-10)), len(faces)), flush=True)
@@ -447,7 +535,7 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         paper_fidelity and getattr(params, "paper_split_allow_neutral_cuts", True)
     )
     sampling_method = (str(getattr(params, "paper_csf_sampling_method",
-                                  "overlap_extrema")) if paper_fidelity
+                                  "m2d_m3d_panel_area")) if paper_fidelity
                        else "overlap_extrema")
     lo, hi, samples = _face_samples(vertices, faces, parameterization,
                                     threshold, paper_fidelity, sampling_method)
@@ -672,7 +760,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
     domain.localized_split_segments = list(domain.split_lines)
     metrics = dict(
         csf_model=(
-            'Paper Sec.4.5 linear conformal scale span sqrt(max(J)/min(J))'
+            ('Experimental M2D/M3D quad area span sqrt(max(A3/A2)/min(A3/A2))'
+             if sampling_method == "m2d_m3d_panel_area"
+             else 'Paper Sec.4.5 linear conformal scale span sqrt(max(J)/min(J))')
             if paper_fidelity else
             'local inverse length scale sqrt(dA_S/dA_Omega); retained UV chart'
         ),
@@ -683,6 +773,9 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             if area_limit_experiment else
             'Paper candidate linear CSF only: sqrt(area Jacobian span) after hypothetical '
             'per-piece rescaling; no actual UV rescale/remap or fabrication certificate'
+            if paper_fidelity and sampling_method != "m2d_m3d_panel_area" else
+            'Experimental M2D/M3D panel area-span proxy; does not certify '
+            'conformality or fabrication (no per-piece rescale/remap)'
             if paper_fidelity else
             'OFF-mode fixed-chart inverse-length CSF; no post-cut reparameterization'
         ),
@@ -735,12 +828,19 @@ def _split_mesh_single(vertices, faces, domain, params=None):
         csf_split_component_rescale_applied=False,
         csf_split_paper_area_span_active=paper_fidelity,
         csf_split_sampling_method=sampling_method,
+        csf_split_panel_area_diagnostics=(
+            parameterization.metrics.get('split_csf_sampling_diagnostics')
+            if sampling_method == 'm2d_m3d_panel_area' else None
+        ),
         csf_split_algorithm_same_as_normal=not paper_fidelity,
         csf_split_degenerate_uv_face_count=invalid_uv_count,
         csf_split_parameterization_repair_required=bool(invalid_uv_count),
-        csf_split_evaluation_scope='usable source triangles only' if invalid_uv_count else 'all source triangles',
+        csf_split_evaluation_scope=('original M2D/M3D quads' if paper_fidelity and sampling_method == 'm2d_m3d_panel_area' else
+                                    'usable source triangles only' if invalid_uv_count else 'all source triangles'),
         csf_split_step_analysis_model=(
-            'Paper: sqrt(component area-Jacobian span) candidate; no UV rescale/remap'
+            ('Paper-oriented experiment: sqrt(M3D/M2D panel area-span) after strict inverse lift'
+             if sampling_method == 'm2d_m3d_panel_area'
+             else 'Paper: sqrt(component area-Jacobian span) candidate; no UV rescale/remap')
             if paper_fidelity else
             'fixed-chart inverse length scale; no conformal reparameterization'
         ),
@@ -760,6 +860,11 @@ def _split_mesh_single(vertices, faces, domain, params=None):
             exhausted and not all(r['reason'] == 'within_quad_distortion_floor' for r in rejected)
         ),
         csf_split_stopping_rule=(
+            'Paper-oriented experiment: per-quad area(M3D)/area(M2D), then '
+            'sqrt(max/min) across disconnected component; '
+            'source Gaussian-curvature priority; complete Grid cuts; '
+            'no per-piece remap, rescale or conformity certificate'
+            if paper_fidelity and sampling_method == 'm2d_m3d_panel_area' else
             'Paper Sec.4.5 approximate: use sqrt(component area-Jacobian span); '
             'highest eligible source Gaussian-curvature point; complete '
             'grid bisection with strict worst-child linear-CSF improvement; '
