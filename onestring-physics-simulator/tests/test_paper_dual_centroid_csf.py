@@ -99,3 +99,54 @@ def test_one_quad_has_no_four_tile_centroid_dual_and_is_not_certified():
     assert field["face_ids"].shape == (0,4)
     assert not component_dual_stats(np.array([0]), quads, field)["measurable"]
     assert not field["diagnostics"]["physical_auxetic_bound_certified"]
+
+
+def test_split_pipeline_marks_single_quad_as_unmeasurable():
+    from onestring_physics.paper_mesh_splitting import _split_mesh_single
+    uv, quads, p = _grid(1,1)
+    domain = SimpleNamespace(
+        parameterization=p, csf_split_enabled=True,
+        max_csf_splits=4, reference_grid_rotation_degrees=0.,
+    )
+    params = SimpleNamespace(
+        paper_fidelity_mode=True,
+        paper_csf_sampling_method="m2d_m3d_dual_centroid",
+        paper_split_area_limit_experiment=False,
+        paper_split_allow_neutral_cuts=True,
+    )
+    _vertices, out_faces, records, metrics = _split_mesh_single(
+        np.column_stack([uv, np.zeros(len(uv))]), quads, domain, params
+    )
+    assert len(records) == 0
+    assert len(out_faces) == 1
+    assert metrics["csf_split_status"] == "uncertified_insufficient_dual_cells"
+    assert metrics["csf_split_dual_unmeasured_region_count"] == 1
+    assert not metrics["csf_split_candidate_linear_bound_satisfied"]
+    assert not metrics["csf_split_candidate_area_bound_satisfied"]
+
+
+def test_split_pipeline_uses_dual_field_and_preserves_original_grid():
+    from onestring_physics.paper_mesh_splitting import _split_mesh_single
+    uv, quads, p = _grid(4,3,x_transform=lambda x: x**3)
+    domain = SimpleNamespace(
+        parameterization=p, csf_split_enabled=True,
+        max_csf_splits=3, reference_grid_rotation_degrees=0.,
+    )
+    params = SimpleNamespace(
+        paper_fidelity_mode=True,
+        paper_csf_sampling_method="m2d_m3d_dual_centroid",
+        paper_split_area_limit_experiment=False,
+        paper_split_allow_neutral_cuts=True,
+    )
+    vertices, cut_faces, records, metrics = _split_mesh_single(
+        np.column_stack([uv, np.zeros(len(uv))]), quads, domain, params
+    )
+    assert metrics["csf_split_sampling_method"] == "m2d_m3d_dual_centroid"
+    assert metrics["max_csf_before_split"] == pytest.approx(np.sqrt(7.))
+    assert metrics["csf_split_dual_diagnostics"]["dual_cell_count"] == 6
+    assert np.allclose(vertices[:len(uv),:2], uv)
+    assert np.array_equal(cut_faces.shape, quads.shape)
+    assert metrics["csf_split_bound_certified"] is False
+    if records:
+        assert metrics["csf_split_dual_unmeasured_region_count"] == 0
+        assert metrics["max_csf_after_split"] <= metrics["max_csf_before_split"]
