@@ -356,7 +356,15 @@ def iterative_postcut_rebff(
                             f"parent={parent_span:.6g}, children={child_spans}"
                         )
                     worst_child = max(child_spans)
-                    if worst_child > parent_span + 1e-9 * max(1.0, parent_span):
+                    # The guard targets the fixed-seam rectangular atlas.
+                    # Keep the independent free-boundary research comparison
+                    # unchanged; its BFF charts are not stitched together.
+                    joined_rectangle = all(
+                        bool(c.get("postcut_joint_atlas", False))
+                        for c in children
+                    )
+                    if (joined_rectangle and
+                        worst_child > parent_span + 1e-9 * max(1.0, parent_span)):
                         raw_spans = [
                             float(c.get("independent_bff_post", {}).get(
                                 "linear_span", float("nan")
