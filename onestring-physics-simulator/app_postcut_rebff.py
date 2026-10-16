@@ -234,6 +234,15 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
              initial_rectangle_mode: str = "source_boundary_shape_fit") -> dict:
     standard_path = str(_locate_bff_cli(standard_exe, rectangle=False))
     rectangle_path = str(_locate_bff_cli(rect_exe, rectangle=True))
+    matched_free = post_policy == "automatic_reference_matched_seam"
+    if matched_free and int(max_splits) != 1:
+        raise ValueError(
+            "Free-boundary shared-seam experiment currently supports exactly "
+            "one Split. Later cuts would move previously registered seams."
+        )
+    effective_post_policy = (
+        "automatic_reference" if matched_free else post_policy
+    )
 
     params = PipelineParameters(
         nx=grid, ny=grid, omega_parameterization_mode="paper_reference_bff",
@@ -314,7 +323,7 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
                 np.asarray(rectangle_corner_positions,float)
                 if post_policy == "target_rectangle" else None
             ),
-            boundary_policy=post_policy,
+            boundary_policy=effective_post_policy,
         )
         if post_policy == "target_rectangle":
             if (bff.metrics.get("bff_boundary_policy_effective") != "target_rectangle"
@@ -328,6 +337,7 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
     # Enforce a common physical seam edge only for rectangular BFF.
     # Free-boundary comparison intentionally retains its original behavior.
     _rebff.seam_corners_required = (post_policy == "target_rectangle")
+    _rebff.match_free_seam = bool(matched_free)
     # A recursive Split must stay on the same GLOBAL Omega lattice. Deriving
     # a new pitch from each smaller child's bbox would manufacture cuts inside
     # cells already proven indivisible by the original grid.
@@ -376,10 +386,27 @@ def _execute(mesh_path: Path, grid: int, standard_exe: str, rect_exe: str,
 
     worst = max(p["post"]["linear_span"] for p in patches)
     report = {
-        "experiment": "Initial rectangular BFF -> grid Split -> independent child BFF -> seam-constrained shared atlas -> measure atlas CSF and repeat Split",
+        "experiment": (
+            "Initial rectangular BFF -> one full-grid Split -> free-boundary "
+            "official BFF on both pieces -> exact shared seam Dirichlet warp "
+            "-> recompute actual UV CSF"
+            if matched_free else
+            "Initial rectangular BFF -> grid Split -> independent child BFF "
+            "-> seam-constrained shared atlas -> measure atlas CSF and repeat Split"
+        ),
         "not_paper_author_verified": True,
         "not_applied_to_K3D_or_T2D": True,
         "input_mesh": str(mesh_path), "grid": int(grid),
+        "postcut_free_shared_seam_mode":bool(matched_free),
+        "postcut_free_shared_seam_diagnostics":[
+            p.get("postcut_free_seam_audit") for p in patches
+        ] if matched_free else None,
+        "postcut_free_shared_seam_uv_verified":bool(
+            matched_free and len(patches)==2
+            and all(p.get("postcut_free_seam_audit",{}).get("seam_uv_error_max",float("inf"))<1e-9
+                    for p in patches)
+        ),
+        "postcut_free_shared_seam_not_original_grid_compatible":bool(matched_free),
         "official_bff_executable": standard_path,
         "rectangular_bff_executable": rectangle_path,
         "initial_bff": "target_rectangle", "postcut_bff": post_policy,
@@ -680,21 +707,29 @@ def main() -> None:
         # never choose it silently when the user wants rectangles.
         post_policy = st.selectbox(
             "Split後のBFF境界条件",
-            ["target_rectangle", "automatic_reference"],
+            ["target_rectangle", "automatic_reference",
+             "automatic_reference_matched_seam"],
             index=0,
-            format_func=lambda value: (
-                "矩形境界（初期BFFと同じ・推奨）"
-                if value == "target_rectangle" else
-                "自由境界（比較実験のみ）"
-            ),
-            help="既定は矩形境界。初回および追加Split後、各子領域を公式の矩形BFFアダプターで解き直します。",
+            format_func=lambda value: {
+                "target_rectangle": "矩形境界（初期BFFと同じ・推奨）",
+                "automatic_reference": "自由境界（境界一致なし・比較実験）",
+                "automatic_reference_matched_seam":
+                    "自由境界＋物理Split境界のUVを完全一致（1本・実験）",
+            }[value],
+            help="自由境界＋境界一致は、公式BFF後に同じ物理切断点を"
+                 "同一UV座標へ固定して内部を調和補正します。補正後CSFを再評価し、"
+                 "UVの反転を禁止します。元のGridやT2Dの製造適合性は保証しません。",
         )
         st.caption("初回BFFだけでCSF≤2ならSplitは0本。"
                    "再BFF後も違反があればGridに沿って追加Splitします。"
                    "矩形境界モードでは子領域も幾何学的に検証します。")
         max_splits = int(st.number_input(
-            "最大Split数（初回を含む）", min_value=1, max_value=64, value=8, step=1,
-            help="CSF>2の領域だけを切断。切れない・予算到達なら停止理由を表示。",
+            "最大Split数（初回を含む）", min_value=1,
+            max_value=(1 if post_policy=="automatic_reference_matched_seam" else 64),
+            value=(1 if post_policy=="automatic_reference_matched_seam" else 8),
+            step=1,
+            help="CSF>2の領域だけを切断。自由境界の境界一致実験は"
+                 "既存の共有境界を壊さないよう1本に制限しています。",
         ))
         st.caption("CSF判定は全領域の sqrt(max(J)/min(J)) ≤ 2（J=3D/2D面積倍率）")
         start = st.button("Split → BFF再計算を収束まで繰り返す", type="primary")
@@ -752,6 +787,12 @@ def main() -> None:
     if report.get("initial_rectangle_selection_attempts"):
         with st.expander("入力S境界に合わせた初期矩形の候補と比較結果"):
             st.json(report["initial_rectangle_selection_attempts"])
+    if report.get("postcut_free_shared_seam_mode"):
+        st.info(
+            "自由境界BFF後に、同じ3D切断点が完全に一致するようUVを調和補正しました。"
+            "以下は補正後のCSFです。Gridの完全保持やT2Dの境界一致は未検証です。"
+        )
+        st.json(report.get("postcut_free_shared_seam_diagnostics"))
     if passed:
         st.success("全領域のCSFが2以下になりました。" + summary)
     else:
