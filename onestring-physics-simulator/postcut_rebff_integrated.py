@@ -23,10 +23,30 @@ class PostcutReBFFDidNotConverge(RuntimeError):
             f"{row.get('axis')}={float(row.get('coordinate',0)):.4g}: {row.get('reason')}"
             for row in rejection_list[:3]
         )
+        # Distinguish a bad INITIAL rectangular chart from CSF exploding
+        # after a nonconformal fixed-seam child atlas. A single maximum alone
+        # cannot tell the user which stage failed.
+        worst_patch=max(
+            report.get("patches",[]),
+            key=lambda p: float(p.get("postcut_rebff",{}).get(
+                "linear_span",float("-inf"))),
+            default=None,
+        )
+        worst_patch_detail=(
+            f", worst region={worst_patch.get('side')}"
+            if worst_patch is not None else ""
+        )
+        initial=report.get("initial_bff_linear_csf")
+        initial_detail=(
+            f"initial BFF CSF={float(initial):.6g}, "
+            if initial is not None else ""
+        )
         super().__init__(
             "Repeated rectangular BFF did not satisfy CSF<=2. "
+            f"{initial_detail}"
             f"Split={report.get('split_count')}, "
-            f"worst CSF={report.get('max_postcut_patch_linear_span'):.6g}, "
+            f"worst shared-atlas CSF={report.get('max_postcut_patch_linear_span'):.6g}"
+            f"{worst_patch_detail}, "
             f"stop={report.get('stop_reason')}; "
             f"unsplittable regions={report.get('unsplittable_region_count',0)}, "
             f"violating regions={report.get('violating_patch_count','unknown')}; "
