@@ -6940,11 +6940,106 @@ def _separate_split_hinge_components(vertices, hinge_graph, padding: float):
     return separated, components, translations
 
 
+def _apply_paper_split_component_gap(out, hinge_graph, top_hinge, t3d, grid, params):
+    """Separate disconnected Paper-oriented T2D islands without deforming tiles.
+
+    This is an explicit PROJECT EXTENSION, not part of OneString 2025 Eq.(6).
+    It operates on final rigid T2D assemblies only: original BFF Omega,
+    initial M2D Grid, K2D, source Split seams and individual hinge links
+    remain unchanged. The previous multiplier UI was diagnostic-only.
+    """
+    multiplier = float(getattr(params, "collision_split_gap_multiplier", 1.0))
+    if not np.isfinite(multiplier) or not 1.0 <= multiplier <= 10.0:
+        raise ValueError("Split component gap multiplier must be between 1 and 10")
+    tile_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-9)
+    padding = max(float(getattr(grid, "gap_size", 0.0)), 0.20 * tile_size) * multiplier
+    separated, components, shifts = _separate_split_hinge_components(
+        out.vertices, hinge_graph, padding
+    )
+    applied = bool(len(components) > 1 and np.max(np.abs(shifts), initial=0.0) > 1e-12)
+    if applied:
+        out.vertices = separated
+        for assembly in (out, top_hinge):
+            if assembly is top_hinge:
+                # Top Hinge is a separate preview and must show identical
+                # island placement to the final Dual Hinge result.
+                for k, component in enumerate(components):
+                    assembly.vertices[component, :, :2] += shifts[k][None, None, :]
+            for k, component in enumerate(components):
+                shift = np.eye(4)
+                shift[:2, 3] = shifts[k]
+                if getattr(assembly, "transform_matrices", None) is not None:
+                    assembly.transform_matrices[component] = (
+                        shift[None, :, :] @ assembly.transform_matrices[component]
+                    )
+                if getattr(assembly, "top_to_bottom_transforms", None) is not None:
+                    inverse = np.eye(4)
+                    inverse[:2, 3] = -shifts[k]
+                    assembly.top_to_bottom_transforms[component] = (
+                        shift[None, :, :] @
+                        assembly.top_to_bottom_transforms[component] @
+                        inverse[None, :, :]
+                    )
+        for hinge in hinge_graph.hinges:
+            hinge.rest_position_2d = .5 * (
+                out.vertices[int(hinge.tile_a), int(hinge.local_vertex_a)] +
+                out.vertices[int(hinge.tile_b), int(hinge.local_vertex_b)]
+            )
+    metrics = dict(
+        split_component_gap_policy="post_T2D_rigid_island_translation_project_extension",
+        split_component_gap_multiplier=float(multiplier),
+        split_component_gap_base_padding=float(padding / multiplier),
+        split_component_gap_target_padding=float(padding),
+        split_component_gap_component_count=len(components),
+        split_component_gap_applied=applied,
+        split_component_gap_max_translation=float(np.max(
+            np.linalg.norm(shifts, axis=1), initial=0.0
+        )),
+        split_component_gap_preserves_omega_grid=True,
+        split_component_gap_preserves_hinge_topology=True,
+    )
+    out.metrics.update(metrics)
+    top_hinge.metrics.update(metrics)
+    # Metrics computed by Eq.(6) refer to the PRE-translation arrangement.
+    # Remeasure the actual final geometry; never quietly certify the old
+    # collision statistics after changing split-component placement.
+    if applied:
+        from .paper_t2d import validate_flat_linkage
+        from .solid_collision_audit import audit_solid_collisions
+        validation = validate_flat_linkage(out, t3d, _original, hinge_graph)
+        out.metrics.update(validation)
+        out.metrics["dual_hinge_final_collision_count"] = int(
+            validation["flat_collision_count"]
+        )
+        out.metrics.update(audit_solid_collisions(out.vertices, tile_size * 1e-8))
+        out.metrics["fabrication_feasible"] = bool(
+            validation["fabrication_feasible"]
+            and out.metrics["solid_collision_pair_count"] == 0
+            and (str(getattr(params, "hinge_layout_collision_mode", "soft")) != "hard"
+                 or out.metrics.get("hard_collision_feasible", False))
+        )
+    hinge_graph.metrics.update(metrics)
+    if applied:
+        hinge_graph.metrics.update({
+            "flat_collision_count": out.metrics["flat_collision_count"],
+            "dual_hinge_final_collision_count": out.metrics["dual_hinge_final_collision_count"],
+            "solid_collision_pair_count": out.metrics["solid_collision_pair_count"],
+            "fabrication_feasible": out.metrics["fabrication_feasible"],
+        })
+    return out, hinge_graph
+
+
 def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_callback=None):
     if t2d.metrics.get("section_4_3_linkage", False):
         from .paper_hinge_solver import optimize_hinge_poses
-        return optimize_hinge_poses(grid, mesh_faces, t2d, t3d,
-                                    params or PipelineParameters(), _original, progress_callback)
+        actual_params = params or PipelineParameters()
+        out, graph, report = optimize_hinge_poses(
+            grid, mesh_faces, t2d, t3d, actual_params, _original, progress_callback
+        )
+        out, graph = _apply_paper_split_component_gap(
+            out, graph, t2d, t3d, grid, actual_params
+        )
+        return out, graph, report
     hinge_faces, hinge_weld_metrics = _canonicalize_faces_by_coincident_tile_tops(
         np.asarray(t3d.vertices, dtype=float)[:, :4, :],
         np.asarray(mesh_faces, dtype=int),
@@ -6958,7 +7053,16 @@ def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_call
         progress_callback,
     )
     tile_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-9)
-    split_padding = max(float(getattr(grid, "gap_size", 0.0)), 0.20 * tile_size)
+    split_multiplier = (
+        float(getattr(params, "collision_split_gap_multiplier", 1.0))
+        if params is not None and (
+            getattr(params, "collision_split_enabled", False)
+            or getattr(params, "collision_split_forced_lines", ())
+        ) else 1.0
+    )
+    if not np.isfinite(split_multiplier) or not 1.0 <= split_multiplier <= 10.0:
+        raise ValueError("Split component gap multiplier must be between 1 and 10")
+    split_padding = max(float(getattr(grid, "gap_size", 0.0)), 0.20 * tile_size) * split_multiplier
     separated, components, translations = _separate_split_hinge_components(
         out.vertices, hinge_graph, split_padding
     )
@@ -6988,6 +7092,8 @@ def _optimize_dual_hinges(grid, mesh_faces, t2d, t3d, params=None, progress_call
         "split_component_spacing_applied": bool(len(components) > 1 and np.max(np.abs(translations), initial=0.0) > 1e-12),
         "split_component_count": int(len(components)),
         "split_component_padding": float(split_padding),
+        "split_component_gap_multiplier": float(split_multiplier),
+        "split_component_gap_applied": bool(len(components) > 1 and np.max(np.abs(translations), initial=0.0) > 1e-12),
         "split_component_max_translation": float(np.max(np.linalg.norm(translations, axis=1), initial=0.0)),
         "split_component_layout": "rigid component translations preserving all intra-component hinges",
     }
