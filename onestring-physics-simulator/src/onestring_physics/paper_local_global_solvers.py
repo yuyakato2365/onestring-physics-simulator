@@ -437,7 +437,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     # IRLS: linearize the LSE penalty into positive per-quad square projection
     # weights at each local step. The exact LSE value is tracked separately.
     square_tail_alpha=max(0.0,_env_float("ONESTRING_K3D_SQUARE_TAIL_ALPHA",4.0))
-    square_tail_beta=max(1e-6,_env_float("ONESTRING_K3D_SQUARE_TAIL_BETA",12.0))
+    square_tail_beta=max(0.0,_env_float("ONESTRING_K3D_SQUARE_TAIL_BETA",12.0))
     square_tail_active=(str(getattr(params,"omega_parameterization_mode",""))=="optcuts_paper_local_global_k3d_k2d")
 
     def _square_tail_deviations(v):
@@ -452,11 +452,16 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
 
     def _square_tail_weights(v):
         d=_square_tail_deviations(v)
-        z=square_tail_beta*d
-        zmax=float(np.max(z))
-        ex=np.exp(z-zmax)
-        probs=ex/np.sum(ex)
-        lse=(zmax+np.log(np.mean(ex)))/square_tail_beta
+        if square_tail_beta == 0.0:
+            # Continuous LSE limit with uniform tail-panel gradient.
+            probs=np.full(len(d),1.0/len(d))
+            lse=float(np.mean(d))
+        else:
+            z=square_tail_beta*d
+            zmax=float(np.max(z))
+            ex=np.exp(z-zmax)
+            probs=ex/np.sum(ex)
+            lse=(zmax+np.log(np.mean(ex)))/square_tail_beta
         # Relative to the ordinary uniform square projection weights.
         # 1 + alpha*N*LSE*softmax_i/d_i corresponds to the ratio of
         # d/d(d_i^2) for the mean-square plus LSE-square objective.
