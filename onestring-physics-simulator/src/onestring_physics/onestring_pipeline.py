@@ -924,6 +924,9 @@ class PipelineParameters(_original.PipelineParameters):
     use_extrusion_aware_k3d: bool = False
     use_curvature_adaptive_grid: bool = False
     use_extrusion_aware_split: bool = False
+    adaptive_normal_turn_degrees: float = 12.0
+    adaptive_max_subdivisions: int = 3
+    adaptive_max_cells: int = 20000
     extrusion_weight: float = 1.0
     extrusion_split_weight: float = 1.0
     extrusion_max_nfev: int = 12
@@ -3232,7 +3235,17 @@ def _flatten_to_domain(parameterization, grid, params=None):
     csf = _parameterization_stretch_csf(parameterization)
     peak_enabled = bool(getattr(params, "enable_peak_guided_split", True)) if params is not None else True
     overlay_metrics = _rebuild_domain_overlay_for_general_omega(domain, parameterization, grid, params)
-    from .extrusion_aware import split_cost_values
+    from .extrusion_aware import split_cost_values, enabled as extrusion_enabled
+    adaptive = extrusion_enabled(params) and params.use_curvature_adaptive_grid
+    if adaptive:
+        # Align the coarse grid first. Both adaptive refinement and the split
+        # pilot then use the final coordinates; no post-refinement regridding.
+        peak_uvs = _surface_peak_uvs(parameterization)
+        peak_alignment = _align_domain_grid_to_uv_points(domain, peak_uvs if len(peak_uvs) else None)
+        domain.detected_symmetry_axes = list(symmetry.get("axes", []))
+        domain.detected_symmetry_centers = dict(symmetry.get("centers", {}))
+        from .extrusion_adaptive_grid import refine_overlay
+        refine_overlay(parameterization, domain, grid, params)
     selection_csf = split_cost_values(parameterization, domain, grid, params, csf, sys.modules[__name__])
     if enabled:
         if peak_enabled:
@@ -3256,7 +3269,8 @@ def _flatten_to_domain(parameterization, grid, params=None):
     localized_split_segments = _localized_csf_split_segments(parameterization, selection_csf, threshold, split_lines, params) if split_lines else []
     peak_uvs = _surface_peak_uvs(parameterization)
     peak_uv = np.mean(peak_uvs, axis=0) if len(peak_uvs) else None
-    peak_alignment = _align_domain_grid_to_uv_points(domain, peak_uvs if len(peak_uvs) else None)
+    if not adaptive:
+        peak_alignment = _align_domain_grid_to_uv_points(domain, peak_uvs if len(peak_uvs) else None)
     domain.csf_values = csf
     domain.split_lines = split_lines
     domain.localized_split_segments = localized_split_segments  # type: ignore[attr-defined]

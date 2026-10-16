@@ -120,7 +120,7 @@ if os.environ.get("ONESTRING_PAPER_T3D_20260920", "0") == "1":
 MODEL_VERSIONS.append({
     "id": "2026-09-23-extrusion-aware",
     "label": "2026-09-23 — Extrusion-aware experiments",
-    "description": "独立した4フラグによる押し出し品質比較。Adaptive Gridは現在の格子制約により未対応。",
+    "description": "独立した4フラグによる押し出し品質比較。Adaptive Gridは曲率に応じた行・列細分化。",
     "t3d_extrusion_side": "negative_normal_from_k3d",
     "t3d_variable_topology_enabled": False,
     "allow_legacy_normal_prism_emergency_fallback": False,
@@ -362,7 +362,10 @@ with st.sidebar:
         st.caption("Mask: " + ''.join('1' if experiment_options[k] else '0' for k in FEATURES))
         st.caption("Principal grid: confidence-weighted global UV rotation. Local varying grid fields are not remeshed.")
         if experiment_options["use_curvature_adaptive_grid"]:
-            st.warning(ADAPTIVE_LIMITATION)
+            st.caption(ADAPTIVE_LIMITATION)
+            experiment_options["adaptive_normal_turn_degrees"] = st.number_input("Adaptive normal-turn target [deg]", min_value=0.1, max_value=90.0, value=12.0, step=1.0)
+            experiment_options["adaptive_max_subdivisions"] = st.number_input("Adaptive subdivisions per interval", min_value=1, max_value=8, value=3, step=1)
+            experiment_options["adaptive_max_cells"] = st.number_input("Adaptive overlay cell budget", min_value=1, value=20000, step=100)
 
     # Expose the official OptCuts distortion setting on the current
     # 2026-09-20 Paper-aligned T3D version selected by the user.

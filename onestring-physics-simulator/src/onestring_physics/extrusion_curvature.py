@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 
 
-def principal_curvature(vertices, triangles):
+def principal_curvature(vertices, triangles, *, return_fit_confidence=False):
     v, f = np.asarray(vertices, float), np.asarray(triangles, int)
     normals = np.zeros_like(v)
     fn = np.cross(v[f[:, 1]]-v[f[:, 0]], v[f[:, 2]]-v[f[:, 0]])
@@ -21,6 +21,7 @@ def principal_curvature(vertices, triangles):
     curvature = np.zeros((len(v), 2))
     directions = np.zeros((len(v), 2, 3))
     confidence = np.zeros(len(v))
+    fit_confidence = np.zeros(len(v))
     for i, ring in enumerate(neighbors):
         ids = sorted(ring | set().union(*(neighbors[j] for j in ring)))
         ids = [j for j in ids if j != i]
@@ -45,7 +46,10 @@ def principal_curvature(vertices, triangles):
         anisotropy = abs(values[1]-values[0])/max(np.sum(abs(values)), 1e-10)
         # Absolute signal gate makes planes/near-flat numerical noise fall back.
         signal_gate = min(1., signal/0.02)
+        fit_confidence[i] = max(0., 1-error/max(signal, 1e-12)) * min(1., sv[-1]/sv[0]*3)
         confidence[i] = anisotropy * max(0., 1-error/max(signal, 1e-12)) * min(1., sv[-1]/sv[0]*3) * signal_gate
+    if return_fit_confidence:
+        return curvature, directions, confidence, neighbors, fit_confidence
     return curvature, directions, confidence, neighbors
 
 
@@ -55,7 +59,7 @@ def align_principal_grid(parameterization):
     uv, uf = np.asarray(p.uv_vertices_2d), np.asarray(p.uv_faces, int)
     if f.shape != uf.shape or f.shape[1] != 3:
         raise ValueError("Principal grid needs paired surface/UV triangles")
-    curvature, directions, confidence, neighbors = principal_curvature(v, f)
+    curvature, directions, confidence, neighbors, fit_confidence = principal_curvature(v, f, return_fit_confidence=True)
     cross = np.zeros(len(uv), complex)
     weights = np.zeros(len(uv))
     for sf, tf in zip(f, uf):
@@ -94,6 +98,7 @@ def align_principal_grid(parameterization):
     for key in list(vars(p)):
         if 'cache' in key:
             delattr(p, key)
+    p._extrusion_curvature_fit = (curvature, fit_confidence)
     p.metrics.update(principal_grid_rotation_degrees=float(np.degrees(angle)),
                      principal_grid_confidence_mean=float(np.mean(confidence)),
                      principal_grid_scope="confidence-weighted global UV rotation; regular topology preserved",

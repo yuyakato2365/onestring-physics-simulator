@@ -4,6 +4,8 @@ Branch: `codex/extrusion-aware-pipeline-20260923`
 Base: `ea6ca5f` (`codex/deployability-k3d-20260921`, originと一致を確認後に分岐)  
 Version: `2026-09-23-extrusion-aware`
 
+Implementation revision: `2026-10-16-adaptive-strips`
+
 ## 実装前に確認したデータフロー・制約
 
 - launcher → `app_optcuts_20260916.py` → OptCuts/common solverのpatch群 → `app_split_panels.py` → `app.py` → `app_backup_before_mitered_t3d.py`。
@@ -27,10 +29,20 @@ area-weighted quad normals、local/global LS、weak rest、反復上限、polish
 |---|---|---|
 | 1 | Principal-curvature Grid / `use_principal_curvature_grid` | `extrusion_curvature.py`、parameterization直後。近傍法線差から対称shape operatorをfit、2主方向・曲率・信頼度を計算。`exp(4iθ)`で符号/90°交換を同一視して近傍平滑化。安全な最小範囲として**格子全体のUV回転**へ集約。局所方向を完全追従するquad remeshingではない。球面/臍点/flat/noisy領域は連続的に既存方向へ戻す。native Grid-OptCutsでは固定seam格子と矛盾するため明示停止。 |
 | 2 | Extrusion-aware K3D / `use_extrusion_aware_k3d` | `extrusion_aware.refine_k3d`を`paper_local_global_solvers.py`の既存solveとhard/polishの間に挿入。既存Planar/Shape/Length/Surfaceを再評価し追加残差を最小化。anti-degeneracyの最終local制約も保持。hard-mode目的にも追加。既存polishを維持するため、最終品質の単調改善を保証するものではない。paper local/global以外のsolverを選んだ場合は明示停止。 |
-| 3 | Curvature-adaptive Grid Size / `use_curvature_adaptive_grid` | **未対応**。`extrusion_aware.validate`で理由付き`NotImplementedError`。T-junctionや暗黙ID破壊を避けるにはconforming quad remesherとpanel/hinge対応の一般化が必要。均一gridを細かくする偽の代替は実装していない。 |
+| 3 | Curvature-adaptive Grid Size / `use_curvature_adaptive_grid` | `extrusion_adaptive_grid.py`、common overlayの位置合わせ後、CSF候補・crop・split・panel ID生成の前。曲率×UVの物理長から法線回転量を推定し、必要な行・列だけを区間細分化。quad/row-major構造を維持しT-junctionを作らない。同じ行・列の低曲率部にも細分化が伝播する。native OptCuts/BFF固定格子は明示停止。 |
 | 4 | Extrusion-aware Split / `use_extrusion_aware_split` | `onestring_pipeline._flatten_to_domain`の既存CSF候補生成・選択。現在のoverlayを仮lift/押し出しし、共通評価関数のdifficultyをCSF costへ加算。既存peak/residual候補poolを`D_existing + λD_extrusion`で順位付けし、既存budget/mirror/snap/duplicateへ渡す。OptCutsのC++ seam objectiveは改変しない。対応するCSF経路を使わないmodeでは明示停止。 |
 
-4 checkboxは独立したdataclass field。adaptiveを除く8 maskを同じpipelineで扱う。`0010`、`1111`を含むadaptive ONの8 maskは**実行成功ではなく明示的な未対応**。全16通りを完了したとの主張はしない。
+4 checkboxは独立したdataclass field。common paper local/global経路で全16 maskを同じpipelineから実行する。全16通りを小規模なneck曲面でT2D top/dualまで検証した。外部OptCuts実行を含む全設定の保証ではない。
+
+## Adaptive Gridの範囲（2026-10-16追加）
+
+曲率の大きさには近傍fitの信頼度を使い、主方向の異方性による信頼度と分離した。球面・臍点でも曲率が大きければ細分化する。機能1と併用すると曲率fitを再利用し、回転済みUVの物理長で評価する。
+
+UI設定は法線回転量の目安（既定12度）、元区間当たり最大分割数（3）、crop前overlay cell上限（20000）。上限超過は処理を止める。最大分割数に達すると目安を満たせない場合があり、そのstrip数をJSONに記録する。これは法線角の厳密な上界ではない。
+
+非一様な軸座標が正で、旧scalar stepは診断用の最小間隔。細分化後の格子幅でIDを発行し、crop/split後にcanonical UVからoverlay panel IDと元cell IDの対応を検証・記録する。Simple Splitの表示用gapはcanonical UVと分離する。K2Dは明示的なpaper linkageを必須にし、対応を持たない旧経路へ進まない。
+
+任意の局所quad remesherではない。整合性を保つため細分化は行・列全体へ伝播し、長いstripでは低曲率部のpanel数も増える。固定h/phaseを持つnative Grid-OptCutsとreference BFFは対象外。これらの制約を保った最小一般化であり、既存OptCuts parameterizationを使うcommon経路とは区別する。
 
 ## 共通押し出し評価
 
@@ -54,7 +66,7 @@ K3DとT3Dのsolve中だけ幾何自由度を共有し、元の頂点配列長・
 
 ## 記録と表示
 
-各実行は`output/extrusion-aware/*.json`へ保存（git対象外）。UIからもJSONをdownload可能。version/mask、パラメータ、solver環境設定、入力mesh SHA256、panel count、split edge count/length、K3D各誤差、仮押し出し/最終K3D/実際T3D品質、panel difficulty、T2D collision/fabrication、6 stage runtimeを記録する。
+各実行は`output/extrusion-aware/*.json`へ保存（git対象外）。UIからもJSONをdownload可能。version/mask、パラメータ、solver環境設定、入力mesh SHA256、panel count、split edge count/length、K3D各誤差、仮押し出し/最終K3D/実際T3D品質、panel difficulty、T2D collision/fabrication、6 stage runtimeを記録する。adaptive ONでは軸座標・分割数・推定法線回転量・元cell対応・上限到達数も保存する。
 
 `split_count`は実際の対応付きboundary **edge segment数**で、連結cutの本数とは異なる。`split_requested_line_count`も併記。`split_total_length`はM3D上の長さ。同じsource端点を持つedgeを一度数える。対応samplingの不一致による連続seam長は別途評価が必要。利用中の経路が提供しないcollision/fabrication値はnullとして記録し、0と偽らない。
 
@@ -64,29 +76,29 @@ linked-panel viewerの`Panel color → Extrusion difficulty`はfinal K3Dの仮�
 
 - `tests/test_extrusion_aware.py`: plane/cylinder/sphere/saddle/neck、低信頼度fallback、source同値と別sheet非結合、共通評価、cost加算、gradientを検証。
 - `0000`は小規模deterministic pipelineで旧versionとM2D/M3D/K3D/K2D/T3D/T2D top/dualの配列をbitwise比較。split ON/OFF両方、hinge数とsplit linesも比較（ON側はsynthetic CSF=2.5を与え、実際にcutが生成されることも確認）。
-- `1000/0100/0001/1100/0101/1001/1101`は小規模neckで機能→K3D→T3D→K2D→T2D topの経路を確認。`0010/1111`などadaptive maskは理由付き停止を検証。
-- paper T3D、K3D history、T2D、Eq.5の関連既存テストも実行。合計60件。これらはOptCuts外部processを使わない。
-- Streamlit AppTestによるheadless起動、新version初期選択、4 checkbox表示を確認。実ブラウザの描画・panel click操作は未確認。
+- `tests/test_extrusion_adaptive_grid.py`: 5曲面のquad/hinge対応、球面の曲率信頼度、局所bumpの非一様分割・スケール不変性、cell budget、Simple Splitのgap後の対応を検証。全16 maskは小規模neckで実stage driverのM2D→M3D→K3D→T3D→K2D→T2D top/dual→hinge/JSONを実行。外部parameterizerをsynthetic surfaceへ置き換え、合成CSFを与えた。Split flag ONでは実cut、source同値、3D境界一致を確認。
+- paper T3D、K3D history、T2D、Eq.5の関連既存テストも実行。合計83件。これらはOptCuts外部processを使わない。
+- Streamlit AppTestによるheadless起動、新version初期選択、4 checkbox表示、adaptive ONの3入力項目を確認。実ブラウザの描画・panel click操作は未確認。
 - **Bunny full run、実OptCuts再実行、Bunnyの首とcollision改善の因果関係、物理組立、性能比較は未検証**。hard K3Dの新gradientは数値差分と比較したが、大規模hard-mode収束は未確認。
-- 対応するmaskのcode path成功は品質改善の証明ではない。局所方向追従grid・adaptive remeshing・OptCuts native objectiveへのdifficulty導入は今後の課題。
+- 対応するmaskのcode path成功は品質改善の証明ではない。局所方向追従grid・任意の局所adaptive remeshing・OptCuts native objectiveへのdifficulty導入は今後の課題。
 
 実行コマンド:
 
 ```bash
-python3 -m pytest -q tests/test_extrusion_aware.py tests/test_paper_t3d_20260920.py tests/test_k3d_iteration_history.py tests/test_paper_t2d.py tests/test_paper_eq5_k2d.py
+python3 -m pytest -q tests/test_extrusion_adaptive_grid.py tests/test_extrusion_aware.py tests/test_paper_t3d_20260920.py tests/test_k3d_iteration_history.py tests/test_paper_t2d.py tests/test_paper_eq5_k2d.py
 ```
 
 ## 起動
 
+元の作業フォルダは別branchに未コミット変更があるため、その内容を保持し、同じ実験branchを専用worktreeで継続した。現在は以下から起動する（元フォルダでのbranch切替は不要）。
+
 ```bash
-cd ~/Documents/OneString-large-steps-mesh-conditioning/onestring-physics-simulator
-git fetch origin
-git switch codex/extrusion-aware-pipeline-20260923
+cd ~/Documents/ChatGPT/OneString/work/extrusion-aware-20261016/onestring-physics-simulator
 git pull --ff-only
 python3 -m streamlit run app_optcuts_20260923_extrusion_aware.py
 ```
 
-旧launcherも残してある。新launcherのversionは`2026-09-23 — Extrusion-aware experiments`、Ωは既存の`2026-09-18 | OptCuts Ω + paper-aligned local/global K3D/K2D`を使う。まず4 OFFでbaseline保存。次に1機能ずつON。adaptive ONは現在停止する。比較時は入力、厚さ、格子、既存K3D重み/反復/polish/hard設定、OptCuts/CSF設定を同じに保つ。
+旧launcherも残してある。新launcherのversionは`2026-09-23 — Extrusion-aware experiments`、Ωは既存の`2026-09-18 | OptCuts Ω + paper-aligned local/global K3D/K2D`を使う。まず4 OFFでbaseline保存。次に1機能ずつON。adaptiveはまず大きめの回転量目安・少ない分割数から試す。比較時は入力、厚さ、格子、既存K3D重み/反復/polish/hard設定、OptCuts/CSF設定を同じに保つ。
 
 ## 変更ファイル
 
@@ -94,6 +106,7 @@ python3 -m streamlit run app_optcuts_20260923_extrusion_aware.py
 - `app_backup_before_mitered_t3d.py`: 新version、checkbox/weight、cache key、JSON download、linked panel coloring
 - `src/onestring_physics/extrusion_quality.py`: 共通評価
 - `src/onestring_physics/extrusion_curvature.py`: 曲率・信頼度・主方向Grid
+- `src/onestring_physics/extrusion_adaptive_grid.py`: 非一様行・列細分化とpanel/cell対応監査
 - `src/onestring_physics/extrusion_aware.py`: flags/制約、K3D追加目的、Split cost、source同値、実験記録
 - `src/onestring_physics/onestring_pipeline.py`: dataclass fields、CSF候補cost接続
 - `src/onestring_physics/paper_local_global_solvers.py`: K3D目的追加・history/hard-mode接続
@@ -102,4 +115,5 @@ python3 -m streamlit run app_optcuts_20260923_extrusion_aware.py
 - `src/onestring_physics/paper_ui_20260916_patch.py`: legacy selector多重wrapperでの新version初期値保持
 - `src_backup_before_sideface_contact/onestring_physics/onestring_pipeline.py`: 実stage driverのversion-gated接続とruntime
 - `tests/test_extrusion_aware.py`: 小規模回帰・機能テスト
+- `tests/test_extrusion_adaptive_grid.py`: adaptive構造・Simple Split・全16 maskのstage driver検証
 - `docs/EXTRUSION_AWARE_20260923.md`: 本報告

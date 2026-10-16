@@ -22,10 +22,8 @@ VERSION = "2026-09-23-extrusion-aware"
 FEATURES = ("use_principal_curvature_grid", "use_extrusion_aware_k3d",
             "use_curvature_adaptive_grid", "use_extrusion_aware_split")
 ADAPTIVE_LIMITATION = (
-    "Curvature-adaptive Grid Size is unavailable: QuadGrid row/column indexing, "
-    "axis-aligned CSF cuts, native OptCuts fixed h/phase, and hinge placement assume "
-    "a regular lattice. Local refinement needs a conforming quad remesher and explicit "
-    "panel/hinge correspondence. No uniform-resolution substitute is applied."
+    "Adaptive grid inserts whole row/column lines: low-curvature cells in the same "
+    "strip may also be refined. Native OptCuts/BFF fixed lattices remain unsupported."
 )
 
 
@@ -41,7 +39,15 @@ def validate(params):
     if not enabled(params):
         return
     if params.use_curvature_adaptive_grid:
-        raise NotImplementedError(ADAPTIVE_LIMITATION)
+        turn = float(params.adaptive_normal_turn_degrees)
+        if not np.isfinite(turn) or not 0 < turn <= 90:
+            raise ValueError('adaptive_normal_turn_degrees must be finite and in (0, 90]')
+        for key in ('adaptive_max_subdivisions', 'adaptive_max_cells'):
+            value = float(getattr(params, key))
+            if not np.isfinite(value) or value < 1 or value != int(value):
+                raise ValueError(f'{key} must be a positive integer')
+        if any(token in str(getattr(params, 'omega_parameterization_mode', '')) for token in ('grid_optcuts', 'optcuts_grid', 'paper_reference_bff')):
+            raise NotImplementedError(ADAPTIVE_LIMITATION)
     for key in ('extrusion_weight', 'extrusion_split_weight'):
         value = float(getattr(params, key))
         if not np.isfinite(value) or value < 0:
@@ -333,7 +339,9 @@ def record_run(state, params, runtimes):
             separation = max(separation, float(np.max(np.linalg.norm(mesh.vertices[ids]-mesh.vertices[ids[0]], axis=1))))
     t2 = state.tiles_2d_dual_hinge.metrics
     t2_top = state.tiles_2d_top_hinge.metrics
-    report = dict(version=VERSION, feature_mask=feature_mask(params),
+    report = dict(version=VERSION, implementation_revision='2026-10-16-adaptive-strips', feature_mask=feature_mask(params),
+                  adaptive_grid=m2d.metrics.get('adaptive_grid'),
+                  adaptive_base_cell_per_panel=m2d.metrics.get('adaptive_base_cell_per_panel'),
                   parameters={k: getattr(params, k) for k in (*FEATURES, 'extrusion_weight', 'extrusion_split_weight', 'extrusion_max_nfev', 'thickness')},
                   panel_count=len(f), split_count=len(cut_edges), split_total_length=split_length,
                   assembled_split_boundary_separation_max=separation,

@@ -112,10 +112,11 @@ def test_supported_feature_paths(mask):
     np.testing.assert_array_equal(k2d.linkage_topology.source_faces, mesh.faces)
 
 
-@pytest.mark.parametrize('mask', [f'{i:04b}' for i in range(16) if i & 2])
-def test_adaptive_masks_explicitly_unsupported(mask):
-    params = p.PipelineParameters(model_version=exp.VERSION, **dict(zip(exp.FEATURES, (c == '1' for c in mask))))
-    with pytest.raises(NotImplementedError, match='regular lattice'):
+@pytest.mark.parametrize('mode', ['optcuts_grid_native', 'paper_reference_bff'])
+def test_adaptive_rejects_fixed_lattice_modes(mode):
+    params = p.PipelineParameters(model_version=exp.VERSION, use_curvature_adaptive_grid=True,
+                                  omega_parameterization_mode=mode)
+    with pytest.raises(NotImplementedError, match='fixed lattices'):
         exp.validate(params)
 
 

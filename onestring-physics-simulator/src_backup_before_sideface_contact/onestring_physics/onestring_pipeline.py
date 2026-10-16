@@ -383,6 +383,11 @@ def build_onestring_design(
         raise NotImplementedError("Extrusion-aware Split currently requires the common CSF candidate-selection route")
     _emit_progress(progress_callback, "Ω domain", 0.22, "Flattened domain ready")
     mesh_2d_initial = _build_m2d(grid, domain, params)
+    if experimental and params.use_curvature_adaptive_grid:
+        from onestring_physics.extrusion_adaptive_grid import attach_panel_correspondence
+        if not hasattr(domain, "adaptive_grid"):
+            raise NotImplementedError("Adaptive grid requires the common structured-overlay route")
+        attach_panel_correspondence(mesh_2d_initial, domain)
     _emit_progress(progress_callback, "Ω -> M2D", 0.30, f"kept {len(mesh_2d_initial.faces)} quads")
     runtime["grid"] = time.perf_counter()-tick
     active_grid = mesh_2d_initial.grid
@@ -413,6 +418,8 @@ def build_onestring_design(
         params,
         progress_callback=_subprogress(progress_callback, 0.56, 0.70, "M2D -> K2D: "),
     )
+    if experimental and params.use_curvature_adaptive_grid and mesh_2d_optimized.linkage_topology is None:
+        raise NotImplementedError("Adaptive grid requires the explicit paper Eq.5 linkage route")
     k2d_flat_layout = _make_flat_tile_layout(mesh_2d_optimized, params)
     runtime["K2D"] = time.perf_counter()-tick
     _emit_progress(progress_callback, "K2D independent tile layout", 0.73, "K2D tile geometry ready for extrusion")
