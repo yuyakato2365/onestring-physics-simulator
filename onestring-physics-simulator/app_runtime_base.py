@@ -956,7 +956,7 @@ with st.sidebar:
         os.environ["ONESTRING_K3D_ADAPTIVE_PLANARITY_MULTIPLIER"] = str(adaptive_planarity_multiplier)
 
     st.caption("K3D 正方形性（shape-preserving AL 段階）：平均誤差と最大歪みLSEの両方を抑制")
-    st.latex(r"E_{\mathrm{Square}}=\frac{w_s}{2}\left[\frac{1}{N}\sum_{i=1}^{N}d_i^2+\alpha\left(\frac{1}{\beta}\log\left(\frac{1}{N}\sum_{i=1}^{N}e^{\beta d_i}\right)\right)^2\right]")
+    st.latex(r"E_{\mathrm{Square}}=\frac{w_s}{2}\left[\frac{1}{N}\sum_{i=1}^{N}d_i^2+\alpha\,L_\beta(d)^2\right],\quad L_0(d)=\frac{1}{N}\sum_i d_i")
     square_tail_alpha = float(st.number_input(
         "Square 最大歪み α", min_value=0.0, max_value=1000.0,
         value=float(os.environ.get("ONESTRING_K3D_SQUARE_TAIL_ALPHA", "4.0")),
@@ -964,10 +964,10 @@ with st.sidebar:
         help="0で最大歪みペナルティを無効化。大きいほど極端に歪むパネルを強く罰する。",
     ))
     square_tail_beta = float(st.number_input(
-        "Square 最大歪み β", min_value=0.001, max_value=1000.0,
+        "Square 最大歪み β", min_value=0.0, max_value=1000.0,
         value=float(os.environ.get("ONESTRING_K3D_SQUARE_TAIL_BETA", "100.0")),
         step=1.0, format="%.3f", key="onestring_k3d_square_tail_beta",
-        help="大きいほどLSEが最大歪みに近づく。0より大きい値を指定する。",
+        help="β=0はLSEの連続極限＝全パネル歪みの平均値。βが大きいほど最大歪みを重視します。正方性ペナルティ自体を無効化する場合はα=0。",
     ))
     os.environ["ONESTRING_K3D_SQUARE_TAIL_ALPHA"] = str(square_tail_alpha)
     os.environ["ONESTRING_K3D_SQUARE_TAIL_BETA"] = str(square_tail_beta)
