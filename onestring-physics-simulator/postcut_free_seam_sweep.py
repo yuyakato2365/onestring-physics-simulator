@@ -32,13 +32,25 @@ from onestring_physics.reference_bff import validate_reference_mesh
 
 
 def _affine_match(source, target):
-    x=np.column_stack((np.asarray(source, float), np.ones(len(source))))
-    y=np.asarray(target, float)
-    fit=np.linalg.lstsq(x, y, rcond=None)[0]
-    linear=fit[:2]
-    if np.linalg.det(linear)<=1e-10:
-        raise ValueError("Affine seam fit must be nonsingular, orientation preserving")
-    return linear, fit[2]
+    """Stable *regularized* affine fit: a straight seam cannot fix 2D shear.
+
+    An ordinary 2D least-squares affine transform from collinear seam points
+    collapses one direction. Anchor the unobservable normal direction to the
+    nearest conformal similarity instead. Positivity-guard any shear change.
+    """
+    x=np.asarray(source,float); y=np.asarray(target,float)
+    sim,_=_fit_similarity(x,y)
+    xc=x-x.mean(axis=0); yc=y-y.mean(axis=0)
+    cov=xc.T@xc
+    ridge=max(1e-12,0.25*float(np.trace(cov)))
+    affine=np.linalg.solve(cov+ridge*np.eye(2),xc.T@yc+ridge*sim)
+    blend=1.0
+    for _ in range(15):
+        linear=sim+blend*(affine-sim)
+        if np.linalg.det(linear)>1e-10:
+            return linear,y.mean(axis=0)-x.mean(axis=0)@linear
+        blend*=0.5
+    raise ValueError("Even regularized affine fit would collapse the chart")
 
 
 def _build_laplacian(xyz, faces):
