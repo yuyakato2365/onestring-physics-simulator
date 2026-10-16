@@ -962,7 +962,7 @@ class PipelineParameters(_original.PipelineParameters):
         "fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit"
     ] = "fixed_phase"
     paper_split_area_limit_experiment: bool = False
-    paper_csf_sampling_method: Literal["overlap_extrema", "interpolated_grid_vertices"] = "overlap_extrema"
+    paper_csf_sampling_method: Literal["m2d_m3d_panel_area", "overlap_extrema", "interpolated_grid_vertices"] = "m2d_m3d_panel_area"
     model_version: str = "2026-07-12-one-sided-t3d"
     use_principal_curvature_grid: bool = False
     use_extrusion_aware_k3d: bool = False
