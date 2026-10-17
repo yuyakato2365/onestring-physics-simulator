@@ -1,0 +1,83 @@
+name: Lilium one-Split grid orientation and crop sensitivity 20261017
+on:
+  push:
+    branches:
+      - experiment/lilium-one-split-angle-audit-20261017
+    paths:
+      - .github/workflows/lilium-one-split-angle-audit-20261017.yml
+  workflow_dispatch:
+jobs:
+  one-cut-orientation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {tag: r0_m1, angle: 0, margin: 1}
+          - {tag: r15_m1, angle: 15, margin: 1}
+          - {tag: r30_m1, angle: 30, margin: 1}
+          - {tag: r45_m1, angle: 45, margin: 1}
+          - {tag: r0_m0, angle: 0, margin: 0}
+          - {tag: r45_m0, angle: 45, margin: 0}
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install authoritative BFF native dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake build-essential libsuitesparse-dev libopenblas-dev liblapack-dev
+      - name: Build rectangle adapter against official BFF source
+        run: |
+          git clone --depth 1 --recursive https://github.com/GeometryCollective/boundary-first-flattening.git /tmp/official-bff
+          python scripts/setup_bff_rectangle.py --source /tmp/official-bff --jobs 4
+      - run: python -m pip install -e ".[dev]"
+      - name: Verify original Lilium mesh bytes
+        run: |
+          curl -fL --retry 3 -o /tmp/lilium.obj https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          got=hashlib.sha256(Path('/tmp/lilium.obj').read_bytes()).hexdigest()
+          expected='4f62ff741b41bd629ccbeaeb0bb2e44ac060cdff88f090129911bede790e8ab3'
+          assert got==expected,(got,expected)
+          print('VERIFIED_LILIUM_SHA256',got,flush=True)
+          PY
+      - name: Run current unmodified exhaustive fixed-UV one-cut test
+        run: |
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj \
+            --grid 14 --margin ${{ matrix.margin }} --rotation ${{ matrix.angle }} \
+            --rectangle-corner-phase 0.0625 --sampling-method interpolated_grid_vertices \
+            --report output/lilium_angle_${{ matrix.tag }}.json
+      - name: Print test summary without forcing a desired cut count
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('output/lilium_angle_${{ matrix.tag }}.json').read_text())
+          b=r.get('best_single_cut_diagnostic') or {}
+          s=(r.get('csf_sampling_diagnostics') or {})
+          print('LILIUM_ANGLE_CASE',json.dumps({
+            'tag':'${{ matrix.tag }}','grid':14,'rotation':${{ matrix.angle }},
+            'margin':${{ matrix.margin }},'quads':r['actual_m2d_quads'],
+            'uv_coverage':r['coverage_audit']['m2d_omega_uv_area_fraction'],
+            'surface_coverage':r['coverage_audit']['lifted_quad_proxy_surface_area_fraction'],
+            'initial_csf':r['linear_csf_before'],'final_csf':r['linear_csf_after'],
+            'splits':r['number_of_splits'],'cut_candidates':b.get('complete_cut_candidate_count'),
+            'one_cut_possible':b.get('any_single_cut_below_threshold'),
+            'best_one_cut':b.get('best_single_cut'),
+            'stop':r['stopping_reason'],'physical_certificate':r['fabrication_bound_certified']
+          },sort_keys=True),flush=True)
+          PY
+      - name: Archive full diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lilium-angle-${{ matrix.tag }}
+          path: onestring-physics-simulator/output/lilium_angle_${{ matrix.tag }}.json
+          if-no-files-found: warn
