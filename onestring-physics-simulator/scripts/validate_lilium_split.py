@@ -26,7 +26,7 @@ from onestring_physics.split_validation.core import (
     ExperimentConfig, load_triangle_obj, mesh_digest, lobe_tip_corners,
     grid_rectangles, area_jacobians, scale_span, clip_source_to_box,
     tile_jacobians, curvature_field, nearest_curvature_grid_vertex,
-    split_tile_ids,
+    split_tile_ids, partition_quad_topology,
 )
 
 CASES = {
@@ -246,8 +246,10 @@ def run_case(xyz, faces, case_id, base, grid_n, max_splits,
                 except (ValueError,RuntimeError) as e:
                     candidates.append(dict(axis=axis,coordinate=v,
                          origin="all_cuts_sweep",rejected_reason=str(e)))
+    topology = partition_quad_topology(tiles,[c["tile_ids"] for c in components])
     return dict(
         case=case_id, description=dict(corners=cp,grid=gp,rings=rings,metric=metric),
+        topology=topology,
         metric_id=metric+"_v1", units="area_ratio", grid=grid_meta,
         bff_initial=init.metrics.get("parameterization_backend_sha256"),
         rectangle_corners_source_vertex_ids=corners,
