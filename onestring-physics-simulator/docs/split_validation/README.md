@@ -85,6 +85,49 @@ For a native BFF build recipe see the repository-root
 `.github/workflows/lilium-split-validation-experiment.yml`
 and the inner project's `scripts/setup_bff_rectangle.py`.
 
+### macOS: B6 fails with `Usage ... [--corner-phase frac]`
+
+The experimental B1/B5/B6/B7 scenarios pass *four explicit Lilium
+boundary corners* via `--corner-xyz x0 y0 z0 ... x3 y3 z3`.
+Older local `bff-rect-command-line` adapters lack this flag and
+reject the command, even though B0 (which needs no explicit corners)
+may run successfully. **Do not interpret this as a negative B6 result
+and do not replace B6's corner selection with phase corners**.
+
+Compile this branch's current rectangular adapter against an already
+available checkout of the official upstream BFF C++ source. This
+creates a **separate executable inside this research worktree**;
+the old compiled adapter and the ordinary simulator remain unchanged.
+
+```bash
+cd "$HOME/Documents/onestring-postcut-rebff/onestring-split-validation/onestring-physics-simulator"
+source .venv/bin/activate
+
+export BFF_SOURCE="$HOME/Documents/OneString-large-steps-mesh-conditioning/onestring-physics-simulator/third_party/boundary-first-flattening"
+test -f "$BFF_SOURCE/include/bff/project/Bff.h" && echo "Official BFF sources found"
+
+python scripts/setup_bff_rectangle.py --source "$BFF_SOURCE" --jobs 4
+export ONESTRING_BFF_RECTANGLE_EXECUTABLE="$PWD/third_party/bff_rectangle_build/bff-rect-command-line"
+
+"$ONESTRING_BFF_RECTANGLE_EXECUTABLE" 2>&1 | grep -- "--corner-xyz"
+
+python scripts/validate_lilium_split.py /tmp/lilium.obj \
+  --require-lilium-sha --grid 14 --cases B6 \
+  --output output/lilium_split_validation_B6_rebuilt
+```
+
+If the `test -f` check fails, search for another official BFF source
+checkout or clone it (with its submodules), then pass that source root
+to `--source`. If the build fails on missing CMake/CHOLMOD dependencies,
+install `cmake` and `suite-sparse` via Homebrew. The `grep` check
+must print a usage line including `--corner-xyz`; its predecessor
+prints only `--corner-phase`. Keep the ordinary
+`ONESTRING_BFF_EXECUTABLE` pointed at the existing official
+`bff-command-line`, which is a **different** executable.
+
+The fixed-output directory differs deliberately from the first run so
+that its error logs and B0 data remain available for audit.
+
 Optional high-cost evaluations:
 
 ```bash
