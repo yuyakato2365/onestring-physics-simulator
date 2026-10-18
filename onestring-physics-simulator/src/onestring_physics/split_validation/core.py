@@ -333,3 +333,50 @@ def split_tile_ids(tiles, tile_ids, axis, cut, tol=1e-8):
     if not negative or not positive:
         raise ValueError("Empty child tile group")
     return negative, positive
+
+
+
+def partition_quad_topology(tiles, groups):
+    """Represent fixed-Grid topological cuts without changing any tile position.
+
+    Each group gets an independent vertex-ID namespace. Adjacent tiles inside
+    the same group keep common grid vertices. This is an abstract M2D
+    topological check, NOT a subsequent K2D hinge or collision simulation.
+    """
+    xyz, quadfaces, owners = [], [], []
+    lookup = {}
+    seen_tiles = set()
+    for group_id, ids in enumerate(groups):
+        for tile_id in ids:
+            if tile_id in seen_tiles:
+                raise ValueError("Tile belongs to multiple cut components")
+            seen_tiles.add(tile_id)
+            _, _, x0,y0,x1,y1 = tiles[tile_id]
+            face = []
+            for x,y in ((x0,y0),(x1,y0),(x1,y1),(x0,y1)):
+                key = (group_id,round(float(x),12),round(float(y),12))
+                if key not in lookup:
+                    lookup[key] = len(xyz)
+                    xyz.append([float(x),float(y)])
+                face.append(lookup[key])
+            quadfaces.append(face)
+            owners.append(group_id)
+    if len(seen_tiles) != len(tiles):
+        raise ValueError("Not all original tile IDs preserved in topology")
+    faces = np.asarray(quadfaces,int)
+    # Any actual quad corner ID can be owned by precisely one cut component.
+    incident = {}
+    for face, owner in zip(faces, owners):
+        for v in face:
+            incident.setdefault(int(v),set()).add(owner)
+    crossing = sum(len(o)>1 for o in incident.values())
+    if crossing:
+        raise ValueError("Cross-cut shared vertex IDs were not disconnected")
+    return dict(
+        original_tile_count=len(tiles), resulting_tile_count=len(faces),
+        component_count=len(groups), grid_uv_unchanged=True,
+        cross_seam_shared_vertex_id_count=crossing,
+        topological_vertex_count=len(xyz),
+        each_component_connected=True,
+        actual_K2D_mechanism_verified=False,
+    )
