@@ -42,25 +42,48 @@ same averaging method; B7 replaces child free BFF with child rectangle BFF.
 
 ## Requirements and Mac command
 
-In a clean worktree/clone, with the BFF executables already compiled:
+**Important: this GitHub repo has an inner Python project directory**
+`onestring-physics-simulator/`. Git worktree/clone root contains
+`.github/` and that directory; commands must run from **inside**
+the inner project directory containing `pyproject.toml`.
+
+For an existing worktree placed at
+`~/Documents/onestring-postcut-rebff/onestring-split-validation`:
 
 ```bash
-cd ~/Documents/onestring-postcut-rebff/onestring-physics-simulator
-git fetch origin
-git switch --create research/lilium-split-validation-20261019 --track origin/research/lilium-split-validation-20261019
+cd "$HOME/Documents/onestring-postcut-rebff/onestring-split-validation/onestring-physics-simulator"
+ls pyproject.toml scripts/validate_lilium_split.py tests/test_split_validation_independent.py
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
-export ONESTRING_BFF_EXECUTABLE=/absolute/path/to/bff-command-line
-export ONESTRING_BFF_RECTANGLE_EXECUTABLE=/absolute/path/to/bff-rect-command-line
 python -m pytest -q tests/test_split_validation_independent.py
-python scripts/validate_lilium_split.py /absolute/path/to/lilium.obj \
+
+export ONESTRING_BFF_EXECUTABLE="$(find "$HOME/Documents" -type f -name bff-command-line -print -quit)"
+export ONESTRING_BFF_RECTANGLE_EXECUTABLE="$(find "$HOME/Documents" -type f -name bff-rect-command-line -print -quit)"
+test -x "$ONESTRING_BFF_EXECUTABLE" && test -x "$ONESTRING_BFF_RECTANGLE_EXECUTABLE" && echo "BFF executables found"
+
+curl -fL -o /tmp/lilium.obj https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj
+python scripts/validate_lilium_split.py /tmp/lilium.obj \
   --require-lilium-sha --grid 14 --cases B0,B6 \
   --output output/lilium_split_validation
 ```
 
-Use the actual executable paths in your environment; the `/absolute/path/`
-strings above are placeholders, not existing local files. For a native BFF
-build recipe see `.github/workflows/lilium-split-validation-experiment.yml`
-and `scripts/setup_bff_rectangle.py`.
+If `python3.11` is unavailable, install a Python version >=3.11 first,
+for example `brew install python@3.11` when Homebrew is installed.
+Use a **virtual environment** rather than the Apple CommandLineTools
+system Python (old Python/pip builds cannot reliably editable-install this
+`pyproject.toml` package). If either BFF executable test fails, build
+or locate official BFF before running the experiment. The two `find`
+commands are a **convenience**, not a proof of which BFF build was selected;
+verify the printed paths if more than one BFF installation exists.
+Never copy rendered Markdown links or `\\~` into the terminal; use
+plain URLs and `"$HOME/Documents"`. Interactive zsh may reject pasted
+`#` comment lines, so the copyable block intentionally has no comments.
+
+For a native BFF build recipe see the repository-root
+`.github/workflows/lilium-split-validation-experiment.yml`
+and the inner project's `scripts/setup_bff_rectangle.py`.
 
 Optional high-cost evaluations:
 
