@@ -1,0 +1,57 @@
+name: Original Paper mode baseline on exact Lilium (unchanged implementation)
+
+on:
+  push:
+    branches:
+      - research/lilium-split-validation-20261019
+    paths:
+      - ".github/workflows/lilium-split-existing-baseline.yml"
+  workflow_dispatch:
+
+jobs:
+  original-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake build-essential libsuitesparse-dev libopenblas-dev liblapack-dev
+          python -m pip install -e ".[dev]"
+      - name: Build official rectangular BFF
+        run: |
+          git clone --depth 1 --recursive https://github.com/GeometryCollective/boundary-first-flattening.git /tmp/official-bff
+          python scripts/setup_bff_rectangle.py --source /tmp/official-bff --jobs 4
+      - name: Fetch exact Lilium input and verify hash
+        run: |
+          curl -fL --retry 3 -o /tmp/lilium.obj https://raw.githubusercontent.com/libigl/libigl-tutorial-data/master/lilium.obj
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          actual=hashlib.sha256(Path('/tmp/lilium.obj').read_bytes()).hexdigest()
+          assert actual == "4f62ff741b41bd629ccbeaeb0bb2e44ac060cdff88f090129911bede790e8ab3"
+          PY
+      - name: Run original Paper mode with interpolated Grid samples
+        run: |
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj \
+            --grid 14 --sampling-method interpolated_grid_vertices \
+            --report output/split_validation_original_baseline/initial_grid_samples.json
+      - name: Run original Paper mode with triangle overlap extrema
+        run: |
+          python scripts/verify_lilium_paper_split.py /tmp/lilium.obj \
+            --grid 14 --sampling-method overlap_extrema \
+            --report output/split_validation_original_baseline/overlap_extrema.json
+      - name: Archive original baseline records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: original-Paper-mode-lilium-baselines
+          path: onestring-physics-simulator/output/split_validation_original_baseline/
+          if-no-files-found: warn
