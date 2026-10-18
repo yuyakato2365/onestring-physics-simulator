@@ -26,7 +26,7 @@ from onestring_physics.split_validation.core import (
     ExperimentConfig, load_triangle_obj, mesh_digest, lobe_tip_corners,
     grid_rectangles, area_jacobians, scale_span, clip_source_to_box,
     tile_jacobians, curvature_field, nearest_curvature_grid_vertex,
-    split_tile_ids, partition_quad_topology,
+    split_tile_ids, partition_quad_topology, boundary_loop,
 )
 
 CASES = {
@@ -116,12 +116,26 @@ def write_png(path, tiles, groups, cut_records):
 
 
 def run_case(xyz, faces, case_id, base, grid_n, max_splits,
-             curvature_override=None, fixed_cut_sweep=False):
+             curvature_override=None, fixed_cut_sweep=False,
+             corner_shift=None):
     cp, gp, rings, metric = CASES[case_id]
     if curvature_override is not None:
         rings = curvature_override
     if cp == "lobe_tips":
         corners = lobe_tip_corners(xyz, faces)
+        if corner_shift is not None:
+            tip_idx, delta = corner_shift
+            if tip_idx not in range(4):
+                raise ValueError("Tip index must be 0,1,2,3")
+            loop = list(map(int,boundary_loop(xyz, faces)))
+            positions = [loop.index(v) for v in corners]
+            next_position = (positions[tip_idx]+int(delta))%len(loop)
+            after = positions.copy()
+            after[tip_idx] = next_position
+            gaps = [(after[(i+1)%4]-after[i])%len(loop) for i in range(4)]
+            if not all(g > 1 for g in gaps):
+                raise ValueError("Corner shift changes tip cyclic order")
+            corners[tip_idx] = loop[next_position]
         init = run_official_bff(xyz, faces, boundary_policy="target_rectangle",
                                 rectangle_corner_positions=xyz[corners])
     else:
@@ -253,6 +267,7 @@ def run_case(xyz, faces, case_id, base, grid_n, max_splits,
         metric_id=metric+"_v1", units="area_ratio", grid=grid_meta,
         bff_initial=init.metrics.get("parameterization_backend_sha256"),
         rectangle_corners_source_vertex_ids=corners,
+        corner_shift=corner_shift,
         original_source_uv_sha256=hashlib.sha256(source_uv.tobytes()).hexdigest(),
         initial=initial, initial_tile_count=len(tiles),
         cuts=cuts, components=components, split_count=len(cuts),
@@ -274,6 +289,8 @@ def main(argv=None):
                    help="Expensive: evaluate every first-cut Grid line")
     p.add_argument("--sensitivity",action="store_true",
                    help="Expensive: 20 Grid/smoothing pairs for B6")
+    p.add_argument("--corner-sensitivity",action="store_true",
+                   help="Expensive: perturb one corner at a time by +/-4 boundary vertices")
     p.add_argument("--require-lilium-sha",action="store_true")
     p.add_argument("--output",type=Path,default=Path("output/split_validation"))
     args=p.parse_args(argv)
@@ -331,6 +348,21 @@ def main(argv=None):
                         child_sigma=[c["metric"]["sigma"] for c in result["components"]]))
                 except Exception as e:
                     sensitivity.append(dict(grid=n,rings=ring,error=str(e)))
+    if args.corner_sensitivity:
+        for tip in range(4):
+            for delta in (-4,4):
+                try:
+                    result,_=run_case(xyz,faces,"B6",cfg,args.grid,args.max_splits,
+                                       corner_shift=(tip,delta))
+                    sensitivity.append(dict(grid=args.grid,rings=3,
+                        corner_index=tip,corner_delta_vertices=delta,
+                        split_count=result["split_count"],
+                        stop_reason=result["stopping_reason"],
+                        child_sigma=[c["metric"]["sigma"] for c in result["components"]]))
+                except Exception as e:
+                    sensitivity.append(dict(grid=args.grid,rings=3,
+                        corner_index=tip,corner_delta_vertices=delta,
+                        error=str(e)))
     payload=dict(
         input_sha256=sha, configuration=asdict(cfg),
         warning="Diagnostic reflattened-tile metric; not author-certified CSF or fabrication",
