@@ -251,17 +251,23 @@ def tile_jacobians(parent_uv, diagnostic_j, faces, tiles,
     if len(j) != len(f):
         raise ValueError("Jacobian/face correspondence missing")
     values, coverage = [], []
+    tri = u[f]
+    tri_min, tri_max = tri.min(axis=1), tri.max(axis=1)
     for row in tiles:
         bounds = row[2:]
-        areas = np.asarray([poly_rectangle_area(u[t], bounds) for t in f])
+        x0,y0,x1,y1 = bounds
+        hits = np.flatnonzero(
+            (tri_max[:,0] >= x0) & (tri_min[:,0] <= x1) &
+            (tri_max[:,1] >= y0) & (tri_min[:,1] <= y1))
+        areas = np.asarray([poly_rectangle_area(tri[t], bounds) for t in hits])
         positive = areas > 0
         measured = float(np.sum(areas))
-        tile_area = float((bounds[2]-bounds[0])*(bounds[3]-bounds[1]))
+        tile_area = float((x1-x0)*(y1-y0))
         if measured < tile_area*(1-coverage_tolerance):
             raise ValueError("Unmeasured tile: area coverage < 99.5%")
         if measured > tile_area*(1+coverage_tolerance):
             raise ValueError("Chart triangle overlap / double coverage")
-        values.append(float(np.dot(areas[positive], j[positive])/measured))
+        values.append(float(np.dot(areas[positive], j[hits][positive])/measured))
         coverage.append(measured/tile_area)
     return np.asarray(values, float), np.asarray(coverage, float)
 
