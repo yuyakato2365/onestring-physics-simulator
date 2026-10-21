@@ -3643,6 +3643,16 @@ elif view_stage == "T2D Dual Hinge":
                 "パネルへの埋め込み (mm)", min_value=0.05, max_value=0.9,
                 value=0.2, step=0.05, key="flexure_embed_mm"
             )
+            _flex_max_gap_mm = st.number_input(
+                "製造用ヒンジが橋渡しする最大接続ギャップ (mm)",
+                min_value=0.1, max_value=5.0, value=1.5, step=0.1,
+                key="flexure_max_joint_gap_mm",
+                help=(
+                    "Dual Hinge最適化後に2つの接続点がずれている場合、"
+                    "薄肉ヒンジでその隙間を橋渡しします。これはT2Dの接続誤差を修正しません。"
+                    "大きすぎる隙間は造形・組立不能となるため制限してください。"
+                ),
+            )
             if st.checkbox(
                 "ヒンジ付きSTLを生成する（未検証の試作専用）",
                 value=False, key="flexure_generate_enabled"
@@ -3660,6 +3670,7 @@ elif view_stage == "T2D Dual Hinge":
                             skin_mm=float(_flex_skin_mm),
                             anchor_inset_mm=float(_flex_inset_mm),
                             embed_mm=float(_flex_embed_mm),
+                            max_joint_gap_mm=float(_flex_max_gap_mm),
                         ),
                     )
                 except ValueError as _flex_error:
@@ -3672,11 +3683,18 @@ elif view_stage == "T2D Dual Hinge":
                         mime="model/stl",
                         key="download_t2d_dual_flexure_mm",
                     )
+                    if _flex_metrics["flexure_max_joint_gap_mm"] > 1e-3:
+                        st.warning(
+                            "薄肉ヒンジは最終T2Dの接続点間に残った隙間を橋渡ししています。"
+                            "T2D自体の接続誤差は修正されていません。"
+                            "STLのヒンジ形状・組立時の負荷を検証してください。"
+                        )
                     st.write({
                         "top hinges": _flex_metrics["flexure_top_count"],
                         "bottom hinges": _flex_metrics["flexure_bottom_count"],
                         "hinge mesh triangles": _flex_metrics["flexure_triangle_count"],
                         "max joint gap (mm)": _flex_metrics["flexure_max_joint_gap_mm"],
+                        "allowed bridge gap (mm)": _flex_metrics["flexure_bridge_limit_mm"],
                     })
     st.write(state.tiles_2d_dual_hinge.metrics)
 elif view_stage in {"Lift Points", "String Path"}:
