@@ -43,6 +43,12 @@ has not been demonstrated.
 6. Append lamella triangles to the panel triangles as **separate intersecting
    closed shells**. A later slicer/mesh Boolean union is required.
 
+The bridge creates physical geometry across small optimizer residual gaps, but
+**does not fix T2D hinge-coincidence constraints**. For example, a 0.732 mm
+residual gap passes the default 1.5 mm fabrication ceiling, but would fail
+if the user requires a 0.6 mm ceiling. The UI reports the measured maximum
+and warns when bridging a nonzero gap. Large gaps still fail explicitly.
+
 The algorithm intentionally rejects major gaps, incompatible hinge-side
 indices, tilted face Z spreads and extreme miter angles. This does **not**
 prove the resulting flat pattern has no new accidental intersections or
@@ -72,6 +78,7 @@ Suggested *unverified experimental starting values*:
 | flexure thickness | 0.6 mm | Total flexible Z cross-section |
 | anchor inset | 3 mm | Connection depth from each stored joint |
 | embed | 0.2 mm | Strip intersection with chosen rigid-panel face |
+| max bridge gap | 1.5 mm | Hard ceiling for residual final-T2D attachment gaps; adjustable from 0.1 to 5 mm |
 
 The STL format has no unit metadata; its vertex numbers mean mm in the new
 export. Original T2D STL exports still use their unchanged settings.
