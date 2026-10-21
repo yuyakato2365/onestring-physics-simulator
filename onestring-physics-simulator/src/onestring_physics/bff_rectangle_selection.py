@@ -28,8 +28,20 @@ def whole_surface_area_span(vertices, uv, faces):
     twice_uv=np.abs(e[:,0]*f[:,1]-e[:,1]*f[:,0])
     if len(twice_uv)==0 or not np.isfinite(twice_3d).all() or not np.isfinite(twice_uv).all():
         raise ValueError("No finite source triangles for rectangular BFF selection")
-    if np.any(twice_3d<=1e-16) or np.any(twice_uv<=1e-16):
-        raise ValueError("One candidate has a degenerate source or UV triangle")
+    if np.any(twice_3d<=1e-16):
+        ids=np.flatnonzero(twice_3d<=1e-16)
+        raise ValueError(
+            f"Input 3D mesh has {len(ids)} degenerate source triangles "
+            f"(first face={int(ids[0])}, twice_area={float(twice_3d[ids[0]]):.4g})"
+        )
+    if np.any(twice_uv<=1e-16):
+        ids=np.flatnonzero(twice_uv<=1e-16)
+        raise ValueError(
+            f"Official rectangular BFF output has {len(ids)} collapsed UV "
+            f"triangles (first face={int(ids[0])}, "
+            f"twice_uv_area={float(twice_uv[ids[0]]):.4g}, "
+            f"source_twice_area={float(twice_3d[ids[0]]):.4g})"
+        )
     jac=twice_3d/twice_uv
     if not np.isfinite(jac).all() or np.any(jac<=0):
         raise ValueError("Invalid source UV area Jacobian")
@@ -227,7 +239,12 @@ def choose_rectangle_by_source_boundary_fit(
             g=uvfaces[:,2]-uvfaces[:,0]
             det=e[:,0]*g[:,1]-e[:,1]*g[:,0]
             if np.any(det>1e-14) and np.any(det < -1e-14):
-                raise ValueError("Rectangular BFF candidate has mixed UV triangle orientations")
+                raise ValueError(
+                    "Official rectangular BFF UV folds over: "
+                    f"{int(np.count_nonzero(det>1e-14))} positive and "
+                    f"{int(np.count_nonzero(det < -1e-14))} inverted triangles "
+                    f"(first inverted face={int(np.flatnonzero(det < -1e-14)[0])})"
+                )
             span=whole_surface_area_span(x,output.uv_vertices,f)
             error=_boundary_similarity_error(projected,np.asarray(output.uv_vertices)[loop],w)
             # Source PCA bounding rectangle is a weak aspect target. Keep this
@@ -310,7 +327,12 @@ def choose_rectangle_by_source_boundary_fit(
                 g = uvfaces[:, 2] - uvfaces[:, 0]
                 det = e[:, 0]*g[:, 1] - e[:, 1]*g[:, 0]
                 if np.any(det > 1e-14) and np.any(det < -1e-14):
-                    raise ValueError("Rectangular BFF candidate has mixed UV triangle orientations")
+                    raise ValueError(
+                    "Official rectangular BFF UV folds over: "
+                    f"{int(np.count_nonzero(det>1e-14))} positive and "
+                    f"{int(np.count_nonzero(det < -1e-14))} inverted triangles "
+                    f"(first inverted face={int(np.flatnonzero(det < -1e-14)[0])})"
+                )
                 span = whole_surface_area_span(x, output.uv_vertices, f)
                 error = _boundary_similarity_error(
                     projected, np.asarray(output.uv_vertices)[loop], w
