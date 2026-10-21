@@ -2622,6 +2622,57 @@ if view_stage == "Pipeline View":
         "T2D残存衝突ペア": state.tiles_2d_dual_hinge.metrics.get("collision_pair_count", "unknown"),
         "衝突回避Split採用数": state.tiles_2d_dual_hinge.metrics.get("collision_split_accepted", 0),
     })
+    # Runtime evidence, not an inference from sidebar labels: these flags are
+    # populated by the actual K3D AL solver / collision-Split full-rebuild path.
+    _k3d_diag = dict(getattr(state.mesh_3d_optimized, "metrics", {}) or {})
+    _split_diag = dict(getattr(state.tiles_2d_dual_hinge, "metrics", {}) or {})
+    _omega_applied = str(getattr(
+        st.session_state.get("onestring_last_completed_params", pipeline_params),
+        "omega_parameterization_mode", "unknown"
+    ))
+    st.subheader("最適化の実行診断（実際の最終結果）")
+    st.write({
+        "Omega実行モード": _omega_applied,
+        "改良K3D ALが実際に適用された": bool(
+            _k3d_diag.get("k3d_augmented_lagrangian_applied", False)
+        ),
+        "K3D shape-preserving AL": bool(
+            _k3d_diag.get("k3d_shape_preserving_mode", False)
+        ),
+        "K3D AL 共平面性制約を満たした": _k3d_diag.get(
+            "k3d_hard_planarity_constraint_satisfied", "not executed"
+        ),
+        "衝突回避Splitフィードバックを実行した": bool(
+            _split_diag.get("collision_split_feedback_enabled", False)
+        ),
+        "衝突回避Splitステータス": _split_diag.get(
+            "collision_split_status", "not executed"
+        ),
+        "Split候補の実際の試行数": _split_diag.get("collision_split_attempted", 0),
+        "衝突回避Splitの新規採用数": _split_diag.get(
+            "collision_split_newly_accepted", 0
+        ),
+        "Split前の衝突ペア数": (_split_diag.get("collision_split_before") or {}).get(
+            "collision_pairs", "not measured"
+        ),
+        "Split後の衝突ペア数": (_split_diag.get("collision_split_after") or {}).get(
+            "collision_pairs", "not measured"
+        ),
+    })
+    if _omega_applied == "optcuts_test" and not bool(
+        _k3d_diag.get("k3d_augmented_lagrangian_applied", False)
+    ):
+        st.warning(
+            "Omega=optcuts_testですが、最終K3DにAL適用メトリクスがありません。"
+            "K3D最適化が改良版へ接続されていないか、別の経路が呼ばれています。"
+        )
+    if not bool(_split_diag.get("collision_split_feedback_enabled", False)):
+        st.caption(
+            "Collision-driven Splitは今回の結果では未実行です。"
+            "PaperモードOFFだけでは有効になりません。"
+            "「Enable sequential collision-driven Split (full pipeline)」をONにし、"
+            "Run OneString pipelineで全工程を再計算してください。"
+        )
     # The overview graph is small but can still trip browser-side Plotly
     # rendering in some reruns. During a changed-grid rebuild show only
     # non-Plotly results until the user explicitly requests the graphic.
