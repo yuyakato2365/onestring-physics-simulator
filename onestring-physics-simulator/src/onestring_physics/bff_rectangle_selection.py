@@ -37,7 +37,7 @@ def whole_surface_area_span(vertices, uv, faces):
     if np.any(twice_uv<=1e-16):
         ids=np.flatnonzero(twice_uv<=1e-16)
         raise ValueError(
-            f"Official rectangular BFF output has {len(ids)} collapsed UV "
+            f"Official rectangular BFF output has {len(ids)} degenerate/collapsed UV "
             f"triangles (first face={int(ids[0])}, "
             f"twice_uv_area={float(twice_uv[ids[0]]):.4g}, "
             f"source_twice_area={float(twice_3d[ids[0]]):.4g})"
