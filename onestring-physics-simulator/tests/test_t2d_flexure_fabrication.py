@@ -128,11 +128,17 @@ def test_t2d_duplicate_links_are_not_printed_twice():
         make_flexure_triangles(fixture(), g)
 
 
-def test_flexure_rejects_tilted_print_face():
+def test_flexure_handles_tilted_print_face_without_flattening():
     tiles = fixture()
-    tiles[0, 0, 2] += 1
-    with pytest.raises(ValueError, match="tilted top face"):
-        make_flexure_triangles(tiles, SimpleNamespace(hinges=[hinge()]))
+    tiles[0, 0, 2] += 1.
+    before = tiles.copy()
+    triangles, metrics = make_flexure_triangles(
+        tiles, SimpleNamespace(hinges=[hinge()]),
+    )
+    assert len(triangles) == 20
+    assert metrics["flexure_max_original_face_z_spread_mm"] >= 1.
+    np.testing.assert_array_equal(tiles, before)
+    assert_closed_shell(triangles)
 
 
 def test_final_export_merges_tile_and_flexure_triangles_without_touching_source():
@@ -169,18 +175,35 @@ def test_invalid_flexure_parameters_rejected():
         )
 
 
-def test_skin_cannot_exceed_fabrication_slab():
-    from onestring_physics import onestring_pipeline as p
+def test_flexure_thickness_does_not_rewrite_thin_panel_geometry():
+    # Flexure parameters never authorize changing or flattening original tiles.
     tiles = fixture()
-    assembly = SimpleNamespace(vertices=tiles, top_faces=np.array([[0, 1, 2, 3]]),
-                               bottom_faces=np.array([[4, 7, 6, 5]]), metrics={})
-    state = SimpleNamespace(tiles_2d_dual_hinge=assembly,
-                            hinge_graph=SimpleNamespace(hinges=[hinge()]))
-    with pytest.raises(ValueError, match="exceeds print panel thickness"):
-        export_final_t2d_flexure_stl(state, panel_size_mm=40.,
-                                     panel_thickness_mm=.5,
-                                     parameters=FlexureParameters(skin_mm=.6))
+    tiles[:, 4:, 2] = 1.8  # Deliberately thin 0.2 mm plates.
+    before = tiles.copy()
+    assembly = SimpleNamespace(
+        vertices=tiles, top_faces=np.array([[0, 1, 2, 3]]),
+        bottom_faces=np.array([[4, 7, 6, 5]]), metrics={},
+    )
+    state = SimpleNamespace(
+        tiles_2d_dual_hinge=assembly,
+        hinge_graph=SimpleNamespace(hinges=[hinge()]),
+    )
+    raw, metrics = export_final_t2d_flexure_stl(
+        state, panel_size_mm=40.,
+        parameters=FlexureParameters(skin_mm=.6),
+    )
+    assert metrics["flexure_original_panel_geometry_preserved"]
+    assert raw.count(b"facet normal") == 44
+    np.testing.assert_array_equal(assembly.vertices, before)
 
+
+def extract_stl_triangles(raw):
+    points = [
+        [float(n) for n in line.strip().split()[1:]]
+        for line in raw.decode("ascii").splitlines()
+        if line.strip().startswith("vertex ")
+    ]
+    return np.asarray(points, dtype=float).reshape(-1, 3, 3)
 
 
 @pytest.mark.parametrize("side", ["top", "bottom"])
@@ -205,7 +228,8 @@ def test_print_export_projects_small_nonplanarity_without_reclassifying_side(sid
         state, panel_size_mm=40., panel_thickness_mm=2.,
         parameters=FlexureParameters(skin_mm=.6, embed_mm=.2),
     )
-    assert metrics["flexure_print_z_normalized"]
+    assert not metrics["flexure_print_z_normalized"]
+    assert metrics["flexure_original_panel_geometry_preserved"]
     assert metrics["flexure_preprint_top_level_spread_mm"] > 0
     assert metrics["flexure_preprint_bottom_level_spread_mm"] > 0
     assert metrics["flexure_preprint_max_face_warp_mm"] > 0
@@ -213,6 +237,32 @@ def test_print_export_projects_small_nonplanarity_without_reclassifying_side(sid
     assert metrics["flexure_flattening_diagnostic_threshold_mm"] > 0
     assert metrics[f"flexure_{side}_count"] == 1
     assert data.count(b"facet normal") == 44
+    # The 24 panel triangles are the first 24 STL facets and must exactly
+    # equal ALL original T2D eight-corner prisms after ONE uniform transform.
+    from onestring_physics import onestring_pipeline as p
+    scale = p._t2d_export_scale(t2d, 40.)
+    expected = unchanged * scale
+    expected[:, :, 2] -= float(expected[..., 2].min())
+    panel_tris = np.array([
+        tile[list(indices)]
+        for tile in expected
+        for indices in p._prism_triangle_indices()
+    ])
+    np.testing.assert_allclose(
+        extract_stl_triangles(data)[:len(panel_tris)],
+        panel_tris, atol=1e-6, rtol=1e-9,
+    )
+    assert metrics["flexure_panel_scale_uniform"] == pytest.approx(scale)
+    assert metrics["flexure_panel_relative_positions_preserved"]
+    # Distances among every point remain in fixed proportions; no tile
+    # thickness normalization or face projection is allowed.
+    all_orig = unchanged.reshape(-1, 3)
+    all_print = expected.reshape(-1, 3)
+    np.testing.assert_allclose(
+        np.linalg.norm(all_print[:, None, :] - all_print[None, :, :], axis=-1),
+        scale * np.linalg.norm(all_orig[:, None, :] - all_orig[None, :, :], axis=-1),
+        atol=1e-8,
+    )
     # The original optimized (imperfectly planar) source is NEVER modified.
     np.testing.assert_array_equal(t2d.vertices, unchanged)
     assert t2d.metrics == {}
@@ -234,3 +284,24 @@ def test_print_export_does_not_flatten_source_for_split_boundary_without_joint()
     assert raw.count(b"facet normal") == 24
     assert metrics["flexure_hinge_count"] == 0
     np.testing.assert_array_equal(t2d.vertices, unchanged)
+
+def test_preserve_original_t2d_even_with_large_interpanel_height_difference():
+    source = fixture()
+    source[1, :, 2] += 1.25
+    before = source.copy()
+    state = SimpleNamespace(
+        tiles_2d_dual_hinge=SimpleNamespace(
+            vertices=source, top_faces=np.array([[0, 1, 2, 3]]),
+            bottom_faces=np.array([[4, 7, 6, 5]]), metrics={},
+        ),
+        hinge_graph=SimpleNamespace(hinges=[hinge("top")]),
+    )
+    raw, metrics = export_final_t2d_flexure_stl(
+        state, panel_size_mm=40.,
+        parameters=FlexureParameters(max_joint_gap_mm=50.),
+    )
+    assert metrics["flexure_max_original_joint_height_difference_mm"] == pytest.approx(5.)
+    assert metrics["flexure_requires_geometry_review"]
+    assert not metrics["flexure_print_z_normalized"]
+    assert raw.count(b"facet normal") == 44
+    np.testing.assert_array_equal(state.tiles_2d_dual_hinge.vertices, before)
