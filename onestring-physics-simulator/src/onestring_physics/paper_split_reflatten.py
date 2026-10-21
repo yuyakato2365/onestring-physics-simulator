@@ -363,6 +363,12 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
         csf_split_step_analysis_model=_CSF_MODEL,
         csf_split_status="satisfied" if report["satisfied"] else "no_admissible_curvature_guided_grid_cut",
         csf_split_stopping_reason="all components <= 2" if report["satisfied"] else "unresolved",
+        csf_split_stopping_rule="new official free-boundary BFF for each 3D source patch; per-tile 3D/free-BFF area span <= 2; actual M2D seams preserved",
+        csf_split_direction_rule="maximum area-smoothed Gaussian curvature interior grid vertex; compare full row/column cuts by worst reflattened child area span",
+        csf_split_budget_exhausted=bool(not report["satisfied"] and len(cuts)>=saved_budget),
+        csf_split_area_ratio_after=report["final_max_sigma"],
+        csf_split_component_rescale_applied=False,
+        csf_split_linear_csf_area_relation="RECONSTRUCTION uses area span directly, not sqrt(area span)",
         reflatten_split_report=report,
     )
     # Do NOT certify global deployability or panel fabrication from a CSF proxy.
