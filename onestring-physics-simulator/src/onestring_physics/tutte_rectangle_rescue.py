@@ -92,8 +92,9 @@ def rectangle_tutte_rescue(vertices, faces) -> BFFRunResult:
     if not np.all(np.isfinite(uv)):
         raise ReferenceBFFError("Tutte rectangle rescue produced non-finite UV")
     triangles=uv[f]
-    signed=np.cross(triangles[:,1]-triangles[:,0],
-                    triangles[:,2]-triangles[:,0])
+    uv_e1=triangles[:,1]-triangles[:,0]
+    uv_e2=triangles[:,2]-triangles[:,0]
+    signed=uv_e1[:,0]*uv_e2[:,1]-uv_e1[:,1]*uv_e2[:,0]
     epsilon=2e-14
     if np.any(np.abs(signed)<=epsilon):
         raise ReferenceBFFError(
