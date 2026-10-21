@@ -156,7 +156,7 @@ def test_final_export_merges_tile_and_flexure_triangles_without_touching_source(
         hinge_graph=SimpleNamespace(hinges=[hinge()]),
     )
     raw, metrics = export_final_t2d_flexure_stl(
-        state, panel_size_mm=40, panel_thickness_mm=2,
+        state, panel_size_mm=40,
     )
     assert raw.startswith(b"solid onestring_t2d_dual_flexure_mm")
     assert raw.count(b"facet normal") == 2 * 12 + 20
@@ -225,7 +225,7 @@ def test_print_export_projects_small_nonplanarity_without_reclassifying_side(sid
         hinge_graph=SimpleNamespace(hinges=[hinge(side)]),
     )
     data, metrics = export_final_t2d_flexure_stl(
-        state, panel_size_mm=40., panel_thickness_mm=2.,
+        state, panel_size_mm=40.,
         parameters=FlexureParameters(skin_mm=.6, embed_mm=.2),
     )
     assert not metrics["flexure_print_z_normalized"]
