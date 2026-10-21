@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -162,11 +164,57 @@ int main(int argc, char** argv) {
     }
     // Do not request PCA reorientation or an additional UV map:
     // only the conformal flattening returned by BFF::flatten is used.
-    if (!MeshIO::write(argv[2], model, std::vector<uint8_t>(1,0),
-                       false, true, 1.0)) {
-        std::cerr << "Failed to write BFF rectangle output\n";
+    // IMPORTANT: upstream MeshIO::writeOBJ uses std::to_string(uv.x/y),
+    // rounding UV vertices to ~6 decimals. Small valid UV triangles can
+    // thereby become EXACTLY collinear or change orientation in the OBJ
+    // consumed by Python (e.g. source face 275). Preserve the same upstream
+    // packing, UV ordering and face indices, but serialize with round-trip
+    // double precision. The BFF solve and UV geometry are NOT modified.
+    std::vector<Vector> originalUvIslandCenters, newUvIslandCenters;
+    std::vector<uint8_t> isUvIslandFlipped;
+    Vector modelMinBounds, modelMaxBounds;
+    const std::vector<uint8_t> isSurfaceMappedToSphere(1, 0);
+    MeshIO::packUvs(model, 1.0, isSurfaceMappedToSphere,
+                    originalUvIslandCenters, newUvIslandCenters,
+                    isUvIslandFlipped, modelMinBounds, modelMaxBounds);
+    std::vector<Vector> positions, uvs;
+    std::vector<int> vIndices, uvIndices, indicesOffset;
+    MeshIO::collectModelUvs(
+        model, false, isSurfaceMappedToSphere,
+        originalUvIslandCenters, newUvIslandCenters, isUvIslandFlipped,
+        modelMinBounds, modelMaxBounds, positions, uvs, vIndices,
+        uvIndices, indicesOffset);
+    std::ofstream out(argv[2]);
+    if (!out.is_open() || uvs.empty() || indicesOffset.size() < 2) {
+        std::cerr << "Failed to prepare full-precision BFF rectangle OBJ\n";
         return EXIT_FAILURE;
     }
+    out << std::setprecision(std::numeric_limits<double>::max_digits10);
+    for (const Vector& uv : uvs) {
+        if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) {
+            std::cerr << "Official BFF produced non-finite UVs\n";
+            return EXIT_FAILURE;
+        }
+        out << "v " << uv.x << " " << uv.y << " 0\n";
+    }
+    for (size_t face=0; face+1<indicesOffset.size(); ++face) {
+        out << "f";
+        for (int j=indicesOffset[face]; j<indicesOffset[face+1]; ++j) {
+            if (uvIndices[j]<0 || static_cast<size_t>(uvIndices[j])>=uvs.size()) {
+                std::cerr << "Invalid BFF UV face index\n";
+                return EXIT_FAILURE;
+            }
+            out << " " << (uvIndices[j]+1);
+        }
+        out << "\n";
+    }
+    out.close();
+    if (!out.good()) {
+        std::cerr << "Writing full-precision BFF rectangle OBJ failed\n";
+        return EXIT_FAILURE;
+    }
+    std::cerr << "BFF_RECTANGLE_OUTPUT_PRECISION="
+              << std::numeric_limits<double>::max_digits10 << "\n";
     std::cerr << "BFF_RECTANGLE_CORNERS="
               << corners[0] << "," << corners[1] << ","
               << corners[2] << "," << corners[3] << "\n";
