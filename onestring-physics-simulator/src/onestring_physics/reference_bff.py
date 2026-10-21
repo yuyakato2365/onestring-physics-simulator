@@ -576,7 +576,19 @@ def triangle_jacobian_diagnostics(
         d_uv = np.column_stack([q1 - q0, q2 - q0])
         det_uv = float(np.linalg.det(d_uv))
         signed_uv_double_area[tri_id] = det_uv
-        if abs(det_uv) <= 2.0 * degeneracy_epsilon:
+        # UV-area tests must be invariant to the GLOBAL similarity scale.
+        # The previous absolute 2e-14 bound rejected formerly valid BFF
+        # triangles after min(lambda)=1 normalization made every UV tiny.
+        # Use each triangle's squared longest UV edge as the area unit.
+        uv_edge_scale2 = max(
+            float(np.sum(np.square(q1 - q0))),
+            float(np.sum(np.square(q2 - q0))),
+            float(np.sum(np.square(q2 - q1))),
+        )
+        uv_area_tolerance = 2.0 * degeneracy_epsilon * uv_edge_scale2
+        if (not math.isfinite(det_uv) or not math.isfinite(uv_area_tolerance)
+                or uv_edge_scale2 <= 0.0
+                or abs(det_uv) <= uv_area_tolerance):
             uv_degenerate[tri_id] = True
             continue
         j_s_to_uv = d_uv @ np.linalg.inv(d_surface)
@@ -587,9 +599,22 @@ def triangle_jacobian_diagnostics(
         sigma_uv_to_s[tri_id] = np.sort(sv_inverse)[::-1]
         area_scale_s_to_uv[tri_id] = abs(float(np.linalg.det(j_s_to_uv)))
 
-    nonzero_orientation = signed_uv_double_area[np.isfinite(signed_uv_double_area) & (np.abs(signed_uv_double_area) > 2.0 * degeneracy_epsilon)]
+    uv_triangles = uv[tris]
+    uv_e01 = uv_triangles[:, 1] - uv_triangles[:, 0]
+    uv_e02 = uv_triangles[:, 2] - uv_triangles[:, 0]
+    uv_e12 = uv_triangles[:, 2] - uv_triangles[:, 1]
+    uv_edge_scale2 = np.maximum.reduce([
+        np.sum(uv_e01 ** 2, axis=1),
+        np.sum(uv_e02 ** 2, axis=1),
+        np.sum(uv_e12 ** 2, axis=1),
+    ])
+    uv_area_limits = 2.0 * degeneracy_epsilon * uv_edge_scale2
+    nonzero_orientation = signed_uv_double_area[
+        np.isfinite(signed_uv_double_area)
+        & (np.abs(signed_uv_double_area) > uv_area_limits)
+    ]
     reference_sign = 1.0 if len(nonzero_orientation) == 0 or float(np.median(nonzero_orientation)) >= 0.0 else -1.0
-    flips = np.isfinite(signed_uv_double_area) & (reference_sign * signed_uv_double_area < -2.0 * degeneracy_epsilon)
+    flips = np.isfinite(signed_uv_double_area) & (reference_sign * signed_uv_double_area < -uv_area_limits)
     valid = ~(surface_degenerate | uv_degenerate) & np.all(np.isfinite(sigma_uv_to_s), axis=1)
     anisotropy = np.full(n, np.nan, dtype=float)
     anisotropy[valid] = sigma_s_to_uv[valid, 0] / np.maximum(sigma_s_to_uv[valid, 1], 1e-300)
@@ -898,7 +923,16 @@ def strict_inverse_map_uv_to_surface(
         a, b, c = uv[face]
         matrix = np.column_stack([b - a, c - a])
         det = float(np.linalg.det(matrix))
-        if abs(det) <= 1e-14:
+        # Match the scale-invariant UV degeneracy check in
+        # triangle_jacobian_diagnostics; an arbitrary BFF similarity scale
+        # must not change whether UV->surface inversion is permitted.
+        uv_edge_scale2 = max(
+            float(np.sum((b - a) ** 2)),
+            float(np.sum((c - a) ** 2)),
+            float(np.sum((c - b) ** 2)),
+        )
+        if (not math.isfinite(det) or uv_edge_scale2 <= 0.0
+                or abs(det) <= 2e-14 * uv_edge_scale2):
             degenerate_count += 1
             continue
         local = np.linalg.solve(matrix, point - a)
