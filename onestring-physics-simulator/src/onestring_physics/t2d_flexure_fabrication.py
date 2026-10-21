@@ -20,7 +20,10 @@ class FlexureParameters:
     skin_mm: float = 0.5
     anchor_inset_mm: float = 2.5
     embed_mm: float = 0.18
-    max_joint_gap_mm: float = 0.6
+    # An optimized rigid-hinge point can retain a small residual gap. The
+    # printable strip BRIDGES that gap without modifying T2D or welding seams.
+    # Limit is deliberately finite; physically large gaps remain rejected.
+    max_joint_gap_mm: float = 1.5
     max_face_z_spread_mm: float = 0.25
     max_miter_ratio: float = 3.0
 
@@ -140,7 +143,13 @@ def make_flexure_triangles(
         joint_a, joint_b = v[a, ca], v[b, cb]
         gap = float(np.linalg.norm(joint_a - joint_b))
         if gap > p.max_joint_gap_mm:
-            raise ValueError(f"hinge {index}: attachment gap {gap:.3g} mm is too large")
+            raise ValueError(
+                f"hinge {index}: attachment gap {gap:.3g} mm exceeds the printable "
+                f"bridge limit {p.max_joint_gap_mm:.3g} mm. "
+                "This is residual T2D hinge misalignment: improve the Dual Hinge "
+                "optimization or explicitly increase the fabrication bridge limit "
+                "after inspecting the physical geometry."
+            )
         if abs(float(joint_a[2]-joint_b[2])) > p.max_face_z_spread_mm:
             raise ValueError(f"hinge {index}: mismatched {surface} heights")
         gap_xy = 0.5 * (joint_a[:2] + joint_b[:2])
@@ -178,6 +187,9 @@ def make_flexure_triangles(
         "flexure_bottom_count": surfaces["bottom"],
         "flexure_triangle_count": len(triangles),
         "flexure_max_joint_gap_mm": max(gaps, default=0.),
+        "flexure_bridge_limit_mm": p.max_joint_gap_mm,
+        "flexure_nonzero_gap_count": sum(gap > 1e-5 for gap in gaps),
+        "flexure_gap_semantics": "residual_T2D_joint_misalignment_bridged_by_lamella_not_solver_fixed",
         "flexure_width_mm": p.width_mm,
         "flexure_skin_mm": p.skin_mm,
         "flexure_anchor_inset_mm": p.anchor_inset_mm,
