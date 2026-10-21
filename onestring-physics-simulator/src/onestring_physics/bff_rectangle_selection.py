@@ -180,6 +180,7 @@ def _boundary_similarity_error(target2d: np.ndarray, uv2d: np.ndarray,
 def choose_rectangle_by_source_boundary_fit(
     vertices, faces, *, rectangle_executable=None, timeout_seconds=120.,
     runner=run_official_bff,
+    allow_nonconformal_rescue: bool = False,
 ):
     """Fit initial Omega using source-boundary geometry and the official BFF.
 
@@ -347,6 +348,32 @@ def choose_rectangle_by_source_boundary_fit(
                     boundary_arclength_phase=candidate.get("phase"),
                     failed_reason=f"{type(exc).__name__}: {str(exc)[:350]}",
                 ))
+    if winning is None and allow_nonconformal_rescue:
+        # This is a DIFFERENT mapping algorithm and cannot be called BFF.
+        # It is available only by explicit opt-in for non-Paper experiments.
+        from .tutte_rectangle_rescue import rectangle_tutte_rescue
+        try:
+            rescue = rectangle_tutte_rescue(x, f)
+        except ReferenceBFFError as exc:
+            attempts.append({
+                "source_corner_method": "explicit_nonconformal_tutte_rectangle_rescue",
+                "failed_reason": f"{type(exc).__name__}: {exc}",
+            })
+        else:
+            return BFFRunResult(
+                uv_vertices=rescue.uv_vertices,
+                metrics={
+                    **rescue.metrics,
+                    "bff_corner_selection_method": "explicit_nonconformal_tutte_rectangle_rescue",
+                    "bff_corner_selection_attempts": attempts,
+                    "bff_corner_selection_attempt_count": len(attempts),
+                    "bff_corner_selection_valid_count": 0,
+                    "bff_corner_selection_rejected_count": len(attempts),
+                    "bff_corner_selection_adaptive_search_used": True,
+                    "bff_corner_selection_author_method_verified": False,
+                    "bff_corner_selection_certifies_area_limit": False,
+                },
+            )
     if winning is None:
         from collections import Counter
         failures = Counter(
