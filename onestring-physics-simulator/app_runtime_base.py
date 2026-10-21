@@ -3610,6 +3610,74 @@ elif view_stage == "T2D Dual Hinge":
             key="download_t2d_dual_hinge_stl",
         )
         state.tiles_2d_dual_hinge.metrics.update(t2d_dual_export_metrics)
+        with st.expander("実験：IsoGami型PP薄肉ヒンジ付き T2D STL（mm）", expanded=False):
+            st.caption(
+                "最終Dual Hingeの接続点とtop/bottom分類から薄いPP用ストリップを生成。"
+                "Split境界は再接続しません。元のSTLは変更せず、こちらは独立の製造実験出力です。"
+                "パネルとストリップは交差する独立閉曲面です。スライサーで形状を結合し、"
+                "印刷前に意図しない接続・スライス・折り曲げ耐久性を確認してください。"
+            )
+            _fm1, _fm2, _fm3 = st.columns(3)
+            _flex_panel_mm = _fm1.number_input(
+                "代表パネル辺長 (mm)", min_value=5.0, max_value=250.0,
+                value=40.0, step=5.0, key="flexure_panel_size_mm"
+            )
+            _flex_plate_mm = _fm2.number_input(
+                "パネル厚さ (mm)", min_value=0.6, max_value=12.0,
+                value=2.0, step=0.2, key="flexure_panel_thickness_mm"
+            )
+            _flex_width_mm = _fm3.number_input(
+                "ヒンジ幅 (mm)", min_value=0.4, max_value=6.0,
+                value=1.2, step=0.2, key="flexure_width_mm"
+            )
+            _fm4, _fm5, _fm6 = st.columns(3)
+            _flex_skin_mm = _fm4.number_input(
+                "薄肉ヒンジ厚 (mm)", min_value=0.2, max_value=2.0,
+                value=0.6, step=0.1, key="flexure_skin_mm"
+            )
+            _flex_inset_mm = _fm5.number_input(
+                "固定端の内側距離 (mm)", min_value=0.4, max_value=12.0,
+                value=3.0, step=0.5, key="flexure_inset_mm"
+            )
+            _flex_embed_mm = _fm6.number_input(
+                "パネルへの埋め込み (mm)", min_value=0.05, max_value=0.9,
+                value=0.2, step=0.05, key="flexure_embed_mm"
+            )
+            if st.checkbox(
+                "ヒンジ付きSTLを生成する（未検証の試作専用）",
+                value=False, key="flexure_generate_enabled"
+            ):
+                from onestring_physics.t2d_flexure_fabrication import (
+                    FlexureParameters, export_final_t2d_flexure_stl
+                )
+                try:
+                    _flex_data, _flex_metrics = export_final_t2d_flexure_stl(
+                        state, hinge_graph=state.hinge_graph,
+                        panel_size_mm=float(_flex_panel_mm),
+                        panel_thickness_mm=float(_flex_plate_mm),
+                        parameters=FlexureParameters(
+                            width_mm=float(_flex_width_mm),
+                            skin_mm=float(_flex_skin_mm),
+                            anchor_inset_mm=float(_flex_inset_mm),
+                            embed_mm=float(_flex_embed_mm),
+                        ),
+                    )
+                except ValueError as _flex_error:
+                    st.error(f"薄肉ヒンジの幾何検証に失敗：{_flex_error}")
+                else:
+                    st.download_button(
+                        "Download T2D with top/bottom PP flexure hinges (mm)",
+                        data=_flex_data,
+                        file_name="onestring_t2d_dual_flexure_mm.stl",
+                        mime="model/stl",
+                        key="download_t2d_dual_flexure_mm",
+                    )
+                    st.write({
+                        "top hinges": _flex_metrics["flexure_top_count"],
+                        "bottom hinges": _flex_metrics["flexure_bottom_count"],
+                        "hinge mesh triangles": _flex_metrics["flexure_triangle_count"],
+                        "max joint gap (mm)": _flex_metrics["flexure_max_joint_gap_mm"],
+                    })
     st.write(state.tiles_2d_dual_hinge.metrics)
 elif view_stage in {"Lift Points", "String Path"}:
     st.plotly_chart(
