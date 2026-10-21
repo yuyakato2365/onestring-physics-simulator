@@ -2195,6 +2195,14 @@ if run_pipeline:
     st.rerun()
 
 state = st.session_state.onestring_state
+if bool(state.surface_parameterization.metrics.get("nonpaper_rectangle_rescue_used", False)):
+    st.error(
+        "この計算結果のS→Ωは公式BFFではありません。"
+        "元の矩形BFF候補が全滅したため、明示的に許可された"
+        "非等角Tutte矩形写像を使用しました。"
+        "後段Split/T2Dは実験結果であり、論文のBFF・CSF閾値"
+        "に準拠した再現として評価しないでください。"
+    )
 _just_completed_pipeline = bool(
     st.session_state.pop("onestring_just_completed_pipeline", False)
 )
