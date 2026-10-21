@@ -328,11 +328,11 @@ def choose_rectangle_by_source_boundary_fit(
                 det = e[:, 0]*g[:, 1] - e[:, 1]*g[:, 0]
                 if np.any(det > 1e-14) and np.any(det < -1e-14):
                     raise ValueError(
-                    "Official rectangular BFF UV folds over: "
-                    f"{int(np.count_nonzero(det>1e-14))} positive and "
-                    f"{int(np.count_nonzero(det < -1e-14))} inverted triangles "
-                    f"(first inverted face={int(np.flatnonzero(det < -1e-14)[0])})"
-                )
+                        "Official rectangular BFF UV folds over: "
+                        f"{int(np.count_nonzero(det>1e-14))} positive and "
+                        f"{int(np.count_nonzero(det < -1e-14))} inverted triangles "
+                        f"(first inverted face={int(np.flatnonzero(det < -1e-14)[0])})"
+                    )
                 span = whole_surface_area_span(x, output.uv_vertices, f)
                 error = _boundary_similarity_error(
                     projected, np.asarray(output.uv_vertices)[loop], w
