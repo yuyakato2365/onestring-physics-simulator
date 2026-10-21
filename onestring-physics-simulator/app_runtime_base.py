@@ -3683,6 +3683,19 @@ elif view_stage == "T2D Dual Hinge":
                         mime="model/stl",
                         key="download_t2d_dual_flexure_mm",
                     )
+                    st.caption(
+                        "STL用にパネルを平面化：元のT2D座標は変更せず、"
+                        "各パネルのXY位置とtop/bottomヒンジ分類を保持したまま、"
+                        "印刷用の下面Z=0・上面Z=指定厚さに投影しています。"
+                        f"変換前の最大面非平面性（最良平面への距離）："
+                        f"{_flex_metrics['flexure_preprint_max_best_fit_face_nonplanarity_mm']:.4g} mm。"
+                    )
+                    if _flex_metrics["flexure_requires_geometry_review"]:
+                        st.warning(
+                            "印刷用投影によってパネル形状が無視できない程度に変わる可能性があります。"
+                            "変換前後の形状・機構運動を確認してください。"
+                            "数値的な共平面性誤差だけを理由に生成を停止することはありません。"
+                        )
                     if _flex_metrics["flexure_max_joint_gap_mm"] > 1e-3:
                         st.warning(
                             "薄肉ヒンジは最終T2Dの接続点間に残った隙間を橋渡ししています。"
