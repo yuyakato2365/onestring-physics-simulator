@@ -47,8 +47,8 @@ def assert_closed_shell(triangles):
 
 
 @pytest.mark.parametrize("side,expected_low,expected_high", [
-    ("top", 1.8, 2.4),
-    ("bottom", -0.4, 0.2),
+    ("top", 1.4, 2.0),
+    ("bottom", 0.0, 0.6),
 ])
 def test_uses_authoritative_top_bottom_surface(side, expected_low, expected_high):
     mesh, metrics = make_flexure_triangles(
@@ -162,8 +162,73 @@ def test_final_export_merges_tile_and_flexure_triangles_without_touching_source(
 
 
 def test_invalid_flexure_parameters_rejected():
-    with pytest.raises(ValueError, match="smaller than skin"):
+    with pytest.raises(ValueError, match="finite positive"):
         make_flexure_triangles(
             fixture(), SimpleNamespace(hinges=[hinge()]),
-            FlexureParameters(skin_mm=.2, embed_mm=.2),
+            FlexureParameters(skin_mm=0.),
         )
+
+
+def test_skin_cannot_exceed_fabrication_slab():
+    from onestring_physics import onestring_pipeline as p
+    tiles = fixture()
+    assembly = SimpleNamespace(vertices=tiles, top_faces=np.array([[0, 1, 2, 3]]),
+                               bottom_faces=np.array([[4, 7, 6, 5]]), metrics={})
+    state = SimpleNamespace(tiles_2d_dual_hinge=assembly,
+                            hinge_graph=SimpleNamespace(hinges=[hinge()]))
+    with pytest.raises(ValueError, match="exceeds print panel thickness"):
+        export_final_t2d_flexure_stl(state, panel_size_mm=40.,
+                                     panel_thickness_mm=.5,
+                                     parameters=FlexureParameters(skin_mm=.6))
+
+
+
+@pytest.mark.parametrize("side", ["top", "bottom"])
+def test_print_export_projects_small_nonplanarity_without_reclassifying_side(side):
+    # Numerical K3D/T2D planarity is not exact. Neighbor tiles can also
+    # retain different Z levels even after 2 mm per-tile extrusion scaling.
+    from onestring_physics import onestring_pipeline as p
+
+    source = fixture()
+    source[0, :4, 2] += np.array([.05, -.09, .06, -.02])
+    source[0, 4:, 2] += np.array([.01, -.04, .02, -.03])
+    source[1, :4, 2] += np.array([.18, .25, .22, .19])
+    source[1, 4:, 2] += np.array([-.11, -.06, -.04, -.08])
+    unchanged = source.copy()
+    t2d = SimpleNamespace(vertices=source, top_faces=np.array([[0, 1, 2, 3]]),
+                          bottom_faces=np.array([[4, 7, 6, 5]]), metrics={})
+    state = SimpleNamespace(
+        tiles_2d_dual_hinge=t2d,
+        hinge_graph=SimpleNamespace(hinges=[hinge(side)]),
+    )
+    data, metrics = export_final_t2d_flexure_stl(
+        state, panel_size_mm=40., panel_thickness_mm=2.,
+        parameters=FlexureParameters(skin_mm=.6, embed_mm=.2),
+    )
+    assert metrics["flexure_print_z_normalized"]
+    assert metrics["flexure_preprint_top_level_spread_mm"] > 0
+    assert metrics["flexure_preprint_bottom_level_spread_mm"] > 0
+    assert metrics["flexure_preprint_max_face_warp_mm"] > 0
+    assert metrics[f"flexure_{side}_count"] == 1
+    assert data.count(b"facet normal") == 44
+    # The original optimized (imperfectly planar) source is NEVER modified.
+    np.testing.assert_array_equal(t2d.vertices, unchanged)
+    assert t2d.metrics == {}
+
+
+def test_print_export_does_not_flatten_source_for_split_boundary_without_joint():
+    source = fixture()
+    source[:, :4, 2] += .3
+    unchanged = source.copy()
+    t2d = SimpleNamespace(
+        vertices=source, top_faces=np.array([[0, 1, 2, 3]]),
+        bottom_faces=np.array([[4, 7, 6, 5]]), metrics={},
+    )
+    state = SimpleNamespace(
+        tiles_2d_dual_hinge=t2d,
+        hinge_graph=SimpleNamespace(hinges=[]),
+    )
+    raw, metrics = export_final_t2d_flexure_stl(state)
+    assert raw.count(b"facet normal") == 24
+    assert metrics["flexure_hinge_count"] == 0
+    np.testing.assert_array_equal(t2d.vertices, unchanged)
