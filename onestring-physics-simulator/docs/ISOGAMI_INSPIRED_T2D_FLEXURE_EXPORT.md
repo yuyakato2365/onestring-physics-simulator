@@ -83,6 +83,29 @@ Suggested *unverified experimental starting values*:
 The STL format has no unit metadata; its vertex numbers mean mm in the new
 export. Original T2D STL exports still use their unchanged settings.
 
+## Handling imperfect T2D coplanarity
+
+The source design optimizes coplanarity but can retain small numerical
+out-of-plane residuals and different panel Z offsets. These deviations
+must **not** be treated as a missing hinge. For this OPTIONAL fabrication
+export only, XY corners and the authoritative top/bottom hinge IDs are
+preserved, while every tile top is projected to Z = panel_thickness_mm and
+bottom to Z = 0. Original optimized T2D vertices and normal STL are not
+modified. No split-edge re-welding occurs.
+
+The exporter records original per-tile Z spread, across-tile top/bottom
+height spread and best-fit-plane residual in millimetres. It warns about
+larger projection changes instead of aborting because of minor nonplanarity.
+This is a **manufacturing approximation**, not a correction to the T2D
+optimization or a proof that the resulting flattened prisms remain exactly
+congruent to the 3D target. A deformable lamella can be generated even when
+its two source joint vertices had slightly different heights.
+
+Top lamella material lies in the upper skin [thickness-skin, thickness],
+and bottom lamella material in the lower skin [0, skin]. Both remain in the
+printable slab, rather than extending below the print bed. The independent
+shells still need a successful mesh/slicer union to be reliably attached.
+
 ## Limitations before printing
 
 - No Boolean union between overlapping shells. Inspect/merge in slicer and
