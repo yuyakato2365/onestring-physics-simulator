@@ -739,6 +739,27 @@ with st.sidebar:
                  "どちらも原論文に明記されていない角の選択方式です。"
                  "OBJ/STL/PLYはTarget Inputのmesh uploadから指定できます。",
         )
+        bff_nonpaper_tutte_rescue_enabled = st.checkbox(
+            "実験：矩形BFFが全滅したら非等角Tutte写像で救済（Paper再現ではない）",
+            value=bool(
+                _reflatten_bff_path and not _lilium_reference_input
+                and not paper_fidelity_enabled
+            ),
+            disabled=bool(
+                paper_fidelity_enabled or not _reflatten_bff_path
+                or bff_rectangle_selection_mode != "source_boundary_shape_fit"
+            ),
+            key=f"nonpaper_tutte_rescue_for_{_corner_mesh_identity}",
+            help="BFF出力が退化・反転する場合のみ、同じ3Dメッシュを変更せず"
+                 "正の重みのTutte矩形写像を解きます。これは等角BFFとは異なり、"
+                 "論文準拠モードでは使用不可。反転・退化の検証は継続します。",
+        )
+        if bff_nonpaper_tutte_rescue_enabled:
+            st.warning(
+                "非等角Tutte救済が有効です。BFF候補が全滅した場合、"
+                "S→Ωに非等角の別手法を用います。"
+                "その場合のSplit本数は元論文のBFF結果と直接比較できません。"
+            )
         paper_split_criterion = st.selectbox(
             "Split CSF判定（論文準拠の研究再構成）",
             ["fixed_uv", "reflatten_tile_area"],
@@ -1812,6 +1833,7 @@ def current_pipeline_key() -> tuple:
         omega_parameterization_mode,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
+        bff_nonpaper_tutte_rescue_enabled,
         paper_split_criterion,
         paper_split_curvature_rings,
         reference_grid_fit_rectangle,
@@ -1970,6 +1992,7 @@ pipeline_params = PipelineParameters(
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
     bff_rectangle_selection_mode=bff_rectangle_selection_mode,
+    bff_nonpaper_tutte_rescue_enabled=bff_nonpaper_tutte_rescue_enabled,
     paper_csf_sampling_method=paper_csf_sampling_method,
     paper_split_area_limit_experiment=paper_split_area_limit_experiment,
     reference_grid_spacing=reference_grid_spacing_value if reference_grid_spacing_value > 0.0 else None,
