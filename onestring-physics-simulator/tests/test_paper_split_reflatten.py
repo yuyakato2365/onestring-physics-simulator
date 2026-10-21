@@ -110,3 +110,68 @@ def test_free_bff_failures_are_never_silently_certified():
         raise RuntimeError("official BFF failed")
     with pytest.raises(RuntimeError,match="official BFF failed"):
         plan_reflatten_cuts(xy,faces,v,f,uv,flatten=broken)
+
+
+
+def test_reflatten_seams_do_not_drop_later_collision_driven_seams(monkeypatch):
+    """When full-pipeline collision feedback rebuilds M2D, both cut classes survive."""
+    from types import SimpleNamespace
+    from onestring_physics import paper_mesh_splitting as split
+    from onestring_physics import paper_split_reflatten as module
+    from onestring_physics import reference_bff as bff
+
+    observed = {}
+    original=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+    faces=np.array([[0,1,2,3]])
+    tri=np.array([[0,1,2],[0,2,3]])
+
+    monkeypatch.setattr(module, "plan_reflatten_cuts",
+        lambda *a,**kw: (
+          [dict(axis="col",value=.5,source_face_id=0)],
+          dict(initial_sigma=2.1,final_max_sigma=1.8,satisfied=True,
+               steps=[dict(parent_face_ids=[0],child_face_ids=[[0],[0]],
+                           parent_sigma=2.1,child_sigma=[1.8,1.7],
+                           curvature_vertex=1,curvature=.9,candidates=[])],
+               leaves=[dict(satisfied=True,sigma=1.8)],
+          ),
+        ))
+    monkeypatch.setattr(split,"chart_geometry",lambda p:(np.column_stack([original,np.zeros(4)]),tri,None))
+    monkeypatch.setattr(bff,"run_official_bff",lambda *a,**kw:None)
+
+    def fake_split(v,f,d,p):
+        observed["forced"]=list(p.collision_split_forced_lines)
+        observed["budget"]=d.max_csf_splits
+        return v.copy(),f.copy(),[
+          dict(axis="col",snapped_value=.5,duplicated_vertices=2),
+          dict(axis="row",snapped_value=.75,duplicated_vertices=3,
+               collision_driven=True)
+        ],dict(split_boundary_pairs=[])
+    monkeypatch.setattr(split,"_split_mesh_single",fake_split)
+    p=SimpleNamespace(
+        bff_executable=None,bff_timeout_seconds=30,
+        paper_split_curvature_rings=3,
+        collision_split_forced_lines=(dict(axis="row",value=.75,source_face_id=0),)
+    )
+    chart=SimpleNamespace(uv_vertices_2d=original,metrics={})
+    domain=SimpleNamespace(parameterization=chart,
+        reference_grid_rotation_degrees=0,max_csf_splits=12)
+    v,f,records,metrics=module.split_mesh_reflatten(original,faces,domain,p)
+    assert observed["budget"]==0
+    assert [c["axis"] for c in observed["forced"]]==["col","row"]
+    assert domain.max_csf_splits==12
+    assert p.collision_split_forced_lines==(
+        dict(axis="row",value=.75,source_face_id=0),)
+    assert metrics["csf_split_step_count"]==1
+    assert metrics["collision_split_count"]==1
+    assert len(metrics["csf_split_step_analysis"])==1
+    assert len(metrics["collision_split_step_analysis"])==1
+    assert metrics["csf_split_duplicated_vertex_count"]==2
+    assert metrics["collision_split_duplicated_vertex_count"]==3
+
+
+def test_figure5_css_stays_with_every_stage_render():
+    from onestring_physics import paper_ui_20260916_patch as ui
+    html=ui._fig(b"\x89PNG placeholder","M2D",.5)
+    assert html.startswith("<style>")
+    assert "class='os-hi'" in html
+    assert ".os-hi{position:absolute" in html
