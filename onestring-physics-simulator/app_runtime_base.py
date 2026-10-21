@@ -688,7 +688,7 @@ with st.sidebar:
         bff_boundary_policy = st.selectbox(
             "BFF boundary policy",
             ["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle", "custom_boundary_curvature"],
-            index=3 if paper_fidelity_enabled else 0,
+            index=3 if (paper_fidelity_enabled or omega_parameterization_mode == "paper_reference_bff") else 0,
             disabled=paper_fidelity_enabled,
             help="target_rectangle uses an independent CLI linked to the official BFF library. Four 90-degree exterior angles are assigned at ordered arclength quartiles. Authors' exact corner positions are not specified.",
         )
@@ -710,15 +710,48 @@ with st.sidebar:
         st.caption("以下は論文の著者実装が未確認の研究用設定です。既定値なら従来のPaperモードと同じです。")
         bff_rectangle_selection_mode = st.selectbox(
             "矩形BFF 四隅の選び方（実験）",
-            ["fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit"],
+            ["fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit", "lobe_tips"],
             format_func=lambda v: {
                 "fixed_phase":"従来の周長4等分（変更なし）",
                 "min_whole_source_area_span_4phase":"4位相から元曲面のCSF比最小を選択",
                 "source_boundary_shape_fit":"Sの境界形状に合う矩形の四隅を自動選択",
+                "lobe_tips":"境界の曲率極大4点（Lilium花弁先端・再展開Split用）",
             }[v],
-            index=2 if postcut_rebff_integrated_mode else 0,
+            index=2 if postcut_rebff_integrated_mode else (
+                3 if omega_parameterization_mode == "paper_reference_bff" else 0
+            ),
             help="同じ3D入力の4つの矩形BFFから、Split数を参照せずに選択。論文にこの手順の記載はありません。",
         )
+        paper_split_criterion = st.selectbox(
+            "Split CSF判定（論文準拠の研究再構成）",
+            ["fixed_uv", "reflatten_tile_area"],
+            index=1 if omega_parameterization_mode == "paper_reference_bff" else 0,
+            disabled=omega_parameterization_mode != "paper_reference_bff",
+            format_func=lambda v: {
+                "fixed_uv": "既存の固定UV / 現行Split（比較用）",
+                "reflatten_tile_area": "3Dピース自由境界BFF再展開 → タイル面積比 ≤ 2",
+            }[v],
+            help="各候補の3D曲面片だけを公式BFFで再展開してCSFを測定。"
+                 "元のM2D格子・K3D・T2Dパネルを再展開UVで置換しません。"
+                 "研究再構成であり著者コードとの一致は未確認。",
+        )
+        paper_split_curvature_rings = int(st.slider(
+            "Split切断点：ガウス曲率平滑化リング数",
+            min_value=1, max_value=10, value=3, step=1,
+            disabled=paper_split_criterion != "reflatten_tile_area",
+        ))
+        reference_grid_fit_rectangle = st.checkbox(
+            "矩形BFFの外接領域にn×nの正方形グリッドを合わせる（実験）",
+            value=omega_parameterization_mode == "paper_reference_bff",
+            disabled=omega_parameterization_mode != "paper_reference_bff",
+            help="短辺をnセルに分割し、端数を左右対称に配置。"
+                 "パネルの後段最適化は変更しません。",
+        )
+        if paper_split_criterion == "reflatten_tile_area":
+            st.info("再展開Splitは論文を参考にした研究再構成です。"
+                    "M2Dと後段パネルを元のグリッドに固定して、"
+                    "3Dの切断片の自由BFFのみでCSFを評価します。"
+                    "外部BFF実行ファイルが必要で計算時間が増えます。")
         paper_csf_sampling_method = st.selectbox(
             "CSF離散評価（実験）",
             ["m2d_m3d_dual_centroid", "m2d_m3d_panel_area",
@@ -1733,6 +1766,9 @@ def current_pipeline_key() -> tuple:
         omega_parameterization_mode,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
+        paper_split_criterion,
+        paper_split_curvature_rings,
+        reference_grid_fit_rectangle,
         postcut_rebff_integrated_mode,
         postcut_rebff_budget,
         postcut_rebff_preview_unconverged,
@@ -1882,6 +1918,9 @@ pipeline_params = PipelineParameters(
     omega_parameterization_mode=omega_parameterization_mode,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
+    paper_split_criterion=paper_split_criterion,
+    paper_split_curvature_rings=paper_split_curvature_rings,
+    reference_grid_fit_rectangle=reference_grid_fit_rectangle,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
     bff_rectangle_selection_mode=bff_rectangle_selection_mode,
