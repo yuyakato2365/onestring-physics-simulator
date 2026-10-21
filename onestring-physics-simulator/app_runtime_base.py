@@ -3645,12 +3645,12 @@ elif view_stage == "T2D Dual Hinge":
             )
             _flex_max_gap_mm = st.number_input(
                 "製造用ヒンジが橋渡しする最大接続ギャップ (mm)",
-                min_value=0.1, max_value=5.0, value=1.5, step=0.1,
+                min_value=0.1, max_value=50.0, value=1.5, step=0.1,
                 key="flexure_max_joint_gap_mm",
                 help=(
                     "Dual Hinge最適化後に2つの接続点がずれている場合、"
                     "薄肉ヒンジでその隙間を橋渡しします。これはT2Dの接続誤差を修正しません。"
-                    "大きすぎる隙間は造形・組立不能となるため制限してください。"
+                    "設定上限は50 mm（5 cm）。大きなギャップは物理的な製造・組立可能性を意味しません。"
                 ),
             )
             if st.checkbox(
