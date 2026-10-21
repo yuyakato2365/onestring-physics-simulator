@@ -118,3 +118,106 @@ A full Lilium end-to-end check additionally requires the verified
 \`lilium.obj\` and both external official BFF executables. No result
 should be treated as a paper reproduction until the numerical output
 has been measured.
+
+
+## General inputs beyond Lilium (2026-10-21 follow-up)
+
+The new reflatten Split has **never** needed a Lilium-specific source topology.
+Its generality was limited by the UI's Lilium-specific rectangular BFF
+corner preset, and by the Lilium-named verification script.
+
+The Streamlit \`mesh upload\` widget already supports OBJ/STL/PLY. The
+generalized mode now automatically chooses \`source_boundary_shape_fit\`
+for non-Lilium input names, and preserves \`lobe_tips\` for named
+\`lilium*.obj\` reference meshes. These options remain manually selectable.
+The UI reinitializes the corner-selection widget when the selected input
+file changes, so a previous Lilium choice is not silently carried over.
+
+The standalone generic audit is:
+
+\`\`\`bash
+python scripts/run_reflatten_split.py --mesh /path/to/any-open-surface.obj --grid 14
+python scripts/run_reflatten_split.py --mesh /path/to/open-surface.stl --grid 20
+python scripts/run_reflatten_split.py --mesh /path/to/open-surface.ply --grid 16
+python scripts/run_reflatten_split.py --builtin dome --grid 14
+python scripts/run_reflatten_split.py --builtin saddle --grid 14
+# Repeat the Lilium benchmark, preserving its original boundary preset:
+python scripts/run_reflatten_split.py --mesh /path/to/lilium.obj --grid 14 --expect-splits 1
+\`\`\`
+
+External official BFF CLI executables must still be built/available.
+\`--mesh\` and \`--builtin\` are exclusive and neither hard-codes a
+split count. The \`--expect-splits\` flag is only an assertion after
+all numerical work has finished. The original
+\`scripts/verify_reflatten_lilium.py\` stays available for compatibility.
+
+### Input restrictions
+
+The official BFF and present source-piece slicing require a **single,
+oriented, manifold triangulated disk with exactly one open boundary**.
+An OBJ/STL/PLY describing a closed genus-0 animal, a multi-boundary
+surface, multiple disconnected islands, or a nonmanifold mesh is
+not automatically unfolded or cut for this algorithm. Its topology
+is validated with \`validate_reference_mesh\`, and a clear error is
+raised without automatic face deletion, unsupported hole filling, or
+fabrication claims. Producing a valid opening cut for a closed 3D
+surface is a separate inverse-design/topology problem.
+
+\`source_boundary_shape_fit\` tests multiple rectangular-BFF corner
+candidates and scores fit to the source boundary. It is less tied to
+Lilium's four petal extrema but is **an expensive unverified heuristic**:
+it may fail on unusually shaped boundaries, and does not guarantee
+numerical convergence. It is NOT the authors' published criterion.
+
+### Comparison with Zaman et al., Section 4.5
+
+Paper: generate corresponding M2D/M3D from a conformal map and grid;
+introduce hierarchical complete grid-direction bisections passing
+through highest Gaussian curvature where the CSF is too high, until
+every part meets the criterion \(\sigma\le2\). The section does
+**not specify** the discrete 3-ring curvature averaging, how to
+choose between row/column, per-candidate free-BFF reflattening, or
+this implementation's tile-by-tile area range.
+
+Current reconstruction: initial official rectangular BFF, grid
+cropping, curvature per source vertex from discrete angle defect over
+vertex area averaged over 3 adjacency rings; interpolate it onto
+interior grid vertices, select the maximum; evaluate one complete
+row and column cut, intersect the triangulated 3D surface with
+each trial cut line, do **official free-boundary BFF separately for
+both child pieces**, compute the per-tile 3D/free-BFF 2D area ratios
+and their maximum/minimum spread, prefer the smaller worst-child
+spread. Continue recursively until spread <=2, budget exhausted, or
+no admissible complete cut. The new BFF charts are diagnostic:
+they are **not** substituted for original M2D panel coordinates.
+
+The paper calls the local conformal scale factor \(\lambda\) and an
+upper bound \(\sigma=2\), while Supplement Fig. 18 discusses an
+area-expansion limit for quadrilateral auxetics. For a locally
+conformal map the area Jacobian is \(\lambda^2\).
+This reconstruction compares an *area ratio of extremes* directly
+to 2; this is a research interpretation and should not be relabeled
+as a verified bound on local linear CSF or the physical mechanism.
+
+Previous \`fixed_uv\` Split: assesses all components on the **same
+initial conformal UV map** (with user-selected per-triangle or
+M2D/M3D area proxies) and no per-child free-BFF solve. It can
+therefore overestimate distortion that a child could release upon
+reflattening. The new method evaluates that release but adds
+BFF cost, more boundary dependence, and more failure cases.
+Neither is a faithful published reconstruction of undocumented
+authors' solver details.
+
+Independently, \`collision_split_enabled\` is the downstream
+SAT/panel-overlap response: candidate complete seams are evaluated
+by full M2D->T2D rebuild and collision/hinge acceptance. It
+addresses a **different feasibility failure** from conformal scale.
+
+Validation: general-input tests in
+\`tests/test_generic_reflatten_inputs.py\` cover open OBJ inputs,
+built-in dome, expected result report, unchanged named Lilium preset,
+and explicit rejection of closed tetrahedra. Existing
+\`tests/test_paper_split_reflatten.py\` covers area conservation,
+planar zero-cut, curvature-peak boundary corners, BFF failure,
+split provenance and display. These tests **do not yet replace
+real end-to-end BFF/M3D/K3D/T2D runs** on non-Lilium geometry.
