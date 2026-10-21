@@ -189,3 +189,41 @@ def make_flexure_triangles(
         "flexure_collision_and_folding_validation": "not_performed",
     }
     return triangles, metrics
+
+
+def export_final_t2d_flexure_stl(
+    source,
+    *,
+    hinge_graph=None,
+    panel_size_mm: float = 40.0,
+    panel_thickness_mm: float = 2.0,
+    parameters: FlexureParameters = FlexureParameters(),
+) -> tuple[bytes, dict[str, object]]:
+    """Independent OPTIONAL fabrication export; leaves optimization and stock STL untouched.
+
+    STL is unitless: coordinates are in **mm** for direct use in Bambu Studio.
+    Importers must merge intersecting shells. No boolean, relief cuts, or
+    folding/stress validation is performed.
+    """
+    from . import onestring_pipeline as pipeline
+
+    if not (np.isfinite(panel_size_mm) and panel_size_mm > 0
+            and np.isfinite(panel_thickness_mm) and panel_thickness_mm > 0):
+        raise ValueError("panel size and thickness must be positive millimetres")
+    assembly = pipeline._resolve_t2d_assembly(source, "dual_hinge")
+    graph = hinge_graph if hinge_graph is not None else getattr(source, "hinge_graph", None)
+    if graph is None:
+        raise ValueError("the final T2D Dual Hinge graph is required")
+    tiles, tile_triangles, metrics = pipeline._t2d_stl_mesh_and_metrics(
+        assembly, panel_size=float(panel_size_mm), thickness=float(panel_thickness_mm)
+    )
+    ribbons, flexure_metrics = make_flexure_triangles(tiles, graph, parameters)
+    all_triangles = tile_triangles + ribbons
+    result_metrics = dict(metrics)
+    result_metrics.update(flexure_metrics)
+    result_metrics["t2d_face_count"] = len(all_triangles)
+    result_metrics["t2d_connected_component_count"] = len(tiles) + len(graph.hinges)
+    result_metrics["t2d_fabrication_unit"] = "mm (STL coordinates, not metadata)"
+    result_metrics["t2d_export_exactness_label"] = "experimental_flexure_geometry_not_validated"
+    data = pipeline._ascii_stl_bytes("onestring_t2d_dual_flexure_mm", all_triangles)
+    return data, result_metrics
