@@ -2729,6 +2729,9 @@ def _build_surface_parameterization(surface, target, grid, params):
                     bool(getattr(params,"bff_nonpaper_tutte_rescue_enabled",False))
                     and not bool(getattr(params,"paper_fidelity_mode",False))
                 ),
+                csf_normalization=str(getattr(
+                    params, "reference_csf_normalization", "min_to_one_hypothesis_a"
+                )),
             )
         elif selection_mode == "min_whole_source_area_span_4phase":
             if boundary_policy != "target_rectangle":
