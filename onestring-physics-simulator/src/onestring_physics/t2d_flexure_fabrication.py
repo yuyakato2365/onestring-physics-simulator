@@ -19,7 +19,7 @@ class FlexureParameters:
     width_mm: float = 1.2
     skin_mm: float = 0.5
     anchor_inset_mm: float = 2.5
-    embed_mm: float = 0.18
+    embed_mm: float = 0.18  # additional in-plane insertion into the rigid tile
     # An optimized rigid-hinge point can retain a small residual gap. The
     # printable strip BRIDGES that gap without modifying T2D or welding seams.
     # Limit is deliberately finite; physically large gaps remain rejected.
@@ -106,8 +106,6 @@ def make_flexure_triangles(
               p.max_joint_gap_mm, p.max_face_z_spread_mm, p.max_miter_ratio)
     if not all(np.isfinite(val) and val > 0 for val in values):
         raise ValueError("all flexure settings must be finite positive values")
-    if p.embed_mm >= p.skin_mm:
-        raise ValueError("embed_mm must be smaller than skin_mm")
     if p.anchor_inset_mm <= p.width_mm / 2:
         raise ValueError("anchor inset must be larger than half the ribbon width")
     if p.max_miter_ratio < 1:
@@ -158,20 +156,25 @@ def make_flexure_triangles(
         center_a, center_b = face_a[:, :2].mean(axis=0), face_b[:, :2].mean(axis=0)
         interior_a = _unit(center_a-joint_a[:2])
         interior_b = _unit(center_b-joint_b[:2])
-        step_a = min(p.anchor_inset_mm, 0.45 * np.linalg.norm(center_a-joint_a[:2]))
-        step_b = min(p.anchor_inset_mm, 0.45 * np.linalg.norm(center_b-joint_b[:2]))
+        # End overlap is IN PLANE. This avoids putting bottom-side lamellae
+        # below the build plate (the former implementation did precisely that).
+        step_a = min(p.anchor_inset_mm + p.embed_mm, 0.45 * np.linalg.norm(center_a-joint_a[:2]))
+        step_b = min(p.anchor_inset_mm + p.embed_mm, 0.45 * np.linalg.norm(center_b-joint_b[:2]))
         if min(step_a, step_b) < p.width_mm / 2:
             raise ValueError(f"hinge {index}: tile corner is too small for requested ribbon width")
         a_anchor = joint_a[:2] + step_a * interior_a
         b_anchor = joint_b[:2] + step_b * interior_b
         path = np.stack((a_anchor, gap_xy, b_anchor))
         zface = 0.5 * float(joint_a[2] + joint_b[2])
+        # Both strips stay WITHIN the common fabrication slab [0, plate_thickness].
+        # The material on the panel face is already present over the anchored
+        # end, so independent intersecting shells require a slicer Boolean union.
         if surface == "top":
-            zlo = zface - p.embed_mm
-            zhi = zlo + p.skin_mm
+            zlo, zhi = zface - p.skin_mm, zface
         else:
-            zhi = zface + p.embed_mm
-            zlo = zhi - p.skin_mm
+            zlo, zhi = zface, zface + p.skin_mm
+        if zlo < -1e-6 or zhi > float(np.min(v[:, :4, 2])) + 1e-6:
+            raise ValueError(f"hinge {index}: skin thickness exceeds printable panel slab")
         try:
             mesh = _strip_mesh(path, p.width_mm, zlo, zhi, p.max_miter_ratio)
         except ValueError as exc:
@@ -194,6 +197,8 @@ def make_flexure_triangles(
         "flexure_skin_mm": p.skin_mm,
         "flexure_anchor_inset_mm": p.anchor_inset_mm,
         "flexure_embed_mm": p.embed_mm,
+        "flexure_embed_semantics": "additional_XY_anchor_inset_not_vertical_extension",
+        "flexure_z_layout": "inside_shared_panel_slab_printable_on_bed",
         "flexure_units": "mm",
         "flexure_source": "authoritative final HingeGraph, not new geometric inference",
         "flexure_boolean_union": "not_performed_overlapping_closed_solids_require_slicer_merge",
@@ -226,9 +231,33 @@ def export_final_t2d_flexure_stl(
     graph = hinge_graph if hinge_graph is not None else getattr(source, "hinge_graph", None)
     if graph is None:
         raise ValueError("the final T2D Dual Hinge graph is required")
-    tiles, tile_triangles, metrics = pipeline._t2d_stl_mesh_and_metrics(
+    tiles, _original_triangles, metrics = pipeline._t2d_stl_mesh_and_metrics(
         assembly, panel_size=float(panel_size_mm), thickness=float(panel_thickness_mm)
     )
+    # The old STL helper scales each tile's Z extent about its OWN Z centre.
+    # Even when the source is conceptually T2D, this leaves different top/bottom
+    # face levels and makes top/bottom fabrication hinges impossible to share
+    # a common plate. For this opt-in export ONLY, preserve every source XY
+    # footprint and the explicit top/bottom vertex IDs, but level all print
+    # panels to a common bed and uniform user-selected thickness.
+    tiles = tiles.copy()
+    original_top_z = tiles[:, :4, 2].copy()
+    original_bottom_z = tiles[:, 4:, 2].copy()
+    pre_top_spread = float(np.ptp(original_top_z.mean(axis=1))) if len(tiles) else 0.
+    pre_bottom_spread = float(np.ptp(original_bottom_z.mean(axis=1))) if len(tiles) else 0.
+    pre_tile_face_warp = max(
+        float(np.max(np.ptp(original_top_z, axis=1))) if len(tiles) else 0.,
+        float(np.max(np.ptp(original_bottom_z, axis=1))) if len(tiles) else 0.,
+    )
+    if parameters.skin_mm > panel_thickness_mm:
+        raise ValueError(
+            f"flexure skin {parameters.skin_mm:g} mm exceeds print panel "
+            f"thickness {panel_thickness_mm:g} mm"
+        )
+    tiles[:, :4, 2] = float(panel_thickness_mm)
+    tiles[:, 4:, 2] = 0.
+    local_tris = pipeline._prism_triangle_indices()
+    tile_triangles = [tile[list(tri)] for tile in tiles for tri in local_tris]
     ribbons, flexure_metrics = make_flexure_triangles(tiles, graph, parameters)
     all_triangles = tile_triangles + ribbons
     result_metrics = dict(metrics)
@@ -237,5 +266,14 @@ def export_final_t2d_flexure_stl(
     result_metrics["t2d_connected_component_count"] = len(tiles) + len(graph.hinges)
     result_metrics["t2d_fabrication_unit"] = "mm (STL coordinates, not metadata)"
     result_metrics["t2d_export_exactness_label"] = "experimental_flexure_geometry_not_validated"
+    result_metrics["flexure_print_z_normalized"] = True
+    result_metrics["flexure_preprint_top_level_spread_mm"] = pre_top_spread
+    result_metrics["flexure_preprint_bottom_level_spread_mm"] = pre_bottom_spread
+    result_metrics["flexure_preprint_max_face_warp_mm"] = pre_tile_face_warp
+    result_metrics["flexure_print_z_bounds_mm"] = [0., float(panel_thickness_mm)]
+    result_metrics["flexure_print_shape_semantics"] = (
+        "XY geometry preserved; per-tile Z flattened to common printable slab; "
+        "upstream T2D solution unchanged; not proof of rigid congruence"
+    )
     data = pipeline._ascii_stl_bytes("onestring_t2d_dual_flexure_mm", all_triangles)
     return data, result_metrics
