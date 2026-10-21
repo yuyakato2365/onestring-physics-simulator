@@ -1774,8 +1774,29 @@ def build_target():
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as fh:
         fh.write(uploaded.getbuffer())
         temp_path = fh.name
-    st.warning(CLOSED_SHAPE_WARNING)
-    return load_target_shape(temp_path)
+    result = load_target_shape(temp_path)
+    if (paper_split_criterion == "reflatten_tile_area"
+            and (paper_fidelity_enabled or omega_parameterization_mode == "paper_reference_bff")):
+        from onestring_physics.reference_bff import (
+            validate_reference_mesh, ReferenceMeshValidationError,
+        )
+        try:
+            _mesh_input_topology = validate_reference_mesh(result.points, result.faces)
+        except ReferenceMeshValidationError as exc:
+            raise ValueError(
+                "再展開Splitが現在対応するのは、三角形が適切に接続した1つの開いた円板型曲面です。"
+                "閉曲面なら切断・境界追加、穴あき面なら適切な位相修正を先に行ってください。"
+                f" 入力メッシュ診断: {exc}"
+            ) from exc
+        st.caption(
+            f"入力メッシュ: {uploaded.name} / "
+            f"{_mesh_input_topology['vertex_count']} 頂点 / "
+            f"{_mesh_input_topology['triangle_count']} 三角形 / "
+            "開いた円板型曲面として検証済み"
+        )
+    else:
+        st.caption(f"入力メッシュ: {uploaded.name}（OBJ/STL/PLY）")
+    return result
 
 
 def current_pipeline_key() -> tuple:
