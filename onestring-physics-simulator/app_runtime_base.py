@@ -713,6 +713,15 @@ with st.sidebar:
         # with target_rectangle. Base the re-flatten defaults on that effective
         # route, otherwise Paper mode silently keeps fixed_phase / fixed_uv.
         _reflatten_bff_path = bool(paper_fidelity_enabled) or omega_parameterization_mode == "paper_reference_bff"
+        # The lobe-tip heuristic is a Lilium-specific benchmark preset,
+        # NOT an appropriate default for a generic open surface. Select an
+        # existing general boundary-fitting algorithm for other meshes.
+        _mesh_name = str(getattr(uploaded, "name", "") or "")
+        _lilium_reference_input = bool(
+            _mesh_name and Path(_mesh_name).stem.lower().startswith("lilium")
+        )
+        _generic_bff_corner_index = (3 if _lilium_reference_input else 2)
+        _corner_mesh_identity = Path(_mesh_name).stem.lower() if _mesh_name else str(target_kind)
         bff_rectangle_selection_mode = st.selectbox(
             "矩形BFF 四隅の選び方（実験）",
             ["fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit", "lobe_tips"],
@@ -723,9 +732,12 @@ with st.sidebar:
                 "lobe_tips":"境界の曲率極大4点（Lilium花弁先端・再展開Split用）",
             }[v],
             index=2 if postcut_rebff_integrated_mode else (
-                3 if _reflatten_bff_path else 0
+                _generic_bff_corner_index if _reflatten_bff_path else 0
             ),
-            help="同じ3D入力の4つの矩形BFFから、Split数を参照せずに選択。論文にこの手順の記載はありません。",
+            key=f"bff_rectangle_selection_for_{_corner_mesh_identity}",
+            help="Liliumの検証用入力ではlobe_tips、その他は汎用境界フィットを既定にします。"
+                 "どちらも原論文に明記されていない角の選択方式です。"
+                 "OBJ/STL/PLYはTarget Inputのmesh uploadから指定できます。",
         )
         paper_split_criterion = st.selectbox(
             "Split CSF判定（論文準拠の研究再構成）",
@@ -753,6 +765,14 @@ with st.sidebar:
                  "パネルの後段最適化は変更しません。",
         )
         if paper_split_criterion == "reflatten_tile_area":
+            if uploaded is None:
+                st.caption(
+                    "現在の入力: 内蔵形状 / ローカル自動探索。"
+                    "別のOBJ/STL/PLYを試すにはTarget Input → mesh uploadを使用してください。"
+                    "再展開Splitは開いた円板型曲面を対象とし、閉曲面は事前に切断が必要です。"
+                )
+            else:
+                st.caption(f"再展開Split入力: {uploaded.name}（Lilium固有の形状条件なし）")
             st.info("再展開Splitは論文を参考にした研究再構成です。"
                     "M2Dと後段パネルを元のグリッドに固定して、"
                     "3Dの切断片の自由BFFのみでCSFを評価します。"
