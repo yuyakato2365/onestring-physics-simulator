@@ -263,9 +263,105 @@ def choose_rectangle_by_source_boundary_fit(
                 "failed_reason":f"{type(exc).__name__}: {str(exc)[:350]}",
             })
     if winning is None:
+        # The general boundary-fit presets are only a heuristic. A valid disk
+        # may still have a non-injective rectangle BFF chart for every PCA
+        # corner choice and every coarse quartile phase. Broaden the phase
+        # search ONLY in that case; do not change the Lilium lobe-tip path or
+        # accept any degenerate/flipped chart merely to suppress an exception.
+        fallback_candidates = [
+            dict(method="boundary_arclength_quartiles_dense", phase=i/64.)
+            for i in range(1, 16)
+            if i % 4 != 0
+        ]
+        # Additional source-boundary maxima provide a qualitatively different
+        # four-corner arrangement on non-rectangular boundaries. The optional
+        # heuristic is still validated by the exact SAME UV checks.
+        from .paper_split_reflatten import lobe_tip_corner_positions
+        for window in (3, 7, 11):
+            try:
+                fallback_candidates.append(dict(
+                    method="boundary_curvature_extrema",
+                    corner_window=window,
+                    source_xyz=lobe_tip_corner_positions(x, f, window=window).tolist(),
+                ))
+            except ValueError as exc:
+                attempts.append(dict(
+                    source_corner_method="boundary_curvature_extrema",
+                    source_corner_window=window,
+                    failed_reason=f"{type(exc).__name__}: {str(exc)[:350]}",
+                ))
+        for candidate in fallback_candidates:
+            kw = dict(
+                rectangle_executable=rectangle_executable,
+                boundary_policy="target_rectangle",
+                timeout_seconds=timeout_seconds,
+            )
+            if "source_xyz" in candidate:
+                kw["rectangle_corner_positions"] = np.asarray(candidate["source_xyz"], float)
+            else:
+                kw["rectangle_corner_phase_fraction"] = candidate["phase"]
+            try:
+                output = runner(x, f, **kw)
+                if output.metrics.get("bff_rectangle_verified") is not True:
+                    raise ValueError("BFF output boundary failed rectangle verification")
+                uvfaces = np.asarray(output.uv_vertices, float)[f]
+                e = uvfaces[:, 1] - uvfaces[:, 0]
+                g = uvfaces[:, 2] - uvfaces[:, 0]
+                det = e[:, 0]*g[:, 1] - e[:, 1]*g[:, 0]
+                if np.any(det > 1e-14) and np.any(det < -1e-14):
+                    raise ValueError("Rectangular BFF candidate has mixed UV triangle orientations")
+                span = whole_surface_area_span(x, output.uv_vertices, f)
+                error = _boundary_similarity_error(
+                    projected, np.asarray(output.uv_vertices)[loop], w
+                )
+                expected = np.ptp(projected, axis=0)
+                actual = np.ptp(np.asarray(output.uv_vertices, float)[loop], axis=0)
+                aspect_source = float(np.max(expected)/max(np.min(expected), 1e-15))
+                aspect_uv = float(np.max(actual)/max(np.min(actual), 1e-15))
+                aspect_error = abs(float(np.log(aspect_uv/aspect_source)))
+                score = error + .10*aspect_error + .06*float(np.log(np.sqrt(span)))
+                row = dict(
+                    source_corner_method=candidate["method"],
+                    source_corner_window=candidate.get("corner_window"),
+                    source_pca_angle_degrees=None,
+                    source_corner_vertex_ids=None,
+                    boundary_arclength_phase=candidate.get("phase"),
+                    normalized_boundary_fit_rmse=error,
+                    aspect_log_error=aspect_error,
+                    whole_source_linear_csf_span=float(np.sqrt(span)),
+                    total_boundary_fit_score=float(score),
+                    rectangle_aspect_ratio=aspect_uv,
+                    corner_boundary_wedge_indices=output.metrics.get(
+                        "bff_rectangle_corner_boundary_wedge_indices"
+                    ),
+                )
+                attempts.append(row)
+                if winning is None or (score, span) < winning[0]:
+                    winning = ((score, span), candidate, output, row)
+            except (ValueError, RuntimeError) as exc:
+                attempts.append(dict(
+                    source_corner_method=candidate["method"],
+                    source_corner_window=candidate.get("corner_window"),
+                    source_pca_angle_degrees=None,
+                    source_corner_vertex_ids=None,
+                    boundary_arclength_phase=candidate.get("phase"),
+                    failed_reason=f"{type(exc).__name__}: {str(exc)[:350]}",
+                ))
+    if winning is None:
+        from collections import Counter
+        failures = Counter(
+            item["failed_reason"].split(":")[0]
+            for item in attempts if "failed_reason" in item
+        )
         raise ReferenceBFFError(
-            "All initial boundary-fit official rectangular BFF candidates failed: "
-            +str(attempts[-5:])
+            f"All {len(attempts)} original + adaptive rectangular BFF corner "
+            f"candidates failed (reasons={dict(failures)}). "
+            "No geometrically valid and consistently oriented rectangular "
+            "BFF chart was found; the input was NOT altered or accepted "
+            "with a foldover. Inspect short/skinny triangles and boundary "
+            "shape, try a different explicit corner mode, or remesh the "
+            "surface without changing its topology. "
+            f"Last five candidate diagnostics: {attempts[-5:]}"
         )
     _,chosen,result,entry=winning
     return BFFRunResult(
@@ -277,6 +373,14 @@ def choose_rectangle_by_source_boundary_fit(
             "bff_corner_selection_attempts":attempts,
             "bff_corner_selection_attempt_count":len(attempts),
             "bff_corner_selection_valid_count":sum("total_boundary_fit_score" in x for x in attempts),
+            "bff_corner_selection_adaptive_search_used":bool(
+                entry["source_corner_method"] in (
+                    "boundary_arclength_quartiles_dense", "boundary_curvature_extrema"
+                )
+            ),
+            "bff_corner_selection_rejected_count":sum(
+                "failed_reason" in row for row in attempts
+            ),
             "bff_corner_selection_selected_score":float(entry["total_boundary_fit_score"]),
             "bff_corner_selection_selected_source_xyz":chosen.get("source_xyz"),
             "bff_corner_selection_selected_source_vertex_ids":chosen.get("source_vertex_ids"),
