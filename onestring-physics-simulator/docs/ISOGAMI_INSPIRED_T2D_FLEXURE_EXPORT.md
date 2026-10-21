@@ -1,0 +1,98 @@
+# Experimental IsoGami-inspired PP lamella hinges on final T2D
+
+## What this adds
+
+After the **final T2D Dual Hinge** layout, a separate, optional STL exporter
+creates thin lamella-like flexure strips alongside the **existing tile prisms**.
+This is a geometric adaptation of the polypropylene lamella concept in
+Han et al., *IsoGami: Rigid-Deployable Kirigami Materials From Isohedral
+Tilings* (SIGGRAPH 2026, Sec. 5.2), not a claim to reproduce the authors'
+undisclosed print geometry or parameters.
+
+**Do not confuse kinematics:** IsoGami hinges facilitate planar rotation;
+OneString hinges fold panels in 3D. Mechanical viability of this new geometry
+has not been demonstrated.
+
+## Authoritative hinge surface and split handling
+
+- Uses only the final state **state.hinge_graph.hinges**, produced by the T2D
+  dual-hinge optimizer. No closest-vertex search, reclassified curvature
+  sign, or connection across split seams.
+- Each Hinge supplies tile_a, tile_b, local_vertex_a, local_vertex_b, and
+  surface ("top" or "bottom").
+- top requires indices 0..3 and puts the lamella on the upper (+Z) face.
+- bottom requires indices 4..7 and puts it on the lower (-Z) face.
+- Violations raise exceptions instead of quietly flipping side or welding
+  disconnected components.
+
+## Mesh algorithm
+
+1. Reuse the **existing final dual T2D** panel solid coordinates and
+   _t2d_stl_mesh_and_metrics. The separate print export scales the median
+   panel edge to an explicit size in **millimetres**.
+2. Normalize the vertical thickness to an adjustable nominal panel thickness
+   through the existing export helper (does not mutate source T2D).
+3. For every *listed* final joint, find points a,b via its local indices.
+   Verify their 3D positions are within max_joint_gap_mm and their
+   designated faces are approximately horizontal and at similar Z.
+4. Find inward anchor points along each hinge-vertex-to-face-centroid direction.
+   Form a bent three-point centerline: anchor A -> joint midpoint -> anchor B.
+5. Extrude one closed mitered lamella of adjustable in-plane width and Z
+   thickness along that centerline. Each end intentionally overlaps the
+   respective panel on the **designated top or bottom face** by embed_mm.
+6. Append lamella triangles to the panel triangles as **separate intersecting
+   closed shells**. A later slicer/mesh Boolean union is required.
+
+The algorithm intentionally rejects major gaps, incompatible hinge-side
+indices, tilted face Z spreads and extreme miter angles. This does **not**
+prove the resulting flat pattern has no new accidental intersections or
+that its out-of-plane folding is mechanically feasible.
+
+## UI / defaults
+
+Launch the same usual Streamlit app (for example:
+
+    streamlit run app_optcuts_20260923_extrusion_aware.py
+
+after repository installation). Once the final "T2D Dual Hinge" tab can
+export its normal STL, expand:
+
+    実験：IsoGami型PP薄肉ヒンジ付き T2D STL（mm）
+
+and tick the generation checkbox. This intentionally does **not** run if
+hard T2D nonpenetration was not satisfied.
+
+Suggested *unverified experimental starting values*:
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| panel size | 40 mm | Median edge length after scaling |
+| panel thickness | 2 mm | Z extent of the source tile, normalized |
+| flexure width | 1.2 mm | XY strip width |
+| flexure thickness | 0.6 mm | Total flexible Z cross-section |
+| anchor inset | 3 mm | Connection depth from each stored joint |
+| embed | 0.2 mm | Strip intersection with chosen rigid-panel face |
+
+The STL format has no unit metadata; its vertex numbers mean mm in the new
+export. Original T2D STL exports still use their unchanged settings.
+
+## Limitations before printing
+
+- No Boolean union between overlapping shells. Inspect/merge in slicer and
+  verify every intended connector is **one continuous printable body**.
+- No thickness-dependent stress calculation, flexure fatigue, printer profile,
+  supports, orientation, collision sweep, relief notch or tolerance tuning.
+- Thin PP hinges should be tested on small samples before printing the full
+  panel layout. In particular, the small free length near a point hinge may
+  not sustain large-angle folding; a later relief geometry may be needed.
+- The solver's rigid pin-joint kinematics do not model flexure bending
+  torque. Do not interpret this exporter as a OneString fabrication proof.
+- If the graph contains no hinges, **none are fabricated**. Disconnected
+  components remain disconnected.
+
+## Automated tests
+
+    python -m pytest -q tests/test_t2d_flexure_fabrication.py \
+        tests/test_paper_t2d.py tests/test_t2d_pipeline_ui_wiring.py
+
+The targeted branch also contains a GitHub Actions job that runs these tests.
