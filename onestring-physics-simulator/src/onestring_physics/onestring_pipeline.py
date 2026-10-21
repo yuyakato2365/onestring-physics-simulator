@@ -959,7 +959,7 @@ class PipelineParameters(_original.PipelineParameters):
     paper_fidelity_mode: bool = False
     # Experimental paper-interpretation studies; defaults remain unchanged.
     bff_rectangle_selection_mode: Literal[
-        "fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit"
+        "fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit", "lobe_tips"
     ] = "fixed_phase"
     paper_split_area_limit_experiment: bool = False
     paper_csf_sampling_method: Literal["m2d_m3d_dual_centroid", "m2d_m3d_panel_area", "overlap_extrema", "interpolated_grid_vertices"] = "m2d_m3d_dual_centroid"
