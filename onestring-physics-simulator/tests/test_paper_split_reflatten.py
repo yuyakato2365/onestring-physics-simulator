@@ -175,3 +175,24 @@ def test_figure5_css_stays_with_every_stage_render():
     assert html.startswith("<style>")
     assert "class='os-hi'" in html
     assert ".os-hi{position:absolute" in html
+
+
+
+def test_3d_split_replay_preserves_original_m3d_vertices():
+    from types import SimpleNamespace
+    from onestring_physics.reflatten_split_view import figure_reflatten_split_3d
+
+    vertices=np.array([[0.,0.,0.],[1.,0.,0.],[1.,1.,.1],[0.,1.,0.]])
+    originals=vertices.copy()
+    faces=np.array([[0,1,2,3]])
+    m2d=SimpleNamespace(
+        vertices=vertices[:,:2].copy(),faces=faces,
+        metrics=dict(csf_split_criterion="reflatten_tile_area",
+                     csf_split_initial_components=[dict(face_ids=[0],sigma=1.2)],
+                     csf_split_step_analysis=[]),
+    )
+    state=SimpleNamespace(mesh_2d_initial=m2d,
+        mesh_3d_initial=SimpleNamespace(vertices=vertices,faces=faces))
+    fig,rows=figure_reflatten_split_3d(state,0)
+    assert fig is not None and rows[0]["M2D panel count"]==1
+    np.testing.assert_array_equal(vertices,originals)
