@@ -962,6 +962,7 @@ class PipelineParameters(_original.PipelineParameters):
         "fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit", "lobe_tips"
     ] = "fixed_phase"
     paper_split_area_limit_experiment: bool = False
+    bff_nonpaper_tutte_rescue_enabled: bool = False
     paper_csf_sampling_method: Literal["m2d_m3d_dual_centroid", "m2d_m3d_panel_area", "overlap_extrema", "interpolated_grid_vertices"] = "m2d_m3d_dual_centroid"
     model_version: str = "2026-07-12-one-sided-t3d"
     use_principal_curvature_grid: bool = False
@@ -2724,6 +2725,10 @@ def _build_surface_parameterization(surface, target, grid, params):
                 surface_vertices,surface_faces,
                 rectangle_executable=getattr(params,"bff_rectangle_executable",None),
                 timeout_seconds=float(getattr(params,"bff_timeout_seconds",120.0)),
+                allow_nonconformal_rescue=(
+                    bool(getattr(params,"bff_nonpaper_tutte_rescue_enabled",False))
+                    and not bool(getattr(params,"paper_fidelity_mode",False))
+                ),
             )
         elif selection_mode == "min_whole_source_area_span_4phase":
             if boundary_policy != "target_rectangle":
@@ -2761,10 +2766,20 @@ def _build_surface_parameterization(surface, target, grid, params):
             )
         boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
         lambda_values = np.asarray(differential["lambda"], dtype=float)
+        _tutte_rescue_used = bool(result.metrics.get("nonpaper_rectangle_rescue_used", False))
+        if _tutte_rescue_used and bool(getattr(params, "paper_fidelity_mode", False)):
+            raise ReferenceBFFUnavailableError(
+                "Nonconformal Tutte rectangle rescue is prohibited in strict Paper mode."
+            )
         metrics: dict[str, object] = {
             **result.metrics,
-            "parameterization_method": "paper_reference_bff",
-            "parameterization_exactness_label": "official_bff_backend",
+            "parameterization_method": (
+                "experimental_tutte_rectangle" if _tutte_rescue_used else "paper_reference_bff"
+            ),
+            "parameterization_exactness_label": (
+                "NONPAPER_EXPERIMENTAL_NONCONFORMAL_TUTTE"
+                if _tutte_rescue_used else "official_bff_backend"
+            ),
             "parameterization_warning": (
                 "BFF rectangle with four prescribed 90-degree exterior angles; "
                 + ("four corners chosen from smoothed boundary geodesic turning maxima (lobe tips). "
@@ -2786,11 +2801,19 @@ def _build_surface_parameterization(surface, target, grid, params):
             "harmonic_solve_performed": False,
             "height_field_shortcut_used": False,
             "omega_corresponds_to_S": True,
-            "omega_correspondence_model": "official BFF c:S->Omega; inverse by strict containing-triangle barycentric coordinates",
-            "paper_flow_stage": "S -> Omega by official Boundary First Flattening CLI",
+            "omega_correspondence_model": (
+                "nonconformal convex-combination Tutte map, NOT BFF; inverse by strict UV barycentric map"
+                if _tutte_rescue_used
+                else "official BFF c:S->Omega; inverse by strict containing-triangle barycentric coordinates"
+            ),
+            "paper_flow_stage": (
+                "S -> Omega by EXPERIMENTAL NONCONFORMAL Tutte rectangle (not Paper BFF)"
+                if _tutte_rescue_used
+                else "S -> Omega by official Boundary First Flattening CLI"
+            ),
             "paper_exactness_warning": "S_TO_M3D: paper-reference candidate; K3D_AND_LATER: existing approximate implementation",
-            "bff_implemented": True,
-            "bff_reference_backend_available": True,
+            "bff_implemented": not _tutte_rescue_used,
+            "bff_reference_backend_available": not _tutte_rescue_used,
             "bff_backend_used": str(result.metrics["parameterization_backend_name"]),
             "flattening_backend": str(result.metrics["parameterization_backend_name"]),
             "omega_boundary_fixed": boundary_policy in {"target_disk"},
@@ -2824,10 +2847,24 @@ def _build_surface_parameterization(surface, target, grid, params):
             "conformal_energy": float(np.nansum(np.square(np.asarray(differential["anisotropy"], dtype=float) - 1.0))),
             "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
         }
-        if metrics["fallbacks_used"]:
-            raise ReferenceBFFUnavailableError("paper_reference_bff recorded a fallback; reference run rejected.")
+        if _tutte_rescue_used:
+            metrics["parameterization_warning"] = (
+                "NON-PAPER: original official rectangular BFF attempts failed. "
+                "User-opted-in Tutte map is nonconformal and must not be "
+                "used to claim reproduction of the authors' BFF or CSF bounds."
+            )
+            metrics["harmonic_solve_performed"] = True
+            metrics["paper_exactness_warning"] = "NONPAPER_RESCUE_USED; Paper equivalence invalid"
+        if metrics["fallbacks_used"] and not (
+            _tutte_rescue_used
+            and bool(getattr(params,"bff_nonpaper_tutte_rescue_enabled", False))
+            and not bool(getattr(params,"paper_fidelity_mode",False))
+        ):
+            raise ReferenceBFFUnavailableError(
+                "Strict BFF mode cannot accept a non-BFF fallback."
+            )
         return _original.SurfaceParameterization(
-            method="paper_reference_bff",
+            method="experimental_tutte_rectangle" if _tutte_rescue_used else "paper_reference_bff",
             surface_vertices_3d=surface_vertices,
             surface_faces=surface_faces,
             uv_vertices_2d=uv_vertices,
