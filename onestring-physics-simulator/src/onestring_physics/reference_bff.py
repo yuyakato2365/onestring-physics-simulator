@@ -482,6 +482,28 @@ def run_official_bff(
                 "Official BFF CLI failed; no fallback was used. "
                 f"exit={completed.returncode}, stdout={completed.stdout[-2000:]!r}, stderr={completed.stderr[-2000:]!r}"
             )
+        # The upstream MeshIO::writeOBJ uses std::to_string and silently
+        # quantizes UVs to about six decimal places. This can collapse thin
+        # triangles (source face 275 in a real generic-mesh regression).
+        # The independent adapter now serializes the *same* official BFF
+        # values at max_digits10 (17). Refuse an out-of-date executable
+        # instead of misleading users into rerunning twenty-five doomed
+        # corner candidates after a git pull without a native rebuild.
+        if boundary_policy == "target_rectangle":
+            precision_rows = [
+                line.split("=", 1)[1].strip()
+                for line in completed.stderr.splitlines()
+                if line.startswith("BFF_RECTANGLE_OUTPUT_PRECISION=")
+            ]
+            if not precision_rows or precision_rows[-1] != "17":
+                raise ReferenceBFFUnavailableError(
+                    "The selected bff-rect-command-line executable is outdated: "
+                    "it lacks the 17-digit UV output precision fix. "
+                    "git pull does NOT rebuild native binaries. Rebuild with "
+                    "'python scripts/setup_bff_rectangle.py --jobs 4' "
+                    "and restart Streamlit with the rebuilt executable path. "
+                    f"Selected adapter: {exe}"
+                )
         uv = _read_write_only_uv_obj(output_path, len(vertices), np.asarray(faces, dtype=int))
     # Independent rectangle adapter reports wedges from its native boundary
     # traversal. Preserve exact four chosen boundary slots; NOT necessarily
@@ -530,6 +552,9 @@ def run_official_bff(
                                          else "boundary_arclength_quartiles")
             if boundary_policy=="target_rectangle" else None,
             "bff_rectangle_corner_boundary_wedge_indices":rect_wedges,
+            "bff_rectangle_uv_serialization_digits": (
+                17 if boundary_policy == "target_rectangle" else None
+            ),
             **rectangle_metrics,
             "fallbacks_used": [],
             "input_topology": topology,
