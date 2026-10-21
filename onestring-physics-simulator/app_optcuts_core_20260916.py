@@ -50,6 +50,9 @@ from onestring_physics.optcuts_grid_native_pipeline_patch import install_native_
 from onestring_physics.optcuts_grid_native_lift_patch import install_native_grid_optcuts_lift_patch  # noqa: E402
 from onestring_physics.optcuts_grid_constrained_m2d_patch import install_optcuts_grid_constrained_m2d_patch  # noqa: E402
 from onestring_physics.optcuts_grid_consistency_patch import install_optcuts_grid_consistency_patch  # noqa: E402
+from onestring_physics.optcuts_test_k3d_augmented_lagrangian_patch import (  # noqa: E402
+    install_optcuts_test_k3d_augmented_lagrangian_patch,
+)
 from onestring_physics.optcuts_k3d_validity_patch import install_optcuts_k3d_validity_patch  # noqa: E402
 from onestring_physics.optcuts_k3d_preflight_patch import install_optcuts_k3d_preflight_patch  # noqa: E402
 from onestring_physics.optcuts_visualization_compat_patch import install_optcuts_visualization_compat_patch  # noqa: E402
@@ -331,6 +334,10 @@ install_optcuts_test_boundary_reparameterization_patch(pipeline)
 # Install before the generic seam metadata wrapper.  The generic wrapper will
 # then call through this bridge and leave optcuts_test metadata intact.
 install_optcuts_test_seam_metadata_bridge(pipeline)
+# IMPORTANT: this was missing, silently leaving the newer K3D solver inert
+# even with Omega=optcuts_test and the AL controls visible in the sidebar.
+# Keep the AL wrapper inside UI-parameter, validity and preflight wrappers.
+install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline)
 # Install immediately outside the AL wrapper so UI values are injected before
 # the AL implementation reads params.k3d_al_anchor_weight.
 _install_optcuts_test_k3d_ui_params(pipeline)
