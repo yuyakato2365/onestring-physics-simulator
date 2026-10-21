@@ -209,6 +209,8 @@ def test_print_export_projects_small_nonplanarity_without_reclassifying_side(sid
     assert metrics["flexure_preprint_top_level_spread_mm"] > 0
     assert metrics["flexure_preprint_bottom_level_spread_mm"] > 0
     assert metrics["flexure_preprint_max_face_warp_mm"] > 0
+    assert metrics["flexure_preprint_max_best_fit_face_nonplanarity_mm"] > 0
+    assert metrics["flexure_flattening_diagnostic_threshold_mm"] > 0
     assert metrics[f"flexure_{side}_count"] == 1
     assert data.count(b"facet normal") == 44
     # The original optimized (imperfectly planar) source is NEVER modified.
