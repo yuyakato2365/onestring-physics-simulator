@@ -221,3 +221,54 @@ and explicit rejection of closed tetrahedra. Existing
 planar zero-cut, curvature-peak boundary corners, BFF failure,
 split provenance and display. These tests **do not yet replace
 real end-to-end BFF/M3D/K3D/T2D runs** on non-Lilium geometry.
+
+
+## When ALL initial official rectangular BFF charts fold or degenerate
+
+The general source-boundary-fit choice can fail on a valid, oriented
+manifold disk: the 3D source may be perfectly legal, while every
+official rectangular BFF result for the tested four corner configurations
+has a flipped or tiny UV triangle. Merely increasing the number of corner
+candidates DOES NOT guarantee a valid conformal rectangular chart.
+
+To make the general experimental pipeline usable without falsifying a
+Paper reproduction, we added an **explicitly labeled non-Paper** mode:
+
+- UI: disable **Paper-oriented computation mode**; select
+  \`paper_reference_bff\` as Omega route and
+  \`source_boundary_shape_fit\` for corners.
+- Check **「実験：矩形BFFが全滅したら非等角Tutte写像で救済」**.
+- First, all the same official rectangular BFF candidates run and
+  undergo the same stringent area/orientation validation.
+- ONLY if all official choices are rejected, build a **positive-weight
+  graph-harmonic (Tutte) embedding into a convex rectangle**. Every
+  boundary vertex is placed monotonically along an arclength-parameterized
+  rectangle; every interior vertex is the arithmetic mean of its mesh
+  neighbors (solved by a sparse linear system).
+- The alternative is accepted only when its UV is finite, no triangle
+  has near-zero signed UV area, all triangle orientations agree, and
+  the rectangular boundary validator passes. The 3D source mesh
+  and original triangle connectivity are NOT modified.
+- Metrics identify \`experimental_tutte_rectangle\`, report
+  \`nonpaper_rectangle_rescue_used=true\`, and preserve
+  \`fallbacks_used=["explicit_nonconformal_tutte_rectangle_rescue"]\`.
+- **This is NOT BFF, NOT conformal, NOT the author algorithm.**
+  The conformal scale-factor interpretation and any "same Split count
+  as paper" conclusion are NOT transferable to this fallback.
+  Reflatten Split continues using official free-boundary BFF on
+  each cut 3D subpiece, but its INITIAL chart is not BFF.
+- The rescue is blocked when strict Paper mode is on, even if the
+  parameter is set manually. Lilium's \`lobe_tips\` setting is
+  unchanged. Disabling the rescue preserves the previous fail-fast
+  behavior exactly.
+
+If even the alternative map fails, the application still stops:
+it never calls an invalid folded/degenerate chart valid. This does
+not make arbitrary closed surfaces or topologies supported.
+
+To compare the paper method, keep the rescue disabled and repair/remesh
+the input or use a valid official BFF chart. For exploratory T2D
+processing, the clearly marked experimental rescue can allow progress.
+
+The relevant tests are \`tests/test_tutte_rectangle_rescue.py\`
+and \`tests/test_bff_rectangle_selection.py\`.
