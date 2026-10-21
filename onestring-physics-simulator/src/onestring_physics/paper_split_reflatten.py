@@ -321,17 +321,22 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     trial=copy.copy(params)
     saved_budget=domain.max_csf_splits
     existing_forced=list(getattr(trial,"collision_split_forced_lines",()) or ())
-    if existing_forced:
-        raise ValueError("Reflatten decisions cannot overwrite existing collision Split forced lines")
     domain.max_csf_splits=0
-    trial.collision_split_forced_lines=tuple(dict(c,score=0.) for c in cuts)
+    # Paper CSF seams are committed first, followed by any independently
+    # accepted collision-driven feedback seams. This preserves the OFF-mode
+    # outer rebuild loop instead of erasing or rejecting its topology.
+    trial.collision_split_forced_lines=tuple(
+        [dict(c,score=0.) for c in cuts] + existing_forced
+    )
     try:
         out_v,out_f,records,metrics=_split_mesh_single(vertices,faces,domain,trial)
     finally:
         domain.max_csf_splits=saved_budget
-    if len(records)!=len(cuts):
-        raise RuntimeError("Reflatten Split source-M2D cut plan was not completely executed")
-    for record,step in zip(records,report["steps"]):
+    if len(records)!=len(cuts)+len(existing_forced):
+        raise RuntimeError("Reflatten or collision Split cut plan was not completely executed")
+    csf_records=records[:len(cuts)]
+    collision_records=records[len(cuts):]
+    for record,step in zip(csf_records,report["steps"]):
         record.update(collision_driven=False,reflatten_csf_cut=True,
             face_ids=step["parent_face_ids"],
             child_face_ids=step["child_face_ids"],
@@ -342,12 +347,14 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
         csf_model=_CSF_MODEL,
         csf_split_exactness_label="RECONSTRUCTION (not author code): per-piece official free-boundary BFF used for decision only",
         csf_split_criterion=REFLATTEN_CRITERION,csf_split_threshold=2.,
-        csf_split_applied=bool(records),number_of_splits=len(records),
-        csf_split_step_analysis=records,csf_split_step_count=len(records),
-        csf_split_locations=[[r["axis"],r["snapped_value"]] for r in records],
-        collision_split_applied=False,collision_split_count=0,
-        collision_split_step_analysis=[],collision_split_duplicated_vertex_count=0,
-        csf_split_duplicated_vertex_count=sum(r["duplicated_vertices"] for r in records),
+        csf_split_applied=bool(csf_records),number_of_splits=len(records),
+        csf_split_step_analysis=csf_records,csf_split_step_count=len(csf_records),
+        csf_split_locations=[[r["axis"],r["snapped_value"]] for r in csf_records],
+        collision_split_applied=bool(collision_records),
+        collision_split_count=len(collision_records),
+        collision_split_step_analysis=collision_records,
+        collision_split_duplicated_vertex_count=sum(r["duplicated_vertices"] for r in collision_records),
+        csf_split_duplicated_vertex_count=sum(r["duplicated_vertices"] for r in csf_records),
         max_csf_before_split=report["initial_sigma"],
         max_csf_after_split=report["final_max_sigma"],
         csf_split_unresolved_component_count=sum(not leaf["satisfied"] for leaf in report["leaves"]),
@@ -361,6 +368,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     # Do NOT certify global deployability or panel fabrication from a CSF proxy.
     metrics["csf_split_bound_certified"]=False
     domain.csf_model=metrics["csf_model"]
+    domain.csf_before=report["initial_sigma"]
+    domain.csf_after_split=report["final_max_sigma"]
     domain.csf_split_exactness_label=metrics["csf_split_exactness_label"]
     domain.paper_split_diagnostics=dict(metrics,split_count=len(records),status=metrics["csf_split_status"])
     p.metrics["split_diagnostics"]=dict(domain.paper_split_diagnostics)
