@@ -94,6 +94,34 @@ def test_t2d_mismatched_joint_is_rejected():
         make_flexure_triangles(tiles, SimpleNamespace(hinges=[hinge()]))
 
 
+
+@pytest.mark.parametrize("side", ["top", "bottom"])
+def test_realistic_residual_hinge_gap_is_bridged_on_correct_side(side):
+    tiles = fixture()
+    tiles[1, :, 0] += .732
+    graph = SimpleNamespace(hinges=[hinge(side)])
+    triangles, metrics = make_flexure_triangles(tiles, graph)
+    assert len(triangles) == 20
+    assert metrics["flexure_max_joint_gap_mm"] == pytest.approx(.732)
+    assert metrics["flexure_nonzero_gap_count"] == 1
+    assert metrics["flexure_bridge_limit_mm"] == pytest.approx(1.5)
+    assert metrics[f"flexure_{side}_count"] == 1
+    assert_closed_shell(triangles)
+    with pytest.raises(ValueError, match=r"exceeds the printable bridge limit 0.6 mm"):
+        make_flexure_triangles(
+            tiles, graph, FlexureParameters(max_joint_gap_mm=.6)
+        )
+
+
+def test_large_gap_is_still_rejected_after_relaxation():
+    tiles = fixture()
+    tiles[1, :, 0] += 6.
+    with pytest.raises(ValueError, match="bridge limit"):
+        make_flexure_triangles(
+            tiles, SimpleNamespace(hinges=[hinge()]),
+            FlexureParameters(max_joint_gap_mm=5.),
+        )
+
 def test_t2d_duplicate_links_are_not_printed_twice():
     g = SimpleNamespace(hinges=[hinge(), hinge()])
     with pytest.raises(ValueError, match="duplicate hinge"):
