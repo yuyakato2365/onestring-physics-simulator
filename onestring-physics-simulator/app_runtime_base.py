@@ -708,6 +708,11 @@ with st.sidebar:
                 "専用アダプタがない場合は、矩形調和写像に切り替えず停止します。"
             )
         st.caption("以下は論文の著者実装が未確認の研究用設定です。既定値なら従来のPaperモードと同じです。")
+        # In Paper mode the Omega selector can show a launcher-injected OptCuts
+        # entry, yet configure_paper_fidelity() still forces paper_reference_bff
+        # with target_rectangle. Base the re-flatten defaults on that effective
+        # route, otherwise Paper mode silently keeps fixed_phase / fixed_uv.
+        _reflatten_bff_path = bool(paper_fidelity_enabled) or omega_parameterization_mode == "paper_reference_bff"
         bff_rectangle_selection_mode = st.selectbox(
             "矩形BFF 四隅の選び方（実験）",
             ["fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit", "lobe_tips"],
@@ -718,15 +723,15 @@ with st.sidebar:
                 "lobe_tips":"境界の曲率極大4点（Lilium花弁先端・再展開Split用）",
             }[v],
             index=2 if postcut_rebff_integrated_mode else (
-                3 if omega_parameterization_mode == "paper_reference_bff" else 0
+                3 if _reflatten_bff_path else 0
             ),
             help="同じ3D入力の4つの矩形BFFから、Split数を参照せずに選択。論文にこの手順の記載はありません。",
         )
         paper_split_criterion = st.selectbox(
             "Split CSF判定（論文準拠の研究再構成）",
             ["fixed_uv", "reflatten_tile_area"],
-            index=1 if omega_parameterization_mode == "paper_reference_bff" else 0,
-            disabled=omega_parameterization_mode != "paper_reference_bff",
+            index=1 if _reflatten_bff_path else 0,
+            disabled=not _reflatten_bff_path,
             format_func=lambda v: {
                 "fixed_uv": "既存の固定UV / 現行Split（比較用）",
                 "reflatten_tile_area": "3Dピース自由境界BFF再展開 → タイル面積比 ≤ 2",
@@ -742,8 +747,8 @@ with st.sidebar:
         ))
         reference_grid_fit_rectangle = st.checkbox(
             "矩形BFFの外接領域にn×nの正方形グリッドを合わせる（実験）",
-            value=omega_parameterization_mode == "paper_reference_bff",
-            disabled=omega_parameterization_mode != "paper_reference_bff",
+            value=_reflatten_bff_path,
+            disabled=not _reflatten_bff_path,
             help="短辺をnセルに分割し、端数を左右対称に配置。"
                  "パネルの後段最適化は変更しません。",
         )
