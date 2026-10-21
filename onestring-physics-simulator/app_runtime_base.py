@@ -2773,6 +2773,18 @@ elif view_stage == "Split Map":
             else:
                 st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
             st.dataframe(_split_rows, hide_index=True, width="stretch")
+            if state.mesh_2d_initial.metrics.get("csf_split_criterion") == "reflatten_tile_area":
+                with st.expander("再展開SplitのM3D形状と切断線を3D表示", expanded=False):
+                    from onestring_physics.reflatten_split_view import figure_reflatten_split_3d
+                    _ref_3d, _ref_pieces = figure_reflatten_split_3d(state, _split_step)
+                    if _ref_3d is None:
+                        st.info("この計算結果には3D再生用のM3D頂点がありません。")
+                    else:
+                        st.plotly_chart(_ref_3d, use_container_width=True,
+                                        key=f"reflatten_original_m3d_{_split_step}")
+                        st.dataframe(_ref_pieces, hide_index=True, width="stretch")
+                        st.caption("表示は最終パネルではなく、元のΩ格子から持ち上げたM3Dです。"
+                                   "再展開UVは評価専用で、製造用パネル形状を変更しません。")
             _split_model = state.mesh_2d_initial.metrics.get("csf_split_criterion")
             if _split_model == "reflatten_tile_area":
                 st.caption(
