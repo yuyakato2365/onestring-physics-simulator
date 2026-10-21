@@ -25,34 +25,36 @@ has not been demonstrated.
 - Violations raise exceptions instead of quietly flipping side or welding
   disconnected components.
 
-## Mesh algorithm
+## Mesh algorithm — exact T2D panel shape preservation
 
-1. Reuse the **existing final dual T2D** panel solid coordinates and
-   _t2d_stl_mesh_and_metrics. The separate print export scales the median
-   panel edge to an explicit size in **millimetres**.
-2. Normalize the vertical thickness to an adjustable nominal panel thickness
-   through the existing export helper (does not mutate source T2D).
-3. For every *listed* final joint, find points a,b via its local indices.
-   Verify their 3D positions are within max_joint_gap_mm and their
-   designated faces are approximately horizontal and at similar Z.
-4. Find inward anchor points along each hinge-vertex-to-face-centroid direction.
-   Form a bent three-point centerline: anchor A -> joint midpoint -> anchor B.
-5. Extrude one closed mitered lamella of adjustable in-plane width and Z
-   thickness along that centerline. Each end intentionally overlaps the
-   respective panel on the **designated top or bottom face** by embed_mm.
-6. Append lamella triangles to the panel triangles as **separate intersecting
-   closed shells**. A later slicer/mesh Boolean union is required.
+1. Read the **final T2D Dual Hinge 8-vertex panel geometry** without
+   modifying its coordinates or changing any panel's own thickness.
+2. Convert source units to millimetres using a **single global uniform**
+   scale calculated from the representative panel edge. Apply only one
+   **global Z translation** to set the minimum vertex height to zero.
+   No per-panel flattening, leveling, thickness setting, local rotation
+   or independent rescaling is permitted.
+3. Re-triangulate each source 8-vertex prism from its own exact scaled
+   vertex coordinates, retaining nonplanar face and height residuals.
+4. For each listed hinge, preserve its top/bottom label and local
+   vertex indices; never infer an unlisted hinge across a split seam.
+5. Interpolate each attachment anchor from the actual panel face
+   joint vertex toward the actual face centroid in 3D. A central
+   point bridges the original joint pair. Generate a **ruled 3D lamella**
+   whose Z heights vary along the strip, following the stored
+   top/bottom face on both tiles.
+6. Append flexure triangles as separate intersecting closed shells.
+   Slicer/mesh Boolean union and physical checking remain required.
 
-The bridge creates physical geometry across small optimizer residual gaps, but
-**does not fix T2D hinge-coincidence constraints**. For example, a 0.732 mm
-residual gap passes the default 1.5 mm fabrication ceiling, but would fail
-if the user requires a 0.6 mm ceiling. The UI reports the measured maximum
-and warns when bridging a nonzero gap. Large gaps still fail explicitly.
+Source panel vertex pairwise distances in millimetres are
+`distance_print = global_scale * distance_T2D`. No other deformation
+is allowed. The printable hinge may span a finite optimizer residual
+gap but does not fix the optimizer's connectivity constraints.
 
-The algorithm intentionally rejects major gaps, incompatible hinge-side
-indices, tilted face Z spreads and extreme miter angles. This does **not**
-prove the resulting flat pattern has no new accidental intersections or
-that its out-of-plane folding is mechanically feasible.
+The configurable bridge limit is at most 50 mm (5 cm). Large bridge
+gaps may create geometries that fail mechanical deployment; allowing
+their export is **not** a fabrication guarantee. Original face warp
+and joint height mismatches are reported, not silently flattened.
 
 ## UI / defaults
 
@@ -73,41 +75,37 @@ Suggested *unverified experimental starting values*:
 | Parameter | Default | Meaning |
 |---|---:|---|
 | panel size | 40 mm | Median edge length after scaling |
-| panel thickness | 2 mm | Z extent of the source tile, normalized |
+| panel thickness | unchanged | Original T2D vertex geometry, no thickness control |
 | flexure width | 1.2 mm | XY strip width |
 | flexure thickness | 0.6 mm | Total flexible Z cross-section |
 | anchor inset | 3 mm | Connection depth from each stored joint |
 | embed | 0.2 mm | Strip intersection with chosen rigid-panel face |
-| max bridge gap | 1.5 mm | Hard ceiling for residual final-T2D attachment gaps; adjustable from 0.1 to 5 mm |
+| max bridge gap | 1.5 mm | Hard ceiling for residual final-T2D attachment gaps; adjustable from 0.1 to 50 mm |
 
 The STL format has no unit metadata; its vertex numbers mean mm in the new
 export. Original T2D STL exports still use their unchanged settings.
 
 ## Handling imperfect T2D coplanarity
 
-The source design optimizes coplanarity but can retain small numerical
-out-of-plane residuals and different panel Z offsets. These deviations
-must **not** be treated as a missing hinge. For this OPTIONAL fabrication
-export only, XY corners and the authoritative top/bottom hinge IDs are
-preserved, while every tile top is projected to Z = panel_thickness_mm and
-bottom to Z = 0. Original optimized T2D vertices and normal STL are not
-modified. No split-edge re-welding occurs.
+K3D/T2D can have residual face nonplanarity and between-panel height
+offsets. The print exporter keeps **those original XYZ values**; it
+never adjusts top or bottom vertices to a common plane and never
+changes panel geometry to fix these errors.
 
-The exporter records original per-tile Z spread, across-tile top/bottom
-height spread and best-fit-plane residual in millimetres. It warns about
-larger projection changes instead of aborting because of minor nonplanarity.
-This is a **manufacturing approximation**, not a correction to the T2D
-optimization or a proof that the resulting flattened prisms remain exactly
-congruent to the 3D target. A deformable lamella can be generated even when
-its two source joint vertices had slightly different heights.
+A hinge strip's 3D centerline and cross-sections follow the original
+top/bottom vertex heights. Its panels remain exactly the original
+T2D prisms after a single global scale and translation.
 
-Top lamella material lies in the upper skin [thickness-skin, thickness],
-and bottom lamella material in the lower skin [0, skin]. Both remain in the
-printable slab, rather than extending below the print bed. The independent
-shells still need a successful mesh/slicer union to be reliably attached.
+The measured best-fit-plane residual and original hinge Z mismatch
+are diagnostics. Significant deviations trigger warnings, not a
+silent geometry rewrite. The mesh may require supports and additional
+relief/collision design before it can be printed or deployed.
 
 ## Limitations before printing
 
+- Original panel tilt and height offsets are preserved. Some panels may
+  float above the print bed after global Z translation; **supports may be
+  required**, and no automatic support design is included.
 - No Boolean union between overlapping shells. Inspect/merge in slicer and
   verify every intended connector is **one continuous printable body**.
 - No thickness-dependent stress calculation, flexure fatigue, printer profile,
