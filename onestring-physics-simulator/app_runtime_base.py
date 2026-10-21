@@ -3622,10 +3622,7 @@ elif view_stage == "T2D Dual Hinge":
                 "代表パネル辺長 (mm)", min_value=5.0, max_value=250.0,
                 value=40.0, step=5.0, key="flexure_panel_size_mm"
             )
-            _flex_plate_mm = _fm2.number_input(
-                "パネル厚さ (mm)", min_value=0.6, max_value=12.0,
-                value=2.0, step=0.2, key="flexure_panel_thickness_mm"
-            )
+            _fm2.caption("パネル厚さ・形状：T2Dの8頂点をそのまま使用（変更不可）")
             _flex_width_mm = _fm3.number_input(
                 "ヒンジ幅 (mm)", min_value=0.4, max_value=6.0,
                 value=1.2, step=0.2, key="flexure_width_mm"
@@ -3664,7 +3661,6 @@ elif view_stage == "T2D Dual Hinge":
                     _flex_data, _flex_metrics = export_final_t2d_flexure_stl(
                         state, hinge_graph=state.hinge_graph,
                         panel_size_mm=float(_flex_panel_mm),
-                        panel_thickness_mm=float(_flex_plate_mm),
                         parameters=FlexureParameters(
                             width_mm=float(_flex_width_mm),
                             skin_mm=float(_flex_skin_mm),
@@ -3684,17 +3680,18 @@ elif view_stage == "T2D Dual Hinge":
                         key="download_t2d_dual_flexure_mm",
                     )
                     st.caption(
-                        "STL用にパネルを平面化：元のT2D座標は変更せず、"
-                        "各パネルのXY位置とtop/bottomヒンジ分類を保持したまま、"
-                        "印刷用の下面Z=0・上面Z=指定厚さに投影しています。"
-                        f"変換前の最大面非平面性（最良平面への距離）："
+                        "パネル形状はT2DのXYZ 8頂点を完全保持し、全体に同一の"
+                        "mm換算倍率とZ方向の平行移動だけを適用しました。"
+                        "パネル厚さ・傾き・共平面性の残差・パネル間の相対位置は変更していません。"
+                        "ヒンジだけを上下の実際の接続高さに追従させています。"
+                        f" 元の面の最大非平面性："
                         f"{_flex_metrics['flexure_preprint_max_best_fit_face_nonplanarity_mm']:.4g} mm。"
                     )
                     if _flex_metrics["flexure_requires_geometry_review"]:
                         st.warning(
-                            "印刷用投影によってパネル形状が無視できない程度に変わる可能性があります。"
-                            "変換前後の形状・機構運動を確認してください。"
-                            "数値的な共平面性誤差だけを理由に生成を停止することはありません。"
+                            "T2Dの元のパネルに大きな傾き・非平面性・ヒンジ高低差があります。"
+                            "パネル形状は変更していません。スライス前に造形方向、"
+                            "サポートの必要性、接続部の干渉と組立可能性を確認してください。"
                         )
                     if _flex_metrics["flexure_max_joint_gap_mm"] > 1e-3:
                         st.warning(
