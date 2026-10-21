@@ -249,6 +249,19 @@ def export_final_t2d_flexure_stl(
         float(np.max(np.ptp(original_top_z, axis=1))) if len(tiles) else 0.,
         float(np.max(np.ptp(original_bottom_z, axis=1))) if len(tiles) else 0.,
     )
+    # Measure the original nonplanarity before projecting the PRINT-ONLY copy.
+    # It is a diagnostic, not a hard rejection: small optimizer residuals are
+    # allowed and the authoritative T2D mesh remains untouched.
+    def _plane_residual(face: np.ndarray) -> float:
+        centered = face - face.mean(axis=0)
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        return float(np.max(np.abs(centered @ vh[-1])))
+
+    pre_face_nonplanarity = max(
+        (_plane_residual(tiles[i, j:j+4, :])
+         for i in range(len(tiles)) for j in (0, 4)), default=0.0
+    )
+    pre_flatten_warn_limit = max(0.25, 0.01 * float(panel_size_mm))
     if parameters.skin_mm > panel_thickness_mm:
         raise ValueError(
             f"flexure skin {parameters.skin_mm:g} mm exceeds print panel "
@@ -270,6 +283,12 @@ def export_final_t2d_flexure_stl(
     result_metrics["flexure_preprint_top_level_spread_mm"] = pre_top_spread
     result_metrics["flexure_preprint_bottom_level_spread_mm"] = pre_bottom_spread
     result_metrics["flexure_preprint_max_face_warp_mm"] = pre_tile_face_warp
+    result_metrics["flexure_preprint_max_best_fit_face_nonplanarity_mm"] = pre_face_nonplanarity
+    result_metrics["flexure_flattening_diagnostic_threshold_mm"] = pre_flatten_warn_limit
+    result_metrics["flexure_requires_geometry_review"] = bool(
+        pre_face_nonplanarity > pre_flatten_warn_limit
+        or pre_tile_face_warp > pre_flatten_warn_limit
+    )
     result_metrics["flexure_print_z_bounds_mm"] = [0., float(panel_thickness_mm)]
     result_metrics["flexure_print_shape_semantics"] = (
         "XY geometry preserved; per-tile Z flattened to common printable slab; "
