@@ -34,8 +34,18 @@ def whole_surface_area_span(vertices, uv, faces):
             f"Input 3D mesh has {len(ids)} degenerate source triangles "
             f"(first face={int(ids[0])}, twice_area={float(twice_3d[ids[0]]):.4g})"
         )
-    if np.any(twice_uv<=1e-16):
-        ids=np.flatnonzero(twice_uv<=1e-16)
+    # Match reference_bff.triangle_jacobian_diagnostics: test UV triangle
+    # shape, not absolute area. The BFF similarity-scale gauge is arbitrary,
+    # and the later CSF normalization can make coordinates very small.
+    uv_edge_scale2 = np.maximum.reduce((
+        np.einsum("ij,ij->i", e, e),
+        np.einsum("ij,ij->i", f, f),
+        np.einsum("ij,ij->i", f-e, f-e),
+    ))
+    degenerate_uv = ((uv_edge_scale2 <= 0) |
+                     (twice_uv <= 2e-14 * uv_edge_scale2))
+    if np.any(degenerate_uv):
+        ids=np.flatnonzero(degenerate_uv)
         raise ValueError(
             f"Official rectangular BFF output has {len(ids)} degenerate/collapsed UV "
             f"triangles (first face={int(ids[0])}, "
@@ -189,10 +199,39 @@ def _boundary_similarity_error(target2d: np.ndarray, uv2d: np.ndarray,
     return float(np.sqrt(np.sum(w*np.sum((a-aligned)**2,axis=1))))
 
 
+def _verify_selected_bff_csf_compatible(
+    vertices, faces, uv_vertices, normalization: str
+) -> None:
+    """Reject BFF candidates incompatible with the *actual downstream CSF*.
+
+    Selection used to accept an unnormalized UV chart, which could later be
+    rejected after the reference CSF similarity rescale. This check uses
+    exactly the same differential pipeline; it never repairs or skips faces.
+    """
+    from .reference_bff import normalize_uv_and_compute_csf
+
+    _, differential = normalize_uv_and_compute_csf(
+        vertices, uv_vertices, faces, normalization=normalization
+    )
+    if differential["uv_degenerate_triangle_count"]:
+        ids = np.flatnonzero(differential["uv_degenerate_triangle"])
+        raise ValueError(
+            "Official BFF candidate fails final normalized CSF UV degeneracy: "
+            f"{len(ids)} faces; first={int(ids[0])}"
+        )
+    if differential["uv_triangle_flip_count"]:
+        ids = np.flatnonzero(differential["triangle_flip"])
+        raise ValueError(
+            "Official BFF candidate fails final normalized CSF orientation: "
+            f"{len(ids)} faces; first={int(ids[0])}"
+        )
+
+
 def choose_rectangle_by_source_boundary_fit(
     vertices, faces, *, rectangle_executable=None, timeout_seconds=120.,
     runner=run_official_bff,
     allow_nonconformal_rescue: bool = False,
+    csf_normalization: str = "min_to_one_hypothesis_a",
 ):
     """Fit initial Omega using source-boundary geometry and the official BFF.
 
@@ -246,6 +285,9 @@ def choose_rectangle_by_source_boundary_fit(
                     f"(first inverted face={int(np.flatnonzero(det < -1e-14)[0])})"
                 )
             span=whole_surface_area_span(x,output.uv_vertices,f)
+            _verify_selected_bff_csf_compatible(
+                x, f, output.uv_vertices, csf_normalization
+            )
             error=_boundary_similarity_error(projected,np.asarray(output.uv_vertices)[loop],w)
             # Source PCA bounding rectangle is a weak aspect target. Keep this
             # term small; direct boundary fidelity is the primary metric.
@@ -334,6 +376,9 @@ def choose_rectangle_by_source_boundary_fit(
                         f"(first inverted face={int(np.flatnonzero(det < -1e-14)[0])})"
                     )
                 span = whole_surface_area_span(x, output.uv_vertices, f)
+                _verify_selected_bff_csf_compatible(
+                    x, f, output.uv_vertices, csf_normalization
+                )
                 error = _boundary_similarity_error(
                     projected, np.asarray(output.uv_vertices)[loop], w
                 )
