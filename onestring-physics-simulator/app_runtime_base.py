@@ -2773,7 +2773,15 @@ elif view_stage == "Split Map":
             else:
                 st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
             st.dataframe(_split_rows, hide_index=True, width="stretch")
-            st.caption("CSFは現在のUV写像に基づく評価値です。")
+            _split_model = state.mesh_2d_initial.metrics.get("csf_split_criterion")
+            if _split_model == "reflatten_tile_area":
+                st.caption(
+                    "再展開Split：各3D曲面片を公式自由境界BFFで別々に展開し、"
+                    "タイルごとの3D/2D面積比の最大/最小でCSF相当量を評価しています。"
+                    "最終パネルは元のΩ格子に固定しています。著者実装との一致は未確認です。"
+                )
+            else:
+                st.caption("CSFは現在のUV写像に基づく評価値です。")
             _split_metrics = state.mesh_2d_initial.metrics
             _split_unresolved = int(_split_metrics.get("csf_split_unresolved_component_count", 0) or 0)
             if _split_unresolved:
