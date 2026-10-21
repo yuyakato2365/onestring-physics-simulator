@@ -1004,6 +1004,9 @@ class PipelineParameters(_original.PipelineParameters):
     ] = "bff"
     bff_executable: str | None = None
     bff_rectangle_executable: str | None = None
+    paper_split_criterion: str = "fixed_uv"
+    paper_split_curvature_rings: int = 3
+    reference_grid_fit_rectangle: bool = False
     optcuts_distortion_bound: float = 4.1
     optcuts_try_alternative_initial_cut: bool = True
     bff_boundary_policy: Literal[
@@ -2701,7 +2704,20 @@ def _build_surface_parameterization(surface, target, grid, params):
             raise ValueError("paper_reference_bff requires omega_boundary_mode='paper_default'; its boundary policy is selected separately.")
         boundary_policy = str(getattr(params, "bff_boundary_policy", "automatic_reference"))
         selection_mode=str(getattr(params, "bff_rectangle_selection_mode", "fixed_phase"))
-        if selection_mode == "source_boundary_shape_fit":
+        if selection_mode == "lobe_tips":
+            if boundary_policy != "target_rectangle":
+                raise ValueError("Lobe-tip BFF corner selection requires target_rectangle")
+            from .paper_split_reflatten import lobe_tip_corner_positions
+            corner_xyz = lobe_tip_corner_positions(surface_vertices, surface_faces)
+            result = run_official_bff(
+                surface_vertices, surface_faces,
+                executable=getattr(params, "bff_executable", None),
+                rectangle_executable=getattr(params, "bff_rectangle_executable", None),
+                rectangle_corner_positions=corner_xyz,
+                boundary_policy="target_rectangle",
+                timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
+            )
+        elif selection_mode == "source_boundary_shape_fit":
             if boundary_policy != "target_rectangle":
                 raise ValueError("Source-boundary shape fitting requires rectangular BFF")
             result=choose_rectangle_by_source_boundary_fit(
@@ -2751,7 +2767,9 @@ def _build_surface_parameterization(surface, target, grid, params):
             "parameterization_exactness_label": "official_bff_backend",
             "parameterization_warning": (
                 "BFF rectangle with four prescribed 90-degree exterior angles; "
-                + ("corner positions selected experimentally to match the 3D source boundary. "
+                + ("four corners chosen from smoothed boundary geodesic turning maxima (lobe tips). "
+                   if selection_mode=="lobe_tips" else
+                   "corner positions selected experimentally to match the 3D source boundary. "
                    if selection_mode=="source_boundary_shape_fit" else
                    "corner positions selected experimentally from boundary arclength. ")
                 + "This corner selection is not specified by the OneString authors."
@@ -3246,7 +3264,21 @@ def _reference_flatten_to_domain(parameterization, grid, params):
     canonical_boundary = (boundary_open - origin) @ rotation
     span = np.ptp(canonical_boundary, axis=0)
     requested_spacing = getattr(params, "reference_grid_spacing", None)
-    if requested_spacing is None:
+    fit_rectangle = bool(getattr(params, "reference_grid_fit_rectangle", False))
+    if requested_spacing is None and fit_rectangle:
+        # Independent OPT-IN: fix the requested number of square grid cells
+        # in the shorter Omega dimension and center any extra clearance.
+        # A small epsilon keeps perimeter quads strictly inside the BFF chart.
+        spacing = max(min(
+            float(span[0]) / max(int(grid.nx), 1),
+            float(span[1]) / max(int(grid.ny), 1),
+        ) * (1. - 1e-6), 1e-8)
+        remainder = span - np.floor(span / spacing) * spacing
+        canonical_shift = np.min(canonical_boundary, axis=0) + remainder / 2.
+        origin = origin + canonical_shift @ rotation.T
+        canonical_boundary = (boundary_open - origin) @ rotation
+        spacing_status = "experimental rectangle-fit: centered square lattice (shortest dimension)"
+    elif requested_spacing is None:
         spacing = max(float(span[0]) / max(int(grid.nx), 1), float(span[1]) / max(int(grid.ny), 1), 1e-8)
         spacing_status = "UNSPECIFIED_IN_PAPER: derived from requested nx/ny (hypothesis_a)"
     else:
