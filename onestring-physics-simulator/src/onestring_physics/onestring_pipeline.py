@@ -3392,9 +3392,14 @@ def _reference_flatten_to_domain(parameterization, grid, params):
     canonical_boundary = (boundary_open - origin) @ rotation
     span = np.ptp(canonical_boundary, axis=0)
     requested_spacing = getattr(params, "reference_grid_spacing", None)
+    # Preserve existing Paper-OFF free-boundary grid behavior. Only the NEW
+    # failed-rectangle recovery disables fitting a rectangle that no longer
+    # exists. All original Paper/normal successful paths are unchanged.
     fit_rectangle = (
         bool(getattr(params, "reference_grid_fit_rectangle", False))
-        and bool(parameterization.metrics.get("omega_boundary_forced_rectangle", False))
+        and not bool(parameterization.metrics.get(
+            "official_bff_free_boundary_recovery_used", False
+        ))
     )
     if requested_spacing is None and fit_rectangle:
         # Independent OPT-IN: fix the requested number of square grid cells
