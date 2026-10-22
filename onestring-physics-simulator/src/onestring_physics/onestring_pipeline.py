@@ -1012,6 +1012,9 @@ class PipelineParameters(_original.PipelineParameters):
     paper_split_direction_choices: tuple = ()
     # Ask the user (app) for each Split direction instead of choosing automatically.
     paper_split_ask_direction: bool = False
+    # Curvatures within this relative band of the maximum count as equal; the
+    # highest (+z) of those vertices is cut through.
+    paper_split_curvature_tie_tolerance: float = 0.02
     reference_grid_fit_rectangle: bool = False
     optcuts_distortion_bound: float = 4.1
     optcuts_try_alternative_initial_cut: bool = True

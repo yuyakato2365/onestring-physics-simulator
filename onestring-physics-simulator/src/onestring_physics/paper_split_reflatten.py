@@ -333,7 +333,8 @@ class SplitDirectionQuestion(BaseException):
 
 
 def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
-                        rings=3,threshold=2.,max_cuts=64,direction_choices=(),ask=False):
+                        rings=3,threshold=2.,max_cuts=64,direction_choices=(),ask=False,
+                        curvature_tie_tolerance=0.02):
     """Assess a full-grid cut using fresh BFF for both 3D child patches."""
     grid_xy=np.asarray(grid_xy,float);quads=np.asarray(quads,int)
     quad_xy=grid_xy[quads];centres=quad_xy.mean(axis=1)
@@ -344,6 +345,9 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
     vertex_k=np.full(len(grid_xy),-np.inf)
     good=tri>=0
     vertex_k[good]=(bary[good]*curvature[tri_faces[tri[good]]]).sum(1)
+    # Height (+z of the input) of every grid vertex on S, for the tie rule below.
+    vertex_z=np.full(len(grid_xy),-np.inf)
+    vertex_z[good]=(bary[good]*np.asarray(xyz,float)[tri_faces[tri[good]],2]).sum(1)
     def sigma(piece,ids):
         J=tile_area_ratios(piece,quad_xy[ids],flatten(piece[0],piece[1]))
         return float(np.max(J)/np.min(J)),J
@@ -371,7 +375,15 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,
                     satisfied=bool(parent_sigma<=threshold),tile_area_ratio=parent_J.tolist()))
             continue
-        peak=max(candidates,key=lambda v:vertex_k[v])
+        # Highest smoothed Gaussian curvature; when several interior vertices are
+        # within ``curvature_tie_tolerance`` (relative) of the maximum - e.g. an
+        # almost spherical bulb where the maximum is decided by mesh noise -
+        # take the HIGHEST of them (largest z of the input surface).
+        k_max=max(vertex_k[v] for v in candidates)
+        tie_band=abs(k_max)*float(curvature_tie_tolerance)
+        ties=[v for v in candidates if vertex_k[v]>=k_max-tie_band]
+        peak=max(ties,key=lambda v:(vertex_z[v],vertex_k[v])) if len(ties)>1 else max(candidates,key=lambda v:vertex_k[v])
+        peak_rule="highest_among_near_equal_curvature" if len(ties)>1 else "max_curvature"
         best=None;evaluated=[];options={}
         for coord,axis in ((0,"col"),(1,"row")):
             value=float(grid_xy[peak,coord])
@@ -416,6 +428,7 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
         report["steps"].append(dict(depth=depth,parent_tiles=int(len(ids)),
                 parent_sigma=float(parent_sigma),curvature_vertex=int(peak),
                 curvature_xy=grid_xy[peak].tolist(),curvature=float(vertex_k[peak]),
+                peak_rule=peak_rule,near_equal_curvature_vertices=int(len(ties)),height=float(vertex_z[peak]),
                 axis=axis,value=value,parent_face_ids=ids.tolist(),
                 parent_tile_area_ratio=parent_J.tolist(),
                 child_tiles=[int(len(c[1])) for c in children],
@@ -452,7 +465,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
         rings=int(getattr(params,"paper_split_curvature_rings",3)),
         threshold=2.,max_cuts=int(getattr(domain,"max_csf_splits",64)),
         direction_choices=tuple(getattr(params,"paper_split_direction_choices",()) or ()),
-        ask=bool(getattr(params,"paper_split_ask_direction",False)))
+        ask=bool(getattr(params,"paper_split_ask_direction",False)),
+        curvature_tie_tolerance=float(getattr(params,"paper_split_curvature_tie_tolerance",0.02)))
     # Preserve the original forced-cut topology implementation and ALL fields.
     # Use a defensive copy of params so changing the decision cannot leak
     # user-requested collision-driven Split state back into the UI.

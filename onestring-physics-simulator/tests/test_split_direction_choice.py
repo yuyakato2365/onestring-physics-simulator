@@ -18,3 +18,9 @@ def test_ask_mode_raises_a_question_that_passes_exception_handlers():
     assert not issubclass(R.SplitDirectionQuestion, Exception)
     assert PipelineParameters().paper_split_ask_direction is False
     assert "ask" in inspect.signature(R.plan_reflatten_cuts).parameters
+
+
+def test_near_equal_curvature_tie_rule_is_configured():
+    assert PipelineParameters().paper_split_curvature_tie_tolerance == 0.02
+    assert inspect.signature(R.plan_reflatten_cuts).parameters["curvature_tie_tolerance"].default == 0.02
+    assert "highest_among_near_equal_curvature" in inspect.getsource(R.plan_reflatten_cuts)
