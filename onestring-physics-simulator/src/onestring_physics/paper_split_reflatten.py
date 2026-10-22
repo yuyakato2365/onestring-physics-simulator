@@ -88,7 +88,11 @@ def lobe_tip_corner_positions(vertices, faces, window=9, snap_to_corners=False):
     if len(chosen)!=4: raise ValueError("unable to locate four separated BFF corners")
     if snap_to_corners:
         sharp=_sharp_corner_picks(turning,smoothed,n)
-        chosen=sharp if sharp is not None else _refine_corner_picks(chosen,turning,smoothed,window)
+        if sharp is not None:
+            chosen=sharp
+        else:
+            shoulders=_shoulder_corner_picks(V[loop],min_elongation=1.3)
+            chosen=shoulders if shoulders is not None else _refine_corner_picks(chosen,turning,smoothed,window)
     return V[[loop[i] for i in sorted(chosen)]].copy()
 
 
@@ -156,6 +160,34 @@ def boundary_feature_angles(vertices, faces, corner_positions, threshold=np.pi/8
         for i,a in zip(cluster,values):
             x,y,z=V[loop[i]];out.append((float(x),float(y),float(z),float(a)))
     return out
+
+
+def _shoulder_corner_picks(P,min_elongation=1.3):
+    """Four corners for a smooth, ELONGATED outline: the shoulders of both ends.
+
+    Without genuine corners the largest turning sits at the two end tips and at
+    the side bulges, so the corners form a diamond (end, side, end, side) and
+    every rectangle side takes a quarter of the outline: Omega comes out almost
+    square however long the shape is. Here the corners are the boundary points
+    furthest in the four directions +/-long axis +/-short axis (of the best-fit
+    plane of the boundary), so the short sides are the two ends and the long
+    sides are the two flanks. Outlines with length/width below
+    ``min_elongation`` (Lilium: about 1) keep the previous rule.
+    """
+    P=np.asarray(P,float);n=len(P)
+    centred=P-P.mean(axis=0)
+    axes=np.linalg.svd(centred,full_matrices=False)[2]
+    s=centred@axes[0];t=centred@axes[1]
+    if np.ptp(t)<=1e-12 or np.ptp(s)/np.ptp(t)<float(min_elongation):
+        return None
+    picks=[]
+    for a in (1.,-1.):
+        for b in (1.,-1.):
+            score=a*s/np.abs(s).max()+b*t/np.abs(t).max()
+            picks.append(int(np.argmax(score)))
+    if len(set(picks))!=4 or any(min(abs(i-j),n-abs(i-j))<=n//16 for k,i in enumerate(picks) for j in picks[k+1:]):
+        return None
+    return picks
 
 
 def _refine_corner_picks(chosen,turning,smoothed,window):
