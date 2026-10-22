@@ -44,6 +44,16 @@ def _hybrid_active(params: Any) -> bool:
     return _active(params) or _paper_lg_active(params)
 
 
+def _paper_mode_linkage(params: Any) -> bool:
+    """Paper-oriented mode keeps the official-BFF Omega/M2D/Split but uses the
+    same paper-aligned Eq.5 local/global K2D as the 2026-09-18 paper-aligned
+    route. Only that K2D builds the corner-connected Sec.4.3 linkage, which is
+    what sends T2D to the paper Dual Hinge solver (multi-start, hard
+    non-penetration, seeds, restarts). Without it Paper mode fell back to the
+    edge-glued strict K2D and the legacy hinge layout, which ignores those."""
+    return bool(getattr(params, "paper_fidelity_mode", False)) and not _hybrid_active(params)
+
+
 def _clone_params(params: Any, **updates: Any) -> Any:
     try:
         return replace(params, **updates)
@@ -169,8 +179,8 @@ def install_lscm_latest_omega_hybrid_patch(pipeline: Any, *, lscm_build_m2d: Any
                 if previous is None: os.environ.pop("ONESTRING_OPTCUTS_TEST_VARIANT",None)
                 else: os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"]=previous
         def k2d_dispatch(mesh_2d,mesh_3d,params,progress_callback=None):
-            if not _hybrid_active(params): return fallback_k2d(mesh_2d,mesh_3d,params,progress_callback=progress_callback)
-            if _paper_lg_active(params):
+            if not _hybrid_active(params) and not _paper_mode_linkage(params): return fallback_k2d(mesh_2d,mesh_3d,params,progress_callback=progress_callback)
+            if _paper_lg_active(params) or _paper_mode_linkage(params):
                 result, report = optimize_paper_local_global_k2d(mesh_2d,mesh_3d,params,progress_callback=progress_callback,pipeline=pipeline)
                 from .eq5_iteration_history_view import render_completed_k2d
                 render_completed_k2d(result.eq5_history)
