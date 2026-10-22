@@ -43,7 +43,10 @@ def test_all_25_rectangle_charts_invalid_official_free_bff_succeeds():
     assert calls[-1]["boundary_policy"] == "automatic_reference"
     assert result.metrics["official_bff_free_boundary_recovery_used"] is True
     assert result.metrics["paper_rectangular_boundary_condition_satisfied"] is False
-    assert result.metrics["bff_corner_selection_attempt_count"]==len(calls)-1
+    # Invalid corner heuristics that fail before calling native BFF are also
+    # recorded, so attempt records may exceed the native invocation count.
+    assert result.metrics["bff_corner_selection_attempt_count"]>=len(calls)-1
+    assert result.metrics["bff_corner_selection_attempt_count"]==len(result.metrics["bff_corner_selection_attempts"])
     assert result.metrics["bff_boundary_policy_effective"]=="boundary_scale_zero"
     assert result.metrics["fallbacks_used"]==[]
 
