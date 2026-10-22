@@ -1,7 +1,7 @@
 name: Experimental T2D flexure, AL and reflatten Split
 on:
   push:
-    branches: [feature/isogami-flexure-t2d-20261021]
+    branches: [feature/isogami-flexure-t2d-20261021, feature/normal-flow-reflatten-csf-20261023]
     paths:
       - "onestring-physics-simulator/src/onestring_physics/t2d_flexure_fabrication.py"
       - "onestring-physics-simulator/app_runtime_base.py"
