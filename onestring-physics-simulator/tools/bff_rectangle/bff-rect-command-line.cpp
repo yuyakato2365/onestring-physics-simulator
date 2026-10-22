@@ -27,12 +27,17 @@ using namespace bff;
 int main(int argc, char** argv) {
     const bool customCornerPositions =
         argc == 17 && std::string(argv[4]) == "--corner-xyz";
-    if ((argc != 4 && argc != 6 && !customCornerPositions) ||
+    // Uses the SAME unmodified official BFF library, but imposes its
+    // natural/free boundary policy rather than forcing four sharp corners.
+    // This is an explicit RECOVERY path, NOT a rectangular solution.
+    const bool freeBoundary = argc == 5 && std::string(argv[4]) == "--free-boundary";
+    if ((argc != 4 && argc != 6 && !customCornerPositions && !freeBoundary) ||
         std::string(argv[3]) != "--writeOnlyUVs" ||
-        (argc == 6 && std::string(argv[4]) != "--corner-phase")) {
+        (argc == 6 && std::string(argv[4]) != "--corner-phase") ||
+        (argc == 5 && !freeBoundary)) {
         std::cerr << "Usage: bff-rect-command-line input.obj output.obj --writeOnlyUVs "
                   << "[--corner-phase frac | --corner-xyz x0 y0 z0 x1 y1 z1 "
-                  << "x2 y2 z2 x3 y3 z3]\\n";
+                  << "x2 y2 z2 x3 y3 z3 | --free-boundary]\\n";
         return EXIT_FAILURE;
     }
     // The original quarter-arclength behavior remains the default.
@@ -83,6 +88,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     std::vector<int> corners(4,0);
+    if (!freeBoundary) {
     if (customCornerPositions) {
         // Candidate corners come from PCA extrema on the actual 3D source
         // boundary. Passing xyz avoids relying on the OBJ/BFF wedge index
@@ -144,6 +150,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    } // Only a forced rectangle needs any corner selection.
     // BFF::flatten(..., false) uses its protected meanScaling gauge,
     // initialized only by the scale-factor overload. Call that official
     // overload once first; this avoids uninitialized state or poking
@@ -153,15 +160,19 @@ int main(int argc, char** argv) {
         std::cerr << "Official BFF gauge initialization failed\\n";
         return EXIT_FAILURE;
     }
-    DenseMatrix exterior(bff.data->bN);
-    for (int k=0; k<4; ++k) {
-        const int idx=bff.data->bIndex[boundary[corners[k]]];
-        exterior(idx) = 0.5 * M_PI;
+    if (!freeBoundary) {
+        DenseMatrix exterior(bff.data->bN);
+        for (int k=0; k<4; ++k) {
+            const int idx=bff.data->bIndex[boundary[corners[k]]];
+            exterior(idx) = 0.5 * M_PI;
+        }
+        if (!bff.flatten(exterior, false)) {
+            std::cerr << "Official BFF prescribed exterior-angle solve failed\n";
+            return EXIT_FAILURE;
+        }
     }
-    if (!bff.flatten(exterior, false)) {
-        std::cerr << "Official BFF prescribed exterior-angle solve failed\n";
-        return EXIT_FAILURE;
-    }
+    // In freeBoundary mode, the BFF scale-factor solve above is FINAL.
+    // No second map is computed and nothing is projected onto a rectangle.
     // Do not request PCA reorientation or an additional UV map:
     // only the conformal flattening returned by BFF::flatten is used.
     // IMPORTANT: upstream MeshIO::writeOBJ uses std::to_string(uv.x/y),
@@ -215,9 +226,13 @@ int main(int argc, char** argv) {
     }
     std::cerr << "BFF_RECTANGLE_OUTPUT_PRECISION="
               << std::numeric_limits<double>::max_digits10 << "\n";
-    std::cerr << "BFF_RECTANGLE_CORNERS="
-              << corners[0] << "," << corners[1] << ","
-              << corners[2] << "," << corners[3] << "\n";
+    if (freeBoundary) {
+        std::cerr << "BFF_FREE_BOUNDARY_HIGH_PRECISION=1\n";
+    } else {
+        std::cerr << "BFF_RECTANGLE_CORNERS="
+                  << corners[0] << "," << corners[1] << ","
+                  << corners[2] << "," << corners[3] << "\n";
+    }
     std::cerr << "BFF_RECTANGLE_CORNER_PHASE=" << cornerPhase << "\\n";
     return EXIT_SUCCESS;
 }
