@@ -2964,6 +2964,11 @@ elif view_stage == "Split Map":
             st.warning(f"検証専用の強制Splitが{_validation_count}本含まれます。"
                        "これはCSF超過による必要Splitではありません。"
                        "後段の処理経路をテストする目的だけに使用してください。")
+        elif state.mesh_2d_initial.metrics.get(
+                "csf_split_validation_force_one_cut_requested",False):
+            st.warning("検証用のSplitを要求しましたが、有効な完全格子切断を"
+                       "生成できませんでした。格子数やメッシュの形状、"
+                       "最大Split数を確認してください。")
         _split_records = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
         _split_count = len(_split_records)
         _split_step = st.slider("追加済みのSplit数", 0, _split_count, 0, key=f"split_process_step_{_split_count}") if _split_count else 0
