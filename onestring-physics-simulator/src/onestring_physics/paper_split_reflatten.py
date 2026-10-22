@@ -374,8 +374,13 @@ class SplitDirectionQuestion(BaseException):
 
 def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                         rings=3,threshold=2.,max_cuts=64,direction_choices=(),ask=False,
-                        curvature_tie_tolerance=0.02):
-    """Assess a full-grid cut using fresh BFF for both 3D child patches."""
+                        curvature_tie_tolerance=0.02,force_one_cut=False):
+    """Assess a full-grid cut using fresh BFF for both 3D child patches.
+
+    Optional one-cut validation runs the same geometric route even if the
+    initial region already satisfies its CSF criterion. It is NOT a CSF
+    necessity, and is separately identified in every cut record/report.
+    """
     grid_xy=np.asarray(grid_xy,float);quads=np.asarray(quads,int)
     quad_xy=grid_xy[quads];centres=quad_xy.mean(axis=1)
     pitch=float(np.median(np.linalg.norm(quad_xy[:,1]-quad_xy[:,0],axis=1)))
@@ -400,7 +405,9 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
         boundary={v for edge,c in edge_count.items() if c==1 for v in edge}
         return sorted(set(quads[ids].ravel().tolist())-boundary)
     report=dict(model=_CSF_MODEL,threshold=float(threshold),curvature_rings=int(rings),
-                pitch=pitch,steps=[],leaves=[])
+                pitch=pitch,steps=[],leaves=[],
+                validation_force_one_cut_requested=bool(force_one_cut),
+                validation_cut_generated=False)
     started=time.perf_counter()
     root=(np.asarray(xyz,float),np.asarray(tri_faces,int),np.asarray(uv,float))
     all_ids=np.arange(len(quads));root_sigma,root_J=sigma(root,all_ids)
@@ -411,7 +418,10 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
     while stack:
         piece,ids,parent_sigma,parent_J,depth=stack.pop()
         candidates=interior(ids)
-        if parent_sigma<=threshold or not candidates or len(cuts)>=max_cuts:
+        validation_forced=bool(force_one_cut and depth==0 and not cuts
+                               and parent_sigma<=threshold)
+        if ((parent_sigma<=threshold and not validation_forced)
+                or not candidates or len(cuts)>=max_cuts):
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,
                     satisfied=bool(parent_sigma<=threshold),tile_area_ratio=parent_J.tolist()))
             continue
@@ -471,8 +481,10 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                 satisfied=False,reason="no_complete_grid_cut",tile_area_ratio=parent_J.tolist()))
             continue
         worst,axis,value,children=best
-        cuts.append(dict(axis=axis,value=float(value),source_face_id=int(ids[0])))
+        cuts.append(dict(axis=axis,value=float(value),source_face_id=int(ids[0]),
+                         validation_forced=validation_forced))
         report["steps"].append(dict(depth=depth,parent_tiles=int(len(ids)),
+                validation_forced=validation_forced,
                 parent_sigma=float(parent_sigma),curvature_vertex=int(peak),
                 curvature_xy=grid_xy[peak].tolist(),curvature=float(vertex_k[peak]),
                 peak_rule=peak_rule,near_equal_curvature_vertices=int(len(ties)),height=float(vertex_z[peak]),
@@ -484,6 +496,7 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                 requested_direction=choice,chosen_by=chosen_by))
         for child in children:stack.append((*child,depth+1))
     report["seconds"]=time.perf_counter()-started
+    report["validation_cut_generated"]=any(c.get("validation_forced",False) for c in cuts)
     report["final_max_sigma"]=max((l["sigma"] for l in report["leaves"]),default=1.)
     report["satisfied"]=all(l["satisfied"] for l in report["leaves"])
     return cuts,report
@@ -529,7 +542,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
         threshold=2.,max_cuts=int(getattr(domain,"max_csf_splits",64)),
         direction_choices=tuple(getattr(params,"paper_split_direction_choices",()) or ()),
         ask=bool(getattr(params,"paper_split_ask_direction",False)),
-        curvature_tie_tolerance=float(getattr(params,"paper_split_curvature_tie_tolerance",0.02)))
+        curvature_tie_tolerance=float(getattr(params,"paper_split_curvature_tie_tolerance",0.02)),
+        force_one_cut=bool(getattr(params,"paper_split_validation_force_one_cut",False)))
     # Preserve the original forced-cut topology implementation and ALL fields.
     # Use a defensive copy of params so changing the decision cannot leak
     # user-requested collision-driven Split state back into the UI.
@@ -553,6 +567,7 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     collision_records=records[len(cuts):]
     for record,step in zip(csf_records,report["steps"]):
         record.update(collision_driven=False,reflatten_csf_cut=True,
+            validation_forced_cut=bool(step.get("validation_forced",False)),
             face_ids=step["parent_face_ids"],
             child_face_ids=step["child_face_ids"],
             sigma_before=step["parent_sigma"],sigma_after=step["child_sigma"],
@@ -569,6 +584,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
             +source_method
         ),
         csf_split_criterion=REFLATTEN_CRITERION,csf_split_threshold=2.,
+        csf_split_validation_force_one_cut_requested=bool(report["validation_force_one_cut_requested"]),
+        csf_split_validation_forced_count=int(report["validation_cut_generated"]),
         csf_split_applied=bool(csf_records),number_of_splits=len(records),
         csf_split_step_analysis=csf_records,csf_split_step_count=len(csf_records),
         csf_split_locations=[[r["axis"],r["snapped_value"]] for r in csf_records],
