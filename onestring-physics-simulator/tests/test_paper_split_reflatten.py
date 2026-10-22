@@ -72,7 +72,8 @@ def test_registered_reflatten_criterion_does_not_replace_fixed_uv():
     import inspect
     src=inspect.getsource(split.split_mesh)
     assert "paper_split_criterion" in src
-    assert "paper_reference_bff" in src
+    assert "paper_reference_bff" in src  # Mentioned in comments, not a restriction
+    assert "not in {" not in src  # Legacy initial Omega is now accepted
     assert "split_mesh_reflatten" in src
     assert "return _split_mesh_single" in src
 
@@ -196,3 +197,52 @@ def test_3d_split_replay_preserves_original_m3d_vertices():
     fig,rows=figure_reflatten_split_3d(state,0)
     assert fig is not None and rows[0]["M2D panel count"]==1
     np.testing.assert_array_equal(vertices,originals)
+
+
+@pytest.mark.parametrize("initial_method", [
+    "paper_reference_bff", "rectangular_harmonic_legacy",
+    "lscm_free_boundary", "bff",
+])
+def test_reflatten_dispatches_identically_for_paper_and_normal_omega(
+        monkeypatch, initial_method):
+    """Paper OFF must use the exact same BFF/area-span Split engine."""
+    from types import SimpleNamespace
+    from onestring_physics import paper_mesh_splitting as split
+    from onestring_physics import paper_split_reflatten as module
+
+    marker=object()
+    seen=[]
+    def fake_reflatten(vertices,faces,domain,params):
+        seen.append((domain.parameterization.method,
+                     params.paper_fidelity_mode))
+        return marker
+    monkeypatch.setattr(module,"split_mesh_reflatten",fake_reflatten)
+    chart=SimpleNamespace(method=initial_method)
+    domain=SimpleNamespace(parameterization=chart)
+    for paper in (True,False):
+        p=SimpleNamespace(paper_split_criterion="reflatten_tile_area",
+                          paper_fidelity_mode=paper)
+        assert split.split_mesh(None,None,domain,p) is marker
+    assert seen==[(initial_method,True),(initial_method,False)]
+
+
+def test_normal_ui_exposes_reflatten_option_and_keeps_legacy_default():
+    root=Path(__file__).parents[1]
+    app=(root/"app_runtime_base.py").read_text()
+    # In Paper OFF + legacy Omega, keep 'fixed_uv' as the default (index=0),
+    # but do not disable the reflatten alternative.
+    selection=app.split('paper_split_criterion = st.selectbox(',1)[1].split(
+        'paper_split_curvature_rings =',1)[0]
+    assert 'index=1 if _reflatten_bff_path else 0' in selection
+    assert 'disabled=not _reflatten_bff_path' not in selection
+    assert '["fixed_uv", "reflatten_tile_area"]' in selection
+    assert 'if paper_split_criterion == "reflatten_tile_area":' in app
+
+
+def test_normal_reflatten_reports_actual_initial_omega_method():
+    code=(Path(__file__).parents[1]/
+          "src/onestring_physics/paper_split_reflatten.py").read_text()
+    assert 'csf_split_initial_omega_method=source_method' in code
+    assert 'csf_split_initial_omega_is_official_bff=' in code
+    assert 'csf_split_normal_flow_enabled=' in code
+    assert '"paper_fidelity_mode"' in code
