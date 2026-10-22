@@ -166,5 +166,11 @@ def render_split_question(st):
             _choose(st, axis)
     if cols[2].button(f"このSplitは自動に任せる（{LABEL[q['auto_axis']]}）", key="split_question_auto"):
         _choose(st, "auto")
+    c4, c5 = st.columns(2)
+    if c4.button("以降の Split はすべて自動で決める", key="split_question_auto_rest"):
+        st.session_state["paper_split_ask_suspended"] = True
+        _choose(st, "auto")
+    if c5.button("ここで Split を打ち切る（残りのピースは σ>2 のまま）", key="split_question_stop"):
+        _choose(st, "stop")
     st.caption("選ぶとパイプラインを最初から計算し直し、次の Split まで進みます。サイドバーの Run を押すと最初の Split から尋ね直します。")
     return True

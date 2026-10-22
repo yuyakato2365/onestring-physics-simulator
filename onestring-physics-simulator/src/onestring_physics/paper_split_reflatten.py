@@ -456,6 +456,13 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                           for c,st in zip(cuts,report["steps"])],
                 grid_xy=grid_xy.tolist(),quads=quads.tolist()))
         choice=str(direction_choices[len(cuts)]) if len(cuts)<len(direction_choices) else "auto"
+        if choice=="stop":
+            # The user ended the Split here: this and every remaining piece
+            # become leaves as they are (sigma may stay above the threshold).
+            max_cuts=len(cuts);report["stopped_by_user"]=True
+            report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,satisfied=False,
+                    reason="stopped_by_user",tile_area_ratio=parent_J.tolist()))
+            continue
         chosen_by="auto"
         if best is not None and choice in options:
             best=options[choice];chosen_by="user"

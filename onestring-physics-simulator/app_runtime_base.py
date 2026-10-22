@@ -1022,6 +1022,7 @@ with st.sidebar:
     if run_pipeline and not _split_direction_rerun and st.session_state.get("paper_split_ask_direction"):
         st.session_state["paper_split_direction_choices"] = ()  # a fresh Run asks again from Split 1
         st.session_state.pop("paper_split_question", None)
+        st.session_state.pop("paper_split_ask_suspended", None)
     run_pipeline = bool(run_pipeline) or _split_direction_rerun
     max_3d_iterations = _param_row(
         "M3D→K3D の反復回数。平面性・正方形性・表面追従を改善するが、重くなる。",
@@ -2031,7 +2032,7 @@ pipeline_params = PipelineParameters(
     paper_split_criterion=paper_split_criterion,
     paper_split_curvature_rings=paper_split_curvature_rings,
     paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
-    paper_split_ask_direction=bool(paper_split_ask_direction),
+    paper_split_ask_direction=bool(paper_split_ask_direction) and not st.session_state.get("paper_split_ask_suspended", False),
     paper_split_curvature_tie_tolerance=paper_split_curvature_tie_percent / 100.0,
     bff_rectangle_manual_corners=(tuple(tuple(float(x) for x in c) for c in (st.session_state.get("bff_manual_corners") or ()))
                                   if _manual_corner_mode else ()),
