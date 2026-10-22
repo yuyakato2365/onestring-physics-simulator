@@ -2829,7 +2829,22 @@ if view_stage == "Pipeline View":
         st.warning("工程ごとのレポートが空です。パネル数は上に表示しています。"
                    "View stageのMetricsから詳細を確認できます。")
 elif view_stage == "S":
-    st.plotly_chart(figure_surface_mesh(state.target_surface), use_container_width=True, key="target_surface")
+    _s_figure = figure_surface_mesh(state.target_surface)
+    try:
+        # Display only: the four boundary points that became the corners of
+        # the rectangular Omega (labels match the Omega view).
+        from onestring_physics.omega_corner_view import add_corners_to_surface_figure, omega_corner_info
+        _corner_info = omega_corner_info(state)
+        if _corner_info["is_rectangle"]:
+            add_corners_to_surface_figure(_s_figure, _corner_info)
+    except Exception:
+        _corner_info = None
+    st.plotly_chart(_s_figure, use_container_width=True, key="target_surface")
+    if _corner_info is not None and _corner_info["is_rectangle"]:
+        st.caption("C1〜C4 は矩形Ωの四隅に写した境界点（" + _corner_info["source"] + "）。"
+                   "Ωビューの同じラベルと対応します。"
+                   + (f" 境界の小さな突起 {_corner_info['feature_count']} 点は、BFFの目標角に残して矩形の辺を保っています。"
+                      if _corner_info["feature_count"] else ""))
 elif view_stage == "Split Map":
     if _postcut_report is not None:
         st.subheader("再BFFを使ったGrid Split履歴")
@@ -3074,6 +3089,19 @@ elif view_stage == "Omega":
                 "The final outline can therefore remain visually indistinguishable from the initialization."
             )
     st.write(omega_info)
+    # Display only: Omega with its long side vertical (paper Fig. 5) and the
+    # four rectangle corners labelled as on S. The computation is unchanged.
+    if _postcut_report is None:
+        try:
+            from onestring_physics.omega_corner_view import figure_omega_upright, omega_corner_info
+            _corner_info = omega_corner_info(state)
+            if st.checkbox("Ωを図5の向き（長辺を縦）で表示", value=True, key="omega_upright_view"):
+                st.plotly_chart(figure_omega_upright(state, _corner_info), use_container_width=True,
+                                key="omega_upright_figure")
+                st.caption("表示のみ（計算には影響しません）。C1〜C4 は S ビューの同じラベルの点に対応します。"
+                           "共形写像では回転と拡大縮小が任意なので、図5と比べやすいよう長辺を縦にしています。")
+        except Exception as _corner_exc:
+            st.caption(f"Ωの向き表示を作れませんでした: {type(_corner_exc).__name__}: {_corner_exc}")
 elif view_stage == "Mode Comparison":
     st.caption(
         "S→M3Dの3モード比較です。spacing / rotation / origin と fully-contained crop を共通化します。"

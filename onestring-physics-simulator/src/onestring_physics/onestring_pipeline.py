@@ -2720,14 +2720,33 @@ def _build_surface_parameterization(surface, target, grid, params):
                 # one official rectangular BFF solve at the four lobe tips, with no
                 # corner re-search and no free-boundary recovery. Lilium gives
                 # 196 tiles and one re-flatten Split with this route.
-                result = run_official_bff(
-                    surface_vertices, surface_faces,
+                _rect_kwargs = dict(
                     executable=getattr(params, "bff_executable", None),
                     rectangle_executable=getattr(params, "bff_rectangle_executable", None),
                     rectangle_corner_positions=corner_xyz,
                     boundary_policy="target_rectangle",
                     timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
                 )
+                result = run_official_bff(surface_vertices, surface_faces, **_rect_kwargs)
+                _features_used = []
+                # Only if this plain rectangle collapses or folds a UV triangle:
+                # keep sharp non-corner rim features (e.g. a tiny tooth) at their
+                # own exterior angles (zero net) instead of flattening them, and
+                # solve the same official BFF once more. Charts that were valid
+                # before (Lilium, height fields) are never re-solved.
+                from .paper_split_reflatten import boundary_feature_angles
+                _features = boundary_feature_angles(surface_vertices, surface_faces, corner_xyz)
+                if _features:
+                    _, _check = normalize_uv_and_compute_csf(
+                        surface_vertices, result.uv_vertices, surface_faces,
+                        normalization=str(getattr(params, "reference_csf_normalization", "min_to_one_hypothesis_a")),
+                    )
+                    if int(_check["uv_degenerate_triangle_count"]) or int(_check["uv_triangle_flip_count"]):
+                        result = run_official_bff(surface_vertices, surface_faces,
+                                                  rectangle_feature_angles=_features, **_rect_kwargs)
+                        _features_used = list(_features)
+                result.metrics["bff_rectangle_corner_positions"] = np.asarray(corner_xyz, float).tolist()
+                result.metrics["bff_rectangle_feature_angles"] = _features_used
             else:
                 try:
                     result = run_official_bff(

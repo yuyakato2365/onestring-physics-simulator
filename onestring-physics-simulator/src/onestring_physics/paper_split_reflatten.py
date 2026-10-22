@@ -106,11 +106,56 @@ def _sharp_corner_picks(turning,smoothed,n):
     for index in np.argsort(-turning,kind="stable"):
         i=int(index)
         if turning[i]<np.pi/8: break
-        if smoothed[i]<0.5*turning[i]: continue
+        # zig-zag test on the immediate neighbours (+/-2): a tooth such as
+        # +1.76/-0.97/-0.97 rad cancels out, a real corner does not. (A wide
+        # window also swallows the gently flaring sides next to a real corner.)
+        if turning[np.arange(i-2,i+3)%n].sum()<0.5*turning[i]: continue
         if all(min(abs(i-j),n-abs(i-j)) > n//8 for j in picks):
             picks.append(i)
         if len(picks)==4: return picks
     return None
+
+
+def boundary_feature_angles(vertices, faces, corner_positions, threshold=np.pi/8):
+    """Sharp non-corner boundary features to keep in the rectangular BFF target.
+
+    The rectangle prescribes exterior angle pi/2 at the four corners and 0
+    elsewhere. A small tooth on an otherwise straight side (e.g. a 0.01-long
+    spike on a vessel rim, +1.76/-0.97/-0.97 rad) would have to be flattened,
+    which collapses its UV triangle and makes the official BFF output invalid.
+    Such clusters keep their own exterior angles, shifted to zero net turning,
+    so the four sides stay straight on both sides of the feature and the total
+    stays 2*pi. Returns [(x, y, z, angle), ...]; empty for smooth boundaries
+    (Lilium, height fields) so their target is unchanged.
+    """
+    V=np.asarray(vertices,float);F=np.asarray(faces,int)[:,:3]
+    loop=_boundary_loop(F);n=len(loop)
+    angsum=np.bincount(F.ravel(),weights=_tri_angles(V,F).ravel(),minlength=len(V))
+    turning=np.pi-angsum[loop]
+    corner_pos=set()
+    for c in np.asarray(corner_positions,float):
+        corner_pos.add(int(np.argmin(np.linalg.norm(V[loop]-c,axis=1))))
+    near_corner=lambda i: any(min(abs(i-c),n-abs(i-c))<=1 for c in corner_pos)
+    flagged=[i for i in range(n) if abs(turning[i])>=threshold and not near_corner(i)]
+    # each sharp vertex together with its two neighbours (which absorb the
+    # opposite turning of a tooth or notch), merged when they touch
+    members=sorted({(i+d)%n for i in flagged for d in (-1,0,1) if not near_corner((i+d)%n)})
+    clusters=[]
+    for i in members:
+        if clusters and min(abs(i-clusters[-1][-1]),n-abs(i-clusters[-1][-1]))<=1:
+            clusters[-1].append(i)
+        else:
+            clusters.append([i])
+    if len(clusters)>1 and min(abs(clusters[0][0]-clusters[-1][-1]),n-abs(clusters[0][0]-clusters[-1][-1]))<=1:
+        clusters[0]=clusters.pop()+clusters[0]
+    out=[]
+    for cluster in clusters:
+        if len(cluster)<2:
+            continue
+        values=turning[cluster]-turning[cluster].mean()
+        for i,a in zip(cluster,values):
+            x,y,z=V[loop[i]];out.append((float(x),float(y),float(z),float(a)))
+    return out
 
 
 def _refine_corner_picks(chosen,turning,smoothed,window):

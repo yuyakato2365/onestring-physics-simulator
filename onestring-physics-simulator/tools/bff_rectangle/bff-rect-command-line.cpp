@@ -166,6 +166,36 @@ int main(int argc, char** argv) {
             const int idx=bff.data->bIndex[boundary[corners[k]]];
             exterior(idx) = 0.5 * M_PI;
         }
+        // Optional extra exterior angles at original boundary vertices
+        // ("x y z angle" per line, zero net sum), e.g. to keep a tiny rim
+        // tooth instead of flattening it into a straight side. Same official
+        // BFF::flatten(target, false) solve; only the target angles differ.
+        if (const char* featurePath = std::getenv("ONESTRING_BFF_FEATURE_ANGLES")) {
+            std::ifstream features(featurePath);
+            if (!features.is_open()) {
+                std::cerr << "Cannot open ONESTRING_BFF_FEATURE_ANGLES file\n";
+                return EXIT_FAILURE;
+            }
+            double fx, fy, fz, fa;
+            int applied=0;
+            while (features >> fx >> fy >> fz >> fa) {
+                int best=-1;
+                double minDist=std::numeric_limits<double>::infinity();
+                for (int i=0; i<n; ++i) {
+                    Vector v=boundary[i]->vertex()->position * mesh.radius + mesh.cm;
+                    const double dx=v[0]-fx, dy=v[1]-fy, dz=v[2]-fz;
+                    const double dist=dx*dx+dy*dy+dz*dz;
+                    if (dist<minDist) { minDist=dist; best=i; }
+                }
+                if (best<0 || minDist>1e-12*perimeter*perimeter || !std::isfinite(fa)) {
+                    std::cerr << "Feature angle point is not an original boundary vertex\n";
+                    return EXIT_FAILURE;
+                }
+                exterior(bff.data->bIndex[boundary[best]]) += fa;
+                ++applied;
+            }
+            std::cout << "ONESTRING_FEATURE_ANGLES_APPLIED " << applied << "\n";
+        }
         if (!bff.flatten(exterior, false)) {
             std::cerr << "Official BFF prescribed exterior-angle solve failed\n";
             return EXIT_FAILURE;

@@ -529,8 +529,15 @@ def run_official_bff(
     boundary_policy: Literal["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"] = "automatic_reference",
     timeout_seconds: float = 120.0,
     free_boundary_precision_adapter: bool = False,
+    rectangle_feature_angles: list | None = None,
 ) -> BFFRunResult:
-    """Run the official BFF CLI and return its UV vertices in input order."""
+    """Run the official BFF CLI and return its UV vertices in input order.
+
+    ``rectangle_feature_angles`` (rectangle with explicit corners only): extra
+    prescribed BFF exterior angles [(x, y, z, angle), ...] at original boundary
+    vertices, summing to zero, passed to the adapter through
+    ONESTRING_BFF_FEATURE_ANGLES.
+    """
 
     topology = validate_reference_mesh(vertices, faces)
     corner_phase=float(rectangle_corner_phase_fraction)
@@ -566,15 +573,24 @@ def run_official_bff(
             command.append("--free-boundary")
         if boundary_policy == "target_disk":
             command.append("--flattenToDisk")
+        run_env = None
         if corners_xyz is not None:
             command.append("--corner-xyz")
             command.extend(format(float(x), ".17g") for x in corners_xyz.ravel())
+            if rectangle_feature_angles:
+                feature_path = root / "feature_angles.txt"
+                feature_path.write_text("".join(
+                    " ".join(format(float(v), ".17g") for v in row) + "\n"
+                    for row in rectangle_feature_angles
+                ))
+                run_env = {**os.environ, "ONESTRING_BFF_FEATURE_ANGLES": str(feature_path)}
         elif boundary_policy == "target_rectangle" and corner_phase:
             command.extend(["--corner-phase", format(corner_phase, ".17g")])
         try:
             completed = subprocess.run(
                 command,
                 cwd=str(exe.parent),
+                env=run_env,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -584,6 +600,12 @@ def run_official_bff(
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise ReferenceBFFUnavailableError(f"Official BFF execution failed: {type(exc).__name__}: {exc}") from exc
+        if run_env is not None and "ONESTRING_FEATURE_ANGLES_APPLIED" not in (completed.stdout or ""):
+            raise ReferenceBFFUnavailableError(
+                "The selected bff-rect-command-line does not support boundary feature angles "
+                "(needed to keep a small rim feature straight-sided). Rebuild it with "
+                "'python3 scripts/setup_bff_rectangle.py --jobs 4' and restart Streamlit."
+            )
         if completed.returncode != 0 or not output_path.is_file():
             raise ReferenceBFFUnavailableError(
                 "Official BFF CLI failed; no fallback was used. "
