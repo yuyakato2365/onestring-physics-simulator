@@ -2710,7 +2710,11 @@ def _build_surface_parameterization(surface, target, grid, params):
                 raise ValueError("Lobe-tip BFF corner selection requires target_rectangle")
             from .paper_split_reflatten import lobe_tip_corner_positions
             corner_xyz = lobe_tip_corner_positions(surface_vertices, surface_faces)
-            try:
+            if bool(getattr(params, "paper_fidelity_mode", False)):
+                # Paper-oriented mode: the validated route (feature branch 5c406ba):
+                # one official rectangular BFF solve at the four lobe tips, with no
+                # corner re-search and no free-boundary recovery. Lilium gives
+                # 196 tiles and one re-flatten Split with this route.
                 result = run_official_bff(
                     surface_vertices, surface_faces,
                     executable=getattr(params, "bff_executable", None),
@@ -2719,62 +2723,72 @@ def _build_surface_parameterization(surface, target, grid, params):
                     boundary_policy="target_rectangle",
                     timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
                 )
-                # Lobe tips are a heuristic, NOT guaranteed to yield an
-                # injective chart on arbitrary uploaded disk-shaped surfaces.
-                # Check *before* selecting the result, as in the general
-                # rectangle corner optimizer. Successful Lilium runs remain
-                # bit-for-bit the same: no reranking or extra solver call.
-                from .bff_rectangle_selection import (
-                    _verify_selected_bff_csf_compatible,
-                    whole_surface_area_span,
-                )
-                whole_surface_area_span(
-                    surface_vertices, result.uv_vertices, surface_faces
-                )
-                _verify_selected_bff_csf_compatible(
-                    surface_vertices, surface_faces, result.uv_vertices,
-                    str(getattr(params, "reference_csf_normalization",
-                                "min_to_one_hypothesis_a")),
-                )
-            except (ReferenceBFFError, ValueError) as exc:
-                # Still official *rectangular BFF*, NEVER Tutte/LSCM here.
-                # If a lobe-tip chart collapses, try the general geometric
-                # rectangle corner optimizer and retain an audit trail.
+            else:
                 try:
-                    alternative = choose_rectangle_by_source_boundary_fit(
+                    result = run_official_bff(
                         surface_vertices, surface_faces,
-                        rectangle_executable=getattr(
-                            params, "bff_rectangle_executable", None
-                        ),
-                        timeout_seconds=float(getattr(
-                            params, "bff_timeout_seconds", 120.0
-                        )),
-                        allow_nonconformal_rescue=False,
-                        csf_normalization=str(getattr(
-                            params, "reference_csf_normalization",
-                            "min_to_one_hypothesis_a"
-                        )),
+                        executable=getattr(params, "bff_executable", None),
+                        rectangle_executable=getattr(params, "bff_rectangle_executable", None),
+                        rectangle_corner_positions=corner_xyz,
+                        boundary_policy="target_rectangle",
+                        timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
                     )
-                except ReferenceBFFError as secondary:
-                    raise ReferenceBFFUnavailableError(
-                        "Lobe-tip official BFF was not usable: "
-                        f"{type(exc).__name__}: {exc}. "
-                        "All alternative official rectangular BFF charts "
-                        f"also failed: {secondary}"
-                    ) from secondary
-                from .reference_bff import BFFRunResult
-                result = BFFRunResult(
-                    uv_vertices=alternative.uv_vertices,
-                    metrics={
-                        **alternative.metrics,
-                        "bff_requested_corner_mode": "lobe_tips",
-                        "bff_lobe_tip_original_candidate_rejected": True,
-                        "bff_lobe_tip_failure_reason": str(exc),
-                        "bff_lobe_tip_recovery": (
-                            "official_rectangular_BFF_source_boundary_search"
-                        ),
-                    },
-                )
+                    # Lobe tips are a heuristic, NOT guaranteed to yield an
+                    # injective chart on arbitrary uploaded disk-shaped surfaces.
+                    # Check *before* selecting the result, as in the general
+                    # rectangle corner optimizer. Successful Lilium runs remain
+                    # bit-for-bit the same: no reranking or extra solver call.
+                    from .bff_rectangle_selection import (
+                        _verify_selected_bff_csf_compatible,
+                        whole_surface_area_span,
+                    )
+                    whole_surface_area_span(
+                        surface_vertices, result.uv_vertices, surface_faces
+                    )
+                    _verify_selected_bff_csf_compatible(
+                        surface_vertices, surface_faces, result.uv_vertices,
+                        str(getattr(params, "reference_csf_normalization",
+                                    "min_to_one_hypothesis_a")),
+                    )
+                except (ReferenceBFFError, ValueError) as exc:
+                    # Still official *rectangular BFF*, NEVER Tutte/LSCM here.
+                    # If a lobe-tip chart collapses, try the general geometric
+                    # rectangle corner optimizer and retain an audit trail.
+                    try:
+                        alternative = choose_rectangle_by_source_boundary_fit(
+                            surface_vertices, surface_faces,
+                            rectangle_executable=getattr(
+                                params, "bff_rectangle_executable", None
+                            ),
+                            timeout_seconds=float(getattr(
+                                params, "bff_timeout_seconds", 120.0
+                            )),
+                            allow_nonconformal_rescue=False,
+                            csf_normalization=str(getattr(
+                                params, "reference_csf_normalization",
+                                "min_to_one_hypothesis_a"
+                            )),
+                        )
+                    except ReferenceBFFError as secondary:
+                        raise ReferenceBFFUnavailableError(
+                            "Lobe-tip official BFF was not usable: "
+                            f"{type(exc).__name__}: {exc}. "
+                            "All alternative official rectangular BFF charts "
+                            f"also failed: {secondary}"
+                        ) from secondary
+                    from .reference_bff import BFFRunResult
+                    result = BFFRunResult(
+                        uv_vertices=alternative.uv_vertices,
+                        metrics={
+                            **alternative.metrics,
+                            "bff_requested_corner_mode": "lobe_tips",
+                            "bff_lobe_tip_original_candidate_rejected": True,
+                            "bff_lobe_tip_failure_reason": str(exc),
+                            "bff_lobe_tip_recovery": (
+                                "official_rectangular_BFF_source_boundary_search"
+                            ),
+                        },
+                    )
         elif selection_mode == "source_boundary_shape_fit":
             if boundary_policy != "target_rectangle":
                 raise ValueError("Source-boundary shape fitting requires rectangular BFF")
@@ -2793,9 +2807,10 @@ def _build_surface_parameterization(surface, target, grid, params):
                 # route. Successful Lilium rectangle charts remain unchanged.
                 # Distinguish official BFF natural boundary from strict
                 # rectangular Paper reproduction in the output metrics/UI.
-                allow_official_free_boundary_recovery=bool(
-                    getattr(params, "paper_fidelity_mode", False)
-                ),
+                # Paper-oriented mode keeps the validated strict rectangle route
+                # (no silent switch to a free-boundary Omega). Paper OFF never
+                # enabled this recovery, so its behaviour is unchanged.
+                allow_official_free_boundary_recovery=False,
             )
         elif selection_mode == "min_whole_source_area_span_4phase":
             if boundary_policy != "target_rectangle":

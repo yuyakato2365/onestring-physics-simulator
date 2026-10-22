@@ -720,7 +720,10 @@ with st.sidebar:
         _lilium_reference_input = bool(
             _mesh_name and Path(_mesh_name).stem.lower().startswith("lilium")
         )
-        _generic_bff_corner_index = (3 if _lilium_reference_input else 2)
+        # Paper-oriented mode keeps the validated lobe-tip corners for every
+        # input (as when the re-flatten Split was verified); Paper OFF keeps the
+        # name-based default below.
+        _generic_bff_corner_index = (3 if (_lilium_reference_input or paper_fidelity_enabled) else 2)
         _corner_mesh_identity = Path(_mesh_name).stem.lower() if _mesh_name else str(target_kind)
         bff_rectangle_selection_mode = st.selectbox(
             "矩形BFF 四隅の選び方（実験）",

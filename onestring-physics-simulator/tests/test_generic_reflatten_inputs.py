@@ -140,6 +140,8 @@ def test_non_lilium_expect_count_never_forces_solver(tmp_path,monkeypatch):
 
 def test_streamlit_generic_corner_default_varies_with_uploaded_input():
     text=(Path(__file__).parents[1]/"app_runtime_base.py").read_text()
-    assert "if _lilium_reference_input else 2" in text
+    # Paper OFF: the default varies with the uploaded input; Paper-oriented
+    # mode keeps the validated lobe-tip corners for every input.
+    assert "(3 if (_lilium_reference_input or paper_fidelity_enabled) else 2)" in text
     assert 'key=f"bff_rectangle_selection_for_{_corner_mesh_identity}"' in text
     assert 'validate_reference_mesh(result.points, result.faces)' in text

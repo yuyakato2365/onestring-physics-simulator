@@ -85,8 +85,10 @@ def test_bad_free_boundary_also_rejected_after_failed_rectangle():
 def test_nonpaper_route_cannot_turn_on_paper_only_recovery_implicitly():
     path=Path(__file__).parents[1]/"src/onestring_physics/onestring_pipeline.py"
     content=path.read_text()
-    assert 'allow_official_free_boundary_recovery=bool(' in content
-    assert 'getattr(params, "paper_fidelity_mode", False)' in content
+    # Paper-oriented mode was restored to the validated strict rectangle route:
+    # the free-boundary recovery is not enabled by any pipeline route.
+    assert 'allow_official_free_boundary_recovery=False,' in content
+    assert 'allow_official_free_boundary_recovery=bool(' not in content
     assert '"omega_boundary_forced_rectangle": _actual_bff_boundary_policy=="target_rectangle"' in content
     assert '"official_bff_free_boundary_recovery_used": _official_free_recovery' in content
     assert '"official_bff_free_boundary_recovery_used", False' in content
