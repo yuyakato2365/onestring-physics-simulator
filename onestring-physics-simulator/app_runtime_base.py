@@ -420,14 +420,11 @@ with st.sidebar:
     )
     if paper_fidelity_enabled:
         st.info(
-            "Paperモード：公式BFFの4つの90°外角による矩形Ω、"
-            "8頂点剛体、T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
-            "Splitは4枚のパネル重心から構成する双対Grid領域のM2D/M3D面積比を評価し、"
-            "その最大/最小比の平方根が2を超えれば、ガウス曲率優先の完全格子切断を試します。"
-            "Splitをまたぐ双対セルと測定不能な子領域は合格判定に使用しません。"
-            "この重心面積評価は研究用であり、四角形機構の製造可能性を保証しません。"
-            "分割後のUV再写像・独立スケール変更は未実装のため、"
-            "論文の製造可能性条件を完全に証明するものではありません。"
+            "Paperモード：公式BFFの矩形Ω、8頂点剛体、"
+            "T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
+            "Split CSFの既定は再展開方式です。各切断候補の3D曲面片を"
+            "公式自由境界BFFで再展開し、タイルの(A3D/A2D)最大/最小比を2と比較します。"
+            "再展開UVは最終M2Dに反映されず、製造可能性の証明ではありません。"
         )
     # Opt-in extension of the ORIGINAL OneString pipeline, not a separate
     # viewer. Leaves OptCuts / legacy BFF untouched when disabled.
@@ -779,17 +776,18 @@ with st.sidebar:
                 "その場合のSplit本数は元論文のBFF結果と直接比較できません。"
             )
         paper_split_criterion = st.selectbox(
-            "Split CSF判定（論文準拠の研究再構成）",
+            "Split CSF判定（Paper / 通常フロー共通）",
             ["fixed_uv", "reflatten_tile_area"],
             index=1 if _reflatten_bff_path else 0,
-            disabled=not _reflatten_bff_path,
             format_func=lambda v: {
                 "fixed_uv": "既存の固定UV / 現行Split（比較用）",
                 "reflatten_tile_area": "3Dピース自由境界BFF再展開 → タイル面積比 ≤ 2",
             }[v],
-            help="各候補の3D曲面片だけを公式BFFで再展開してCSFを測定。"
-                 "元のM2D格子・K3D・T2Dパネルを再展開UVで置換しません。"
-                 "研究再構成であり著者コードとの一致は未確認。",
+            help="Paper ON/OFFのどちらでも使えます。各候補の3D曲面片を公式の"
+                 "自由境界BFFで再展開し、タイル面積比の最大/最小が2以下かを判定。"
+                 "初期Ωは通常フローのharmonic/LSCM等でも構いませんが、非等角の場合は"
+                 "論文再現ではありません。元のM2D/K3D/T2Dを再BFFのUVで置換しません。"
+                 "外部の公式BFF実行ファイルが必要です。",
         )
         paper_split_curvature_rings = int(st.slider(
             "Split切断点：ガウス曲率平滑化リング数",
@@ -827,10 +825,11 @@ with st.sidebar:
                 )
             else:
                 st.caption(f"再展開Split入力: {uploaded.name}（Lilium固有の形状条件なし）")
-            st.info("再展開Splitは論文を参考にした研究再構成です。"
-                    "M2Dと後段パネルを元のグリッドに固定して、"
-                    "3Dの切断片の自由BFFのみでCSFを評価します。"
-                    "外部BFF実行ファイルが必要で計算時間が増えます。")
+            st.info("再展開SplitはPaper ON/OFFの両方で同じ計算を使います。"
+                    "M2Dと後段パネルは元のグリッドに固定し、"
+                    "3Dの切断片を公式の自由境界BFFで再展開してタイル面積比を評価します。"
+                    "通常フローで非等角Ωを使う場合は論文再現ではありません。"
+                    "公式BFF外部実行ファイルが必要で計算時間が増えます。")
         paper_csf_sampling_method = st.selectbox(
             "CSF離散評価（実験）",
             ["m2d_m3d_dual_centroid", "m2d_m3d_panel_area",
@@ -1843,8 +1842,7 @@ def build_target():
         fh.write(uploaded.getbuffer())
         temp_path = fh.name
     result = load_target_shape(temp_path)
-    if (paper_split_criterion == "reflatten_tile_area"
-            and (paper_fidelity_enabled or omega_parameterization_mode == "paper_reference_bff")):
+    if paper_split_criterion == "reflatten_tile_area":
         from onestring_physics.reference_bff import (
             validate_reference_mesh, ReferenceMeshValidationError,
         )
