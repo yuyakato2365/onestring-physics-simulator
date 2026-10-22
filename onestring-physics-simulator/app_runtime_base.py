@@ -708,6 +708,21 @@ with st.sidebar:
                 "専用アダプタがない場合は、矩形調和写像に切り替えず停止します。"
             )
         st.caption("以下は論文の著者実装が未確認の研究用設定です。既定値なら従来のPaperモードと同じです。")
+        bff_corner_input_mode = st.radio(
+            "矩形Ωの隅の決め方（Paperモード）",
+            ["自動", "手動（S の上で4点を選ぶ）"],
+            key="bff_corner_input_mode",
+            horizontal=True,
+            help="手動：計算後に View stage「S」で境界の4点を選んで確定すると、その4点を BFF の隅にして計算し直します。"
+                 "確定するまでは自動の隅で計算します。",
+        )
+        _manual_corner_mode = bff_corner_input_mode.startswith("手動")
+        if _manual_corner_mode:
+            if st.session_state.get("bff_manual_corners"):
+                st.caption("手動の隅：確定済みの4点を使用中（View stage「S」で選び直し・解除できます）。")
+            else:
+                st.caption("手動の隅はまだ確定していません。Run の後、View stage「S」で4点を選んで確定してください。"
+                           "確定するまでは自動の隅で計算します。")
         # In Paper mode the Omega selector can show a launcher-injected OptCuts
         # entry, yet configure_paper_fidelity() still forces paper_reference_bff
         # with target_rectangle. Base the re-flatten defaults on that effective
@@ -1861,7 +1876,7 @@ def current_pipeline_key() -> tuple:
         paper_split_criterion,
         tuple(st.session_state.get("paper_split_direction_choices", ())),
         paper_split_curvature_tie_percent,
-        str(st.session_state.get("bff_manual_corners") or ()),
+        (_manual_corner_mode, str(st.session_state.get("bff_manual_corners") or ())),
         paper_split_curvature_rings,
         reference_grid_fit_rectangle,
         postcut_rebff_integrated_mode,
@@ -2018,7 +2033,8 @@ pipeline_params = PipelineParameters(
     paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
     paper_split_ask_direction=bool(paper_split_ask_direction),
     paper_split_curvature_tie_tolerance=paper_split_curvature_tie_percent / 100.0,
-    bff_rectangle_manual_corners=tuple(tuple(float(x) for x in c) for c in (st.session_state.get("bff_manual_corners") or ())),
+    bff_rectangle_manual_corners=(tuple(tuple(float(x) for x in c) for c in (st.session_state.get("bff_manual_corners") or ()))
+                                  if _manual_corner_mode else ()),
     reference_grid_fit_rectangle=reference_grid_fit_rectangle,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
@@ -2886,8 +2902,12 @@ elif view_stage == "S":
                    + (f" 境界の小さな突起 {_corner_info['feature_count']} 点は、BFFの目標角に残して矩形の辺を保っています。"
                       if _corner_info["feature_count"] else ""))
     try:
-        from onestring_physics.manual_corner_ui import render_manual_corner_ui
-        render_manual_corner_ui(st, state)
+        if not st.session_state.get("bff_corner_input_mode", "自動").startswith("手動"):
+            st.caption("矩形Ωの隅を手で選ぶには、サイドバー「Paper-reference BFF settings」の"
+                       "「矩形Ωの隅の決め方」で「手動」を選んでください。")
+        else:
+            from onestring_physics.manual_corner_ui import render_manual_corner_ui
+            render_manual_corner_ui(st, state)
     except Exception as _manual_exc:
         st.caption(f"手動の隅の選択欄を表示できませんでした: {type(_manual_exc).__name__}: {_manual_exc}")
 elif view_stage == "Split Map":
