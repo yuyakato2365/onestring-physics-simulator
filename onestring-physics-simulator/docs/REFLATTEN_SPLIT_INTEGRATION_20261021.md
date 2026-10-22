@@ -272,3 +272,65 @@ processing, the clearly marked experimental rescue can allow progress.
 
 The relevant tests are \`tests/test_tutte_rectangle_rescue.py\`
 and \`tests/test_bff_rectangle_selection.py\`.
+
+
+## Official BFF natural-boundary recovery for invalid rectangle charts (Oct 22)
+
+The root symptom reported on an arbitrary disk-type mesh was:
+25 attempted rectangular boundary corner configurations all invalid.
+Some candidates produced exactly zero UV triangle area at face 275;
+other corner choices inverted four triangles around face 286.
+Tweaking area epsilon, repeating the same rectangle corners, using
+nonconformal Tutte, or simply writing more decimals did NOT establish
+a correct rectangular BFF embedding for this source surface.
+
+For the **Paper ON + source_boundary_shape_fit** path ONLY:
+
+1. Try all the existing official constrained rectangular BFF candidates,
+   with their strict orientation / UV validity tests.
+2. If and only if every rectangle chart is invalid, invoke the SAME official
+   GeometryCollective BFF library with its native ZERO boundary scale
+   factors / **free-boundary BFF** via the independent native adapter's
+   \`--free-boundary\` option. Export the original BFF UVs to OBJ using
+   17-digit round-trip precision (the old official OBJ writer quantized
+   to six decimals).
+3. Require valid and finite differential UV Jacobians, consistent triangle
+   orientation, no UV area collapses and no interior triangle overlaps.
+   On failure, keep throwing an error; do not inject Tutte or LSCM maps.
+4. If valid, preserve the source 3D mesh and the EXACT existing
+   \`reflatten_tile_area\` Split code. The source Ω is now a FREE-boundary
+   conformal chart, **not** the prescribed rectangle. The grid is still
+   square and cropped to Ω, but the rectangle-specific fit option is
+   bypassed only for this recovery case.
+5. Emit \`official_bff_free_boundary_recovery_used=true\`,
+   \`paper_rectangle_requirement_met=false\` and a prominent Streamlit
+   warning. The Paper fidelity report must explicitly state that the
+   strict prescribed-rectangle condition was **not** reproduced.
+
+For the Paper OFF path, this recovery remains disabled; no changes to
+its original BFF/T2D/Split choices are intended. Likewise, valid
+Lilium rectangular BFF outputs remain unchanged.
+
+The recovery uses OFFICIAL BFF, not the previously added optional
+nonconformal Tutte solution. Nevertheless the different **boundary
+condition** can produce different source charts and Split numbers, and
+must not be presented as a strict reproduction of the original
+rectangle-preset numerical results. The authors' exact original
+boundary choice remains unverified.
+
+Native source changes require **rebuilding**:
+\`\`\`bash
+python3 scripts/setup_bff_rectangle.py --jobs 4
+export ONESTRING_BFF_RECTANGLE_EXECUTABLE="$PWD/third_party/bff_rectangle_build/bff-rect-command-line"
+python3 scripts/verify_rectangular_bff.py
+\`\`\`
+
+This verifies the standard rectangular CLI AND native 17-digit
+official natural-boundary recovery. The programmatic failure-path
+tests in \`tests/test_bff_free_boundary_recovery.py\` simulate
+all candidate failures and do not substitute nonconformal charts.
+
+This implementation has NOT yet passed the exact user's source mesh
+through an actual full S->Omega->M2D->M3D->K3D->T2D run; the optional
+previously added \`ONESTRING_BFF_DEBUG_DIR\` forensic output can reveal
+the input-specific root cause if even free BFF is non-injective.
