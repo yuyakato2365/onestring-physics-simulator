@@ -30,14 +30,21 @@ def render_manual_corner_ui(st, state, surface=None, request=False):
     st.subheader("Ω を作る前に、矩形の隅を4点選んでください（元の S の境界）" if request else "矩形Ωの隅を手動で選ぶ（元の S の境界）")
     st.caption(("現在の計算：手動で確定した4点を隅に使用。" if confirmed else "現在の計算：自動で選んだ隅。")
                + " 真上から見た図で境界の点を4つクリックし、3D で確認して「確定」を押すと、その4点を BFF の隅にして計算し直します。"
-               "Paperモードの計算でだけ使われます。選ぶ順番は自由です（境界に沿って自動で並べ替えます）。")
+               "Paperモードの計算でだけ使われます。選ぶ順番は自由です（境界に沿って自動で並べ替えます）。"
+               "選んだ点には、各軸に平行な補助線（点線）を引きます。")
     top = go.Figure()
     top.add_trace(go.Scatter(x=V[:, 0], y=V[:, 1], mode="markers", marker=dict(size=2, color="rgba(120,140,170,0.35)"),
                              hoverinfo="skip", name="S"))
     top.add_trace(go.Scatter(x=B[:, 0], y=B[:, 1], mode="markers+lines", customdata=np.arange(len(loop)),
                              marker=dict(size=8, color="#1b2a31"), line=dict(color="#1b2a31", width=1),
                              hovertemplate="境界点 %{customdata}（クリックで選択）<extra></extra>", name="境界（クリックで選択）"))
+    lo, hi = V.min(axis=0), V.max(axis=0)
+    pad = 0.06 * float(np.max(hi - lo))
     for k, b in enumerate(picks):
+        # guide lines through the picked point, parallel to the x and y axes
+        for gx, gy in (([lo[0] - pad, hi[0] + pad], [B[b, 1]] * 2), ([B[b, 0]] * 2, [lo[1] - pad, hi[1] + pad])):
+            top.add_trace(go.Scatter(x=gx, y=gy, mode="lines", line=dict(color=COLORS[k], width=2, dash="dash"),
+                                     hoverinfo="skip", showlegend=False))
         top.add_trace(go.Scatter(x=[B[b, 0]], y=[B[b, 1]], mode="markers+text", text=[f"C{k + 1}"], textposition="top center",
                                  textfont=dict(size=15, color=COLORS[k]), marker=dict(size=17, color=COLORS[k]),
                                  hoverinfo="skip", name=f"C{k + 1}"))
@@ -68,6 +75,12 @@ def render_manual_corner_ui(st, state, surface=None, request=False):
     L = B[list(range(len(loop))) + [0]]
     mesh.add_trace(go.Scatter3d(x=L[:, 0], y=L[:, 1], z=L[:, 2], mode="lines", line=dict(color="#1b2a31", width=4), name="境界"))
     for k, b in enumerate(picks):
+        # guide lines through the picked point, parallel to the x, y and z axes
+        for axis in range(3):
+            ends = np.repeat(B[b][None, :], 2, axis=0)
+            ends[:, axis] = [lo[axis] - pad, hi[axis] + pad]
+            mesh.add_trace(go.Scatter3d(x=ends[:, 0], y=ends[:, 1], z=ends[:, 2], mode="lines",
+                                        line=dict(color=COLORS[k], width=3, dash="dash"), hoverinfo="skip", showlegend=False))
         mesh.add_trace(go.Scatter3d(x=[B[b, 0]], y=[B[b, 1]], z=[B[b, 2]], mode="markers+text", text=[f"C{k + 1}"],
                                     textfont=dict(size=16, color=COLORS[k]), marker=dict(size=9, color=COLORS[k]), name=f"C{k + 1}"))
     mesh.update_layout(height=520, margin=dict(l=0, r=0, t=10, b=0), scene=dict(aspectmode="data"))
