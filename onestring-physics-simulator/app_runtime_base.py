@@ -2195,6 +2195,14 @@ if run_pipeline:
     st.rerun()
 
 state = st.session_state.onestring_state
+if bool(state.surface_parameterization.metrics.get("official_bff_free_boundary_recovery_used", False)):
+    st.warning(
+        "【Paper Ω 境界条件を変更】矩形BFFの全候補でUVが退化／反転したため、"
+        "公式BFFの自由境界解を使用しました。"
+        "後段の再展開Splitの計算式・処理は維持されていますが、"
+        "初期Ωは矩形ではありません。Liliumなどの矩形BFF成功例との"
+        "Split数を、同一条件の論文再現として比較しないでください。"
+    )
 if bool(state.surface_parameterization.metrics.get("nonpaper_rectangle_rescue_used", False)):
     st.error(
         "この計算結果のS→Ωは公式BFFではありません。"
