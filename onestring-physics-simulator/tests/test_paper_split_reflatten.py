@@ -246,3 +246,46 @@ def test_normal_reflatten_reports_actual_initial_omega_method():
     assert 'csf_split_initial_omega_is_official_bff=' in code
     assert 'csf_split_normal_flow_enabled=' in code
     assert '"paper_fidelity_mode"' in code
+
+
+
+def test_validation_forced_split_is_opt_in_and_does_not_fake_csf():
+    """A flat chart already satisfies sigma=1: debug must still exercise a cut."""
+    v, tri, uv = _grid_mesh(n=12)
+    g = np.linspace(-0.8, 0.8, 7)
+    xx, yy = np.meshgrid(g, g, indexing="ij")
+    xy = np.stack([xx.ravel(), yy.ravel()], axis=1)
+    quads = np.array([
+        [i*7+j, (i+1)*7+j, (i+1)*7+j+1, i*7+j+1]
+        for i in range(6) for j in range(6)
+    ])
+    bff_mock = lambda V, F: V[:, :2].copy()
+
+    natural, natural_report = plan_reflatten_cuts(
+        xy, quads, v, tri, uv, flatten=bff_mock)
+    assert natural == []
+    assert natural_report["initial_sigma"] == pytest.approx(1.)
+    assert not natural_report["validation_cut_generated"]
+
+    forced, report = plan_reflatten_cuts(
+        xy, quads, v, tri, uv, flatten=bff_mock,
+        force_one_cut=True, max_cuts=1)
+    assert len(forced) == len(report["steps"]) == 1
+    assert report["validation_force_one_cut_requested"]
+    assert report["validation_cut_generated"]
+    assert forced[0]["validation_forced"] is True
+    assert report["steps"][0]["validation_forced"] is True
+    assert report["initial_sigma"] == pytest.approx(1.)
+    assert report["final_max_sigma"] == pytest.approx(1., abs=1e-6)
+    assert report["satisfied"]
+
+
+def test_debug_force_one_cut_is_exposed_to_regular_pipeline():
+    root = Path(__file__).parents[1]
+    app = (root/"app_runtime_base.py").read_text()
+    core = (root/"src/onestring_physics/paper_split_reflatten.py").read_text()
+    pipeline = (root/"src/onestring_physics/onestring_pipeline.py").read_text()
+    assert 'paper_split_validation_force_one_cut: bool = False' in pipeline
+    assert 'paper_split_validation_force_one_cut=paper_split_validation_force_one_cut' in app
+    assert 'csf_split_validation_forced_count' in core
+    assert 'force_one_cut=bool(getattr(params,"paper_split_validation_force_one_cut",False))' in core
