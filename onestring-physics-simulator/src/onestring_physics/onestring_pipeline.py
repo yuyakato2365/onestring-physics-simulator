@@ -1015,6 +1015,8 @@ class PipelineParameters(_original.PipelineParameters):
     # Curvatures within this relative band of the maximum count as equal; the
     # highest (+z) of those vertices is cut through.
     paper_split_curvature_tie_tolerance: float = 0.02
+    # Paper mode: four corners picked by hand on S (xyz); empty = automatic.
+    bff_rectangle_manual_corners: tuple = ()
     reference_grid_fit_rectangle: bool = False
     optcuts_distortion_bound: float = 4.1
     optcuts_try_alternative_initial_cut: bool = True
@@ -2723,6 +2725,15 @@ def _build_surface_parameterization(surface, target, grid, params):
                 # boundary corners (square height fields); Lilium is unchanged.
                 snap_to_corners=bool(getattr(params, "paper_fidelity_mode", False)),
             )
+            _manual = list(getattr(params, "bff_rectangle_manual_corners", ()) or ())
+            if bool(getattr(params, "paper_fidelity_mode", False)) and len(_manual) == 4:
+                # Corners picked by hand on S: snap each to its boundary vertex.
+                from .paper_split_reflatten import _boundary_loop
+                _loop = _boundary_loop(np.asarray(surface_faces, int)[:, :3])
+                _B = np.asarray(surface_vertices, float)[_loop]
+                _ids = [int(np.argmin(np.linalg.norm(_B - np.asarray(c, float), axis=1))) for c in _manual]
+                if len(set(_ids)) == 4:
+                    corner_xyz = _B[_ids]
             if bool(getattr(params, "paper_fidelity_mode", False)):
                 # Paper-oriented mode: the validated route (feature branch 5c406ba):
                 # one official rectangular BFF solve at the four lobe tips, with no

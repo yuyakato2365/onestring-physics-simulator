@@ -1861,6 +1861,7 @@ def current_pipeline_key() -> tuple:
         paper_split_criterion,
         tuple(st.session_state.get("paper_split_direction_choices", ())),
         paper_split_curvature_tie_percent,
+        str(st.session_state.get("bff_manual_corners") or ()),
         paper_split_curvature_rings,
         reference_grid_fit_rectangle,
         postcut_rebff_integrated_mode,
@@ -2017,6 +2018,7 @@ pipeline_params = PipelineParameters(
     paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
     paper_split_ask_direction=bool(paper_split_ask_direction),
     paper_split_curvature_tie_tolerance=paper_split_curvature_tie_percent / 100.0,
+    bff_rectangle_manual_corners=tuple(tuple(float(x) for x in c) for c in (st.session_state.get("bff_manual_corners") or ())),
     reference_grid_fit_rectangle=reference_grid_fit_rectangle,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
@@ -2883,6 +2885,11 @@ elif view_stage == "S":
                    "Ωビューの同じラベルと対応します。"
                    + (f" 境界の小さな突起 {_corner_info['feature_count']} 点は、BFFの目標角に残して矩形の辺を保っています。"
                       if _corner_info["feature_count"] else ""))
+    try:
+        from onestring_physics.manual_corner_ui import render_manual_corner_ui
+        render_manual_corner_ui(st, state)
+    except Exception as _manual_exc:
+        st.caption(f"手動の隅の選択欄を表示できませんでした: {type(_manual_exc).__name__}: {_manual_exc}")
 elif view_stage == "Split Map":
     if _postcut_report is not None:
         st.subheader("再BFFを使ったGrid Split履歴")
