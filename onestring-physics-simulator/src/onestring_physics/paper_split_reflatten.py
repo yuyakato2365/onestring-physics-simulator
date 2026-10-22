@@ -497,6 +497,22 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     p=domain.parameterization
     xyz,tri_faces,_=chart_geometry(p)
     uv=np.asarray(p.uv_vertices_2d,float)
+    # Normal (Paper OFF) Omega modes can be harmonic/LSCM rather than
+    # official BFF. The same reflatten-area decision is valid only when the
+    # input UV chart is finite and locally unfolded; never silently repair
+    # a degenerate or flipped mapping to obtain a passing Split score.
+    from .reference_bff import triangle_jacobian_diagnostics
+    chart_check=triangle_jacobian_diagnostics(xyz,uv,tri_faces)
+    if (not np.isfinite(uv).all()
+            or chart_check["uv_degenerate_triangle_count"]
+            or chart_check["uv_triangle_flip_count"]
+            or chart_check["surface_degenerate_triangle_count"]):
+        raise ValueError(
+            "Reflatten Split needs a finite, non-flipped, non-degenerate "
+            "initial S->Omega chart (including normal-flow harmonic/LSCM "
+            "charts). Fix the input parameterization before CSF Split."
+        )
+    source_method=str(getattr(p,"method","unknown"))
     angle=np.deg2rad(float(getattr(domain,"reference_grid_rotation_degrees",0.)))
     R=np.array([[np.cos(angle),-np.sin(angle)],[np.sin(angle),np.cos(angle)]])
     grid_xy=np.asarray(vertices,float)[:,:2]@R
@@ -544,7 +560,14 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
             gaussian_curvature=step["curvature"],candidate_cuts=step["candidates"])
     metrics.update(
         csf_model=_CSF_MODEL,
-        csf_split_exactness_label="RECONSTRUCTION (not author code): per-piece official free-boundary BFF used for decision only",
+        csf_split_initial_omega_method=source_method,
+        csf_split_initial_omega_is_official_bff=source_method=="paper_reference_bff",
+        csf_split_normal_flow_enabled=not bool(getattr(params,"paper_fidelity_mode",False)),
+        csf_split_exactness_label=(
+            "RECONSTRUCTION (not author code): per-piece official free-boundary BFF "
+            "used for the decision only; initial S->Omega method="
+            +source_method
+        ),
         csf_split_criterion=REFLATTEN_CRITERION,csf_split_threshold=2.,
         csf_split_applied=bool(csf_records),number_of_splits=len(records),
         csf_split_step_analysis=csf_records,csf_split_step_count=len(csf_records),
