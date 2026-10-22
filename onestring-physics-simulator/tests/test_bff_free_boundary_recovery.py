@@ -86,4 +86,4 @@ def test_nonpaper_route_cannot_turn_on_paper_only_recovery_implicitly():
     assert 'getattr(params, "paper_fidelity_mode", False)' in content
     assert '"omega_boundary_forced_rectangle": _actual_bff_boundary_policy=="target_rectangle"' in content
     assert '"official_bff_free_boundary_recovery_used": _official_free_recovery' in content
-    assert 'and bool(parameterization.metrics.get("omega_boundary_forced_rectangle", False))' in content
+    assert '"official_bff_free_boundary_recovery_used", False' in content
