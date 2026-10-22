@@ -412,13 +412,11 @@ def split_mesh(vertices, faces, domain, params=None):
     # Opt-in Sec.4.5 research reconstruction. Do not alter the default
     # fixed-UV, OptCuts or collision-driven Split route.
     if str(getattr(params, "paper_split_criterion", "fixed_uv")) == "reflatten_tile_area":
-        if str(getattr(domain.parameterization, "method", "")) not in {
-            "paper_reference_bff", "experimental_tutte_rectangle"
-        }:
-            raise ValueError(
-                "reflatten_tile_area Split requires official BFF or an explicitly "
-                "selected experimental nonconformal Tutte S->Omega map"
-            )
+        # Shared CSF decision for both Paper and normal flows. The original
+        # S->Omega chart may be official BFF or another valid UV mapping:
+        # each 3D source piece is evaluated with a NEW official free-boundary
+        # BFF, while fabrication keeps the original M2D geometry. A legacy
+        # harmonic/LSCM initial chart is NOT relabelled as Paper BFF.
         from .paper_split_reflatten import split_mesh_reflatten
         return split_mesh_reflatten(vertices, faces, domain, params)
     selected,evaluated=_select_optcuts_by_split_count(vertices,faces,domain,params)
