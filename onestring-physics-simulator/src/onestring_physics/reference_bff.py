@@ -460,7 +460,15 @@ def _save_rectangular_bff_diagnostics(
         np.abs(signed) <= 2e-14 * scale
     )
     good = np.isfinite(signed) & ~degenerate
-    orientation = float(np.sign(np.median(signed[good]))) if np.any(good) else 0.
+    if np.any(good):
+        orientation = float(np.sign(np.median(signed[good])))
+        if orientation == 0.:
+            # A perfect tie (one positive, one negative) is itself a
+            # foldover. Choose a deterministic reference orientation so
+            # that at least the opposite-signed triangles are counted.
+            orientation = float(np.sign(signed[np.flatnonzero(good)[0]]))
+    else:
+        orientation = 0.
     inverted = good & (signed * orientation < 0)
     worst = np.unique(np.concatenate((
         np.flatnonzero(degenerate)[:12], np.flatnonzero(inverted)[:12]
