@@ -528,6 +528,7 @@ def run_official_bff(
     rectangle_corner_positions: np.ndarray | None = None,
     boundary_policy: Literal["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"] = "automatic_reference",
     timeout_seconds: float = 120.0,
+    free_boundary_precision_adapter: bool = False,
 ) -> BFFRunResult:
     """Run the official BFF CLI and return its UV vertices in input order."""
 
@@ -544,8 +545,12 @@ def run_official_bff(
         raise ValueError("BFF rectangle corner phase must be in [0, 0.25)")
     if corner_phase and boundary_policy != "target_rectangle":
         raise ValueError("Rectangle corner phase only applies to target_rectangle")
+    if free_boundary_precision_adapter and boundary_policy not in {
+        "automatic_reference", "boundary_scale_zero"
+    }:
+        raise ValueError("High-precision free-boundary BFF adapter needs natural boundary policy")
     exe = (find_rectangular_bff_executable(rectangle_executable)
-           if boundary_policy == "target_rectangle"
+           if (boundary_policy == "target_rectangle" or free_boundary_precision_adapter)
            else find_official_bff_executable(executable))
     if boundary_policy not in {"automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"}:
         raise ReferenceBFFUnavailableError(
@@ -557,6 +562,8 @@ def run_official_bff(
         output_path = root / "output.obj"
         _write_triangle_obj(input_path, vertices, faces)
         command = [str(exe), str(input_path), str(output_path), "--writeOnlyUVs"]
+        if free_boundary_precision_adapter:
+            command.append("--free-boundary")
         if boundary_policy == "target_disk":
             command.append("--flattenToDisk")
         if corners_xyz is not None:
@@ -589,7 +596,7 @@ def run_official_bff(
         # values at max_digits10 (17). Refuse an out-of-date executable
         # instead of misleading users into rerunning twenty-five doomed
         # corner candidates after a git pull without a native rebuild.
-        if boundary_policy == "target_rectangle":
+        if boundary_policy == "target_rectangle" or free_boundary_precision_adapter:
             precision_rows = [
                 line.split("=", 1)[1].strip()
                 for line in completed.stderr.splitlines()
@@ -605,7 +612,7 @@ def run_official_bff(
                     f"Selected adapter: {exe}"
                 )
         uv = _read_write_only_uv_obj(output_path, len(vertices), np.asarray(faces, dtype=int))
-        if boundary_policy == "target_rectangle" and os.environ.get(
+        if (boundary_policy == "target_rectangle" or free_boundary_precision_adapter) and os.environ.get(
             "ONESTRING_BFF_DEBUG_DIR", ""
         ).strip():
             _save_rectangular_bff_diagnostics(
@@ -638,7 +645,11 @@ def run_official_bff(
     return BFFRunResult(
         uv_vertices=uv,
         metrics={
-            "parameterization_backend_name": "GeometryCollective/boundary-first-flattening:bff-command-line",
+            "parameterization_backend_name": (
+                "GeometryCollective/boundary-first-flattening:bff-rect-adapter-free-boundary"
+                if free_boundary_precision_adapter else
+                "GeometryCollective/boundary-first-flattening:bff-command-line"
+            ),
             "parameterization_backend_repository": OFFICIAL_BFF_REPOSITORY,
             "parameterization_backend_version": version_hint,
             "parameterization_backend_commit_sha": _discover_git_commit(exe),
@@ -664,6 +675,10 @@ def run_official_bff(
             "bff_rectangle_uv_serialization_digits": (
                 17 if boundary_policy == "target_rectangle" else None
             ),
+            "bff_free_boundary_uv_serialization_digits": (
+                17 if free_boundary_precision_adapter else None
+            ),
+            "bff_free_boundary_high_precision_adapter": free_boundary_precision_adapter,
             **rectangle_metrics,
             "fallbacks_used": [],
             "input_topology": topology,
