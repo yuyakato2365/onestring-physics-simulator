@@ -16,6 +16,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import uuid
 from typing import Any, Literal
 
 import numpy as np
@@ -418,6 +419,105 @@ def validate_rectangular_boundary(
     }
 
 
+def _save_rectangular_bff_diagnostics(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    uv_vertices: np.ndarray,
+    *,
+    executable: Path,
+    corner_phase: float,
+    corner_positions: np.ndarray | None,
+    native_precision: int,
+) -> Path | None:
+    """Opt-in forensic snapshot of the ACTUAL solver output, not a repair.
+
+    ONESTRING_BFF_DEBUG_DIR must be set. The snapshot is saved locally and
+    contains source XYZ, face indices, raw high-precision UV, and per-face
+    signed-area diagnostics. This function changes no computational output.
+    """
+    requested = os.environ.get("ONESTRING_BFF_DEBUG_DIR", "").strip()
+    if not requested:
+        return None
+    directory = Path(requested).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    unique = uuid.uuid4().hex[:12]
+    target = directory / f"bff_rect_{unique}"
+    v = np.asarray(vertices, float)
+    f = np.asarray(faces, int)
+    uv = np.asarray(uv_vertices, float)
+    tri = uv[f]
+    e1 = tri[:, 1] - tri[:, 0]
+    e2 = tri[:, 2] - tri[:, 0]
+    e3 = tri[:, 2] - tri[:, 1]
+    signed = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    scale = np.maximum.reduce((
+        np.sum(e1 * e1, axis=1),
+        np.sum(e2 * e2, axis=1),
+        np.sum(e3 * e3, axis=1),
+    ))
+    # Same scale-invariant threshold as the main CSF validity check.
+    degenerate = (~np.isfinite(signed)) | (scale <= 0) | (
+        np.abs(signed) <= 2e-14 * scale
+    )
+    good = np.isfinite(signed) & ~degenerate
+    if np.any(good):
+        orientation = float(np.sign(np.median(signed[good])))
+        if orientation == 0.:
+            # A perfect tie (one positive, one negative) is itself a
+            # foldover. Choose a deterministic reference orientation so
+            # that at least the opposite-signed triangles are counted.
+            orientation = float(np.sign(signed[np.flatnonzero(good)[0]]))
+    else:
+        orientation = 0.
+    inverted = good & (signed * orientation < 0)
+    worst = np.unique(np.concatenate((
+        np.flatnonzero(degenerate)[:12], np.flatnonzero(inverted)[:12]
+    )))
+    np.savez_compressed(
+        str(target) + ".npz",
+        vertices=v, faces=f, uv_vertices=uv,
+        signed_twice_uv_areas=signed,
+        uv_edge_scale_squared=scale,
+        degenerate_face_ids=np.flatnonzero(degenerate),
+        inverted_face_ids=np.flatnonzero(inverted),
+    )
+    report = {
+        "note": "Diagnostic output ONLY. Invalid BFF UV was not accepted.",
+        "native_executable": str(executable),
+        "native_executable_sha256": _sha256(executable),
+        "native_output_precision_digits": int(native_precision),
+        "candidate_corner_phase": float(corner_phase),
+        "candidate_explicit_corner_xyz": (
+            np.asarray(corner_positions).tolist()
+            if corner_positions is not None else None
+        ),
+        "vertex_count": int(len(v)),
+        "triangle_count": int(len(f)),
+        "uv_degenerate_faces": int(np.count_nonzero(degenerate)),
+        "uv_inverted_faces": int(np.count_nonzero(inverted)),
+        "examined_face_ids": worst.tolist(),
+        "examined_faces": [
+            {
+                "face_id": int(i),
+                "source_vertex_ids": f[i].tolist(),
+                "xyz": v[f[i]].tolist(),
+                "uv": uv[f[i]].tolist(),
+                "signed_twice_uv_area": float(signed[i]),
+                "relative_uv_twice_area": (
+                    float(signed[i] / scale[i]) if scale[i] > 0 else None
+                ),
+                "degenerate": bool(degenerate[i]),
+                "inverted": bool(inverted[i]),
+            }
+            for i in worst
+        ],
+    }
+    (directory / f"bff_rect_{unique}.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return target
+
+
 def run_official_bff(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -428,8 +528,16 @@ def run_official_bff(
     rectangle_corner_positions: np.ndarray | None = None,
     boundary_policy: Literal["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"] = "automatic_reference",
     timeout_seconds: float = 120.0,
+    free_boundary_precision_adapter: bool = False,
+    rectangle_feature_angles: list | None = None,
 ) -> BFFRunResult:
-    """Run the official BFF CLI and return its UV vertices in input order."""
+    """Run the official BFF CLI and return its UV vertices in input order.
+
+    ``rectangle_feature_angles`` (rectangle with explicit corners only): extra
+    prescribed BFF exterior angles [(x, y, z, angle), ...] at original boundary
+    vertices, summing to zero, passed to the adapter through
+    ONESTRING_BFF_FEATURE_ANGLES.
+    """
 
     topology = validate_reference_mesh(vertices, faces)
     corner_phase=float(rectangle_corner_phase_fraction)
@@ -444,8 +552,12 @@ def run_official_bff(
         raise ValueError("BFF rectangle corner phase must be in [0, 0.25)")
     if corner_phase and boundary_policy != "target_rectangle":
         raise ValueError("Rectangle corner phase only applies to target_rectangle")
+    if free_boundary_precision_adapter and boundary_policy not in {
+        "automatic_reference", "boundary_scale_zero"
+    }:
+        raise ValueError("High-precision free-boundary BFF adapter needs natural boundary policy")
     exe = (find_rectangular_bff_executable(rectangle_executable)
-           if boundary_policy == "target_rectangle"
+           if (boundary_policy == "target_rectangle" or free_boundary_precision_adapter)
            else find_official_bff_executable(executable))
     if boundary_policy not in {"automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle"}:
         raise ReferenceBFFUnavailableError(
@@ -457,17 +569,28 @@ def run_official_bff(
         output_path = root / "output.obj"
         _write_triangle_obj(input_path, vertices, faces)
         command = [str(exe), str(input_path), str(output_path), "--writeOnlyUVs"]
+        if free_boundary_precision_adapter:
+            command.append("--free-boundary")
         if boundary_policy == "target_disk":
             command.append("--flattenToDisk")
+        run_env = None
         if corners_xyz is not None:
             command.append("--corner-xyz")
             command.extend(format(float(x), ".17g") for x in corners_xyz.ravel())
+            if rectangle_feature_angles:
+                feature_path = root / "feature_angles.txt"
+                feature_path.write_text("".join(
+                    " ".join(format(float(v), ".17g") for v in row) + "\n"
+                    for row in rectangle_feature_angles
+                ))
+                run_env = {**os.environ, "ONESTRING_BFF_FEATURE_ANGLES": str(feature_path)}
         elif boundary_policy == "target_rectangle" and corner_phase:
             command.extend(["--corner-phase", format(corner_phase, ".17g")])
         try:
             completed = subprocess.run(
                 command,
                 cwd=str(exe.parent),
+                env=run_env,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -477,12 +600,49 @@ def run_official_bff(
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise ReferenceBFFUnavailableError(f"Official BFF execution failed: {type(exc).__name__}: {exc}") from exc
+        if run_env is not None and "ONESTRING_FEATURE_ANGLES_APPLIED" not in (completed.stdout or ""):
+            raise ReferenceBFFUnavailableError(
+                "The selected bff-rect-command-line does not support boundary feature angles "
+                "(needed to keep a small rim feature straight-sided). Rebuild it with "
+                "'python3 scripts/setup_bff_rectangle.py --jobs 4' and restart Streamlit."
+            )
         if completed.returncode != 0 or not output_path.is_file():
             raise ReferenceBFFUnavailableError(
                 "Official BFF CLI failed; no fallback was used. "
                 f"exit={completed.returncode}, stdout={completed.stdout[-2000:]!r}, stderr={completed.stderr[-2000:]!r}"
             )
+        # The upstream MeshIO::writeOBJ uses std::to_string and silently
+        # quantizes UVs to about six decimal places. This can collapse thin
+        # triangles (source face 275 in a real generic-mesh regression).
+        # The independent adapter now serializes the *same* official BFF
+        # values at max_digits10 (17). Refuse an out-of-date executable
+        # instead of misleading users into rerunning twenty-five doomed
+        # corner candidates after a git pull without a native rebuild.
+        if boundary_policy == "target_rectangle" or free_boundary_precision_adapter:
+            precision_rows = [
+                line.split("=", 1)[1].strip()
+                for line in completed.stderr.splitlines()
+                if line.startswith("BFF_RECTANGLE_OUTPUT_PRECISION=")
+            ]
+            if not precision_rows or precision_rows[-1] != "17":
+                raise ReferenceBFFUnavailableError(
+                    "The selected bff-rect-command-line executable is outdated: "
+                    "it lacks the 17-digit UV output precision fix. "
+                    "git pull does NOT rebuild native binaries. Rebuild with "
+                    "'python scripts/setup_bff_rectangle.py --jobs 4' "
+                    "and restart Streamlit with the rebuilt executable path. "
+                    f"Selected adapter: {exe}"
+                )
         uv = _read_write_only_uv_obj(output_path, len(vertices), np.asarray(faces, dtype=int))
+        if (boundary_policy == "target_rectangle" or free_boundary_precision_adapter) and os.environ.get(
+            "ONESTRING_BFF_DEBUG_DIR", ""
+        ).strip():
+            _save_rectangular_bff_diagnostics(
+                vertices, faces, uv, executable=exe,
+                corner_phase=corner_phase,
+                corner_positions=corners_xyz,
+                native_precision=17,
+            )
     # Independent rectangle adapter reports wedges from its native boundary
     # traversal. Preserve exact four chosen boundary slots; NOT necessarily
     # original OBJ vertex IDs due BFF's mesh import/renumbering.
@@ -507,7 +667,11 @@ def run_official_bff(
     return BFFRunResult(
         uv_vertices=uv,
         metrics={
-            "parameterization_backend_name": "GeometryCollective/boundary-first-flattening:bff-command-line",
+            "parameterization_backend_name": (
+                "GeometryCollective/boundary-first-flattening:bff-rect-adapter-free-boundary"
+                if free_boundary_precision_adapter else
+                "GeometryCollective/boundary-first-flattening:bff-command-line"
+            ),
             "parameterization_backend_repository": OFFICIAL_BFF_REPOSITORY,
             "parameterization_backend_version": version_hint,
             "parameterization_backend_commit_sha": _discover_git_commit(exe),
@@ -530,6 +694,13 @@ def run_official_bff(
                                          else "boundary_arclength_quartiles")
             if boundary_policy=="target_rectangle" else None,
             "bff_rectangle_corner_boundary_wedge_indices":rect_wedges,
+            "bff_rectangle_uv_serialization_digits": (
+                17 if boundary_policy == "target_rectangle" else None
+            ),
+            "bff_free_boundary_uv_serialization_digits": (
+                17 if free_boundary_precision_adapter else None
+            ),
+            "bff_free_boundary_high_precision_adapter": free_boundary_precision_adapter,
             **rectangle_metrics,
             "fallbacks_used": [],
             "input_topology": topology,
@@ -576,7 +747,19 @@ def triangle_jacobian_diagnostics(
         d_uv = np.column_stack([q1 - q0, q2 - q0])
         det_uv = float(np.linalg.det(d_uv))
         signed_uv_double_area[tri_id] = det_uv
-        if abs(det_uv) <= 2.0 * degeneracy_epsilon:
+        # UV-area tests must be invariant to the GLOBAL similarity scale.
+        # The previous absolute 2e-14 bound rejected formerly valid BFF
+        # triangles after min(lambda)=1 normalization made every UV tiny.
+        # Use each triangle's squared longest UV edge as the area unit.
+        uv_edge_scale2 = max(
+            float(np.sum(np.square(q1 - q0))),
+            float(np.sum(np.square(q2 - q0))),
+            float(np.sum(np.square(q2 - q1))),
+        )
+        uv_area_tolerance = 2.0 * degeneracy_epsilon * uv_edge_scale2
+        if (not math.isfinite(det_uv) or not math.isfinite(uv_area_tolerance)
+                or uv_edge_scale2 <= 0.0
+                or abs(det_uv) <= uv_area_tolerance):
             uv_degenerate[tri_id] = True
             continue
         j_s_to_uv = d_uv @ np.linalg.inv(d_surface)
@@ -587,9 +770,22 @@ def triangle_jacobian_diagnostics(
         sigma_uv_to_s[tri_id] = np.sort(sv_inverse)[::-1]
         area_scale_s_to_uv[tri_id] = abs(float(np.linalg.det(j_s_to_uv)))
 
-    nonzero_orientation = signed_uv_double_area[np.isfinite(signed_uv_double_area) & (np.abs(signed_uv_double_area) > 2.0 * degeneracy_epsilon)]
+    uv_triangles = uv[tris]
+    uv_e01 = uv_triangles[:, 1] - uv_triangles[:, 0]
+    uv_e02 = uv_triangles[:, 2] - uv_triangles[:, 0]
+    uv_e12 = uv_triangles[:, 2] - uv_triangles[:, 1]
+    uv_edge_scale2 = np.maximum.reduce([
+        np.sum(uv_e01 ** 2, axis=1),
+        np.sum(uv_e02 ** 2, axis=1),
+        np.sum(uv_e12 ** 2, axis=1),
+    ])
+    uv_area_limits = 2.0 * degeneracy_epsilon * uv_edge_scale2
+    nonzero_orientation = signed_uv_double_area[
+        np.isfinite(signed_uv_double_area)
+        & (np.abs(signed_uv_double_area) > uv_area_limits)
+    ]
     reference_sign = 1.0 if len(nonzero_orientation) == 0 or float(np.median(nonzero_orientation)) >= 0.0 else -1.0
-    flips = np.isfinite(signed_uv_double_area) & (reference_sign * signed_uv_double_area < -2.0 * degeneracy_epsilon)
+    flips = np.isfinite(signed_uv_double_area) & (reference_sign * signed_uv_double_area < -uv_area_limits)
     valid = ~(surface_degenerate | uv_degenerate) & np.all(np.isfinite(sigma_uv_to_s), axis=1)
     anisotropy = np.full(n, np.nan, dtype=float)
     anisotropy[valid] = sigma_s_to_uv[valid, 0] / np.maximum(sigma_s_to_uv[valid, 1], 1e-300)
@@ -898,7 +1094,16 @@ def strict_inverse_map_uv_to_surface(
         a, b, c = uv[face]
         matrix = np.column_stack([b - a, c - a])
         det = float(np.linalg.det(matrix))
-        if abs(det) <= 1e-14:
+        # Match the scale-invariant UV degeneracy check in
+        # triangle_jacobian_diagnostics; an arbitrary BFF similarity scale
+        # must not change whether UV->surface inversion is permitted.
+        uv_edge_scale2 = max(
+            float(np.sum((b - a) ** 2)),
+            float(np.sum((c - a) ** 2)),
+            float(np.sum((c - b) ** 2)),
+        )
+        if (not math.isfinite(det) or uv_edge_scale2 <= 0.0
+                or abs(det) <= 2e-14 * uv_edge_scale2):
             degenerate_count += 1
             continue
         local = np.linalg.solve(matrix, point - a)

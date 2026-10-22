@@ -28,8 +28,30 @@ def whole_surface_area_span(vertices, uv, faces):
     twice_uv=np.abs(e[:,0]*f[:,1]-e[:,1]*f[:,0])
     if len(twice_uv)==0 or not np.isfinite(twice_3d).all() or not np.isfinite(twice_uv).all():
         raise ValueError("No finite source triangles for rectangular BFF selection")
-    if np.any(twice_3d<=1e-16) or np.any(twice_uv<=1e-16):
-        raise ValueError("One candidate has a degenerate source or UV triangle")
+    if np.any(twice_3d<=1e-16):
+        ids=np.flatnonzero(twice_3d<=1e-16)
+        raise ValueError(
+            f"Input 3D mesh has {len(ids)} degenerate source triangles "
+            f"(first face={int(ids[0])}, twice_area={float(twice_3d[ids[0]]):.4g})"
+        )
+    # Match reference_bff.triangle_jacobian_diagnostics: test UV triangle
+    # shape, not absolute area. The BFF similarity-scale gauge is arbitrary,
+    # and the later CSF normalization can make coordinates very small.
+    uv_edge_scale2 = np.maximum.reduce((
+        np.einsum("ij,ij->i", e, e),
+        np.einsum("ij,ij->i", f, f),
+        np.einsum("ij,ij->i", f-e, f-e),
+    ))
+    degenerate_uv = ((uv_edge_scale2 <= 0) |
+                     (twice_uv <= 2e-14 * uv_edge_scale2))
+    if np.any(degenerate_uv):
+        ids=np.flatnonzero(degenerate_uv)
+        raise ValueError(
+            f"Official rectangular BFF output has {len(ids)} degenerate/collapsed UV "
+            f"triangles (first face={int(ids[0])}, "
+            f"twice_uv_area={float(twice_uv[ids[0]]):.4g}, "
+            f"source_twice_area={float(twice_3d[ids[0]]):.4g})"
+        )
     jac=twice_3d/twice_uv
     if not np.isfinite(jac).all() or np.any(jac<=0):
         raise ValueError("Invalid source UV area Jacobian")
@@ -177,9 +199,40 @@ def _boundary_similarity_error(target2d: np.ndarray, uv2d: np.ndarray,
     return float(np.sqrt(np.sum(w*np.sum((a-aligned)**2,axis=1))))
 
 
+def _verify_selected_bff_csf_compatible(
+    vertices, faces, uv_vertices, normalization: str
+) -> None:
+    """Reject BFF candidates incompatible with the *actual downstream CSF*.
+
+    Selection used to accept an unnormalized UV chart, which could later be
+    rejected after the reference CSF similarity rescale. This check uses
+    exactly the same differential pipeline; it never repairs or skips faces.
+    """
+    from .reference_bff import normalize_uv_and_compute_csf
+
+    _, differential = normalize_uv_and_compute_csf(
+        vertices, uv_vertices, faces, normalization=normalization
+    )
+    if differential["uv_degenerate_triangle_count"]:
+        ids = np.flatnonzero(differential["uv_degenerate_triangle"])
+        raise ValueError(
+            "Official BFF candidate fails final normalized CSF UV degeneracy: "
+            f"{len(ids)} faces; first={int(ids[0])}"
+        )
+    if differential["uv_triangle_flip_count"]:
+        ids = np.flatnonzero(differential["triangle_flip"])
+        raise ValueError(
+            "Official BFF candidate fails final normalized CSF orientation: "
+            f"{len(ids)} faces; first={int(ids[0])}"
+        )
+
+
 def choose_rectangle_by_source_boundary_fit(
     vertices, faces, *, rectangle_executable=None, timeout_seconds=120.,
     runner=run_official_bff,
+    allow_nonconformal_rescue: bool = False,
+    allow_official_free_boundary_recovery: bool = False,
+    csf_normalization: str = "min_to_one_hypothesis_a",
 ):
     """Fit initial Omega using source-boundary geometry and the official BFF.
 
@@ -226,8 +279,16 @@ def choose_rectangle_by_source_boundary_fit(
             g=uvfaces[:,2]-uvfaces[:,0]
             det=e[:,0]*g[:,1]-e[:,1]*g[:,0]
             if np.any(det>1e-14) and np.any(det < -1e-14):
-                raise ValueError("Rectangular BFF candidate has mixed UV triangle orientations")
+                raise ValueError(
+                    "Official rectangular BFF UV folds over: "
+                    f"{int(np.count_nonzero(det>1e-14))} positive and "
+                    f"{int(np.count_nonzero(det < -1e-14))} inverted triangles "
+                    f"(first inverted face={int(np.flatnonzero(det < -1e-14)[0])})"
+                )
             span=whole_surface_area_span(x,output.uv_vertices,f)
+            _verify_selected_bff_csf_compatible(
+                x, f, output.uv_vertices, csf_normalization
+            )
             error=_boundary_similarity_error(projected,np.asarray(output.uv_vertices)[loop],w)
             # Source PCA bounding rectangle is a weak aspect target. Keep this
             # term small; direct boundary fidelity is the primary metric.
@@ -263,9 +324,210 @@ def choose_rectangle_by_source_boundary_fit(
                 "failed_reason":f"{type(exc).__name__}: {str(exc)[:350]}",
             })
     if winning is None:
+        # The general boundary-fit presets are only a heuristic. A valid disk
+        # may still have a non-injective rectangle BFF chart for every PCA
+        # corner choice and every coarse quartile phase. Broaden the phase
+        # search ONLY in that case; do not change the Lilium lobe-tip path or
+        # accept any degenerate/flipped chart merely to suppress an exception.
+        fallback_candidates = [
+            dict(method="boundary_arclength_quartiles_dense", phase=i/64.)
+            for i in range(1, 16)
+            if i % 4 != 0
+        ]
+        # Additional source-boundary maxima provide a qualitatively different
+        # four-corner arrangement on non-rectangular boundaries. The optional
+        # heuristic is still validated by the exact SAME UV checks.
+        from .paper_split_reflatten import lobe_tip_corner_positions
+        for window in (3, 7, 11):
+            try:
+                fallback_candidates.append(dict(
+                    method="boundary_curvature_extrema",
+                    corner_window=window,
+                    source_xyz=lobe_tip_corner_positions(x, f, window=window).tolist(),
+                ))
+            except ValueError as exc:
+                attempts.append(dict(
+                    source_corner_method="boundary_curvature_extrema",
+                    source_corner_window=window,
+                    failed_reason=f"{type(exc).__name__}: {str(exc)[:350]}",
+                ))
+        for candidate in fallback_candidates:
+            kw = dict(
+                rectangle_executable=rectangle_executable,
+                boundary_policy="target_rectangle",
+                timeout_seconds=timeout_seconds,
+            )
+            if "source_xyz" in candidate:
+                kw["rectangle_corner_positions"] = np.asarray(candidate["source_xyz"], float)
+            else:
+                kw["rectangle_corner_phase_fraction"] = candidate["phase"]
+            try:
+                output = runner(x, f, **kw)
+                if output.metrics.get("bff_rectangle_verified") is not True:
+                    raise ValueError("BFF output boundary failed rectangle verification")
+                uvfaces = np.asarray(output.uv_vertices, float)[f]
+                e = uvfaces[:, 1] - uvfaces[:, 0]
+                g = uvfaces[:, 2] - uvfaces[:, 0]
+                det = e[:, 0]*g[:, 1] - e[:, 1]*g[:, 0]
+                if np.any(det > 1e-14) and np.any(det < -1e-14):
+                    raise ValueError(
+                        "Official rectangular BFF UV folds over: "
+                        f"{int(np.count_nonzero(det>1e-14))} positive and "
+                        f"{int(np.count_nonzero(det < -1e-14))} inverted triangles "
+                        f"(first inverted face={int(np.flatnonzero(det < -1e-14)[0])})"
+                    )
+                span = whole_surface_area_span(x, output.uv_vertices, f)
+                _verify_selected_bff_csf_compatible(
+                    x, f, output.uv_vertices, csf_normalization
+                )
+                error = _boundary_similarity_error(
+                    projected, np.asarray(output.uv_vertices)[loop], w
+                )
+                expected = np.ptp(projected, axis=0)
+                actual = np.ptp(np.asarray(output.uv_vertices, float)[loop], axis=0)
+                aspect_source = float(np.max(expected)/max(np.min(expected), 1e-15))
+                aspect_uv = float(np.max(actual)/max(np.min(actual), 1e-15))
+                aspect_error = abs(float(np.log(aspect_uv/aspect_source)))
+                score = error + .10*aspect_error + .06*float(np.log(np.sqrt(span)))
+                row = dict(
+                    source_corner_method=candidate["method"],
+                    source_corner_window=candidate.get("corner_window"),
+                    source_pca_angle_degrees=None,
+                    source_corner_vertex_ids=None,
+                    boundary_arclength_phase=candidate.get("phase"),
+                    normalized_boundary_fit_rmse=error,
+                    aspect_log_error=aspect_error,
+                    whole_source_linear_csf_span=float(np.sqrt(span)),
+                    total_boundary_fit_score=float(score),
+                    rectangle_aspect_ratio=aspect_uv,
+                    corner_boundary_wedge_indices=output.metrics.get(
+                        "bff_rectangle_corner_boundary_wedge_indices"
+                    ),
+                )
+                attempts.append(row)
+                if winning is None or (score, span) < winning[0]:
+                    winning = ((score, span), candidate, output, row)
+            except (ValueError, RuntimeError) as exc:
+                attempts.append(dict(
+                    source_corner_method=candidate["method"],
+                    source_corner_window=candidate.get("corner_window"),
+                    source_pca_angle_degrees=None,
+                    source_corner_vertex_ids=None,
+                    boundary_arclength_phase=candidate.get("phase"),
+                    failed_reason=f"{type(exc).__name__}: {str(exc)[:350]}",
+                ))
+    if winning is None and allow_official_free_boundary_recovery:
+        # Rectangular BFF can fold for a valid curved disk even after all
+        # corner choices fail. Use the SAME official BFF library with its
+        # NATURAL boundary condition, serialized at 17-digit precision.
+        # The resulting Omega is not rectangular: record that prominently.
+        # Split decisions still use free-boundary official BFF on pieces.
+        try:
+            free = runner(
+                x, f,
+                rectangle_executable=rectangle_executable,
+                boundary_policy="automatic_reference",
+                free_boundary_precision_adapter=True,
+                timeout_seconds=timeout_seconds,
+            )
+            span = whole_surface_area_span(x, free.uv_vertices, f)
+            _verify_selected_bff_csf_compatible(
+                x, f, free.uv_vertices, csf_normalization
+            )
+            # Check actual interior overlap, not merely local orientation.
+            from .reference_bff import count_internal_triangle_overlaps
+            overlaps = count_internal_triangle_overlaps(
+                np.asarray(free.uv_vertices, float), f
+            )
+            if overlaps:
+                raise ValueError(
+                    f"Natural-boundary official BFF has {overlaps} triangle "
+                    "overlaps in UV; invalid recovery"
+                )
+        except (ValueError, RuntimeError) as exc:
+            attempts.append(dict(
+                source_corner_method="official_bff_natural_boundary_high_precision",
+                failed_reason=f"{type(exc).__name__}: {str(exc)[:500]}",
+            ))
+        else:
+            return BFFRunResult(
+                uv_vertices=free.uv_vertices,
+                metrics={
+                    **free.metrics,
+                    "official_bff_free_boundary_recovery_used": True,
+                    "bff_rectangle_recovery_requested_policy": "target_rectangle",
+                    "bff_rectangle_recovery_actual_policy": "boundary_scale_zero",
+                    "paper_rectangular_boundary_condition_satisfied": False,
+                    "bff_corner_selection_method": (
+                        "official_natural_boundary_after_all_rectangle_folds"
+                    ),
+                    "bff_corner_selection_attempt_count": len(attempts),
+                    "bff_corner_selection_valid_count": 1,
+                    "bff_corner_selection_rejected_count": len(attempts),
+                    "bff_corner_selection_attempts": attempts,
+                    "bff_corner_selection_area_span": float(span),
+                    "bff_corner_selection_author_method_verified": False,
+                    "bff_corner_selection_certifies_area_limit": False,
+                    "bff_corner_selection_warning": (
+                        "Not a rectangular Omega. Official free-boundary BFF "
+                        "replaces a failed rectangular boundary condition; "
+                        "Paper rectangular preset is NOT reproduced."
+                    ),
+                },
+            )
+    if winning is None and allow_nonconformal_rescue:
+        # This is a DIFFERENT mapping algorithm and cannot be called BFF.
+        # It is available only by explicit opt-in for non-Paper experiments.
+        from .tutte_rectangle_rescue import rectangle_tutte_rescue
+        try:
+            rescue = rectangle_tutte_rescue(x, f)
+        except ReferenceBFFError as exc:
+            attempts.append({
+                "source_corner_method": "explicit_nonconformal_tutte_rectangle_rescue",
+                "failed_reason": f"{type(exc).__name__}: {exc}",
+            })
+        else:
+            return BFFRunResult(
+                uv_vertices=rescue.uv_vertices,
+                metrics={
+                    **rescue.metrics,
+                    "bff_corner_selection_method": "explicit_nonconformal_tutte_rectangle_rescue",
+                    "bff_corner_selection_attempts": attempts,
+                    "bff_corner_selection_attempt_count": len(attempts),
+                    "bff_corner_selection_valid_count": 0,
+                    "bff_corner_selection_rejected_count": len(attempts),
+                    "bff_corner_selection_adaptive_search_used": True,
+                    "bff_corner_selection_author_method_verified": False,
+                    "bff_corner_selection_certifies_area_limit": False,
+                },
+            )
+    if winning is None:
+        from collections import Counter
+        import os
+        _bff_debug = os.environ.get("ONESTRING_BFF_DEBUG_DIR", "").strip()
+        failures = Counter(
+            item["failed_reason"].split(":")[0]
+            for item in attempts if "failed_reason" in item
+        )
         raise ReferenceBFFError(
-            "All initial boundary-fit official rectangular BFF candidates failed: "
-            +str(attempts[-5:])
+            f"All {len(attempts)} original + adaptive rectangular BFF corner "
+            f"candidates failed (reasons={dict(failures)}). "
+            "No geometrically valid and consistently oriented rectangular "
+            "BFF chart was found; the input was NOT altered or accepted "
+            "with a foldover. Inspect short/skinny triangles and boundary "
+            "shape, try a different explicit corner mode, or remesh the "
+            "surface without changing its topology. "
+            f"Last five candidate diagnostics: {attempts[-5:]}. "
+            + (
+                f"Full source XYZ / invalid UV snapshots were saved to "
+                f"ONESTRING_BFF_DEBUG_DIR={_bff_debug!r}; upload that folder "
+                f"for exact face-level diagnosis."
+                if _bff_debug else
+                "To inspect the actual solver outputs without changing "
+                "Paper/CSF/Split, set ONESTRING_BFF_DEBUG_DIR before restarting "
+                "Streamlit; the next attempt saves original XYZ, face IDs, "
+                "raw 17-digit BFF UV and problematic face geometry."
+            )
         )
     _,chosen,result,entry=winning
     return BFFRunResult(
@@ -277,6 +539,14 @@ def choose_rectangle_by_source_boundary_fit(
             "bff_corner_selection_attempts":attempts,
             "bff_corner_selection_attempt_count":len(attempts),
             "bff_corner_selection_valid_count":sum("total_boundary_fit_score" in x for x in attempts),
+            "bff_corner_selection_adaptive_search_used":bool(
+                entry["source_corner_method"] in (
+                    "boundary_arclength_quartiles_dense", "boundary_curvature_extrema"
+                )
+            ),
+            "bff_corner_selection_rejected_count":sum(
+                "failed_reason" in row for row in attempts
+            ),
             "bff_corner_selection_selected_score":float(entry["total_boundary_fit_score"]),
             "bff_corner_selection_selected_source_xyz":chosen.get("source_xyz"),
             "bff_corner_selection_selected_source_vertex_ids":chosen.get("source_vertex_ids"),

@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 
-from onestring_physics.reference_bff import run_official_bff
+from onestring_physics.reference_bff import run_official_bff, triangle_jacobian_diagnostics
 
 
 def main() -> None:
@@ -31,8 +31,31 @@ def main() -> None:
         vertices,faces,boundary_policy="target_rectangle"
     )
     assert output.metrics["bff_rectangle_verified"]
+    assert output.metrics["bff_rectangle_uv_serialization_digits"] == 17
+    # This is a true numerical signal of improved serialization precision,
+    # not merely a source-code grep. The old adapter used std::to_string,
+    # causing ALL values to lie on the 1e-6 grid.
+    assert np.any(np.abs(output.uv_vertices - np.round(output.uv_vertices,6)) > 1e-9), (
+        "UV output appears quantized to six decimals; inspect compiled adapter"
+    )
+    differential = triangle_jacobian_diagnostics(vertices, output.uv_vertices, faces)
+    assert differential["uv_degenerate_triangle_count"] == 0
+    assert differential["uv_triangle_flip_count"] == 0
     assert output.metrics["bff_rectangle_width"]>0
     assert output.metrics["bff_rectangle_height"]>0
+    # The same compiled adapter must also preserve full precision when
+    # official BFF's natural boundary is used as a valid recovery chart.
+    free_output = run_official_bff(
+        vertices, faces, boundary_policy="automatic_reference",
+        free_boundary_precision_adapter=True,
+    )
+    assert free_output.metrics["bff_boundary_policy_effective"] == "boundary_scale_zero"
+    assert free_output.metrics["bff_free_boundary_uv_serialization_digits"] == 17
+    assert free_output.metrics["bff_free_boundary_high_precision_adapter"] is True
+    free_diff = triangle_jacobian_diagnostics(vertices, free_output.uv_vertices, faces)
+    assert free_diff["uv_degenerate_triangle_count"] == 0
+    assert free_diff["uv_triangle_flip_count"] == 0
+    print("FREE_BOUNDARY_BFF_HIGH_PRECISION_OK")
     print("RECTANGULAR_BFF_OK")
     print("target_policy:",output.metrics["bff_boundary_policy_effective"])
     print("backend:",output.metrics["parameterization_backend_name"])

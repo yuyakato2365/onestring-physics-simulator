@@ -688,7 +688,7 @@ with st.sidebar:
         bff_boundary_policy = st.selectbox(
             "BFF boundary policy",
             ["automatic_reference", "boundary_scale_zero", "target_disk", "target_rectangle", "custom_boundary_curvature"],
-            index=3 if paper_fidelity_enabled else 0,
+            index=3 if (paper_fidelity_enabled or omega_parameterization_mode == "paper_reference_bff") else 0,
             disabled=paper_fidelity_enabled,
             help="target_rectangle uses an independent CLI linked to the official BFF library. Four 90-degree exterior angles are assigned at ordered arclength quartiles. Authors' exact corner positions are not specified.",
         )
@@ -708,17 +708,129 @@ with st.sidebar:
                 "専用アダプタがない場合は、矩形調和写像に切り替えず停止します。"
             )
         st.caption("以下は論文の著者実装が未確認の研究用設定です。既定値なら従来のPaperモードと同じです。")
+        bff_corner_input_mode = st.radio(
+            "矩形Ωの隅の決め方（Paperモード）",
+            ["自動", "手動（S の上で4点を選ぶ）"],
+            key="bff_corner_input_mode",
+            horizontal=True,
+            help="手動：計算後に View stage「S」で境界の4点を選んで確定すると、その4点を BFF の隅にして計算し直します。"
+                 "確定するまでは自動の隅で計算します。",
+        )
+        _manual_corner_mode = bff_corner_input_mode.startswith("手動")
+        if _manual_corner_mode:
+            if st.session_state.get("bff_manual_corners"):
+                st.caption("手動の隅：確定済みの4点を使用中（View stage「S」で選び直し・解除できます）。")
+            else:
+                st.caption("手動の隅はまだ確定していません。Run すると Ω を作る前に止まり、"
+                           "S の上で4点を選ぶ画面が出ます。")
+        # In Paper mode the Omega selector can show a launcher-injected OptCuts
+        # entry, yet configure_paper_fidelity() still forces paper_reference_bff
+        # with target_rectangle. Base the re-flatten defaults on that effective
+        # route, otherwise Paper mode silently keeps fixed_phase / fixed_uv.
+        _reflatten_bff_path = bool(paper_fidelity_enabled) or omega_parameterization_mode == "paper_reference_bff"
+        # The lobe-tip heuristic is a Lilium-specific benchmark preset,
+        # NOT an appropriate default for a generic open surface. Select an
+        # existing general boundary-fitting algorithm for other meshes.
+        _mesh_name = str(getattr(uploaded, "name", "") or "")
+        _lilium_reference_input = bool(
+            _mesh_name and Path(_mesh_name).stem.lower().startswith("lilium")
+        )
+        # Paper-oriented mode keeps the validated lobe-tip corners for every
+        # input (as when the re-flatten Split was verified); Paper OFF keeps the
+        # name-based default below.
+        _generic_bff_corner_index = (3 if (_lilium_reference_input or paper_fidelity_enabled) else 2)
+        _corner_mesh_identity = Path(_mesh_name).stem.lower() if _mesh_name else str(target_kind)
         bff_rectangle_selection_mode = st.selectbox(
             "矩形BFF 四隅の選び方（実験）",
-            ["fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit"],
+            ["fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit", "lobe_tips"],
             format_func=lambda v: {
                 "fixed_phase":"従来の周長4等分（変更なし）",
                 "min_whole_source_area_span_4phase":"4位相から元曲面のCSF比最小を選択",
                 "source_boundary_shape_fit":"Sの境界形状に合う矩形の四隅を自動選択",
+                "lobe_tips":"境界の曲率極大4点（Lilium花弁先端・再展開Split用）",
             }[v],
-            index=2 if postcut_rebff_integrated_mode else 0,
-            help="同じ3D入力の4つの矩形BFFから、Split数を参照せずに選択。論文にこの手順の記載はありません。",
+            index=2 if postcut_rebff_integrated_mode else (
+                _generic_bff_corner_index if _reflatten_bff_path else 0
+            ),
+            key=f"bff_rectangle_selection_for_{_corner_mesh_identity}",
+            help="Liliumの検証用入力ではlobe_tips、その他は汎用境界フィットを既定にします。"
+                 "どちらも原論文に明記されていない角の選択方式です。"
+                 "OBJ/STL/PLYはTarget Inputのmesh uploadから指定できます。",
         )
+        bff_nonpaper_tutte_rescue_enabled = st.checkbox(
+            "実験：矩形BFFが全滅したら非等角Tutte写像で救済（Paper再現ではない）",
+            value=bool(
+                _reflatten_bff_path and not _lilium_reference_input
+                and not paper_fidelity_enabled
+            ),
+            disabled=bool(
+                paper_fidelity_enabled or not _reflatten_bff_path
+                or bff_rectangle_selection_mode != "source_boundary_shape_fit"
+            ),
+            key=f"nonpaper_tutte_rescue_for_{_corner_mesh_identity}",
+            help="BFF出力が退化・反転する場合のみ、同じ3Dメッシュを変更せず"
+                 "正の重みのTutte矩形写像を解きます。これは等角BFFとは異なり、"
+                 "論文準拠モードでは使用不可。反転・退化の検証は継続します。",
+        )
+        if bff_nonpaper_tutte_rescue_enabled:
+            st.warning(
+                "非等角Tutte救済が有効です。BFF候補が全滅した場合、"
+                "S→Ωに非等角の別手法を用います。"
+                "その場合のSplit本数は元論文のBFF結果と直接比較できません。"
+            )
+        paper_split_criterion = st.selectbox(
+            "Split CSF判定（論文準拠の研究再構成）",
+            ["fixed_uv", "reflatten_tile_area"],
+            index=1 if _reflatten_bff_path else 0,
+            disabled=not _reflatten_bff_path,
+            format_func=lambda v: {
+                "fixed_uv": "既存の固定UV / 現行Split（比較用）",
+                "reflatten_tile_area": "3Dピース自由境界BFF再展開 → タイル面積比 ≤ 2",
+            }[v],
+            help="各候補の3D曲面片だけを公式BFFで再展開してCSFを測定。"
+                 "元のM2D格子・K3D・T2Dパネルを再展開UVで置換しません。"
+                 "研究再構成であり著者コードとの一致は未確認。",
+        )
+        paper_split_curvature_rings = int(st.slider(
+            "Split切断点：ガウス曲率平滑化リング数",
+            min_value=1, max_value=10, value=3, step=1,
+            disabled=paper_split_criterion != "reflatten_tile_area",
+        ))
+        reference_grid_fit_rectangle = st.checkbox(
+            "矩形BFFの外接領域にn×nの正方形グリッドを合わせる（実験）",
+            value=_reflatten_bff_path,
+            disabled=not _reflatten_bff_path,
+            help="短辺をnセルに分割し、端数を左右対称に配置。"
+                 "パネルの後段最適化は変更しません。",
+        )
+        paper_split_ask_direction = st.checkbox(
+            "Splitの向きを処理中に尋ねる（候補が出るたびに縦・横を選ぶ）",
+            value=False, key="paper_split_ask_direction",
+            disabled=paper_split_criterion != "reflatten_tile_area",
+            help="Split が必要になるたびに計算を止め、M2D 上の縦・横の候補線と子の σ を示して選んでもらいます。"
+                 "選ぶたびにパイプラインを最初から計算し直し、次の Split まで進みます。",
+        )
+        paper_split_curvature_tie_percent = float(st.number_input(
+            "Split点：ガウス曲率がほぼ同じとみなす幅（最大値からの差、%）",
+            min_value=0.0, max_value=30.0, value=2.0, step=0.5,
+            key="paper_split_curvature_tie_percent",
+            disabled=paper_split_criterion != "reflatten_tile_area",
+            help="曲率が最大値からこの割合以内の格子点が複数あれば、その中で最も高い（入力の +z）点を通って切ります。"
+                 "0% にすると常に曲率最大の点を使います。",
+        ))
+        if paper_split_criterion == "reflatten_tile_area":
+            if uploaded is None:
+                st.caption(
+                    "現在の入力: 内蔵形状 / ローカル自動探索。"
+                    "別のOBJ/STL/PLYを試すにはTarget Input → mesh uploadを使用してください。"
+                    "再展開Splitは開いた円板型曲面を対象とし、閉曲面は事前に切断が必要です。"
+                )
+            else:
+                st.caption(f"再展開Split入力: {uploaded.name}（Lilium固有の形状条件なし）")
+            st.info("再展開Splitは論文を参考にした研究再構成です。"
+                    "M2Dと後段パネルを元のグリッドに固定して、"
+                    "3Dの切断片の自由BFFのみでCSFを評価します。"
+                    "外部BFF実行ファイルが必要で計算時間が増えます。")
         paper_csf_sampling_method = st.selectbox(
             "CSF離散評価（実験）",
             ["m2d_m3d_dual_centroid", "m2d_m3d_panel_area",
@@ -905,6 +1017,20 @@ with st.sidebar:
         lambda: st.button("Run OneString pipeline", type="primary"),
         tight_note=True,
     )
+    # A Split-direction choice made in the Split Map re-runs the pipeline once.
+    _split_direction_rerun = bool(st.session_state.pop("onestring_split_direction_rerun", False))
+    if run_pipeline and not _split_direction_rerun and st.session_state.get("paper_split_ask_direction"):
+        st.session_state["paper_split_direction_choices"] = ()  # a fresh Run asks again from Split 1
+        st.session_state.pop("paper_split_question", None)
+        st.session_state.pop("paper_split_ask_suspended", None)
+    if run_pipeline and not _split_direction_rerun and _manual_corner_mode:
+        # Manual corners: every fresh Run asks for the four corners again
+        # starting from an empty selection).
+        st.session_state.pop("bff_manual_corners", None)
+        st.session_state.pop("corner_selection_request", None)
+        st.session_state.pop("manual_corner_picks", None)
+        st.session_state["manual_corner_nonce"] = int(st.session_state.get("manual_corner_nonce", 0)) + 1
+    run_pipeline = bool(run_pipeline) or _split_direction_rerun
     max_3d_iterations = _param_row(
         "M3D→K3D の反復回数。平面性・正方形性・表面追従を改善するが、重くなる。",
         lambda: st.slider("3D optimization iterations", 5, 120, 40, 5, help="Iterations for K3D optimization."),
@@ -1716,8 +1842,29 @@ def build_target():
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as fh:
         fh.write(uploaded.getbuffer())
         temp_path = fh.name
-    st.warning(CLOSED_SHAPE_WARNING)
-    return load_target_shape(temp_path)
+    result = load_target_shape(temp_path)
+    if (paper_split_criterion == "reflatten_tile_area"
+            and (paper_fidelity_enabled or omega_parameterization_mode == "paper_reference_bff")):
+        from onestring_physics.reference_bff import (
+            validate_reference_mesh, ReferenceMeshValidationError,
+        )
+        try:
+            _mesh_input_topology = validate_reference_mesh(result.points, result.faces)
+        except ReferenceMeshValidationError as exc:
+            raise ValueError(
+                "再展開Splitが現在対応するのは、三角形が適切に接続した1つの開いた円板型曲面です。"
+                "閉曲面なら切断・境界追加、穴あき面なら適切な位相修正を先に行ってください。"
+                f" 入力メッシュ診断: {exc}"
+            ) from exc
+        st.caption(
+            f"入力メッシュ: {uploaded.name} / "
+            f"{_mesh_input_topology['vertex_count']} 頂点 / "
+            f"{_mesh_input_topology['triangle_count']} 三角形 / "
+            "開いた円板型曲面として検証済み"
+        )
+    else:
+        st.caption(f"入力メッシュ: {uploaded.name}（OBJ/STL/PLY）")
+    return result
 
 
 def current_pipeline_key() -> tuple:
@@ -1733,6 +1880,13 @@ def current_pipeline_key() -> tuple:
         omega_parameterization_mode,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
+        bff_nonpaper_tutte_rescue_enabled,
+        paper_split_criterion,
+        tuple(st.session_state.get("paper_split_direction_choices", ())),
+        paper_split_curvature_tie_percent,
+        (_manual_corner_mode, str(st.session_state.get("bff_manual_corners") or ())),
+        paper_split_curvature_rings,
+        reference_grid_fit_rectangle,
         postcut_rebff_integrated_mode,
         postcut_rebff_budget,
         postcut_rebff_preview_unconverged,
@@ -1882,9 +2036,19 @@ pipeline_params = PipelineParameters(
     omega_parameterization_mode=omega_parameterization_mode,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
+    paper_split_criterion=paper_split_criterion,
+    paper_split_curvature_rings=paper_split_curvature_rings,
+    paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
+    paper_split_ask_direction=bool(paper_split_ask_direction) and not st.session_state.get("paper_split_ask_suspended", False),
+    paper_split_curvature_tie_tolerance=paper_split_curvature_tie_percent / 100.0,
+    bff_rectangle_manual_corners=(tuple(tuple(float(x) for x in c) for c in (st.session_state.get("bff_manual_corners") or ()))
+                                  if _manual_corner_mode else ()),
+    bff_rectangle_manual_mode=bool(_manual_corner_mode),
+    reference_grid_fit_rectangle=reference_grid_fit_rectangle,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
     bff_rectangle_selection_mode=bff_rectangle_selection_mode,
+    bff_nonpaper_tutte_rescue_enabled=bff_nonpaper_tutte_rescue_enabled,
     paper_csf_sampling_method=paper_csf_sampling_method,
     paper_split_area_limit_experiment=paper_split_area_limit_experiment,
     reference_grid_spacing=reference_grid_spacing_value if reference_grid_spacing_value > 0.0 else None,
@@ -1963,7 +2127,20 @@ if paper_fidelity_enabled:
     pipeline_params, _paper_overrides = configure_paper_fidelity(pipeline_params)
     with st.expander("Paper modeが計算に適用する設定",expanded=False):
         st.json(_paper_overrides)
+from onestring_physics.paper_split_reflatten import SplitDirectionQuestion as _SplitDirectionQuestion
+from onestring_physics.paper_split_reflatten import CornerSelectionRequest as _CornerSelectionRequest
 pipeline_key = (current_pipeline_key(), paper_fidelity_enabled)
+# Paper mode paused at a Split and asks for its direction (shown before any
+# result, and only while no new run was requested).
+if st.session_state.get("corner_selection_request") and not run_pipeline:
+    from onestring_physics.manual_corner_ui import render_manual_corner_ui
+    _corner_req = st.session_state["corner_selection_request"]
+    render_manual_corner_ui(st, None, surface=(_corner_req["vertices"], _corner_req["faces"]), request=True)
+    st.stop()
+if st.session_state.get("paper_split_question") and not run_pipeline:
+    from onestring_physics.split_direction_ui import render_split_question
+    render_split_question(st)
+    st.stop()
 if "onestring_state" not in st.session_state and not run_pipeline:
     st.info("Set parameters, then click Run OneString pipeline. The paper-default path stops at unimplemented stages; enable the experimental pipeline explicitly to run the old prototype path.")
     st.stop()
@@ -2037,6 +2214,15 @@ if run_pipeline:
                     pipeline_params,
                     progress_callback=_build_progress,
                 )
+                st.session_state.pop("paper_split_question", None)
+        except _CornerSelectionRequest as _corner_request:
+            # Manual corners: pick four boundary points of S before Omega.
+            st.session_state["corner_selection_request"] = _corner_request.info
+            st.rerun()
+        except _SplitDirectionQuestion as _question:
+            # Paper mode asks for the next Split direction (see the panel below).
+            st.session_state["paper_split_question"] = _question.info
+            st.rerun()
         except Exception as exc:
             st.session_state.pipeline_progress_log = progress_log
             if postcut_rebff_integrated_mode:
@@ -2087,6 +2273,22 @@ if run_pipeline:
     st.rerun()
 
 state = st.session_state.onestring_state
+if bool(state.surface_parameterization.metrics.get("official_bff_free_boundary_recovery_used", False)):
+    st.warning(
+        "【Paper Ω 境界条件を変更】矩形BFFの全候補でUVが退化／反転したため、"
+        "公式BFFの自由境界解を使用しました。"
+        "後段の再展開Splitの計算式・処理は維持されていますが、"
+        "初期Ωは矩形ではありません。Liliumなどの矩形BFF成功例との"
+        "Split数を、同一条件の論文再現として比較しないでください。"
+    )
+if bool(state.surface_parameterization.metrics.get("nonpaper_rectangle_rescue_used", False)):
+    st.error(
+        "この計算結果のS→Ωは公式BFFではありません。"
+        "元の矩形BFF候補が全滅したため、明示的に許可された"
+        "非等角Tutte矩形写像を使用しました。"
+        "後段Split/T2Dは実験結果であり、論文のBFF・CSF閾値"
+        "に準拠した再現として評価しないでください。"
+    )
 _just_completed_pipeline = bool(
     st.session_state.pop("onestring_just_completed_pipeline", False)
 )
@@ -2622,6 +2824,57 @@ if view_stage == "Pipeline View":
         "T2D残存衝突ペア": state.tiles_2d_dual_hinge.metrics.get("collision_pair_count", "unknown"),
         "衝突回避Split採用数": state.tiles_2d_dual_hinge.metrics.get("collision_split_accepted", 0),
     })
+    # Runtime evidence, not an inference from sidebar labels: these flags are
+    # populated by the actual K3D AL solver / collision-Split full-rebuild path.
+    _k3d_diag = dict(getattr(state.mesh_3d_optimized, "metrics", {}) or {})
+    _split_diag = dict(getattr(state.tiles_2d_dual_hinge, "metrics", {}) or {})
+    _omega_applied = str(getattr(
+        st.session_state.get("onestring_last_completed_params", pipeline_params),
+        "omega_parameterization_mode", "unknown"
+    ))
+    st.subheader("最適化の実行診断（実際の最終結果）")
+    st.write({
+        "Omega実行モード": _omega_applied,
+        "改良K3D ALが実際に適用された": bool(
+            _k3d_diag.get("k3d_augmented_lagrangian_applied", False)
+        ),
+        "K3D shape-preserving AL": bool(
+            _k3d_diag.get("k3d_shape_preserving_mode", False)
+        ),
+        "K3D AL 共平面性制約を満たした": _k3d_diag.get(
+            "k3d_hard_planarity_constraint_satisfied", "not executed"
+        ),
+        "衝突回避Splitフィードバックを実行した": bool(
+            _split_diag.get("collision_split_feedback_enabled", False)
+        ),
+        "衝突回避Splitステータス": _split_diag.get(
+            "collision_split_status", "not executed"
+        ),
+        "Split候補の実際の試行数": _split_diag.get("collision_split_attempted", 0),
+        "衝突回避Splitの新規採用数": _split_diag.get(
+            "collision_split_newly_accepted", 0
+        ),
+        "Split前の衝突ペア数": (_split_diag.get("collision_split_before") or {}).get(
+            "collision_pairs", "not measured"
+        ),
+        "Split後の衝突ペア数": (_split_diag.get("collision_split_after") or {}).get(
+            "collision_pairs", "not measured"
+        ),
+    })
+    if _omega_applied == "optcuts_test" and not bool(
+        _k3d_diag.get("k3d_augmented_lagrangian_applied", False)
+    ):
+        st.warning(
+            "Omega=optcuts_testですが、最終K3DにAL適用メトリクスがありません。"
+            "K3D最適化が改良版へ接続されていないか、別の経路が呼ばれています。"
+        )
+    if not bool(_split_diag.get("collision_split_feedback_enabled", False)):
+        st.caption(
+            "Collision-driven Splitは今回の結果では未実行です。"
+            "PaperモードOFFだけでは有効になりません。"
+            "「Enable sequential collision-driven Split (full pipeline)」をONにし、"
+            "Run OneString pipelineで全工程を再計算してください。"
+        )
     # The overview graph is small but can still trip browser-side Plotly
     # rendering in some reruns. During a changed-grid rebuild show only
     # non-Plotly results until the user explicitly requests the graphic.
@@ -2651,7 +2904,31 @@ if view_stage == "Pipeline View":
         st.warning("工程ごとのレポートが空です。パネル数は上に表示しています。"
                    "View stageのMetricsから詳細を確認できます。")
 elif view_stage == "S":
-    st.plotly_chart(figure_surface_mesh(state.target_surface), use_container_width=True, key="target_surface")
+    _s_figure = figure_surface_mesh(state.target_surface)
+    try:
+        # Display only: the four boundary points that became the corners of
+        # the rectangular Omega (labels match the Omega view).
+        from onestring_physics.omega_corner_view import add_corners_to_surface_figure, omega_corner_info
+        _corner_info = omega_corner_info(state)
+        if _corner_info["is_rectangle"]:
+            add_corners_to_surface_figure(_s_figure, _corner_info)
+    except Exception:
+        _corner_info = None
+    st.plotly_chart(_s_figure, use_container_width=True, key="target_surface")
+    if _corner_info is not None and _corner_info["is_rectangle"]:
+        st.caption("C1〜C4 は矩形Ωの四隅に写した境界点（" + _corner_info["source"] + "）。"
+                   "Ωビューの同じラベルと対応します。"
+                   + (f" 境界の小さな突起 {_corner_info['feature_count']} 点は、BFFの目標角に残して矩形の辺を保っています。"
+                      if _corner_info["feature_count"] else ""))
+    try:
+        if not st.session_state.get("bff_corner_input_mode", "自動").startswith("手動"):
+            st.caption("矩形Ωの隅を手で選ぶには、サイドバー「Paper-reference BFF settings」の"
+                       "「矩形Ωの隅の決め方」で「手動」を選んでください。")
+        else:
+            from onestring_physics.manual_corner_ui import render_manual_corner_ui
+            render_manual_corner_ui(st, state)
+    except Exception as _manual_exc:
+        st.caption(f"手動の隅の選択欄を表示できませんでした: {type(_manual_exc).__name__}: {_manual_exc}")
 elif view_stage == "Split Map":
     if _postcut_report is not None:
         st.subheader("再BFFを使ったGrid Split履歴")
@@ -2683,7 +2960,27 @@ elif view_stage == "Split Map":
             else:
                 st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
             st.dataframe(_split_rows, hide_index=True, width="stretch")
-            st.caption("CSFは現在のUV写像に基づく評価値です。")
+            if state.mesh_2d_initial.metrics.get("csf_split_criterion") == "reflatten_tile_area":
+                with st.expander("再展開SplitのM3D形状と切断線を3D表示", expanded=False):
+                    from onestring_physics.reflatten_split_view import figure_reflatten_split_3d
+                    _ref_3d, _ref_pieces = figure_reflatten_split_3d(state, _split_step)
+                    if _ref_3d is None:
+                        st.info("この計算結果には3D再生用のM3D頂点がありません。")
+                    else:
+                        st.plotly_chart(_ref_3d, use_container_width=True,
+                                        key=f"reflatten_original_m3d_{_split_step}")
+                        st.dataframe(_ref_pieces, hide_index=True, width="stretch")
+                        st.caption("表示は最終パネルではなく、元のΩ格子から持ち上げたM3Dです。"
+                                   "再展開UVは評価専用で、製造用パネル形状を変更しません。")
+            _split_model = state.mesh_2d_initial.metrics.get("csf_split_criterion")
+            if _split_model == "reflatten_tile_area":
+                st.caption(
+                    "再展開Split：各3D曲面片を公式自由境界BFFで別々に展開し、"
+                    "タイルごとの3D/2D面積比の最大/最小でCSF相当量を評価しています。"
+                    "最終パネルは元のΩ格子に固定しています。著者実装との一致は未確認です。"
+                )
+            else:
+                st.caption("CSFは現在のUV写像に基づく評価値です。")
             _split_metrics = state.mesh_2d_initial.metrics
             _split_unresolved = int(_split_metrics.get("csf_split_unresolved_component_count", 0) or 0)
             if _split_unresolved:
@@ -2694,6 +2991,9 @@ elif view_stage == "Split Map":
                     f"{_split_unresolved}個残っています。終了理由：{_split_reason}。"
                     " 分割回数の上限や格子上の切断不能は、CSF条件の達成を意味しません。"
                 )
+        if (state.mesh_2d_initial.metrics.get("reflatten_split_report") or {}).get("steps"):
+            from onestring_physics.split_direction_ui import render_split_direction_ui
+            render_split_direction_ui(st, state)
         if state.mesh_2d_initial.metrics.get("csf_split_parameterization_repair_required"):
             st.warning(
                 "UVに退化した三角形があるため、有効な領域で処理を継続しています。"
@@ -2876,6 +3176,19 @@ elif view_stage == "Omega":
                 "The final outline can therefore remain visually indistinguishable from the initialization."
             )
     st.write(omega_info)
+    # Display only: Omega with its long side vertical (paper Fig. 5) and the
+    # four rectangle corners labelled as on S. The computation is unchanged.
+    if _postcut_report is None:
+        try:
+            from onestring_physics.omega_corner_view import figure_omega_upright, omega_corner_info
+            _corner_info = omega_corner_info(state)
+            if st.checkbox("Ωを図5の向き（長辺を縦）で表示", value=True, key="omega_upright_view"):
+                st.plotly_chart(figure_omega_upright(state, _corner_info), use_container_width=True,
+                                key="omega_upright_figure")
+                st.caption("表示のみ（計算には影響しません）。C1〜C4 は S ビューの同じラベルの点に対応します。"
+                           "共形写像では回転と拡大縮小が任意なので、図5と比べやすいよう長辺を縦にしています。")
+        except Exception as _corner_exc:
+            st.caption(f"Ωの向き表示を作れませんでした: {type(_corner_exc).__name__}: {_corner_exc}")
 elif view_stage == "Mode Comparison":
     st.caption(
         "S→M3Dの3モード比較です。spacing / rotation / origin と fully-contained crop を共通化します。"
@@ -3610,6 +3923,102 @@ elif view_stage == "T2D Dual Hinge":
             key="download_t2d_dual_hinge_stl",
         )
         state.tiles_2d_dual_hinge.metrics.update(t2d_dual_export_metrics)
+        with st.expander("実験：IsoGami型PP薄肉ヒンジ付き T2D STL（mm）", expanded=False):
+            st.caption(
+                "最終Dual Hingeの接続点とtop/bottom分類から薄いPP用ストリップを生成。"
+                "Split境界は再接続しません。元のSTLは変更せず、こちらは独立の製造実験出力です。"
+                "パネルとストリップは交差する独立閉曲面です。スライサーで形状を結合し、"
+                "印刷前に意図しない接続・スライス・折り曲げ耐久性を確認してください。"
+            )
+            _fm1, _fm2, _fm3 = st.columns(3)
+            _flex_panel_mm = _fm1.number_input(
+                "代表パネル辺長 (mm)", min_value=5.0, max_value=250.0,
+                value=40.0, step=5.0, key="flexure_panel_size_mm"
+            )
+            _fm2.caption("パネル厚さ・形状：T2Dの8頂点をそのまま使用（変更不可）")
+            _flex_width_mm = _fm3.number_input(
+                "ヒンジ幅 (mm)", min_value=0.4, max_value=6.0,
+                value=1.2, step=0.2, key="flexure_width_mm"
+            )
+            _fm4, _fm5, _fm6 = st.columns(3)
+            _flex_skin_mm = _fm4.number_input(
+                "薄肉ヒンジ厚 (mm)", min_value=0.2, max_value=2.0,
+                value=0.6, step=0.1, key="flexure_skin_mm"
+            )
+            _flex_inset_mm = _fm5.number_input(
+                "固定端の内側距離 (mm)", min_value=0.4, max_value=12.0,
+                value=3.0, step=0.5, key="flexure_inset_mm"
+            )
+            _flex_embed_mm = _fm6.number_input(
+                "パネルへの埋め込み (mm)", min_value=0.05, max_value=0.9,
+                value=0.2, step=0.05, key="flexure_embed_mm"
+            )
+            _flex_max_gap_mm = st.number_input(
+                "製造用ヒンジが橋渡しする最大接続ギャップ (mm)",
+                min_value=0.1, max_value=50.0, value=1.5, step=0.1,
+                key="flexure_max_joint_gap_mm",
+                help=(
+                    "Dual Hinge最適化後に2つの接続点がずれている場合、"
+                    "薄肉ヒンジでその隙間を橋渡しします。これはT2Dの接続誤差を修正しません。"
+                    "設定上限は50 mm（5 cm）。大きなギャップは物理的な製造・組立可能性を意味しません。"
+                ),
+            )
+            if st.checkbox(
+                "ヒンジ付きSTLを生成する（未検証の試作専用）",
+                value=False, key="flexure_generate_enabled"
+            ):
+                from onestring_physics.t2d_flexure_fabrication import (
+                    FlexureParameters, export_final_t2d_flexure_stl
+                )
+                try:
+                    _flex_data, _flex_metrics = export_final_t2d_flexure_stl(
+                        state, hinge_graph=state.hinge_graph,
+                        panel_size_mm=float(_flex_panel_mm),
+                        parameters=FlexureParameters(
+                            width_mm=float(_flex_width_mm),
+                            skin_mm=float(_flex_skin_mm),
+                            anchor_inset_mm=float(_flex_inset_mm),
+                            embed_mm=float(_flex_embed_mm),
+                            max_joint_gap_mm=float(_flex_max_gap_mm),
+                        ),
+                    )
+                except ValueError as _flex_error:
+                    st.error(f"薄肉ヒンジの幾何検証に失敗：{_flex_error}")
+                else:
+                    st.download_button(
+                        "Download T2D with top/bottom PP flexure hinges (mm)",
+                        data=_flex_data,
+                        file_name="onestring_t2d_dual_flexure_mm.stl",
+                        mime="model/stl",
+                        key="download_t2d_dual_flexure_mm",
+                    )
+                    st.caption(
+                        "パネル形状はT2DのXYZ 8頂点を完全保持し、全体に同一の"
+                        "mm換算倍率とZ方向の平行移動だけを適用しました。"
+                        "パネル厚さ・傾き・共平面性の残差・パネル間の相対位置は変更していません。"
+                        "ヒンジだけを上下の実際の接続高さに追従させています。"
+                        f" 元の面の最大非平面性："
+                        f"{_flex_metrics['flexure_preprint_max_best_fit_face_nonplanarity_mm']:.4g} mm。"
+                    )
+                    if _flex_metrics["flexure_requires_geometry_review"]:
+                        st.warning(
+                            "T2Dの元のパネルに大きな傾き・非平面性・ヒンジ高低差があります。"
+                            "パネル形状は変更していません。スライス前に造形方向、"
+                            "サポートの必要性、接続部の干渉と組立可能性を確認してください。"
+                        )
+                    if _flex_metrics["flexure_max_joint_gap_mm"] > 1e-3:
+                        st.warning(
+                            "薄肉ヒンジは最終T2Dの接続点間に残った隙間を橋渡ししています。"
+                            "T2D自体の接続誤差は修正されていません。"
+                            "STLのヒンジ形状・組立時の負荷を検証してください。"
+                        )
+                    st.write({
+                        "top hinges": _flex_metrics["flexure_top_count"],
+                        "bottom hinges": _flex_metrics["flexure_bottom_count"],
+                        "hinge mesh triangles": _flex_metrics["flexure_triangle_count"],
+                        "max joint gap (mm)": _flex_metrics["flexure_max_joint_gap_mm"],
+                        "allowed bridge gap (mm)": _flex_metrics["flexure_bridge_limit_mm"],
+                    })
     st.write(state.tiles_2d_dual_hinge.metrics)
 elif view_stage in {"Lift Points", "String Path"}:
     st.plotly_chart(

@@ -1,7 +1,7 @@
 name: Rectangular Boundary First Flattening
 on:
   push:
-    branches: [agent/paper-rectangular-bff-20261013, agent/paper-split-area-verified-20261014]
+    branches: [agent/paper-rectangular-bff-20261013, agent/paper-split-area-verified-20261014, feature/isogami-flexure-t2d-20261021]
     paths:
       - "onestring-physics-simulator/tools/bff_rectangle/**"
       - "onestring-physics-simulator/scripts/setup_bff_rectangle.py"

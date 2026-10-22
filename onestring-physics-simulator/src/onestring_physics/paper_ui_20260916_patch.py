@@ -8,14 +8,24 @@ def _card(t,e,m,b="Paper"):
  return f"<div class='os-eq-card'><div class='os-eq-top'><b>{html.escape(t)}</b><em>{b}</em></div><div class='os-eq'>{e}</div><div class='os-eq-map'>{m}</div></div>"
 SECTION_CARDS={"Target Input":("S → Ω → M₂D","c:S→Ω &nbsp;&nbsp; M<sub>2D</sub>=Grid(Ω,s)","Parameterization と fabrication grid の生成。"),"Pipeline Optimization":("Optimization objectives","E<sub>Assembled</sub>(v)=ω₁E<sub>Planar</sub>+ω₂E<sub>Square</sub>+ω₃E<sub>Surface</sub><br><br>E<sub>Flat</sub>(v)=ω₁E<sub>Edge</sub>+ω₂E<sub>Collision</sub>+ω₃E<sub>Fab</sub>","上: M₃D→K₃D (Sec.4.2) / 下: M₂D→K₂D (Sec.4.3)。iterations/time budget は solver 設定。"),"Hinge Layout Optimization":("Hinge objective","E<sub>Hinge</sub>(v)=ω₁E<sub>Rigid</sub>+ω₂E<sub>Collision</sub>+ω₃E<sub>Conn</sub>","Paper Sec.4.4。anchor/candidate/time budget は implementation-only。"),"Compute Backend":("Numerical backend","arg min E — objective unchanged","CPU/CUDA・dtype は数値実装設定。","Implementation"),"Actuation Simulation":("Deployment simulation","x<sup>k+1</sup>=Solver(x<sup>k</sup>,constraints)","Figure 5 後段の simulation。","Downstream"),"High-Fidelity Physical Mode":("Physical extensions","E=E<sub>base</sub>+E<sub>gravity</sub>+E<sub>friction</sub>+E<sub>hinge</sub>","Paper objective そのものではない追加近似。","Implementation")}
 CONTROL_CARDS={"w_planar / EPlanar":("K₃D · EAssembled","<b>ω₁</b>E<sub>Planar</sub> + ω₂E<sub>Square</sub> + ω₃E<sub>Surface</sub>","この値 = ω₁ (planarity)。"),"w_square / ESquare":("K₃D · EAssembled","ω₁E<sub>Planar</sub> + <b>ω₂</b>E<sub>Square</sub> + ω₃E<sub>Surface</sub>","この値 = ω₂ (square-like shape)。"),"w_surface / ESurface":("K₃D · EAssembled","ω₁E<sub>Planar</sub> + ω₂E<sub>Square</sub> + <b>ω₃</b>E<sub>Surface</sub>","この値 = ω₃ (surface fitting)。"),"K3D AL anchor weight (w_a)":("K₃D stabilization","E<sub>impl</sub>=E<sub>Assembled</sub>+<b>w<sub>a</sub>E<sub>anchor</sub></b>+AL(planarity)","Paper ω ではない。","Implementation"),"3D optimization iterations":("K₃D solver","min E<sub>Assembled</sub>(v)","反復上限。","Solver"),"2D optimization iterations":("K₂D solver","min E<sub>Flat</sub>(v)","反復上限。","Solver"),"K2D strict solver time budget":("K₂D solver","min E<sub>Flat</sub>(v), time≤<b>T</b>","T = 時間上限。","Solver"),"hinge connection weight":("T₂D · EHinge","ω₁E<sub>Rigid</sub>+ω₂E<sub>Collision</sub>+<b>ω₃E<sub>Conn</sub></b>","connection 項の重み。"),"hinge collision weight":("T₂D · EHinge","ω₁E<sub>Rigid</sub>+<b>ω₂E<sub>Collision</sub></b>+ω₃E<sub>Conn</sub>","collision 項の重み。"),"hinge layout anchor weight":("T₂D stabilization","E<sub>impl</sub>=E<sub>Hinge</sub>+<b>w<sub>a</sub>E<sub>anchor</sub></b>","Paper Sec.4.4 の三項にはない。","Implementation")}
-_LOCK=threading.Lock();_THREAD=None
+_LOCK=threading.Lock();_THREAD=None;_LOAD_ERROR=None
+_F5_CSS = (".os-f5{width:100%;padding:8px;border:1px solid rgba(120,130,145,.18);border-radius:18px;background:rgba(245,248,252,.75);box-sizing:border-box}"
+ ".os-f5-img{position:relative;display:block;width:100%;line-height:0}.os-f5 img{width:100%;display:block;border-radius:11px}"
+ ".os-hi{position:absolute;box-sizing:border-box;border:4px solid rgba(151,164,181,.30);border-radius:14px;pointer-events:none}"
+ ".os-hi i{position:absolute;inset:-4px;box-sizing:border-box;border-radius:14px;padding:4px;background:linear-gradient(105deg,rgba(35,133,235,.98),rgba(135,207,255,.96),rgba(48,151,255,.98),rgba(205,236,255,.98));-webkit-mask:conic-gradient(from -90deg,#000 0 var(--p),transparent var(--p) 360deg),linear-gradient(#000 0 0) content-box;-webkit-mask-composite:source-in,xor;mask:conic-gradient(from -90deg,#000 0 var(--p),transparent var(--p) 360deg),linear-gradient(#000 0 0) content-box;mask-composite:intersect,exclude}"
+ ".os-stage{display:flex;justify-content:space-between;padding:7px 11px;margin:6px 0;border-radius:11px;background:rgba(225,239,255,.58)}"
+ ".os-loading{padding:45px;text-align:center;border-radius:16px;background:rgba(240,245,250,.7)}"
+ )
+def _css(): return "<style>" + _F5_CSS + "</style>"
 def _paths():
  root=Path(__file__).resolve().parents[2];c=root/".paper_cache";c.mkdir(exist_ok=True);return c/"onestringpull_authors_version_compressed.pdf",c/"figure5.png"
 def _load():
+ global _LOAD_ERROR
  pdf,png=_paths()
  try:
   if png.exists() and png.stat().st_size>10000:return
-  import fitz
+  try:import pymupdf as fitz
+  except ImportError:import fitz
   if not pdf.exists() or pdf.stat().st_size<100000:
    req=urllib.request.Request(PAPER_PDF,headers={"User-Agent":"Mozilla/5.0"});last=None
    for ctx in (ssl.create_default_context(),ssl._create_unverified_context()):
@@ -25,7 +35,9 @@ def _load():
     except Exception as e:last=e;pdf.unlink(missing_ok=True)
    if last:raise last
   doc=fitz.open(pdf);pix=doc[4].get_pixmap(matrix=fitz.Matrix(3,3),clip=fitz.Rect(45,72,570,258),alpha=False);png.write_bytes(pix.tobytes("png"))
- except Exception:pass
+  _LOAD_ERROR=None
+ except ImportError:_LOAD_ERROR="PyMuPDF が見つかりません（python -m pip install PyMuPDF）"
+ except Exception as exc:_LOAD_ERROR=f"{type(exc).__name__}: {exc}"
 def _figure():
  global _THREAD
  _,p=_paths()
@@ -59,12 +71,14 @@ def _fig(data,a,q):
  # The overlay must be positioned against the image box itself.  When it is a
  # child of the padded card, percentage offsets resolve against the padding box
  # and the frame drifts sideways relative to the figure.
- return f"<div class='os-f5'><div class='os-f5-img'><img src='{uri}'>{ov}</div></div>"
+ return _css()+f"<div class='os-f5'><div class='os-f5-img'><img src='{uri}'>{ov}</div></div>"
 def _render(st,caption,a="",q=0):
  d=_figure()
- if d is None:st.markdown("<div class='os-loading'>Figure 5 preparing… <small>calculation continues</small></div>",unsafe_allow_html=True)
+ if d is None:
+  msg=html.escape(_LOAD_ERROR) if _LOAD_ERROR else "calculation continues"
+  st.markdown(_css()+f"<div class='os-loading'>Figure 5 preparing… <small>{msg}</small></div>",unsafe_allow_html=True)
  else:st.markdown(_fig(d,a,q),unsafe_allow_html=True);st.caption(caption)
- if a:st.markdown(f"<div class='os-stage'><b>{a}</b><span>{int(100*max(0,min(1,float(q or 0))))}%</span></div>",unsafe_allow_html=True)
+ if a:st.markdown(_css()+f"<div class='os-stage'><b>{a}</b><span>{int(100*max(0,min(1,float(q or 0))))}%</span></div>",unsafe_allow_html=True)
 def install_paper_ui_20260916_patch():
  try:import streamlit as st
  except Exception:return

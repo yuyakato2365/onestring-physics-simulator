@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -25,12 +27,17 @@ using namespace bff;
 int main(int argc, char** argv) {
     const bool customCornerPositions =
         argc == 17 && std::string(argv[4]) == "--corner-xyz";
-    if ((argc != 4 && argc != 6 && !customCornerPositions) ||
+    // Uses the SAME unmodified official BFF library, but imposes its
+    // natural/free boundary policy rather than forcing four sharp corners.
+    // This is an explicit RECOVERY path, NOT a rectangular solution.
+    const bool freeBoundary = argc == 5 && std::string(argv[4]) == "--free-boundary";
+    if ((argc != 4 && argc != 6 && !customCornerPositions && !freeBoundary) ||
         std::string(argv[3]) != "--writeOnlyUVs" ||
-        (argc == 6 && std::string(argv[4]) != "--corner-phase")) {
+        (argc == 6 && std::string(argv[4]) != "--corner-phase") ||
+        (argc == 5 && !freeBoundary)) {
         std::cerr << "Usage: bff-rect-command-line input.obj output.obj --writeOnlyUVs "
                   << "[--corner-phase frac | --corner-xyz x0 y0 z0 x1 y1 z1 "
-                  << "x2 y2 z2 x3 y3 z3]\\n";
+                  << "x2 y2 z2 x3 y3 z3 | --free-boundary]\\n";
         return EXIT_FAILURE;
     }
     // The original quarter-arclength behavior remains the default.
@@ -81,6 +88,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     std::vector<int> corners(4,0);
+    if (!freeBoundary) {
     if (customCornerPositions) {
         // Candidate corners come from PCA extrema on the actual 3D source
         // boundary. Passing xyz avoids relying on the OBJ/BFF wedge index
@@ -142,6 +150,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    } // Only a forced rectangle needs any corner selection.
     // BFF::flatten(..., false) uses its protected meanScaling gauge,
     // initialized only by the scale-factor overload. Call that official
     // overload once first; this avoids uninitialized state or poking
@@ -151,25 +160,109 @@ int main(int argc, char** argv) {
         std::cerr << "Official BFF gauge initialization failed\\n";
         return EXIT_FAILURE;
     }
-    DenseMatrix exterior(bff.data->bN);
-    for (int k=0; k<4; ++k) {
-        const int idx=bff.data->bIndex[boundary[corners[k]]];
-        exterior(idx) = 0.5 * M_PI;
+    if (!freeBoundary) {
+        DenseMatrix exterior(bff.data->bN);
+        for (int k=0; k<4; ++k) {
+            const int idx=bff.data->bIndex[boundary[corners[k]]];
+            exterior(idx) = 0.5 * M_PI;
+        }
+        // Optional extra exterior angles at original boundary vertices
+        // ("x y z angle" per line, zero net sum), e.g. to keep a tiny rim
+        // tooth instead of flattening it into a straight side. Same official
+        // BFF::flatten(target, false) solve; only the target angles differ.
+        if (const char* featurePath = std::getenv("ONESTRING_BFF_FEATURE_ANGLES")) {
+            std::ifstream features(featurePath);
+            if (!features.is_open()) {
+                std::cerr << "Cannot open ONESTRING_BFF_FEATURE_ANGLES file\n";
+                return EXIT_FAILURE;
+            }
+            double fx, fy, fz, fa;
+            int applied=0;
+            while (features >> fx >> fy >> fz >> fa) {
+                int best=-1;
+                double minDist=std::numeric_limits<double>::infinity();
+                for (int i=0; i<n; ++i) {
+                    Vector v=boundary[i]->vertex()->position * mesh.radius + mesh.cm;
+                    const double dx=v[0]-fx, dy=v[1]-fy, dz=v[2]-fz;
+                    const double dist=dx*dx+dy*dy+dz*dz;
+                    if (dist<minDist) { minDist=dist; best=i; }
+                }
+                if (best<0 || minDist>1e-12*perimeter*perimeter || !std::isfinite(fa)) {
+                    std::cerr << "Feature angle point is not an original boundary vertex\n";
+                    return EXIT_FAILURE;
+                }
+                exterior(bff.data->bIndex[boundary[best]]) += fa;
+                ++applied;
+            }
+            std::cout << "ONESTRING_FEATURE_ANGLES_APPLIED " << applied << "\n";
+        }
+        if (!bff.flatten(exterior, false)) {
+            std::cerr << "Official BFF prescribed exterior-angle solve failed\n";
+            return EXIT_FAILURE;
+        }
     }
-    if (!bff.flatten(exterior, false)) {
-        std::cerr << "Official BFF prescribed exterior-angle solve failed\n";
-        return EXIT_FAILURE;
-    }
+    // In freeBoundary mode, the BFF scale-factor solve above is FINAL.
+    // No second map is computed and nothing is projected onto a rectangle.
     // Do not request PCA reorientation or an additional UV map:
     // only the conformal flattening returned by BFF::flatten is used.
-    if (!MeshIO::write(argv[2], model, std::vector<uint8_t>(1,0),
-                       false, true, 1.0)) {
-        std::cerr << "Failed to write BFF rectangle output\n";
+    // IMPORTANT: upstream MeshIO::writeOBJ uses std::to_string(uv.x/y),
+    // rounding UV vertices to ~6 decimals. Small valid UV triangles can
+    // thereby become EXACTLY collinear or change orientation in the OBJ
+    // consumed by Python (e.g. source face 275). Preserve the same upstream
+    // packing, UV ordering and face indices, but serialize with round-trip
+    // double precision. The BFF solve and UV geometry are NOT modified.
+    std::vector<Vector> originalUvIslandCenters, newUvIslandCenters;
+    std::vector<uint8_t> isUvIslandFlipped;
+    Vector modelMinBounds, modelMaxBounds;
+    const std::vector<uint8_t> isSurfaceMappedToSphere(1, 0);
+    MeshIO::packUvs(model, 1.0, isSurfaceMappedToSphere,
+                    originalUvIslandCenters, newUvIslandCenters,
+                    isUvIslandFlipped, modelMinBounds, modelMaxBounds);
+    std::vector<Vector> positions, uvs;
+    std::vector<int> vIndices, uvIndices, indicesOffset;
+    MeshIO::collectModelUvs(
+        model, false, isSurfaceMappedToSphere,
+        originalUvIslandCenters, newUvIslandCenters, isUvIslandFlipped,
+        modelMinBounds, modelMaxBounds, positions, uvs, vIndices,
+        uvIndices, indicesOffset);
+    std::ofstream out(argv[2]);
+    if (!out.is_open() || uvs.empty() || indicesOffset.size() < 2) {
+        std::cerr << "Failed to prepare full-precision BFF rectangle OBJ\n";
         return EXIT_FAILURE;
     }
-    std::cerr << "BFF_RECTANGLE_CORNERS="
-              << corners[0] << "," << corners[1] << ","
-              << corners[2] << "," << corners[3] << "\n";
+    out << std::setprecision(std::numeric_limits<double>::max_digits10);
+    for (const Vector& uv : uvs) {
+        if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) {
+            std::cerr << "Official BFF produced non-finite UVs\n";
+            return EXIT_FAILURE;
+        }
+        out << "v " << uv.x << " " << uv.y << " 0\n";
+    }
+    for (size_t face=0; face+1<indicesOffset.size(); ++face) {
+        out << "f";
+        for (int j=indicesOffset[face]; j<indicesOffset[face+1]; ++j) {
+            if (uvIndices[j]<0 || static_cast<size_t>(uvIndices[j])>=uvs.size()) {
+                std::cerr << "Invalid BFF UV face index\n";
+                return EXIT_FAILURE;
+            }
+            out << " " << (uvIndices[j]+1);
+        }
+        out << "\n";
+    }
+    out.close();
+    if (!out.good()) {
+        std::cerr << "Writing full-precision BFF rectangle OBJ failed\n";
+        return EXIT_FAILURE;
+    }
+    std::cerr << "BFF_RECTANGLE_OUTPUT_PRECISION="
+              << std::numeric_limits<double>::max_digits10 << "\n";
+    if (freeBoundary) {
+        std::cerr << "BFF_FREE_BOUNDARY_HIGH_PRECISION=1\n";
+    } else {
+        std::cerr << "BFF_RECTANGLE_CORNERS="
+                  << corners[0] << "," << corners[1] << ","
+                  << corners[2] << "," << corners[3] << "\n";
+    }
     std::cerr << "BFF_RECTANGLE_CORNER_PHASE=" << cornerPhase << "\\n";
     return EXIT_SUCCESS;
 }

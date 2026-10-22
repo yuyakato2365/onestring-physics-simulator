@@ -959,9 +959,10 @@ class PipelineParameters(_original.PipelineParameters):
     paper_fidelity_mode: bool = False
     # Experimental paper-interpretation studies; defaults remain unchanged.
     bff_rectangle_selection_mode: Literal[
-        "fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit"
+        "fixed_phase", "min_whole_source_area_span_4phase", "source_boundary_shape_fit", "lobe_tips"
     ] = "fixed_phase"
     paper_split_area_limit_experiment: bool = False
+    bff_nonpaper_tutte_rescue_enabled: bool = False
     paper_csf_sampling_method: Literal["m2d_m3d_dual_centroid", "m2d_m3d_panel_area", "overlap_extrema", "interpolated_grid_vertices"] = "m2d_m3d_dual_centroid"
     model_version: str = "2026-07-12-one-sided-t3d"
     use_principal_curvature_grid: bool = False
@@ -1004,6 +1005,20 @@ class PipelineParameters(_original.PipelineParameters):
     ] = "bff"
     bff_executable: str | None = None
     bff_rectangle_executable: str | None = None
+    paper_split_criterion: str = "fixed_uv"
+    paper_split_curvature_rings: int = 3
+    # Per-cut direction for the re-flatten Split, in planning order:
+    # "auto" | "col" (vertical line in M2D) | "row" (horizontal line).
+    paper_split_direction_choices: tuple = ()
+    # Ask the user (app) for each Split direction instead of choosing automatically.
+    paper_split_ask_direction: bool = False
+    # Curvatures within this relative band of the maximum count as equal; the
+    # highest (+z) of those vertices is cut through.
+    paper_split_curvature_tie_tolerance: float = 0.02
+    # Paper mode: four corners picked by hand on S (xyz); empty = automatic.
+    bff_rectangle_manual_corners: tuple = ()
+    bff_rectangle_manual_mode: bool = False
+    reference_grid_fit_rectangle: bool = False
     optcuts_distortion_bound: float = 4.1
     optcuts_try_alternative_initial_cut: bool = True
     bff_boundary_policy: Literal[
@@ -2701,13 +2716,151 @@ def _build_surface_parameterization(surface, target, grid, params):
             raise ValueError("paper_reference_bff requires omega_boundary_mode='paper_default'; its boundary policy is selected separately.")
         boundary_policy = str(getattr(params, "bff_boundary_policy", "automatic_reference"))
         selection_mode=str(getattr(params, "bff_rectangle_selection_mode", "fixed_phase"))
-        if selection_mode == "source_boundary_shape_fit":
+        if selection_mode == "lobe_tips":
+            if boundary_policy != "target_rectangle":
+                raise ValueError("Lobe-tip BFF corner selection requires target_rectangle")
+            from .paper_split_reflatten import lobe_tip_corner_positions
+            corner_xyz = lobe_tip_corner_positions(
+                surface_vertices, surface_faces,
+                # Paper-oriented mode: put the rectangle corners on genuine
+                # boundary corners (square height fields); Lilium is unchanged.
+                snap_to_corners=bool(getattr(params, "paper_fidelity_mode", False)),
+            )
+            _manual = list(getattr(params, "bff_rectangle_manual_corners", ()) or ())
+            if bool(getattr(params, "paper_fidelity_mode", False)) and len(_manual) == 4:
+                # Corners picked by hand on S: snap each to its boundary vertex.
+                from .paper_split_reflatten import _boundary_loop
+                _loop = _boundary_loop(np.asarray(surface_faces, int)[:, :3])
+                _B = np.asarray(surface_vertices, float)[_loop]
+                _ids = [int(np.argmin(np.linalg.norm(_B - np.asarray(c, float), axis=1))) for c in _manual]
+                if len(set(_ids)) == 4:
+                    corner_xyz = _B[_ids]
+            elif bool(getattr(params, "paper_fidelity_mode", False)) and bool(getattr(params, "bff_rectangle_manual_mode", False)):
+                # Manual corners requested but not chosen yet: ask before solving.
+                from .paper_split_reflatten import CornerSelectionRequest
+                raise CornerSelectionRequest(dict(
+                    vertices=np.asarray(surface_vertices, float).tolist(),
+                    faces=np.asarray(surface_faces, int)[:, :3].tolist()))
+            if bool(getattr(params, "paper_fidelity_mode", False)):
+                # Paper-oriented mode: the validated route (feature branch 5c406ba):
+                # one official rectangular BFF solve at the four lobe tips, with no
+                # corner re-search and no free-boundary recovery. Lilium gives
+                # 196 tiles and one re-flatten Split with this route.
+                _rect_kwargs = dict(
+                    executable=getattr(params, "bff_executable", None),
+                    rectangle_executable=getattr(params, "bff_rectangle_executable", None),
+                    rectangle_corner_positions=corner_xyz,
+                    boundary_policy="target_rectangle",
+                    timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
+                )
+                result = run_official_bff(surface_vertices, surface_faces, **_rect_kwargs)
+                _features_used = []
+                # Only if this plain rectangle collapses or folds a UV triangle:
+                # keep sharp non-corner rim features (e.g. a tiny tooth) at their
+                # own exterior angles (zero net) instead of flattening them, and
+                # solve the same official BFF once more. Charts that were valid
+                # before (Lilium, height fields) are never re-solved.
+                from .paper_split_reflatten import boundary_feature_angles
+                _features = boundary_feature_angles(surface_vertices, surface_faces, corner_xyz)
+                if _features:
+                    _, _check = normalize_uv_and_compute_csf(
+                        surface_vertices, result.uv_vertices, surface_faces,
+                        normalization=str(getattr(params, "reference_csf_normalization", "min_to_one_hypothesis_a")),
+                    )
+                    if int(_check["uv_degenerate_triangle_count"]) or int(_check["uv_triangle_flip_count"]):
+                        result = run_official_bff(surface_vertices, surface_faces,
+                                                  rectangle_feature_angles=_features, **_rect_kwargs)
+                        _features_used = list(_features)
+                result.metrics["bff_rectangle_corner_positions"] = np.asarray(corner_xyz, float).tolist()
+                result.metrics["bff_rectangle_feature_angles"] = _features_used
+            else:
+                try:
+                    result = run_official_bff(
+                        surface_vertices, surface_faces,
+                        executable=getattr(params, "bff_executable", None),
+                        rectangle_executable=getattr(params, "bff_rectangle_executable", None),
+                        rectangle_corner_positions=corner_xyz,
+                        boundary_policy="target_rectangle",
+                        timeout_seconds=float(getattr(params, "bff_timeout_seconds", 120.0)),
+                    )
+                    # Lobe tips are a heuristic, NOT guaranteed to yield an
+                    # injective chart on arbitrary uploaded disk-shaped surfaces.
+                    # Check *before* selecting the result, as in the general
+                    # rectangle corner optimizer. Successful Lilium runs remain
+                    # bit-for-bit the same: no reranking or extra solver call.
+                    from .bff_rectangle_selection import (
+                        _verify_selected_bff_csf_compatible,
+                        whole_surface_area_span,
+                    )
+                    whole_surface_area_span(
+                        surface_vertices, result.uv_vertices, surface_faces
+                    )
+                    _verify_selected_bff_csf_compatible(
+                        surface_vertices, surface_faces, result.uv_vertices,
+                        str(getattr(params, "reference_csf_normalization",
+                                    "min_to_one_hypothesis_a")),
+                    )
+                except (ReferenceBFFError, ValueError) as exc:
+                    # Still official *rectangular BFF*, NEVER Tutte/LSCM here.
+                    # If a lobe-tip chart collapses, try the general geometric
+                    # rectangle corner optimizer and retain an audit trail.
+                    try:
+                        alternative = choose_rectangle_by_source_boundary_fit(
+                            surface_vertices, surface_faces,
+                            rectangle_executable=getattr(
+                                params, "bff_rectangle_executable", None
+                            ),
+                            timeout_seconds=float(getattr(
+                                params, "bff_timeout_seconds", 120.0
+                            )),
+                            allow_nonconformal_rescue=False,
+                            csf_normalization=str(getattr(
+                                params, "reference_csf_normalization",
+                                "min_to_one_hypothesis_a"
+                            )),
+                        )
+                    except ReferenceBFFError as secondary:
+                        raise ReferenceBFFUnavailableError(
+                            "Lobe-tip official BFF was not usable: "
+                            f"{type(exc).__name__}: {exc}. "
+                            "All alternative official rectangular BFF charts "
+                            f"also failed: {secondary}"
+                        ) from secondary
+                    from .reference_bff import BFFRunResult
+                    result = BFFRunResult(
+                        uv_vertices=alternative.uv_vertices,
+                        metrics={
+                            **alternative.metrics,
+                            "bff_requested_corner_mode": "lobe_tips",
+                            "bff_lobe_tip_original_candidate_rejected": True,
+                            "bff_lobe_tip_failure_reason": str(exc),
+                            "bff_lobe_tip_recovery": (
+                                "official_rectangular_BFF_source_boundary_search"
+                            ),
+                        },
+                    )
+        elif selection_mode == "source_boundary_shape_fit":
             if boundary_policy != "target_rectangle":
                 raise ValueError("Source-boundary shape fitting requires rectangular BFF")
             result=choose_rectangle_by_source_boundary_fit(
                 surface_vertices,surface_faces,
                 rectangle_executable=getattr(params,"bff_rectangle_executable",None),
                 timeout_seconds=float(getattr(params,"bff_timeout_seconds",120.0)),
+                allow_nonconformal_rescue=(
+                    bool(getattr(params,"bff_nonpaper_tutte_rescue_enabled",False))
+                    and not bool(getattr(params,"paper_fidelity_mode",False))
+                ),
+                csf_normalization=str(getattr(
+                    params, "reference_csf_normalization", "min_to_one_hypothesis_a"
+                )),
+                # ONLY a failure-path improvement in the Paper rectangle
+                # route. Successful Lilium rectangle charts remain unchanged.
+                # Distinguish official BFF natural boundary from strict
+                # rectangular Paper reproduction in the output metrics/UI.
+                # Paper-oriented mode keeps the validated strict rectangle route
+                # (no silent switch to a free-boundary Omega). Paper OFF never
+                # enabled this recovery, so its behaviour is unchanged.
+                allow_official_free_boundary_recovery=False,
             )
         elif selection_mode == "min_whole_source_area_span_4phase":
             if boundary_policy != "target_rectangle":
@@ -2745,13 +2898,33 @@ def _build_surface_parameterization(surface, target, grid, params):
             )
         boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
         lambda_values = np.asarray(differential["lambda"], dtype=float)
+        _tutte_rescue_used = bool(result.metrics.get("nonpaper_rectangle_rescue_used", False))
+        _official_free_recovery = bool(result.metrics.get(
+            "official_bff_free_boundary_recovery_used", False
+        ))
+        _actual_bff_boundary_policy = str(
+            result.metrics.get("bff_boundary_policy_effective", boundary_policy)
+        )
+        if _tutte_rescue_used and bool(getattr(params, "paper_fidelity_mode", False)):
+            raise ReferenceBFFUnavailableError(
+                "Nonconformal Tutte rectangle rescue is prohibited in strict Paper mode."
+            )
         metrics: dict[str, object] = {
             **result.metrics,
-            "parameterization_method": "paper_reference_bff",
-            "parameterization_exactness_label": "official_bff_backend",
+            "parameterization_method": (
+                "experimental_tutte_rectangle" if _tutte_rescue_used else "paper_reference_bff"
+            ),
+            "parameterization_exactness_label": (
+                "NONPAPER_EXPERIMENTAL_NONCONFORMAL_TUTTE"
+                if _tutte_rescue_used else
+                "OFFICIAL_BFF_NATURAL_BOUNDARY_RECTANGLE_RECOVERY"
+                if _official_free_recovery else "official_bff_backend"
+            ),
             "parameterization_warning": (
                 "BFF rectangle with four prescribed 90-degree exterior angles; "
-                + ("corner positions selected experimentally to match the 3D source boundary. "
+                + ("four corners chosen from smoothed boundary geodesic turning maxima (lobe tips). "
+                   if selection_mode=="lobe_tips" else
+                   "corner positions selected experimentally to match the 3D source boundary. "
                    if selection_mode=="source_boundary_shape_fit" else
                    "corner positions selected experimentally from boundary arclength. ")
                 + "This corner selection is not specified by the OneString authors."
@@ -2768,18 +2941,31 @@ def _build_surface_parameterization(surface, target, grid, params):
             "harmonic_solve_performed": False,
             "height_field_shortcut_used": False,
             "omega_corresponds_to_S": True,
-            "omega_correspondence_model": "official BFF c:S->Omega; inverse by strict containing-triangle barycentric coordinates",
-            "paper_flow_stage": "S -> Omega by official Boundary First Flattening CLI",
+            "omega_correspondence_model": (
+                "nonconformal convex-combination Tutte map, NOT BFF; inverse by strict UV barycentric map"
+                if _tutte_rescue_used
+                else "official BFF c:S->Omega; inverse by strict containing-triangle barycentric coordinates"
+            ),
+            "paper_flow_stage": (
+                "S -> Omega by EXPERIMENTAL NONCONFORMAL Tutte rectangle (not Paper BFF)"
+                if _tutte_rescue_used
+                else "S -> Omega by official Boundary First Flattening CLI"
+            ),
             "paper_exactness_warning": "S_TO_M3D: paper-reference candidate; K3D_AND_LATER: existing approximate implementation",
-            "bff_implemented": True,
-            "bff_reference_backend_available": True,
+            "bff_implemented": not _tutte_rescue_used,
+            "bff_reference_backend_available": not _tutte_rescue_used,
             "bff_backend_used": str(result.metrics["parameterization_backend_name"]),
             "flattening_backend": str(result.metrics["parameterization_backend_name"]),
             "omega_boundary_fixed": boundary_policy in {"target_disk"},
-            "omega_boundary_forced_rectangle": boundary_policy=="target_rectangle",
-            "omega_boundary_shape": ("rectangle" if boundary_policy=="target_rectangle"
-                                     else "disk" if boundary_policy=="target_disk"
-                                     else "free"),
+            "omega_boundary_forced_rectangle": _actual_bff_boundary_policy=="target_rectangle",
+            "omega_boundary_shape": (
+                "rectangle" if _actual_bff_boundary_policy=="target_rectangle" else
+                "disk" if _actual_bff_boundary_policy=="target_disk" else "free"
+            ),
+            "paper_rectangle_requirement_met": bool(
+                _actual_bff_boundary_policy == "target_rectangle"
+            ),
+            "official_bff_free_boundary_recovery_used": _official_free_recovery,
             "omega_boundary_constraint_model": str(result.metrics["bff_boundary_policy_effective"]),
             "uv_triangle_flip_count": int(differential["uv_triangle_flip_count"]),
             "uv_degenerate_triangle_count": int(differential["uv_degenerate_triangle_count"]),
@@ -2806,10 +2992,35 @@ def _build_surface_parameterization(surface, target, grid, params):
             "conformal_energy": float(np.nansum(np.square(np.asarray(differential["anisotropy"], dtype=float) - 1.0))),
             "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
         }
-        if metrics["fallbacks_used"]:
-            raise ReferenceBFFUnavailableError("paper_reference_bff recorded a fallback; reference run rejected.")
+        if _official_free_recovery:
+            metrics["parameterization_warning"] = (
+                "RECTANGULAR-BFF FAILURE: 25 tested rectangle corners folded or "
+                "collapsed. The SAME OFFICIAL BFF solver made a valid FREE "
+                "boundary Ω, and CSF Split is still reflatten_tile_area. "
+                "However, Ω is not rectangular: the strict Paper rectangle "
+                "configuration was not reproduced."
+            )
+            metrics["paper_exactness_warning"] = (
+                "OFFICIAL_BFF_FREE_BOUNDARY_RECOVERY_NOT_RECTANGLE"
+            )
+        if _tutte_rescue_used:
+            metrics["parameterization_warning"] = (
+                "NON-PAPER: original official rectangular BFF attempts failed. "
+                "User-opted-in Tutte map is nonconformal and must not be "
+                "used to claim reproduction of the authors' BFF or CSF bounds."
+            )
+            metrics["harmonic_solve_performed"] = True
+            metrics["paper_exactness_warning"] = "NONPAPER_RESCUE_USED; Paper equivalence invalid"
+        if metrics["fallbacks_used"] and not (
+            _tutte_rescue_used
+            and bool(getattr(params,"bff_nonpaper_tutte_rescue_enabled", False))
+            and not bool(getattr(params,"paper_fidelity_mode",False))
+        ):
+            raise ReferenceBFFUnavailableError(
+                "Strict BFF mode cannot accept a non-BFF fallback."
+            )
         return _original.SurfaceParameterization(
-            method="paper_reference_bff",
+            method="experimental_tutte_rectangle" if _tutte_rescue_used else "paper_reference_bff",
             surface_vertices_3d=surface_vertices,
             surface_faces=surface_faces,
             uv_vertices_2d=uv_vertices,
@@ -3246,7 +3457,29 @@ def _reference_flatten_to_domain(parameterization, grid, params):
     canonical_boundary = (boundary_open - origin) @ rotation
     span = np.ptp(canonical_boundary, axis=0)
     requested_spacing = getattr(params, "reference_grid_spacing", None)
-    if requested_spacing is None:
+    # Preserve existing Paper-OFF free-boundary grid behavior. Only the NEW
+    # failed-rectangle recovery disables fitting a rectangle that no longer
+    # exists. All original Paper/normal successful paths are unchanged.
+    fit_rectangle = (
+        bool(getattr(params, "reference_grid_fit_rectangle", False))
+        and not bool(parameterization.metrics.get(
+            "official_bff_free_boundary_recovery_used", False
+        ))
+    )
+    if requested_spacing is None and fit_rectangle:
+        # Independent OPT-IN: fix the requested number of square grid cells
+        # in the shorter Omega dimension and center any extra clearance.
+        # A small epsilon keeps perimeter quads strictly inside the BFF chart.
+        spacing = max(min(
+            float(span[0]) / max(int(grid.nx), 1),
+            float(span[1]) / max(int(grid.ny), 1),
+        ) * (1. - 1e-6), 1e-8)
+        remainder = span - np.floor(span / spacing) * spacing
+        canonical_shift = np.min(canonical_boundary, axis=0) + remainder / 2.
+        origin = origin + canonical_shift @ rotation.T
+        canonical_boundary = (boundary_open - origin) @ rotation
+        spacing_status = "experimental rectangle-fit: centered square lattice (shortest dimension)"
+    elif requested_spacing is None:
         spacing = max(float(span[0]) / max(int(grid.nx), 1), float(span[1]) / max(int(grid.ny), 1), 1e-8)
         spacing_status = "UNSPECIFIED_IN_PAPER: derived from requested nx/ny (hypothesis_a)"
     else:
