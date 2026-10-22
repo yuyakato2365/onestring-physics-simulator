@@ -29,3 +29,25 @@ For each current 3D source patch:
 `python -m pytest -q tests/test_paper_split_reflatten.py`
 
 The tests check dispatch from both Paper ON and Paper OFF, UI selection/default, and collision-driven seam preservation with native BFF mocked. Full end-to-end native-BFF validation on a representative mesh remains necessary.
+
+## Verifying the downstream pipeline with a forced cut
+
+A **zero-Split result is valid** when the initial BFF area span already satisfies the threshold. The Split decision can be inspected in the Results view as `max_csf_before_split` and `csf_split_step_count`.
+
+To exercise the full production pipeline when there is no naturally required cut:
+
+1. Keep `Split CSF判定` set to `reflatten_tile_area` and choose a disk-topology input mesh with several interior grid lines (`grid size` around 8–14 for a quick test).
+2. Enable **検証用：CSFが2以下でもSplitを1本入れる** in the BFF settings.
+3. Run the normal pipeline. The planner uses its regular curvature-guided complete grid-line candidates and computes each child's area-span by official free-boundary BFF, even if the initial span was <=2.
+4. Check the Split process view, M2D/M3D stage views, K3D, K2D, T3D, T2D and any downstream errors. The UI labels the cut as **verification-only**. It is NOT evidence of an actually necessary Split.
+5. Turn the checkbox OFF before collecting research results. The natural CSF policy and threshold are not modified.
+
+The stored report explicitly distinguishes:
+- `csf_split_validation_force_one_cut_requested`: debug control was enabled
+- `csf_split_validation_forced_count`: number of cuts deliberately inserted despite the parent already passing CSF
+- `reflatten_split_report.steps[].validation_forced`: per-cut debug provenance
+- `max_csf_before_split` and `max_csf_after_split`: real, unmodified BFF area-span measurements
+
+If the geometry has no complete admissible internal grid line, or if the Split budget is zero, **no cut is generated**; the UI shows a warning instead of fabricating a successful result.
+
+**Scope:** The debug mode verifies that the Split-to-downstream execution path is reachable and surfaces real failures. A unit test verifies a geometrically flat `sigma=1` case can yield one *explicitly marked* debug cut. It does not by itself prove mechanical assembly or that any natural Split is required.
