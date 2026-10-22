@@ -443,6 +443,8 @@ def choose_rectangle_by_source_boundary_fit(
             )
     if winning is None:
         from collections import Counter
+        import os
+        _bff_debug = os.environ.get("ONESTRING_BFF_DEBUG_DIR", "").strip()
         failures = Counter(
             item["failed_reason"].split(":")[0]
             for item in attempts if "failed_reason" in item
@@ -455,7 +457,17 @@ def choose_rectangle_by_source_boundary_fit(
             "with a foldover. Inspect short/skinny triangles and boundary "
             "shape, try a different explicit corner mode, or remesh the "
             "surface without changing its topology. "
-            f"Last five candidate diagnostics: {attempts[-5:]}"
+            f"Last five candidate diagnostics: {attempts[-5:]}. "
+            + (
+                f"Full source XYZ / invalid UV snapshots were saved to "
+                f"ONESTRING_BFF_DEBUG_DIR={_bff_debug!r}; upload that folder "
+                f"for exact face-level diagnosis."
+                if _bff_debug else
+                "To inspect the actual solver outputs without changing "
+                "Paper/CSF/Split, set ONESTRING_BFF_DEBUG_DIR before restarting "
+                "Streamlit; the next attempt saves original XYZ, face IDs, "
+                "raw 17-digit BFF UV and problematic face geometry."
+            )
         )
     _,chosen,result,entry=winning
     return BFFRunResult(
