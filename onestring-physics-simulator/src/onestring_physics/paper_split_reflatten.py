@@ -62,8 +62,15 @@ def _boundary_loop(F):
     return max(loops,key=len)
 
 
-def lobe_tip_corner_positions(vertices, faces, window=9):
-    """Four well-spaced boundary extrema of smoothed geodesic turning."""
+def lobe_tip_corner_positions(vertices, faces, window=9, snap_to_corners=False):
+    """Four well-spaced boundary corners for the rectangular BFF.
+
+    Default: the four well-spaced extrema of smoothed geodesic turning (Lilium:
+    the petal tips). With ``snap_to_corners`` (Paper-oriented mode), boundaries
+    with four genuine corners use those vertices and flat maxima use their
+    centre, so straight-edged surfaces map to a valid rectangle. Lilium's four
+    corners are identical either way.
+    """
     V=np.asarray(vertices,float);F=np.asarray(faces,int)[:,:3]
     loop=_boundary_loop(F)
     n=len(loop)
@@ -79,7 +86,63 @@ def lobe_tip_corner_positions(vertices, faces, window=9):
             chosen.append(i)
         if len(chosen)==4: break
     if len(chosen)!=4: raise ValueError("unable to locate four separated BFF corners")
+    if snap_to_corners:
+        sharp=_sharp_corner_picks(turning,smoothed,n)
+        chosen=sharp if sharp is not None else _refine_corner_picks(chosen,turning,smoothed,window)
     return V[[loop[i] for i in sorted(chosen)]].copy()
+
+
+def _sharp_corner_picks(turning,smoothed,n):
+    """Four genuine boundary corners, if the boundary has them.
+
+    A corner is a single vertex whose geodesic turning is at least pi/8 and is
+    not cancelled by its neighbours (a jagged boundary alternates +/- turning,
+    so its window sum stays small). Height fields over a square have four such
+    vertices (pi/2 on a flat sheet, about 0.65 rad on a saddle) while the
+    largest smoothed turning of a saddle lies at its edge midpoints. Lilium's
+    largest single-vertex turning is 0.25 rad, so it keeps the lobe tips.
+    """
+    picks=[]
+    for index in np.argsort(-turning,kind="stable"):
+        i=int(index)
+        if turning[i]<np.pi/8: break
+        if smoothed[i]<0.5*turning[i]: continue
+        if all(min(abs(i-j),n-abs(i-j)) > n//8 for j in picks):
+            picks.append(i)
+        if len(picks)==4: return picks
+    return None
+
+
+def _refine_corner_picks(chosen,turning,smoothed,window):
+    """Put each pick on the actual corner when the boundary HAS a corner there.
+
+    Straight-edged boundaries (height fields over a square, polygons) concentrate
+    the turning in single vertices, so every window that contains the corner has
+    the same smoothed sum. The stable sort then returns the FIRST vertex of that
+    plateau, ``window`` vertices before the corner: the rectangle corner lands on
+    a straight edge while the real 90-degree corner must be flattened, which
+    collapses its UV triangles (BFF output rejected as degenerate). Two cases are
+    moved; anything else is left exactly as before (Lilium: raw turning <= 0.25
+    rad and distinct smoothed maxima, so its four corners are unchanged).
+
+    1. a vertex with turning >= pi/4 inside the window (a genuine sharp corner)
+       -> that vertex;
+    2. a flat maximum of the smoothed sum -> the centre of that plateau.
+    """
+    n=len(turning);refined=[]
+    for i in chosen:
+        span=np.arange(i-window,i+window+1)%n
+        sharp=int(span[int(np.argmax(turning[span]))])
+        if turning[sharp]>=np.pi/4:
+            refined.append(sharp);continue
+        tol=1e-9*max(1.0,abs(float(smoothed[i])))
+        lo=hi=0
+        while lo<n and abs(smoothed[(i-lo-1)%n]-smoothed[i])<=tol: lo+=1
+        while hi<n and abs(smoothed[(i+hi+1)%n]-smoothed[i])<=tol: hi+=1
+        refined.append(int((i+(hi-lo)//2)%n) if lo+hi<n else i)
+    if len(set(refined))!=len(refined):
+        return chosen
+    return refined
 
 
 def _smoothed_gaussian_curvature(V,F,rings):

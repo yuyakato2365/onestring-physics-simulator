@@ -2709,7 +2709,12 @@ def _build_surface_parameterization(surface, target, grid, params):
             if boundary_policy != "target_rectangle":
                 raise ValueError("Lobe-tip BFF corner selection requires target_rectangle")
             from .paper_split_reflatten import lobe_tip_corner_positions
-            corner_xyz = lobe_tip_corner_positions(surface_vertices, surface_faces)
+            corner_xyz = lobe_tip_corner_positions(
+                surface_vertices, surface_faces,
+                # Paper-oriented mode: put the rectangle corners on genuine
+                # boundary corners (square height fields); Lilium is unchanged.
+                snap_to_corners=bool(getattr(params, "paper_fidelity_mode", False)),
+            )
             if bool(getattr(params, "paper_fidelity_mode", False)):
                 # Paper-oriented mode: the validated route (feature branch 5c406ba):
                 # one official rectangular BFF solve at the four lobe tips, with no
