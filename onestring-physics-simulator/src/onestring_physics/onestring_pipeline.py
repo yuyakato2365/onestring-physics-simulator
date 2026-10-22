@@ -2789,6 +2789,13 @@ def _build_surface_parameterization(surface, target, grid, params):
                 csf_normalization=str(getattr(
                     params, "reference_csf_normalization", "min_to_one_hypothesis_a"
                 )),
+                # ONLY a failure-path improvement in the Paper rectangle
+                # route. Successful Lilium rectangle charts remain unchanged.
+                # Distinguish official BFF natural boundary from strict
+                # rectangular Paper reproduction in the output metrics/UI.
+                allow_official_free_boundary_recovery=bool(
+                    getattr(params, "paper_fidelity_mode", False)
+                ),
             )
         elif selection_mode == "min_whole_source_area_span_4phase":
             if boundary_policy != "target_rectangle":
@@ -2827,6 +2834,12 @@ def _build_surface_parameterization(surface, target, grid, params):
         boundary = uv_vertices[boundary_loop + [boundary_loop[0]]]
         lambda_values = np.asarray(differential["lambda"], dtype=float)
         _tutte_rescue_used = bool(result.metrics.get("nonpaper_rectangle_rescue_used", False))
+        _official_free_recovery = bool(result.metrics.get(
+            "official_bff_free_boundary_recovery_used", False
+        ))
+        _actual_bff_boundary_policy = str(
+            result.metrics.get("bff_boundary_policy_effective", boundary_policy)
+        )
         if _tutte_rescue_used and bool(getattr(params, "paper_fidelity_mode", False)):
             raise ReferenceBFFUnavailableError(
                 "Nonconformal Tutte rectangle rescue is prohibited in strict Paper mode."
@@ -2838,7 +2851,9 @@ def _build_surface_parameterization(surface, target, grid, params):
             ),
             "parameterization_exactness_label": (
                 "NONPAPER_EXPERIMENTAL_NONCONFORMAL_TUTTE"
-                if _tutte_rescue_used else "official_bff_backend"
+                if _tutte_rescue_used else
+                "OFFICIAL_BFF_NATURAL_BOUNDARY_RECTANGLE_RECOVERY"
+                if _official_free_recovery else "official_bff_backend"
             ),
             "parameterization_warning": (
                 "BFF rectangle with four prescribed 90-degree exterior angles; "
@@ -2877,10 +2892,15 @@ def _build_surface_parameterization(surface, target, grid, params):
             "bff_backend_used": str(result.metrics["parameterization_backend_name"]),
             "flattening_backend": str(result.metrics["parameterization_backend_name"]),
             "omega_boundary_fixed": boundary_policy in {"target_disk"},
-            "omega_boundary_forced_rectangle": boundary_policy=="target_rectangle",
-            "omega_boundary_shape": ("rectangle" if boundary_policy=="target_rectangle"
-                                     else "disk" if boundary_policy=="target_disk"
-                                     else "free"),
+            "omega_boundary_forced_rectangle": _actual_bff_boundary_policy=="target_rectangle",
+            "omega_boundary_shape": (
+                "rectangle" if _actual_bff_boundary_policy=="target_rectangle" else
+                "disk" if _actual_bff_boundary_policy=="target_disk" else "free"
+            ),
+            "paper_rectangle_requirement_met": bool(
+                _actual_bff_boundary_policy == "target_rectangle"
+            ),
+            "official_bff_free_boundary_recovery_used": _official_free_recovery,
             "omega_boundary_constraint_model": str(result.metrics["bff_boundary_policy_effective"]),
             "uv_triangle_flip_count": int(differential["uv_triangle_flip_count"]),
             "uv_degenerate_triangle_count": int(differential["uv_degenerate_triangle_count"]),
@@ -2907,6 +2927,17 @@ def _build_surface_parameterization(surface, target, grid, params):
             "conformal_energy": float(np.nansum(np.square(np.asarray(differential["anisotropy"], dtype=float) - 1.0))),
             "parameterization_runtime_seconds": float(time.perf_counter() - parameterization_started),
         }
+        if _official_free_recovery:
+            metrics["parameterization_warning"] = (
+                "RECTANGULAR-BFF FAILURE: 25 tested rectangle corners folded or "
+                "collapsed. The SAME OFFICIAL BFF solver made a valid FREE "
+                "boundary Ω, and CSF Split is still reflatten_tile_area. "
+                "However, Ω is not rectangular: the strict Paper rectangle "
+                "configuration was not reproduced."
+            )
+            metrics["paper_exactness_warning"] = (
+                "OFFICIAL_BFF_FREE_BOUNDARY_RECOVERY_NOT_RECTANGLE"
+            )
         if _tutte_rescue_used:
             metrics["parameterization_warning"] = (
                 "NON-PAPER: original official rectangular BFF attempts failed. "
@@ -3361,7 +3392,10 @@ def _reference_flatten_to_domain(parameterization, grid, params):
     canonical_boundary = (boundary_open - origin) @ rotation
     span = np.ptp(canonical_boundary, axis=0)
     requested_spacing = getattr(params, "reference_grid_spacing", None)
-    fit_rectangle = bool(getattr(params, "reference_grid_fit_rectangle", False))
+    fit_rectangle = (
+        bool(getattr(params, "reference_grid_fit_rectangle", False))
+        and bool(parameterization.metrics.get("omega_boundary_forced_rectangle", False))
+    )
     if requested_spacing is None and fit_rectangle:
         # Independent OPT-IN: fix the requested number of square grid cells
         # in the shorter Omega dimension and center any extra clearance.
