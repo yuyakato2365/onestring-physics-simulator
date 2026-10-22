@@ -14,6 +14,15 @@ RERUN_FLAG = "onestring_split_direction_rerun"
 COLORS = ("#d62728", "#1f77b4", "#2ca02c", "#9467bd")
 
 
+def _set_picks(st, picks):
+    """Store the picks and give the clickable chart a NEW key: Streamlit keeps a
+    chart's last click per key, so reusing a key after undo/reset re-added the
+    point that had just been removed."""
+    st.session_state[PICKS] = list(picks)
+    st.session_state["manual_corner_nonce"] = int(st.session_state.get("manual_corner_nonce", 0)) + 1
+    st.rerun()
+
+
 def render_manual_corner_ui(st, state, surface=None, request=False):
     import plotly.graph_objects as go
     from .paper_split_reflatten import _boundary_loop
@@ -53,7 +62,7 @@ def render_manual_corner_ui(st, state, surface=None, request=False):
     top.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False, scaleanchor="x", scaleratio=1), height=520,
                       clickmode="event+select", margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h", y=-0.02),
                       paper_bgcolor="white", plot_bgcolor="white")
-    event = st.plotly_chart(top, use_container_width=True, key=f"manual_corner_top_{len(picks)}",
+    event = st.plotly_chart(top, use_container_width=True, key=f"manual_corner_top_{int(st.session_state.get('manual_corner_nonce', 0))}",
                             on_select="rerun", selection_mode="points")
     try:
         points = event.selection.points if event is not None else []
@@ -65,13 +74,11 @@ def render_manual_corner_ui(st, state, surface=None, request=False):
         b = point.get("customdata", point.get("point_index"))
         b = int(b[0] if isinstance(b, (list, tuple)) else b)
         if b not in picks and len(picks) < 4:
-            st.session_state[PICKS] = picks + [b]
-            st.rerun()
+            _set_picks(st, picks + [b])
     with st.expander("クリックで選べないときは番号で追加", expanded=False):
         number = st.number_input("境界点の番号（図にマウスを重ねると表示）", 0, len(loop) - 1, 0, 1, key="manual_corner_number")
         if st.button("この番号の点を追加", key="manual_corner_add", disabled=len(picks) >= 4 or int(number) in picks):
-            st.session_state[PICKS] = picks + [int(number)]
-            st.rerun()
+            _set_picks(st, picks + [int(number)])
     mesh = go.Figure(go.Mesh3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], i=F[:, 0], j=F[:, 1], k=F[:, 2],
                                color="#9db7d9", opacity=0.9, flatshading=True, hoverinfo="skip", name="S"))
     L = B[list(range(len(loop))) + [0]]
@@ -90,11 +97,9 @@ def render_manual_corner_ui(st, state, surface=None, request=False):
     st.write(f"選択済み：{len(picks)} / 4 点" + ("（" + "、".join(f"C{k + 1}=境界点{b}" for k, b in enumerate(picks)) + "）" if picks else ""))
     c1, c2, c3, c4 = st.columns(4)
     if c1.button("最後の1点を取り消す", key="manual_corner_undo", disabled=not picks):
-        st.session_state[PICKS] = picks[:-1]
-        st.rerun()
+        _set_picks(st, picks[:-1])
     if c2.button("すべてやり直す", key="manual_corner_reset", disabled=not picks):
-        st.session_state[PICKS] = []
-        st.rerun()
+        _set_picks(st, [])
     if c3.button("この4点で確定（再計算）", key="manual_corner_confirm", type="primary", disabled=len(picks) != 4):
         st.session_state[CONFIRMED] = [B[b].tolist() for b in picks]
         st.session_state.pop("corner_selection_request", None)
@@ -102,6 +107,5 @@ def render_manual_corner_ui(st, state, surface=None, request=False):
         st.rerun()
     if c4.button("手動の隅を解除（自動に戻す）", key="manual_corner_clear", disabled=not confirmed):
         st.session_state.pop(CONFIRMED, None)
-        st.session_state[PICKS] = []
         st.session_state[RERUN_FLAG] = True
-        st.rerun()
+        _set_picks(st, [])
