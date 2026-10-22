@@ -789,6 +789,19 @@ with st.sidebar:
                  "論文再現ではありません。元のM2D/K3D/T2Dを再BFFのUVで置換しません。"
                  "外部の公式BFF実行ファイルが必要です。",
         )
+        paper_split_validation_force_one_cut = st.checkbox(
+            "検証用：CSFが2以下でもSplitを1本入れる",
+            value=False,
+            disabled=paper_split_criterion != "reflatten_tile_area",
+            key="split_validation_force_one_cut",
+            help="CSFの閾値を下げたり値を偽装したりせず、最初の領域に"
+                 "完全な格子Splitを1本追加して、下流M2D→T2D処理を検証します。"
+                 "実際にはSplitが不要な場合も切るため、研究結果には使わないでください。"
+                 "後続領域のCSFが2を超える場合は通常の追加Splitも検討します。",
+        )
+        if paper_split_validation_force_one_cut:
+            st.warning("検証専用の強制Splitが有効です。Split本数は必要本数ではなく、"
+                       "このRunの結果を論文再現・CSF最適解として扱わないでください。")
         paper_split_curvature_rings = int(st.slider(
             "Split切断点：ガウス曲率平滑化リング数",
             min_value=1, max_value=10, value=3, step=1,
@@ -1880,6 +1893,7 @@ def current_pipeline_key() -> tuple:
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
         paper_split_criterion,
+        paper_split_validation_force_one_cut,
         tuple(st.session_state.get("paper_split_direction_choices", ())),
         paper_split_curvature_tie_percent,
         (_manual_corner_mode, str(st.session_state.get("bff_manual_corners") or ())),
@@ -2035,6 +2049,7 @@ pipeline_params = PipelineParameters(
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
+    paper_split_validation_force_one_cut=paper_split_validation_force_one_cut,
     paper_split_curvature_rings=paper_split_curvature_rings,
     paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
     paper_split_ask_direction=bool(paper_split_ask_direction) and not st.session_state.get("paper_split_ask_suspended", False),
@@ -2943,6 +2958,12 @@ elif view_stage == "Split Map":
     else:
         from onestring_physics.split_process_view import figure_split_process
         st.subheader("Splitを追加する過程")
+        _validation_count=int(state.mesh_2d_initial.metrics.get(
+            "csf_split_validation_forced_count",0) or 0)
+        if _validation_count:
+            st.warning(f"検証専用の強制Splitが{_validation_count}本含まれます。"
+                       "これはCSF超過による必要Splitではありません。"
+                       "後段の処理経路をテストする目的だけに使用してください。")
         _split_records = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
         _split_count = len(_split_records)
         _split_step = st.slider("追加済みのSplit数", 0, _split_count, 0, key=f"split_process_step_{_split_count}") if _split_count else 0
