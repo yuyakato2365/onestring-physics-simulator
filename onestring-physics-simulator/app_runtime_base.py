@@ -795,6 +795,14 @@ with st.sidebar:
             help="Split が必要になるたびに計算を止め、M2D 上の縦・横の候補線と子の σ を示して選んでもらいます。"
                  "選ぶたびにパイプラインを最初から計算し直し、次の Split まで進みます。",
         )
+        paper_split_curvature_tie_percent = float(st.number_input(
+            "Split点：ガウス曲率がほぼ同じとみなす幅（最大値からの差、%）",
+            min_value=0.0, max_value=30.0, value=2.0, step=0.5,
+            key="paper_split_curvature_tie_percent",
+            disabled=paper_split_criterion != "reflatten_tile_area",
+            help="曲率が最大値からこの割合以内の格子点が複数あれば、その中で最も高い（入力の +z）点を通って切ります。"
+                 "0% にすると常に曲率最大の点を使います。",
+        ))
         if paper_split_criterion == "reflatten_tile_area":
             if uploaded is None:
                 st.caption(
@@ -1852,6 +1860,7 @@ def current_pipeline_key() -> tuple:
         bff_nonpaper_tutte_rescue_enabled,
         paper_split_criterion,
         tuple(st.session_state.get("paper_split_direction_choices", ())),
+        paper_split_curvature_tie_percent,
         paper_split_curvature_rings,
         reference_grid_fit_rectangle,
         postcut_rebff_integrated_mode,
@@ -2007,6 +2016,7 @@ pipeline_params = PipelineParameters(
     paper_split_curvature_rings=paper_split_curvature_rings,
     paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
     paper_split_ask_direction=bool(paper_split_ask_direction),
+    paper_split_curvature_tie_tolerance=paper_split_curvature_tie_percent / 100.0,
     reference_grid_fit_rectangle=reference_grid_fit_rectangle,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,

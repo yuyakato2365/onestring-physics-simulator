@@ -380,7 +380,7 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
         # almost spherical bulb where the maximum is decided by mesh noise -
         # take the HIGHEST of them (largest z of the input surface).
         k_max=max(vertex_k[v] for v in candidates)
-        tie_band=abs(k_max)*float(curvature_tie_tolerance)
+        tie_band=abs(k_max)*min(max(float(curvature_tie_tolerance),0.),0.99)
         ties=[v for v in candidates if vertex_k[v]>=k_max-tie_band]
         peak=max(ties,key=lambda v:(vertex_z[v],vertex_k[v])) if len(ties)>1 else max(candidates,key=lambda v:vertex_k[v])
         peak_rule="highest_among_near_equal_curvature" if len(ties)>1 else "max_curvature"
