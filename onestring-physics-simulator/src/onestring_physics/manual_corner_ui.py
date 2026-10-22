@@ -14,18 +14,20 @@ RERUN_FLAG = "onestring_split_direction_rerun"
 COLORS = ("#d62728", "#1f77b4", "#2ca02c", "#9467bd")
 
 
-def render_manual_corner_ui(st, state):
+def render_manual_corner_ui(st, state, surface=None, request=False):
     import plotly.graph_objects as go
     from .paper_split_reflatten import _boundary_loop
 
-    S = state.target_surface
-    V = np.asarray(S.vertices, float)
-    F = np.asarray(S.faces, int)[:, :3]
+    if surface is not None:
+        V, F = np.asarray(surface[0], float), np.asarray(surface[1], int)[:, :3]
+    else:
+        V = np.asarray(state.target_surface.vertices, float)
+        F = np.asarray(state.target_surface.faces, int)[:, :3]
     loop = _boundary_loop(F)
     B = V[loop]
     picks = [int(b) for b in st.session_state.get(PICKS, []) if 0 <= int(b) < len(loop)]
     confirmed = st.session_state.get(CONFIRMED)
-    st.subheader("矩形Ωの隅を手動で選ぶ（元の S の境界）")
+    st.subheader("Ω を作る前に、矩形の隅を4点選んでください（元の S の境界）" if request else "矩形Ωの隅を手動で選ぶ（元の S の境界）")
     st.caption(("現在の計算：手動で確定した4点を隅に使用。" if confirmed else "現在の計算：自動で選んだ隅。")
                + " 真上から見た図で境界の点を4つクリックし、3D で確認して「確定」を押すと、その4点を BFF の隅にして計算し直します。"
                "Paperモードの計算でだけ使われます。選ぶ順番は自由です（境界に沿って自動で並べ替えます）。")
@@ -80,6 +82,7 @@ def render_manual_corner_ui(st, state):
         st.rerun()
     if c3.button("この4点で確定（再計算）", key="manual_corner_confirm", type="primary", disabled=len(picks) != 4):
         st.session_state[CONFIRMED] = [B[b].tolist() for b in picks]
+        st.session_state.pop("corner_selection_request", None)
         st.session_state[RERUN_FLAG] = True
         st.rerun()
     if c4.button("手動の隅を解除（自動に戻す）", key="manual_corner_clear", disabled=not confirmed):

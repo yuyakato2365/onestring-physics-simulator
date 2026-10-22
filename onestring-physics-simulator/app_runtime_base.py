@@ -721,8 +721,8 @@ with st.sidebar:
             if st.session_state.get("bff_manual_corners"):
                 st.caption("手動の隅：確定済みの4点を使用中（View stage「S」で選び直し・解除できます）。")
             else:
-                st.caption("手動の隅はまだ確定していません。Run の後、View stage「S」で4点を選んで確定してください。"
-                           "確定するまでは自動の隅で計算します。")
+                st.caption("手動の隅はまだ確定していません。Run すると Ω を作る前に止まり、"
+                           "S の上で4点を選ぶ画面が出ます。")
         # In Paper mode the Omega selector can show a launcher-injected OptCuts
         # entry, yet configure_paper_fidelity() still forces paper_reference_bff
         # with target_rectangle. Base the re-flatten defaults on that effective
@@ -2035,6 +2035,7 @@ pipeline_params = PipelineParameters(
     paper_split_curvature_tie_tolerance=paper_split_curvature_tie_percent / 100.0,
     bff_rectangle_manual_corners=(tuple(tuple(float(x) for x in c) for c in (st.session_state.get("bff_manual_corners") or ()))
                                   if _manual_corner_mode else ()),
+    bff_rectangle_manual_mode=bool(_manual_corner_mode),
     reference_grid_fit_rectangle=reference_grid_fit_rectangle,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
@@ -2119,9 +2120,15 @@ if paper_fidelity_enabled:
     with st.expander("Paper modeが計算に適用する設定",expanded=False):
         st.json(_paper_overrides)
 from onestring_physics.paper_split_reflatten import SplitDirectionQuestion as _SplitDirectionQuestion
+from onestring_physics.paper_split_reflatten import CornerSelectionRequest as _CornerSelectionRequest
 pipeline_key = (current_pipeline_key(), paper_fidelity_enabled)
 # Paper mode paused at a Split and asks for its direction (shown before any
 # result, and only while no new run was requested).
+if st.session_state.get("corner_selection_request") and not run_pipeline:
+    from onestring_physics.manual_corner_ui import render_manual_corner_ui
+    _corner_req = st.session_state["corner_selection_request"]
+    render_manual_corner_ui(st, None, surface=(_corner_req["vertices"], _corner_req["faces"]), request=True)
+    st.stop()
 if st.session_state.get("paper_split_question") and not run_pipeline:
     from onestring_physics.split_direction_ui import render_split_question
     render_split_question(st)
@@ -2200,6 +2207,10 @@ if run_pipeline:
                     progress_callback=_build_progress,
                 )
                 st.session_state.pop("paper_split_question", None)
+        except _CornerSelectionRequest as _corner_request:
+            # Manual corners: pick four boundary points of S before Omega.
+            st.session_state["corner_selection_request"] = _corner_request.info
+            st.rerun()
         except _SplitDirectionQuestion as _question:
             # Paper mode asks for the next Split direction (see the panel below).
             st.session_state["paper_split_question"] = _question.info

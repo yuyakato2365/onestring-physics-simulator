@@ -352,6 +352,14 @@ def tile_area_ratios(piece,quad_xy,new_uv,shrink=2e-3):
     return ratios
 
 
+class CornerSelectionRequest(BaseException):
+    """Paper mode with manual corners: stop before the rectangular BFF and let
+    the user pick four boundary points of S (BaseException, like below)."""
+    def __init__(self, info):
+        super().__init__("rectangle corners requested")
+        self.info = info
+
+
 class SplitDirectionQuestion(BaseException):
     """Paper mode asks the user for the direction of the next Split.
 

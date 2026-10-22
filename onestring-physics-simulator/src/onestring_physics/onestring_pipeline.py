@@ -1017,6 +1017,7 @@ class PipelineParameters(_original.PipelineParameters):
     paper_split_curvature_tie_tolerance: float = 0.02
     # Paper mode: four corners picked by hand on S (xyz); empty = automatic.
     bff_rectangle_manual_corners: tuple = ()
+    bff_rectangle_manual_mode: bool = False
     reference_grid_fit_rectangle: bool = False
     optcuts_distortion_bound: float = 4.1
     optcuts_try_alternative_initial_cut: bool = True
@@ -2734,6 +2735,12 @@ def _build_surface_parameterization(surface, target, grid, params):
                 _ids = [int(np.argmin(np.linalg.norm(_B - np.asarray(c, float), axis=1))) for c in _manual]
                 if len(set(_ids)) == 4:
                     corner_xyz = _B[_ids]
+            elif bool(getattr(params, "paper_fidelity_mode", False)) and bool(getattr(params, "bff_rectangle_manual_mode", False)):
+                # Manual corners requested but not chosen yet: ask before solving.
+                from .paper_split_reflatten import CornerSelectionRequest
+                raise CornerSelectionRequest(dict(
+                    vertices=np.asarray(surface_vertices, float).tolist(),
+                    faces=np.asarray(surface_faces, int)[:, :3].tolist()))
             if bool(getattr(params, "paper_fidelity_mode", False)):
                 # Paper-oriented mode: the validated route (feature branch 5c406ba):
                 # one official rectangular BFF solve at the four lobe tips, with no
