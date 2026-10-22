@@ -43,6 +43,19 @@ def main() -> None:
     assert differential["uv_triangle_flip_count"] == 0
     assert output.metrics["bff_rectangle_width"]>0
     assert output.metrics["bff_rectangle_height"]>0
+    # The same compiled adapter must also preserve full precision when
+    # official BFF's natural boundary is used as a valid recovery chart.
+    free_output = run_official_bff(
+        vertices, faces, boundary_policy="automatic_reference",
+        free_boundary_precision_adapter=True,
+    )
+    assert free_output.metrics["bff_boundary_policy_effective"] == "boundary_scale_zero"
+    assert free_output.metrics["bff_free_boundary_uv_serialization_digits"] == 17
+    assert free_output.metrics["bff_free_boundary_high_precision_adapter"] is True
+    free_diff = triangle_jacobian_diagnostics(vertices, free_output.uv_vertices, faces)
+    assert free_diff["uv_degenerate_triangle_count"] == 0
+    assert free_diff["uv_triangle_flip_count"] == 0
+    print("FREE_BOUNDARY_BFF_HIGH_PRECISION_OK")
     print("RECTANGULAR_BFF_OK")
     print("target_policy:",output.metrics["bff_boundary_policy_effective"])
     print("backend:",output.metrics["parameterization_backend_name"])
