@@ -72,8 +72,8 @@ def test_registered_reflatten_criterion_does_not_replace_fixed_uv():
     import inspect
     src=inspect.getsource(split.split_mesh)
     assert "paper_split_criterion" in src
-    assert "paper_reference_bff" in src  # Mentioned in comments, not a restriction
-    assert "not in {" not in src  # Legacy initial Omega is now accepted
+    assert "paper_reference_bff" not in src  # No initial-Omega method restriction
+    assert "not in {" not in src  # Legacy initial Omega is accepted
     assert "split_mesh_reflatten" in src
     assert "return _split_mesh_single" in src
 
