@@ -231,6 +231,7 @@ def choose_rectangle_by_source_boundary_fit(
     vertices, faces, *, rectangle_executable=None, timeout_seconds=120.,
     runner=run_official_bff,
     allow_nonconformal_rescue: bool = False,
+    allow_official_free_boundary_recovery: bool = False,
     csf_normalization: str = "min_to_one_hypothesis_a",
 ):
     """Fit initial Omega using source-boundary geometry and the official BFF.
@@ -415,6 +416,65 @@ def choose_rectangle_by_source_boundary_fit(
                     boundary_arclength_phase=candidate.get("phase"),
                     failed_reason=f"{type(exc).__name__}: {str(exc)[:350]}",
                 ))
+    if winning is None and allow_official_free_boundary_recovery:
+        # Rectangular BFF can fold for a valid curved disk even after all
+        # corner choices fail. Use the SAME official BFF library with its
+        # NATURAL boundary condition, serialized at 17-digit precision.
+        # The resulting Omega is not rectangular: record that prominently.
+        # Split decisions still use free-boundary official BFF on pieces.
+        try:
+            free = runner(
+                x, f,
+                rectangle_executable=rectangle_executable,
+                boundary_policy="automatic_reference",
+                free_boundary_precision_adapter=True,
+                timeout_seconds=timeout_seconds,
+            )
+            span = whole_surface_area_span(x, free.uv_vertices, f)
+            _verify_selected_bff_csf_compatible(
+                x, f, free.uv_vertices, csf_normalization
+            )
+            # Check actual interior overlap, not merely local orientation.
+            from .reference_bff import count_internal_triangle_overlaps
+            overlaps = count_internal_triangle_overlaps(
+                np.asarray(free.uv_vertices, float), f
+            )
+            if overlaps:
+                raise ValueError(
+                    f"Natural-boundary official BFF has {overlaps} triangle "
+                    "overlaps in UV; invalid recovery"
+                )
+        except (ValueError, RuntimeError) as exc:
+            attempts.append(dict(
+                source_corner_method="official_bff_natural_boundary_high_precision",
+                failed_reason=f"{type(exc).__name__}: {str(exc)[:500]}",
+            ))
+        else:
+            return BFFRunResult(
+                uv_vertices=free.uv_vertices,
+                metrics={
+                    **free.metrics,
+                    "official_bff_free_boundary_recovery_used": True,
+                    "bff_rectangle_recovery_requested_policy": "target_rectangle",
+                    "bff_rectangle_recovery_actual_policy": "boundary_scale_zero",
+                    "paper_rectangular_boundary_condition_satisfied": False,
+                    "bff_corner_selection_method": (
+                        "official_natural_boundary_after_all_rectangle_folds"
+                    ),
+                    "bff_corner_selection_attempt_count": len(attempts),
+                    "bff_corner_selection_valid_count": 1,
+                    "bff_corner_selection_rejected_count": len(attempts),
+                    "bff_corner_selection_attempts": attempts,
+                    "bff_corner_selection_area_span": float(span),
+                    "bff_corner_selection_author_method_verified": False,
+                    "bff_corner_selection_certifies_area_limit": False,
+                    "bff_corner_selection_warning": (
+                        "Not a rectangular Omega. Official free-boundary BFF "
+                        "replaces a failed rectangular boundary condition; "
+                        "Paper rectangular preset is NOT reproduced."
+                    ),
+                },
+            )
     if winning is None and allow_nonconformal_rescue:
         # This is a DIFFERENT mapping algorithm and cannot be called BFF.
         # It is available only by explicit opt-in for non-Paper experiments.
