@@ -321,7 +321,7 @@ def tile_area_ratios(piece,quad_xy,new_uv,shrink=2e-3):
 
 
 def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
-                        rings=3,threshold=2.,max_cuts=64):
+                        rings=3,threshold=2.,max_cuts=64,direction_choices=()):
     """Assess a full-grid cut using fresh BFF for both 3D child patches."""
     grid_xy=np.asarray(grid_xy,float);quads=np.asarray(quads,int)
     quad_xy=grid_xy[quads];centres=quad_xy.mean(axis=1)
@@ -360,7 +360,7 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                     satisfied=bool(parent_sigma<=threshold),tile_area_ratio=parent_J.tolist()))
             continue
         peak=max(candidates,key=lambda v:vertex_k[v])
-        best=None;evaluated=[]
+        best=None;evaluated=[];options={}
         for coord,axis in ((0,"col"),(1,"row")):
             value=float(grid_xy[peak,coord])
             minus=ids[centres[ids,coord]<value-tol]
@@ -379,7 +379,15 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
             evaluated.append(dict(axis=axis,value=value,
                 child_tiles=[int(len(c[1])) for c in children],
                 child_sigma=[float(c[2]) for c in children],worst_child_sigma=float(worst)))
+            options[axis]=(worst,axis,value,children)
             if best is None or worst<best[0]:best=(worst,axis,value,children)
+        # Optional user choice for this cut (cuts are numbered in planning
+        # order): "col" = vertical line in M2D, "row" = horizontal line.
+        # "auto" or an unusable direction keeps the automatic choice.
+        choice=str(direction_choices[len(cuts)]) if len(cuts)<len(direction_choices) else "auto"
+        chosen_by="auto"
+        if best is not None and choice in options:
+            best=options[choice];chosen_by="user"
         if best is None:
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,
                 satisfied=False,reason="no_complete_grid_cut",tile_area_ratio=parent_J.tolist()))
@@ -393,7 +401,8 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                 parent_tile_area_ratio=parent_J.tolist(),
                 child_tiles=[int(len(c[1])) for c in children],
                 child_face_ids=[c[1].tolist() for c in children],
-                child_sigma=[float(c[2]) for c in children],candidates=evaluated))
+                child_sigma=[float(c[2]) for c in children],candidates=evaluated,
+                requested_direction=choice,chosen_by=chosen_by))
         for child in children:stack.append((*child,depth+1))
     report["seconds"]=time.perf_counter()-started
     report["final_max_sigma"]=max((l["sigma"] for l in report["leaves"]),default=1.)
@@ -422,7 +431,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     cuts,report=plan_reflatten_cuts(
         grid_xy,faces,xyz,tri_faces,uv@R,flatten=flatten,
         rings=int(getattr(params,"paper_split_curvature_rings",3)),
-        threshold=2.,max_cuts=int(getattr(domain,"max_csf_splits",64)))
+        threshold=2.,max_cuts=int(getattr(domain,"max_csf_splits",64)),
+        direction_choices=tuple(getattr(params,"paper_split_direction_choices",()) or ()))
     # Preserve the original forced-cut topology implementation and ALL fields.
     # Use a defensive copy of params so changing the decision cannot leak
     # user-requested collision-driven Split state back into the UI.

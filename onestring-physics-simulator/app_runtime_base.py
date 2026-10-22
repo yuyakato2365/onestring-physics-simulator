@@ -987,6 +987,8 @@ with st.sidebar:
         lambda: st.button("Run OneString pipeline", type="primary"),
         tight_note=True,
     )
+    # A Split-direction choice made in the Split Map re-runs the pipeline once.
+    run_pipeline = bool(run_pipeline) or bool(st.session_state.pop("onestring_split_direction_rerun", False))
     max_3d_iterations = _param_row(
         "M3D→K3D の反復回数。平面性・正方形性・表面追従を改善するが、重くなる。",
         lambda: st.slider("3D optimization iterations", 5, 120, 40, 5, help="Iterations for K3D optimization."),
@@ -1838,6 +1840,7 @@ def current_pipeline_key() -> tuple:
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
         paper_split_criterion,
+        tuple(st.session_state.get("paper_split_direction_choices", ())),
         paper_split_curvature_rings,
         reference_grid_fit_rectangle,
         postcut_rebff_integrated_mode,
@@ -1991,6 +1994,7 @@ pipeline_params = PipelineParameters(
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
     paper_split_curvature_rings=paper_split_curvature_rings,
+    paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
     reference_grid_fit_rectangle=reference_grid_fit_rectangle,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
@@ -2907,6 +2911,9 @@ elif view_stage == "Split Map":
                     f"{_split_unresolved}個残っています。終了理由：{_split_reason}。"
                     " 分割回数の上限や格子上の切断不能は、CSF条件の達成を意味しません。"
                 )
+        if (state.mesh_2d_initial.metrics.get("reflatten_split_report") or {}).get("steps"):
+            from onestring_physics.split_direction_ui import render_split_direction_ui
+            render_split_direction_ui(st, state)
         if state.mesh_2d_initial.metrics.get("csf_split_parameterization_repair_required"):
             st.warning(
                 "UVに退化した三角形があるため、有効な領域で処理を継続しています。"
