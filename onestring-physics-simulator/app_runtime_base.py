@@ -1023,6 +1023,11 @@ with st.sidebar:
         st.session_state["paper_split_direction_choices"] = ()  # a fresh Run asks again from Split 1
         st.session_state.pop("paper_split_question", None)
         st.session_state.pop("paper_split_ask_suspended", None)
+    if run_pipeline and not _split_direction_rerun and _manual_corner_mode:
+        # Manual corners: every fresh Run asks for the four corners again
+        # (the previous picks stay pre-selected and can be undone or reset).
+        st.session_state.pop("bff_manual_corners", None)
+        st.session_state.pop("corner_selection_request", None)
     run_pipeline = bool(run_pipeline) or _split_direction_rerun
     max_3d_iterations = _param_row(
         "M3D→K3D の反復回数。平面性・正方形性・表面追従を改善するが、重くなる。",

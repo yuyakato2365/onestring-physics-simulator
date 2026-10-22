@@ -42,9 +42,11 @@ def render_manual_corner_ui(st, state, surface=None, request=False):
     pad = 0.06 * float(np.max(hi - lo))
     for k, b in enumerate(picks):
         # guide lines through the picked point, parallel to the x and y axes
-        for gx, gy in (([lo[0] - pad, hi[0] + pad], [B[b, 1]] * 2), ([B[b, 0]] * 2, [lo[1] - pad, hi[1] + pad])):
-            top.add_trace(go.Scatter(x=gx, y=gy, mode="lines", line=dict(color=COLORS[k], width=2, dash="dash"),
-                                     hoverinfo="skip", showlegend=False))
+        # (layout shapes: not dimmed by the chart's point selection)
+        top.add_shape(type="line", x0=lo[0] - pad, x1=hi[0] + pad, y0=B[b, 1], y1=B[b, 1], layer="above",
+                      line=dict(color=COLORS[k], width=2, dash="dash"))
+        top.add_shape(type="line", x0=B[b, 0], x1=B[b, 0], y0=lo[1] - pad, y1=hi[1] + pad, layer="above",
+                      line=dict(color=COLORS[k], width=2, dash="dash"))
         top.add_trace(go.Scatter(x=[B[b, 0]], y=[B[b, 1]], mode="markers+text", text=[f"C{k + 1}"], textposition="top center",
                                  textfont=dict(size=15, color=COLORS[k]), marker=dict(size=17, color=COLORS[k]),
                                  hoverinfo="skip", name=f"C{k + 1}"))
