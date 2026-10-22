@@ -108,3 +108,63 @@ def render_split_direction_ui(st, state):
             st.session_state.pop(f"split_direction_choice_{k}", None)
         st.session_state[RERUN_FLAG] = True
         st.rerun()
+
+
+def _choose(st, axis):
+    st.session_state[SESSION_KEY] = tuple(st.session_state.get(SESSION_KEY, ())) + (axis,)
+    st.session_state.pop("paper_split_question", None)
+    st.session_state[RERUN_FLAG] = True
+    st.rerun()
+
+
+def render_split_question(st):
+    """Ask for the direction of the Split that the pipeline is about to make."""
+    import plotly.graph_objects as go
+
+    q = st.session_state.get("paper_split_question")
+    if not q:
+        return False
+    xy, quads = np.asarray(q["grid_xy"], float), np.asarray(q["quads"], int)
+    parent = np.asarray(q["parent_face_ids"], int)
+    fig = go.Figure()
+    xs, ys = [], []
+    for f in quads:
+        c = xy[list(f) + [f[0]]]
+        xs += list(c[:, 0]) + [None]; ys += list(c[:, 1]) + [None]
+    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="rgba(90,100,115,0.35)", width=1), hoverinfo="skip", name="M2D"))
+    px, py = [], []
+    for f in quads[parent]:
+        c = xy[list(f) + [f[0]]]
+        px += list(c[:, 0]) + [None]; py += list(c[:, 1]) + [None]
+    fig.add_trace(go.Scatter(x=px, y=py, mode="lines", fill="toself", fillcolor="rgba(255,190,90,0.25)",
+                             line=dict(color="rgba(200,120,20,0.6)", width=1), hoverinfo="skip", name="切るピース"))
+    def segment(axis, value, ids):
+        lo, hi = xy[quads[ids]].reshape(-1, 2).min(0), xy[quads[ids]].reshape(-1, 2).max(0)
+        return ([value, value], [lo[1], hi[1]]) if axis == "col" else ([lo[0], hi[0]], [value, value])
+    for prev in q.get("previous", []):
+        lx, ly = segment(prev["axis"], float(prev["value"]), np.asarray(prev["parent_face_ids"], int))
+        fig.add_trace(go.Scatter(x=lx, y=ly, mode="lines", line=dict(color="#1b2a31", width=4), name="決定済みの Split", hoverinfo="skip"))
+    styles = {"col": "#d62728", "row": "#1f77b4"}
+    for cand in q["candidates"]:
+        lx, ly = segment(cand["axis"], float(cand["value"]), parent)
+        sig = " / ".join(f"{v:.3f}" for v in cand["child_sigma"])
+        fig.add_trace(go.Scatter(x=lx, y=ly, mode="lines", line=dict(color=styles[cand["axis"]], width=4, dash="dash"),
+                                 name=f"{LABEL[cand['axis']]}の候補（子の σ {sig}）"))
+    fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False, scaleanchor="x", scaleratio=1), height=600,
+                      margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h", y=-0.02),
+                      paper_bgcolor="white", plot_bgcolor="white")
+    st.subheader(f"Split {int(q['step']) + 1} の向きを選んでください")
+    st.caption(f"オレンジのピース（{len(parent)}枚）の σ = {float(q['parent_sigma']):.3f} > 2 なので切ります。"
+               "どちらの候補も、平滑化ガウス曲率が最大のグリッド頂点を通る端から端までの格子線です。"
+               "子の σ は、切った2片をそれぞれ自由境界BFFで展開し直して測った値です（2以下なら、その片はそれ以上切りません）。")
+    st.plotly_chart(fig, use_container_width=True, key="split_question_figure")
+    cols = st.columns(3)
+    for col, axis in zip(cols, ("col", "row")):
+        cand = next((c for c in q["candidates"] if c["axis"] == axis), None)
+        if cand and col.button(f"{LABEL[axis]}で切る（子の σ {' / '.join(f'{v:.3f}' for v in cand['child_sigma'])}）",
+                               key=f"split_question_{axis}", type="primary"):
+            _choose(st, axis)
+    if cols[2].button(f"このSplitは自動に任せる（{LABEL[q['auto_axis']]}）", key="split_question_auto"):
+        _choose(st, "auto")
+    st.caption("選ぶとパイプラインを最初から計算し直し、次の Split まで進みます。サイドバーの Run を押すと最初の Split から尋ね直します。")
+    return True

@@ -320,8 +320,20 @@ def tile_area_ratios(piece,quad_xy,new_uv,shrink=2e-3):
     return ratios
 
 
+class SplitDirectionQuestion(BaseException):
+    """Paper mode asks the user for the direction of the next Split.
+
+    A BaseException so wrapper layers that catch ``Exception`` let it reach the
+    app, which shows the candidates and re-runs with the answer appended to
+    ``paper_split_direction_choices``.
+    """
+    def __init__(self, info):
+        super().__init__("split direction requested")
+        self.info = info
+
+
 def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
-                        rings=3,threshold=2.,max_cuts=64,direction_choices=()):
+                        rings=3,threshold=2.,max_cuts=64,direction_choices=(),ask=False):
     """Assess a full-grid cut using fresh BFF for both 3D child patches."""
     grid_xy=np.asarray(grid_xy,float);quads=np.asarray(quads,int)
     quad_xy=grid_xy[quads];centres=quad_xy.mean(axis=1)
@@ -384,6 +396,13 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
         # Optional user choice for this cut (cuts are numbered in planning
         # order): "col" = vertical line in M2D, "row" = horizontal line.
         # "auto" or an unusable direction keeps the automatic choice.
+        if ask and len(options)>1 and len(cuts)>=len(direction_choices):
+            raise SplitDirectionQuestion(dict(
+                step=len(cuts),parent_face_ids=ids.tolist(),parent_sigma=float(parent_sigma),
+                candidates=evaluated,auto_axis=best[1],
+                previous=[dict(axis=c["axis"],value=c["value"],parent_face_ids=st["parent_face_ids"])
+                          for c,st in zip(cuts,report["steps"])],
+                grid_xy=grid_xy.tolist(),quads=quads.tolist()))
         choice=str(direction_choices[len(cuts)]) if len(cuts)<len(direction_choices) else "auto"
         chosen_by="auto"
         if best is not None and choice in options:
@@ -432,7 +451,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
         grid_xy,faces,xyz,tri_faces,uv@R,flatten=flatten,
         rings=int(getattr(params,"paper_split_curvature_rings",3)),
         threshold=2.,max_cuts=int(getattr(domain,"max_csf_splits",64)),
-        direction_choices=tuple(getattr(params,"paper_split_direction_choices",()) or ()))
+        direction_choices=tuple(getattr(params,"paper_split_direction_choices",()) or ()),
+        ask=bool(getattr(params,"paper_split_ask_direction",False)))
     # Preserve the original forced-cut topology implementation and ALL fields.
     # Use a defensive copy of params so changing the decision cannot leak
     # user-requested collision-driven Split state back into the UI.

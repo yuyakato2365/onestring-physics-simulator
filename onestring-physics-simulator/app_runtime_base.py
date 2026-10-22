@@ -788,6 +788,13 @@ with st.sidebar:
             help="短辺をnセルに分割し、端数を左右対称に配置。"
                  "パネルの後段最適化は変更しません。",
         )
+        paper_split_ask_direction = st.checkbox(
+            "Splitの向きを処理中に尋ねる（候補が出るたびに縦・横を選ぶ）",
+            value=False, key="paper_split_ask_direction",
+            disabled=paper_split_criterion != "reflatten_tile_area",
+            help="Split が必要になるたびに計算を止め、M2D 上の縦・横の候補線と子の σ を示して選んでもらいます。"
+                 "選ぶたびにパイプラインを最初から計算し直し、次の Split まで進みます。",
+        )
         if paper_split_criterion == "reflatten_tile_area":
             if uploaded is None:
                 st.caption(
@@ -988,7 +995,11 @@ with st.sidebar:
         tight_note=True,
     )
     # A Split-direction choice made in the Split Map re-runs the pipeline once.
-    run_pipeline = bool(run_pipeline) or bool(st.session_state.pop("onestring_split_direction_rerun", False))
+    _split_direction_rerun = bool(st.session_state.pop("onestring_split_direction_rerun", False))
+    if run_pipeline and not _split_direction_rerun and st.session_state.get("paper_split_ask_direction"):
+        st.session_state["paper_split_direction_choices"] = ()  # a fresh Run asks again from Split 1
+        st.session_state.pop("paper_split_question", None)
+    run_pipeline = bool(run_pipeline) or _split_direction_rerun
     max_3d_iterations = _param_row(
         "M3D→K3D の反復回数。平面性・正方形性・表面追従を改善するが、重くなる。",
         lambda: st.slider("3D optimization iterations", 5, 120, 40, 5, help="Iterations for K3D optimization."),
@@ -1995,6 +2006,7 @@ pipeline_params = PipelineParameters(
     paper_split_criterion=paper_split_criterion,
     paper_split_curvature_rings=paper_split_curvature_rings,
     paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
+    paper_split_ask_direction=bool(paper_split_ask_direction),
     reference_grid_fit_rectangle=reference_grid_fit_rectangle,
     optcuts_distortion_bound=optcuts_distortion_bound,
     bff_boundary_policy=bff_boundary_policy,
@@ -2078,7 +2090,14 @@ if paper_fidelity_enabled:
     pipeline_params, _paper_overrides = configure_paper_fidelity(pipeline_params)
     with st.expander("Paper modeが計算に適用する設定",expanded=False):
         st.json(_paper_overrides)
+from onestring_physics.paper_split_reflatten import SplitDirectionQuestion as _SplitDirectionQuestion
 pipeline_key = (current_pipeline_key(), paper_fidelity_enabled)
+# Paper mode paused at a Split and asks for its direction (shown before any
+# result, and only while no new run was requested).
+if st.session_state.get("paper_split_question") and not run_pipeline:
+    from onestring_physics.split_direction_ui import render_split_question
+    render_split_question(st)
+    st.stop()
 if "onestring_state" not in st.session_state and not run_pipeline:
     st.info("Set parameters, then click Run OneString pipeline. The paper-default path stops at unimplemented stages; enable the experimental pipeline explicitly to run the old prototype path.")
     st.stop()
@@ -2152,6 +2171,11 @@ if run_pipeline:
                     pipeline_params,
                     progress_callback=_build_progress,
                 )
+                st.session_state.pop("paper_split_question", None)
+        except _SplitDirectionQuestion as _question:
+            # Paper mode asks for the next Split direction (see the panel below).
+            st.session_state["paper_split_question"] = _question.info
+            st.rerun()
         except Exception as exc:
             st.session_state.pipeline_progress_log = progress_log
             if postcut_rebff_integrated_mode:

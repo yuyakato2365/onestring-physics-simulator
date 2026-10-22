@@ -1010,6 +1010,8 @@ class PipelineParameters(_original.PipelineParameters):
     # Per-cut direction for the re-flatten Split, in planning order:
     # "auto" | "col" (vertical line in M2D) | "row" (horizontal line).
     paper_split_direction_choices: tuple = ()
+    # Ask the user (app) for each Split direction instead of choosing automatically.
+    paper_split_ask_direction: bool = False
     reference_grid_fit_rectangle: bool = False
     optcuts_distortion_bound: float = 4.1
     optcuts_try_alternative_initial_cut: bool = True
