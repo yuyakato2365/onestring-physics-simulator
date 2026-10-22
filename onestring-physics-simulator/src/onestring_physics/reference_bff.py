@@ -16,6 +16,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import uuid
 from typing import Any, Literal
 
 import numpy as np
@@ -418,6 +419,97 @@ def validate_rectangular_boundary(
     }
 
 
+def _save_rectangular_bff_diagnostics(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    uv_vertices: np.ndarray,
+    *,
+    executable: Path,
+    corner_phase: float,
+    corner_positions: np.ndarray | None,
+    native_precision: int,
+) -> Path | None:
+    """Opt-in forensic snapshot of the ACTUAL solver output, not a repair.
+
+    ONESTRING_BFF_DEBUG_DIR must be set. The snapshot is saved locally and
+    contains source XYZ, face indices, raw high-precision UV, and per-face
+    signed-area diagnostics. This function changes no computational output.
+    """
+    requested = os.environ.get("ONESTRING_BFF_DEBUG_DIR", "").strip()
+    if not requested:
+        return None
+    directory = Path(requested).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    unique = uuid.uuid4().hex[:12]
+    target = directory / f"bff_rect_{unique}"
+    v = np.asarray(vertices, float)
+    f = np.asarray(faces, int)
+    uv = np.asarray(uv_vertices, float)
+    tri = uv[f]
+    e1 = tri[:, 1] - tri[:, 0]
+    e2 = tri[:, 2] - tri[:, 0]
+    e3 = tri[:, 2] - tri[:, 1]
+    signed = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    scale = np.maximum.reduce((
+        np.sum(e1 * e1, axis=1),
+        np.sum(e2 * e2, axis=1),
+        np.sum(e3 * e3, axis=1),
+    ))
+    # Same scale-invariant threshold as the main CSF validity check.
+    degenerate = (~np.isfinite(signed)) | (scale <= 0) | (
+        np.abs(signed) <= 2e-14 * scale
+    )
+    good = np.isfinite(signed) & ~degenerate
+    orientation = float(np.sign(np.median(signed[good]))) if np.any(good) else 0.
+    inverted = good & (signed * orientation < 0)
+    worst = np.unique(np.concatenate((
+        np.flatnonzero(degenerate)[:12], np.flatnonzero(inverted)[:12]
+    )))
+    np.savez_compressed(
+        str(target) + ".npz",
+        vertices=v, faces=f, uv_vertices=uv,
+        signed_twice_uv_areas=signed,
+        uv_edge_scale_squared=scale,
+        degenerate_face_ids=np.flatnonzero(degenerate),
+        inverted_face_ids=np.flatnonzero(inverted),
+    )
+    report = {
+        "note": "Diagnostic output ONLY. Invalid BFF UV was not accepted.",
+        "native_executable": str(executable),
+        "native_executable_sha256": _sha256(executable),
+        "native_output_precision_digits": int(native_precision),
+        "candidate_corner_phase": float(corner_phase),
+        "candidate_explicit_corner_xyz": (
+            np.asarray(corner_positions).tolist()
+            if corner_positions is not None else None
+        ),
+        "vertex_count": int(len(v)),
+        "triangle_count": int(len(f)),
+        "uv_degenerate_faces": int(np.count_nonzero(degenerate)),
+        "uv_inverted_faces": int(np.count_nonzero(inverted)),
+        "examined_face_ids": worst.tolist(),
+        "examined_faces": [
+            {
+                "face_id": int(i),
+                "source_vertex_ids": f[i].tolist(),
+                "xyz": v[f[i]].tolist(),
+                "uv": uv[f[i]].tolist(),
+                "signed_twice_uv_area": float(signed[i]),
+                "relative_uv_twice_area": (
+                    float(signed[i] / scale[i]) if scale[i] > 0 else None
+                ),
+                "degenerate": bool(degenerate[i]),
+                "inverted": bool(inverted[i]),
+            }
+            for i in worst
+        ],
+    }
+    (directory / f"bff_rect_{unique}.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return target
+
+
 def run_official_bff(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -505,6 +597,15 @@ def run_official_bff(
                     f"Selected adapter: {exe}"
                 )
         uv = _read_write_only_uv_obj(output_path, len(vertices), np.asarray(faces, dtype=int))
+        if boundary_policy == "target_rectangle" and os.environ.get(
+            "ONESTRING_BFF_DEBUG_DIR", ""
+        ).strip():
+            _save_rectangular_bff_diagnostics(
+                vertices, faces, uv, executable=exe,
+                corner_phase=corner_phase,
+                corner_positions=corners_xyz,
+                native_precision=17,
+            )
     # Independent rectangle adapter reports wedges from its native boundary
     # traversal. Preserve exact four chosen boundary slots; NOT necessarily
     # original OBJ vertex IDs due BFF's mesh import/renumbering.
