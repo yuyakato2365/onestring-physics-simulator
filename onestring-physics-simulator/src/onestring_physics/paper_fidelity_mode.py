@@ -81,10 +81,24 @@ def check_paper_fidelity(state, params) -> FidelityOutcome:
     # BFF is a REQUIREMENT, not inferred from a misleading 'bff' alias.
     omega=str(getattr(params,"omega_parameterization_mode",""))
     rectangle=str(getattr(params,"bff_boundary_policy",""))=="target_rectangle"
+    _actual_omega_metrics = dict(
+        getattr(getattr(state, "surface_parameterization", None), "metrics", {}) or {}
+    )
+    _used_free_boundary = bool(
+        _actual_omega_metrics.get("official_bff_free_boundary_recovery_used", False)
+    )
     stages["Omega"]=(
+        "official BFF free-boundary fallback: rectangular preset NOT reproduced"
+        if _used_free_boundary else
         "official BFF with prescribed rectangular boundary requested"
         if omega=="paper_reference_bff" and rectangle else "invalid"
     )
+    if _used_free_boundary:
+        reasons.append(
+            "All rectangle-constrained official BFF charts were invalid; "
+            "source Omega was recovered with official natural-boundary BFF. "
+            "This is not a faithful prescribed-rectangle Paper run."
+        )
     if not rectangle:
         reasons.append("Paper rectangle mode requires four BFF boundary exterior angles")
     if omega!="paper_reference_bff":
