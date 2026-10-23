@@ -235,10 +235,18 @@ def apply_paper_split(pipeline_module, mesh, domain, params=None):
     collision_gap_multiplier=float(
         getattr(params,"collision_split_gap_multiplier",1.0)
     )
-    separated, components, panel_vertices, offsets, gap = _open_split_gaps(
-        grid_vertices, faces, records, mesh.grid,
+    # Decide each panel's Split-side offsets in ORIGINAL grid coordinates.
+    # After reBFF a panel may have moved across its former cut line, and
+    # determining left/right from deformed coordinates would invert the gap.
+    source_grid=canonical.copy()
+    source_grid[:,:2] = canonical[:,:2] @ rotation
+    _, components, panel_vertices, offsets, gap = _open_split_gaps(
+        source_grid, faces, records, mesh.grid,
         collision_gap_multiplier=collision_gap_multiplier,
     )
+    separated=grid_vertices.copy()
+    for ids, offset in zip(panel_vertices, offsets):
+        separated[ids,:2] += offset[None,:]
     separated[:, :2] = separated[:, :2] @ rotation.T
     offsets = [offset @ rotation.T for offset in offsets]
     metrics.update(paper_split_finalized=True, simple_split_active=True, simple_split_records=records,
