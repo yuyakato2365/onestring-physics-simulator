@@ -461,8 +461,12 @@ def install_simple_split_panel_patch(pipeline_module: Any, optimization_debug_mo
         # edge-match objective does not constrain face orientation/non-overlap.
         # Apply a conservative continuation ONLY for the opt-in reBFF M2D
         # route; leave legacy/plain-grid K2D bitwise unchanged.
-        if bool((getattr(mesh_2d,"metrics",{}) or {}).get(
-                "m2d_postcut_rebff_applied",False)):
+        if (bool(getattr(params,"paper_fidelity_mode",False))
+                and bool(getattr(params,"paper_split_apply_rebff_m2d",False))
+                and bool((getattr(mesh_2d,"metrics",{}) or {}).get(
+                    "m2d_postcut_rebff_applied",False))):
+            # Do NOT route Paper-OFF or ordinary OptCuts K2D through this
+            # experimental geometry repair, even if stale mesh flags survive.
             from .rebff_k2d_guard import guard_rebff_k2d
             guarded_xy,guard_metrics=guard_rebff_k2d(
                 mesh_2d,mesh_3d,result)
