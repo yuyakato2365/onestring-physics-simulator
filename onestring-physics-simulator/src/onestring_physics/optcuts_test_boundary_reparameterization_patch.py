@@ -278,6 +278,13 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             rank_grid_aware_seam_candidates, copy_selected_chart_to_original,
         )
 
+        # This marker belongs to the CURRENT solve, not any previous
+        # collection of diagnostic ZIP files.
+        from .optcuts_grid_failure_diagnostics import begin_diagnostic_run
+        parameterization.metrics["optcuts_area_grid_diagnostic_run_id"] = (
+            begin_diagnostic_run()
+        )
+
         # A: Choose among ACTUAL official OptCuts initial-cut/seam
         # topologies, using each candidate's own REAL production M2D grid.
         # No independently invented lattice or silent change in the 50% mask.
