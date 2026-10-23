@@ -194,6 +194,17 @@ def optimize_assembled(base, target, mesh2d, mesh3d, p, params, pipeline):
         return base(target, mesh3d, p, params)
     mapping = source_equivalence(mesh2d, mesh3d, p, pipeline)
     reduced = geometry_view(mesh3d, mapping)
+    if hasattr(mesh3d,"_seam_original_m2d_uv"):
+        # Source-seam UV vertex IDs still refer to the full original
+        # M2D overlay. Reduced vertex IDs differ after source-equivalence
+        # merging, and must NEVER be used to classify real cut edges.
+        reduced._seam_defer_until_full_mesh=True
+        print(
+            "[SEAM-K3D-INDEX] deferred_reduced_closure "
+            f"full_vertices={len(mesh3d.vertices)} "
+            f"reduced_vertices={len(reduced.vertices)}",
+            flush=True,
+        )
     result, report = base(target, reduced, p, params)
     if params.use_extrusion_aware_k3d and not result.metrics.get('extrusion_objective_applied'):
         raise RuntimeError('Extrusion-aware K3D requires the paper local/global K3D route; select the 2026-09-18 OptCuts Ω route')
@@ -204,6 +215,25 @@ def optimize_assembled(base, target, mesh2d, mesh3d, p, params, pipeline):
     result.metrics['assembled_equivalence_policy'] = 'source barycentric identity; reduced geometry unknowns only; original flat topology retained'
     # History snapshots belong to the reduced solve, not the expanded mesh.
     result.metrics['assembled_geometry_reduced_vertex_count'] = len(reduced.vertices)
+    if hasattr(mesh3d,"_seam_original_m2d_uv"):
+        # Source geometry, original per-face UV IDs, and the K3D
+        # optimization now use the SAME full vertex index space.
+        from .optcuts_seam_exact_closure import (
+            close_k3d_seam_after_full_vertex_restore,
+        )
+        mesh3d._seam_deferred_from_reduced_K3D=True
+        result=close_k3d_seam_after_full_vertex_restore(
+            mesh3d,result,p,params
+        )
+        if bool(result.metrics.get("seam_exact_closure_deferred",False)):
+            result.metrics["seam_exact_closure_deferred"]=False
+            result.metrics["seam_exact_closure_deferred_completed"]=True
+        print(
+            "[SEAM-K3D-INDEX] full_vertex_restore_closed "
+            f"full_vertices={len(result.vertices)} "
+            f"status={result.metrics.get('seam_exact_closure_enabled',False)}",
+            flush=True,
+        )
     return result, report
 
 
