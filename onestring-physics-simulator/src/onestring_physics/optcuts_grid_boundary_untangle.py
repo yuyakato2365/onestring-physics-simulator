@@ -5,6 +5,7 @@ It never changes the selected M2D cells, the boundary destination, or
 OptCuts' seam topology. Infeasible goals raise clear diagnostic errors.
 """
 import numpy as np
+import time
 
 
 def oriented_area_ratio(base,vertices,faces):
@@ -45,7 +46,25 @@ def untangle_fixed_boundary(base,faces,loop,target,harmonic,previous=None):
     x=(.5*previous[free]+.5*harmonic_i
        if previous is not None else harmonic_i.copy())
     diag={"solver":"orientation_barrier_lbfgsb","iterations":0}
+    last_heartbeat = [time.monotonic()]
+    optimization_started = last_heartbeat[0]
     for strength in (100.,3000.,100000.):
+        iterations_at_strength = [0]
+
+        def heartbeat(_x):
+            # L-BFGS-B can spend a long time inside a single continuation
+            # step; this emits health signals without altering its objective.
+            iterations_at_strength[0] += 1
+            now = time.monotonic()
+            if now - last_heartbeat[0] >= 10.:
+                print(
+                    "[GRID-UV-OPT] optimizer active "
+                    f"barrier={strength:g} "
+                    f"lbfgsb_iterations={iterations_at_strength[0]} "
+                    f"elapsed={now-optimization_started:.1f}s",
+                    flush=True,
+                )
+                last_heartbeat[0] = now
         def objective(v):
             uv=out.copy();uv[free]=v.reshape(-1,2)
             tri=uv[faces];p,q,r=tri[:,0],tri[:,1],tri[:,2]
@@ -68,6 +87,7 @@ def untangle_fixed_boundary(base,faces,loop,target,harmonic,previous=None):
                 np.add.at(grad,faces[:,i],coeff[:,None]*derivative)
             return float(score),grad[free].ravel()
         opt=minimize(objective,x.ravel(),method="L-BFGS-B",jac=True,
+                     callback=heartbeat,
                      options={"maxiter":240,"gtol":1e-8,"ftol":1e-12})
         x=np.asarray(opt.x,float).reshape(-1,2)
         out[free]=x
@@ -83,8 +103,21 @@ def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess):
     step=.25
     last=np.asarray(base,float).copy()
     history=[]
+    started = time.monotonic()
+    last_progress_log = started
+    print(
+        f"[GRID-UV-CONT] starting; vertices={len(base)} "
+        f"triangles={len(faces)}; full_boundary_fraction=1",
+        flush=True,
+    )
     for _ in range(70):
         if progress>=1.-1e-9:
+            print(
+                f"[GRID-UV-CONT] complete; "
+                f"steps={len(history)} "
+                f"elapsed={time.monotonic()-started:.1f}s",
+                flush=True,
+            )
             return last,history
         if step<1./2048.:break
         fraction=min(1.,progress+step)
@@ -118,6 +151,19 @@ def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess):
             step=min(.3,step*1.4)
         else:
             step*=.5
+        now=time.monotonic()
+        if (now-last_progress_log>=10. or progress>=1.-1e-9):
+            print(
+                "[GRID-UV-CONT] "
+                f"step={len(history)}/70 accepted={valid} "
+                f"target_fraction={fraction:.5f} "
+                f"last_valid_fraction={progress:.5f} "
+                f"min_signed_area_ratio={ratio:.5g} "
+                f"next_step={step:.5g} "
+                f"elapsed={now-started:.1f}s",
+                flush=True,
+            )
+            last_progress_log=now
     # This is failure of the attempted numerical continuation, not a proof
     # that no topology-preserving map to the prescribed outline exists.
     rejected=next((item for item in reversed(history)
@@ -132,6 +178,13 @@ def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess):
             f"; degenerate={rejected.get('degenerate_triangles', 'not_audited')}"
             f"; overlap={rejected.get('uv_overlap_pairs', 'not_audited')}"
         )
+    print(
+        "[GRID-UV-CONT] failed "
+        f"last_valid_fraction={progress:.5f} "
+        f"steps={len(history)} "
+        f"elapsed={time.monotonic()-started:.1f}s",
+        flush=True,
+    )
     raise ValueError(
         "GRID_BOUNDARY_BIJECTIVE_MAPPING_NOT_FOUND: "
         f"last_valid_fraction={progress:.5g}"
