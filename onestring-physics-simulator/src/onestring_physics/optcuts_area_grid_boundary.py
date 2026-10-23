@@ -785,15 +785,39 @@ def keep_cells_on_fixed_lattice(mesh,domain):
     """Select the SAME exact-overlap tiles that defined the snapped boundary."""
     mask=np.asarray(domain._optcuts_area_grid_mask,bool)
     faces=np.asarray(mesh.faces,int)
-    src_nx=int(domain.overlay_nx)
-    margin=int(domain.overlay_margin_tiles)
-    # Overlay cells are row-major by y, x; verify actual geometry, not IDs.
+    # Verify against the *frozen source-lattice geometry*, not merely
+    # against domain.uv_vertices: the production M2D builder copies those
+    # coordinates, so comparing them to each other would miss a corrupt
+    # or independently rebuilt grid with exactly the same cell count.
     uv=np.asarray(mesh.vertices,float)
     base=np.asarray(domain.uv_vertices,float)
-    if len(uv)!=len(base) or not np.allclose(uv[:,:2],base):
+    origin=np.asarray(domain.parameterization.metrics[
+        "optcuts_area_grid_grid_origin"],float)
+    step=np.asarray(domain.parameterization.metrics[
+        "optcuts_area_grid_grid_step"],float)
+    nx,ny=int(domain.overlay_nx),int(domain.overlay_ny)
+    expected_count=(nx+1)*(ny+1)
+    if (len(base)!=expected_count or len(uv)!=expected_count
+            or np.any(~np.isfinite(uv)) or
+            np.any(~np.isfinite(base)) or
+            not np.allclose(uv[:,:2],base[:,:2],rtol=0,atol=1e-10)):
         raise GridBoundaryReparameterizationError(
-            "GRID_BOUNDARY_M2D_LATTICE_MISMATCH: M2D and target grid differ"
+            "GRID_BOUNDARY_M2D_LATTICE_MISMATCH: invalid overlay vertices"
         )
+    x=origin[0]+np.arange(nx+1,dtype=float)*step[0]
+    y=origin[1]+np.arange(ny+1,dtype=float)*step[1]
+    xx,yy=np.meshgrid(x,y,indexing="xy")
+    expected_xy=np.stack([xx,yy],axis=-1).reshape(-1,2)
+    tol=max(1e-10,1e-8*float(np.max(np.abs(step))))
+    if not np.allclose(base[:,:2],expected_xy,rtol=0,atol=tol):
+        drift=float(np.max(np.abs(base[:,:2]-expected_xy)))
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_M2D_LATTICE_MISMATCH: M2D vertices do not "
+            "match the EXACT frozen origin/spacing; "
+            f"max_coordinate_error={drift:.6g}, tolerance={tol:.6g}"
+        )
+    # The selected-cell mask is indexed by integer (row, col) on this
+    # verified original overlay. Enforce exact IDs in the outer builder.
     keep=np.zeros(len(faces),bool)
     for fi,f in enumerate(faces):
         p=np.asarray(uv[f,:2],float)
