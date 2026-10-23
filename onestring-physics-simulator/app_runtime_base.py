@@ -3428,14 +3428,19 @@ elif view_stage == "M3D":
         }
     )
 elif view_stage == "K2D":
-    from onestring_physics.eq5_iteration_history_view import render_final_k2d_result, render_eq5_iteration_history
-    if not render_final_k2d_result(st):
+    from onestring_physics.eq5_iteration_history_view import (
+        render_final_k2d_result, render_actual_rebff_k2d_result,
+        render_eq5_iteration_history,
+    )
+    if render_actual_rebff_k2d_result(st,state.mesh_2d_optimized):
+        pass
+    elif not render_final_k2d_result(st):
         st.plotly_chart(
             figure_flat_tile_layout(state.k2d_flat_layout, title="K2D flat independent tile layout", hinge_graph=state.hinge_graph, tile_colors=_corr_tile_colors),
             use_container_width=True,
             key="k2d",
         )
-    with st.expander("K2D optimization history", expanded=False):
+    with st.expander("K2D optimization history（補正前の生ログ）", expanded=False):
         render_eq5_iteration_history(st)
     st.write({"mesh_metrics": state.mesh_2d_optimized.metrics, "layout_metrics": state.k2d_flat_layout.metrics})
     st.subheader("K2D ↔ K3D edge-length diagnostics")
