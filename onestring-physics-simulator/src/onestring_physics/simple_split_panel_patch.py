@@ -212,10 +212,26 @@ def apply_paper_split(pipeline_module, mesh, domain, params=None):
         # The reference-BFF builder also publishes this legacy report. Keep
         # it in sync instead of leaving a pending/zero-split result behind.
         domain.reference_split_diagnostics = dict(domain.paper_split_diagnostics)
-    # Work in grid coordinates when opening a rotated grid's seams.
+    # Preserve the original Omega coordinates for M3D inverse mapping,
+    # but optionally use per-piece free-boundary BFF UV for fabrication M2D.
+    # This occurs AFTER the real seams have duplicated vertex IDs.
+    apply_rebff=bool(getattr(params, "paper_split_apply_rebff_m2d", False))
+    physical = canonical.copy()
+    if apply_rebff and bool(measured.get("csf_split_applied", False)):
+        from .postcut_rebff_m2d import apply_leaf_rebff_uv
+        physical, rebff_audit = apply_leaf_rebff_uv(
+            canonical, faces,
+            getattr(domain, "_split_rebff_leaf_charts", None),
+            rotation_degrees=float(getattr(domain,"reference_grid_rotation_degrees",0.)),
+        )
+        metrics.update(rebff_audit)
+    elif apply_rebff:
+        metrics.update(m2d_postcut_rebff_applied=False,
+                       m2d_postcut_rebff_reason="no CSF Split was generated")
+    # Work in grid coordinates when opening rotated grid seams.
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
     rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
-    grid_vertices = canonical.copy(); grid_vertices[:, :2] = canonical[:, :2] @ rotation
+    grid_vertices = physical.copy(); grid_vertices[:, :2] = physical[:, :2] @ rotation
     collision_gap_multiplier=float(
         getattr(params,"collision_split_gap_multiplier",1.0)
     )
