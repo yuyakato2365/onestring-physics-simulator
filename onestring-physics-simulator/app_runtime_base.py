@@ -744,6 +744,7 @@ with st.sidebar:
         and st.session_state.get("_onestring_area_grid_boundary_omega_selected",False)
     )
     optcuts_area_grid_coverage_threshold = 0.50
+    optcuts_area_grid_orientation_search_enabled = True
     if optcuts_area_grid_boundary_enabled:
         with st.expander("Area-Threshold Grid Boundary（新Ω生成モード）", expanded=True):
             optcuts_area_grid_coverage_threshold = st.slider(
@@ -755,6 +756,15 @@ with st.sidebar:
                 help="各四角Gridセルが、最初のOptCuts Ωと交わる面積を"
                      "セル全面積で割った割合。50%以上なら採用します。"
                      "M2D境界を作り、Ωの境界と内部UVを再パラメータ化します。",
+            )
+            optcuts_area_grid_orientation_search_enabled = st.checkbox(
+                "Gridに合いやすいΩの回転方向も探索する（0°/22.5°/45°/67.5°）",
+                value=True,
+                key="optcuts_area_grid_orientation_search_enabled",
+                help="公式OptCutsが1種類のSeamしか返さない場合も、"
+                     "生成後のUVを剛体回転してから実際のM2D Gridを生成・比較します。"
+                     "回転でSeam自体は変更されません。各候補のGridは"
+                     "選択時点から固定します。",
             )
             st.warning(
                 "実験モード：OptCutsのSeam接続は維持します。"
@@ -2016,6 +2026,7 @@ def current_pipeline_key() -> tuple:
         optcuts_grid_aware_strength,
         optcuts_area_grid_boundary_enabled,
         optcuts_area_grid_coverage_threshold,
+        optcuts_area_grid_orientation_search_enabled,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
@@ -2178,6 +2189,7 @@ pipeline_params = PipelineParameters(
     optcuts_grid_aware_strength=optcuts_grid_aware_strength,
     optcuts_area_grid_boundary_enabled=optcuts_area_grid_boundary_enabled,
     optcuts_area_grid_coverage_threshold=optcuts_area_grid_coverage_threshold,
+    optcuts_area_grid_orientation_search_enabled=optcuts_area_grid_orientation_search_enabled,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
@@ -3248,7 +3260,11 @@ elif view_stage == "Omega":
                         "optcuts_area_grid_seam_selected_start"),
                     "Grid-aware seam評価スコア": _area_grid_metrics.get(
                         "optcuts_area_grid_seam_selected_score"),
-                    "比較した公式Seam候補数": _area_grid_metrics.get(
+                    "公式OptCuts由来のSeam候補数": _area_grid_metrics.get(
+                        "optcuts_area_grid_seam_official_source_count"),
+                    "採用したΩの回転角（Seamは不変）": _area_grid_metrics.get(
+                        "optcuts_area_grid_seam_selected_rotation_degrees"),
+                    "SeamとΩの回転を合わせた評価数": _area_grid_metrics.get(
                         "optcuts_area_grid_seam_candidate_count"),
                 })
                 with st.expander("OptCuts Seam候補のGrid形状・歪み比較", expanded=True):
