@@ -326,6 +326,7 @@ def save_failure_bundle(*, base, faces, boundary_indices, mapped_boundary,
                         accepted, rejected, harmonic, grid_outline, grid_step,
                         fraction, last_valid_fraction, history,
                         metadata=None, grid_mask=None, grid_coverage=None,
+                        source_vertices_3d=None, source_faces=None,
                         output_dir=None):
     """Write lightweight JSON/SVG + full compressed arrays, return paths.
 
@@ -337,6 +338,20 @@ def save_failure_bundle(*, base, faces, boundary_indices, mapped_boundary,
         rejected, harmonic, grid_outline, grid_step,
         fraction, last_valid_fraction,
     )
+    if source_vertices_3d is not None and source_faces is not None:
+        xyz = np.asarray(source_vertices_3d, dtype=float)
+        xyz_faces = np.asarray(source_faces, dtype=int)
+        arrays["source_vertices_3d"] = xyz
+        arrays["source_faces"] = xyz_faces
+        if (xyz_faces.shape == arrays["uv_faces"].shape
+                and xyz.ndim == 2 and xyz.shape[1] == 3
+                and len(xyz_faces) > 0 and np.min(xyz_faces) >= 0
+                and np.max(xyz_faces) < len(xyz)):
+            for row in analysis["ranked_worst_triangles"]:
+                f = int(row["triangle_id"])
+                tri = xyz_faces[f]
+                row["source_face_vertex_ids"] = tri.tolist()
+                row["source_xyz_centroid"] = xyz[tri].mean(axis=0).tolist()
     if grid_mask is not None:
         arrays["grid_mask"] = np.asarray(grid_mask, dtype=bool)
     if grid_coverage is not None:
