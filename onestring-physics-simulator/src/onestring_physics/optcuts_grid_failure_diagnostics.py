@@ -21,6 +21,43 @@ import uuid
 import numpy as np
 
 
+EAR_PREFLIGHT_DIAGNOSTIC_VERSION = "ear-safe-v1"
+
+
+def begin_diagnostic_run(output_dir=None):
+    """Mark each new area-Grid computation; older snapshots stay untouched.
+
+    The companion summarizer refuses to republish snapshots from a prior
+    calculation when the current one has not saved a failure.
+    """
+    root = Path(output_dir or os.environ.get(
+        "ONESTRING_GRID_DIAGNOSTICS_DIR",
+        "logs/grid_boundary_diagnostics",
+    )).expanduser()
+    run_id = uuid.uuid4().hex[:14]
+    manifest = {
+        "run_id": run_id,
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "ear_preflight_version": EAR_PREFLIGHT_DIAGNOSTIC_VERSION,
+    }
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        # Single active Streamlit evaluation at a time is the usual mode.
+        # If multiple simultaneous sessions share this directory, callers
+        # can use ONESTRING_GRID_DIAGNOSTICS_DIR to isolate their outputs.
+        tmp = root / ("last_run_" + run_id + ".tmp")
+        tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        tmp.replace(root / "last_run.json")
+        print("[GRID-DIAG] started_run=" + run_id, flush=True)
+    except OSError as exc:
+        print(
+            "[GRID-DIAG] run_marker_not_saved="
+            + type(exc).__name__ + ": " + str(exc),
+            flush=True,
+        )
+    return run_id
+
+
 def _signed_area(pts):
     xy = np.asarray(pts, dtype=float)
     return 0.5 * float(np.sum(xy[:, 0] * np.roll(xy[:, 1], -1)
