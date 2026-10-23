@@ -539,7 +539,9 @@ def test_grid_aware_seam_ranking_uses_each_original_production_grid():
             dict(official_quality), dict(official_quality)],
     )
     grid = SimpleNamespace(nx=4, ny=4)
-    params = SimpleNamespace(optcuts_area_grid_coverage_threshold=.5)
+    params = SimpleNamespace(
+        optcuts_area_grid_coverage_threshold=.5,
+        optcuts_area_grid_orientation_search_enabled=False)
     def actual_grid(chart, _grid, _params):
         boundary = np.asarray(chart.omega_boundary)
         step = np.ptp(boundary, axis=0) / (2 * grid.nx)
@@ -609,6 +611,7 @@ def test_grid_seam_selection_tries_next_official_cut_after_fit_failure(monkeypat
         optcuts_try_alternative_initial_cut: bool = True
         optcuts_area_grid_boundary_enabled: bool = True
         optcuts_area_grid_coverage_threshold: float = .5
+        optcuts_area_grid_orientation_search_enabled: bool = False
 
     def domain_for(chart, *_args):
         x = np.linspace(-.125, 1.125, 11)
@@ -671,3 +674,78 @@ def test_grid_seam_score_rejects_excessive_original_uv_distortion():
                csf_over_2_area_fraction=.4)
     assert (grid_seam_selection_score(shape, bad, reference_sd=2.)
             > grid_seam_selection_score(shape, base, reference_sd=2.))
+
+
+
+def test_one_official_seam_has_real_uv_orientations_not_fake_seams():
+    """The fixed-grid production geometry changes while the seam IDs do not."""
+    from onestring_physics.optcuts_grid_aware_seam_selection import (
+        rank_grid_aware_seam_candidates,
+    )
+    uv, tri, loop = _grid_chart(n=6)
+    chart = SimpleNamespace(
+        method="optcuts_test", metrics={"boundary_loop": list(loop)},
+        surface_vertices_3d=np.c_[uv, np.zeros(len(uv))],
+        surface_faces=tri.copy(), uv_vertices_2d=uv.copy(),
+        uv_faces=tri.copy(), omega_boundary=uv[np.r_[loop,loop[0]]],
+        triangle_acceleration=None,
+    )
+    grid = SimpleNamespace(nx=3, ny=3)
+    params = SimpleNamespace(
+        optcuts_area_grid_coverage_threshold=.5,
+        optcuts_area_grid_orientation_search_enabled=True,
+    )
+    def actual_domain(candidate, *_args):
+        pts = np.asarray(candidate.omega_boundary, dtype=float)
+        lo = pts.min(axis=0)
+        step = np.maximum(np.ptp(pts, axis=0)/6., 1e-8)
+        xx, yy = np.meshgrid(
+            lo[0] + (np.arange(9) - 1)*step[0],
+            lo[1] + (np.arange(9) - 1)*step[1],
+            indexing="xy",
+        )
+        return SimpleNamespace(
+            uv_vertices=np.stack([xx, yy], axis=-1).reshape(-1, 2),
+            overlay_nx=8, overlay_ny=8, overlay_margin_tiles=1,
+            parameterization=candidate,
+        )
+    ranked, report = rank_grid_aware_seam_candidates(
+        chart, grid, params, actual_domain,
+    )
+    assert len(report) == 4
+    assert len(ranked) >= 2
+    assert {x["uv_rotation_degrees"] for x in report} == {
+        0., 22.5, 45., 67.5}
+    assert {x["source_start_index"] for x in report} == {0}
+    assert all(np.array_equal(c.uv_faces, tri) for c, _, _ in ranked)
+    np.testing.assert_allclose(chart.uv_vertices_2d, uv)
+    assert all(np.isfinite(x["score"]) for _, _, x in ranked)
+
+
+def test_grid_seam_orientation_toggle_only_one_chart_when_disabled():
+    from onestring_physics.optcuts_grid_aware_seam_selection import (
+        rank_grid_aware_seam_candidates,
+    )
+    uv, tri, loop = _grid_chart(n=6)
+    chart = SimpleNamespace(
+        method="optcuts_test", metrics={},
+        surface_vertices_3d=np.c_[uv, np.zeros(len(uv))],
+        surface_faces=tri, uv_vertices_2d=uv,
+        uv_faces=tri, omega_boundary=uv[np.r_[loop, loop[0]]],
+        triangle_acceleration=None,
+    )
+    grid = SimpleNamespace(nx=3, ny=3)
+    params = SimpleNamespace(
+        optcuts_area_grid_coverage_threshold=.5,
+        optcuts_area_grid_orientation_search_enabled=False,
+    )
+    def build(c, *_args):
+        x = np.linspace(-1/6, 7/6, 9)
+        xx, yy = np.meshgrid(x, x, indexing="xy")
+        return SimpleNamespace(
+            uv_vertices=np.stack([xx, yy], axis=-1).reshape(-1, 2),
+            overlay_nx=8, overlay_ny=8, overlay_margin_tiles=1,
+        )
+    ranks, rows = rank_grid_aware_seam_candidates(chart, grid, params, build)
+    assert len(rows) == len(ranks) == 1
+    assert rows[0]["uv_rotation_degrees"] == 0.
