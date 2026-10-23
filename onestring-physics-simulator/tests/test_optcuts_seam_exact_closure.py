@@ -107,7 +107,7 @@ def test_paper_extrusion_preserves_closed_seam_on_top_and_bottom():
         [0,0,0],[1,0,0],[1,1,0],[0,1,0],
         [1,0,0],[2,0,0],[2,1,0],[1,1,0]
     ],float)
-    mesh=SimpleNamespace(vertices=xyz.copy(),faces=faces,
+    mesh=SimpleNamespace(vertices=xyz.copy(),faces=faces,stage="K3D",
         metrics={"seam_exact_vertex_groups":topo["groups"],
                  "paper_t3d_planarity_iterations":5})
     # Actual upstream helpers are omitted, but the shared top/bottom solve
