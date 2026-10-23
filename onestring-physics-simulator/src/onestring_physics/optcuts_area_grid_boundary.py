@@ -233,31 +233,68 @@ def _harmonic_dirichlet(uv,faces,loop,targets):
     return result
 
 
-def construct_grid_target(uv,faces,boundary_loop,*,nx,ny,threshold=.5,margin=1):
-    """Pure geometric stage, independent of OptCuts executable and Streamlit."""
-    nx,ny=int(nx),int(ny)
-    if nx<2 or ny<2 or nx>100 or ny>100:
-        raise ValueError("GRID_BOUNDARY_GRID_RANGE: grid nx/ny must be in [2,100]")
+def _actual_overlay_lattice(domain):
+    """Extract *the actual production M2D lattice* before deforming Omega."""
+    count_x=int(getattr(domain,"overlay_nx",0))
+    count_y=int(getattr(domain,"overlay_ny",0))
+    points=np.asarray(domain.uv_vertices,float)[:,:2]
+    if count_x<2 or count_y<2 or len(points)!=(count_x+1)*(count_y+1):
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_REAL_M2D_LATTICE_MISSING: original Ω must first "
+            "generate the actual rectangular M2D overlay"
+        )
+    origin=points[0].copy()
+    dx=points[1]-points[0]
+    dy=points[count_x+1]-points[0]
+    tol=max(float(np.ptp(points,axis=0).max())*1e-7,1e-10)
+    if (abs(dx[1])>tol or abs(dy[0])>tol or
+            dx[0]<=1e-12 or dy[1]<=1e-12):
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_ROTATED_OR_IRREGULAR_LATTICE_UNSUPPORTED: "
+            "cannot change grid phase or pretend the M2D grid is axis-aligned"
+        )
+    step=np.array([dx[0],dy[1]],float)
+    expected=origin+np.stack(np.meshgrid(
+        np.arange(count_x+1)*step[0],
+        np.arange(count_y+1)*step[1],indexing="xy"),axis=-1).reshape(-1,2)
+    if not np.allclose(points,expected,atol=tol,rtol=0):
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_REAL_M2D_LATTICE_MISMATCH: overlay not regular"
+        )
+    return origin,step,count_x,count_y
+
+
+def construct_grid_target(uv,faces,boundary_loop,*,nx,ny,threshold=.5,
+                          margin=1,domain=None):
+    """Choose cells from the REAL production M2D lattice, not an inferred one."""
     if not np.isfinite(threshold) or not (0.<threshold<=1.):
         raise ValueError("GRID_BOUNDARY_THRESHOLD_RANGE: coverage must be in (0,1]")
-    boundary_uv=np.asarray(uv,float)[np.asarray(boundary_loop,int)]
-    lower=boundary_uv.min(axis=0)
-    span=np.maximum(np.ptp(boundary_uv,axis=0),1e-8)
-    effective_nx=max(2*nx,nx+2,2)
-    effective_ny=max(2*ny,ny+2,2)
-    step=span/np.array([effective_nx,effective_ny],float)
-    origin=lower.copy()
-    coverage=_intersection_ratios(uv,faces,origin,step,effective_nx,effective_ny)
+    if domain is not None:
+        origin,step,n_cells_x,n_cells_y=_actual_overlay_lattice(domain)
+        margin=int(getattr(domain,"overlay_margin_tiles",0))
+    else:
+        # Pure-geometry tests only. Live runs MUST supply the actual domain.
+        nx,ny=int(nx),int(ny)
+        if nx<2 or ny<2 or nx>100 or ny>100:
+            raise ValueError("GRID_BOUNDARY_GRID_RANGE: grid nx/ny must be in [2,100]")
+        boundary_uv=np.asarray(uv,float)[np.asarray(boundary_loop,int)]
+        origin=boundary_uv.min(axis=0)
+        span=np.maximum(np.ptp(boundary_uv,axis=0),1e-8)
+        n_cells_x=max(2*nx,nx+2,2)
+        n_cells_y=max(2*ny,ny+2,2)
+        step=span/np.array([n_cells_x,n_cells_y],float)
+    coverage=_intersection_ratios(uv,faces,origin,step,n_cells_x,n_cells_y)
     mask=coverage>=float(threshold)-1e-12
     corners=_grid_boundary(mask)
     target=origin+np.asarray(corners,float)*step
     return dict(mask=mask,coverage=coverage,grid_outline=target,
                 grid_outline_integer=np.asarray(corners,int),
-                origin=origin,step=step,nx=effective_nx,ny=effective_ny,
-                margin=int(max(0,margin)))
+                origin=origin,step=step,nx=n_cells_x,ny=n_cells_y,
+                margin=int(max(0,margin)),
+                grid_source="real_production_m2d_overlay" if domain is not None else "synthetic_fixture")
 
 
-def apply_area_grid_boundary(parameterization,grid,params):
+def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     from .optcuts_backend import _boundary_loops
     uv=np.asarray(parameterization.uv_vertices_2d,float)
     faces=np.asarray(parameterization.uv_faces,int)
@@ -270,7 +307,7 @@ def apply_area_grid_boundary(parameterization,grid,params):
     thresh=float(getattr(params,"optcuts_area_grid_coverage_threshold",.5))
     margin=int(getattr(params,"omega_overlay_margin",1))
     target=construct_grid_target(uv,faces,loop,nx=grid.nx,ny=grid.ny,
-                                 threshold=thresh,margin=margin)
+                                 threshold=thresh,margin=margin,domain=domain)
     mapped=_boundary_target_map(uv,loop,target["grid_outline"])
     # quality() requires OptCutsResult (not SurfaceParameterization).
     # Evaluate by wrapping the current chart with all corresponding faces.
@@ -343,6 +380,7 @@ def apply_area_grid_boundary(parameterization,grid,params):
         optcuts_area_grid_overlay_ny=int(target["ny"]),
         optcuts_area_grid_margin=int(target["margin"]),
         optcuts_area_grid_selection="exact UV-triangle/cell intersection >= threshold",
+        optcuts_area_grid_lattice_source=target["grid_source"],
         optcuts_area_grid_reparameterization="monotone corner correspondence + fixed-boundary harmonic Dirichlet",
         optcuts_area_grid_seam_topology_preserved=True,
     )
@@ -362,13 +400,14 @@ def fix_domain_lattice(domain,parameterization):
     step=np.asarray(m["optcuts_area_grid_grid_step"],float)
     nx=int(m["optcuts_area_grid_overlay_nx"])
     ny=int(m["optcuts_area_grid_overlay_ny"])
+    # origin already includes all production margins. Never add them again.
     margin=int(m["optcuts_area_grid_margin"])
-    x=origin[0]+(np.arange(nx+2*margin+1)-margin)*step[0]
-    y=origin[1]+(np.arange(ny+2*margin+1)-margin)*step[1]
+    x=origin[0]+np.arange(nx+1)*step[0]
+    y=origin[1]+np.arange(ny+1)*step[1]
     xx,yy=np.meshgrid(x,y,indexing="xy")
     domain.uv_vertices=np.stack((xx,yy),axis=2).reshape(-1,2)
-    domain.overlay_nx=nx+2*margin
-    domain.overlay_ny=ny+2*margin
+    domain.overlay_nx=nx
+    domain.overlay_ny=ny
     domain.overlay_margin_tiles=margin
     domain.overlay_step_u=float(step[0])
     domain.overlay_step_v=float(step[1])
