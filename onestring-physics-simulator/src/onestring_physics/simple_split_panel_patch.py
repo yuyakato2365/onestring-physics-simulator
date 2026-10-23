@@ -457,6 +457,35 @@ def install_simple_split_panel_patch(pipeline_module: Any, optimization_debug_mo
             })
             result = _make_quadmesh(pipeline_module, result, verts, np.asarray(result.faces, dtype=int).copy(), metrics)
             _copy_attrs(mesh_2d, result)
+        # ReBFF can strongly deform the reference M2D, while the normal K2D
+        # edge-match objective does not constrain face orientation/non-overlap.
+        # Apply a conservative continuation ONLY for the opt-in reBFF M2D
+        # route; leave legacy/plain-grid K2D bitwise unchanged.
+        if bool((getattr(mesh_2d,"metrics",{}) or {}).get(
+                "m2d_postcut_rebff_applied",False)):
+            from .rebff_k2d_guard import guard_rebff_k2d
+            guarded_xy,guard_metrics=guard_rebff_k2d(
+                mesh_2d,mesh_3d,result)
+            guarded_vertices=np.asarray(result.vertices,float).copy()
+            guarded_vertices[:,:2]=guarded_xy
+            guarded_metrics=dict(getattr(result,"metrics",{}) or {})
+            guarded_metrics.update(guard_metrics)
+            guarded_metrics.update(
+                edge_matching_error=guard_metrics["k2d_rebff_guard_final_mean_edge_error"],
+                edge_matching_error_after=guard_metrics["k2d_rebff_guard_final_mean_edge_error"],
+                k2d_edge_error_after=guard_metrics["k2d_rebff_guard_final_mean_edge_error"],
+                mean_edge_length_error_after=guard_metrics["k2d_rebff_guard_final_mean_edge_error"],
+                max_edge_length_error_after=guard_metrics["k2d_rebff_guard_final_max_edge_error"],
+                k2d_rebff_guard_solver_metrics_preserved_in_guard_fields=True,
+            )
+            result=_make_quadmesh(pipeline_module,result,guarded_vertices,
+                                  np.asarray(result.faces,int).copy(),guarded_metrics)
+            _copy_attrs(mesh_2d,result)
+            try:
+                report.after_error=guard_metrics["k2d_rebff_guard_final_mean_edge_error"]
+                report.constraint_violation=guard_metrics["k2d_rebff_guard_overlap_count"]
+            except (AttributeError,TypeError):
+                pass
         try:
             render_split_panel_correspondence(mesh_2d, result, mesh_3d)
         except Exception:
