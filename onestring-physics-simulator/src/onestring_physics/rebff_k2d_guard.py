@@ -108,6 +108,20 @@ def guard_rebff_k2d(mesh_2d, mesh_3d, k2d, *, minimum_fraction=1./512.):
         return final.copy(),dict(k2d_rebff_guard_applied=False)
     areas=_areas(original,faces)
     signs=np.sign(areas)
+    # Compare against original Omega when available. A per-quad signed-area
+    # check against itself would silently accept an input that was ALREADY
+    # flipped by the reBFF-to-M2D mapping.
+    canonical=getattr(mesh_2d,"_split_panel_source_vertices",None)
+    if canonical is not None:
+        ref_signs=np.sign(_areas(np.asarray(canonical,float)[:,:2],faces))
+        if np.any(signs!=ref_signs):
+            raise RuntimeError(
+                "K2D_REBFF_INPUT_INVALID: reBFF M2D already flipped "
+                "relative to the original Omega grid")
+    elif np.any(signs!=signs[0]):
+        raise RuntimeError(
+            "K2D_REBFF_INPUT_INVALID: source reBFF M2D has mixed "
+            "quad orientations")
     tile_scale=max(float(np.median(np.sqrt(np.abs(areas)))),1e-9)
     eps=max(1e-12,1e-7*tile_scale*tile_scale)
     if not _convex_and_oriented(original,faces,signs,eps):
