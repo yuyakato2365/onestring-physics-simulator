@@ -289,3 +289,93 @@ def test_debug_force_one_cut_is_exposed_to_regular_pipeline():
     assert 'paper_split_validation_force_one_cut=paper_split_validation_force_one_cut' in app
     assert 'csf_split_validation_forced_count' in core
     assert 'force_one_cut=bool(getattr(params,"paper_split_validation_force_one_cut",False))' in core
+
+
+
+def _example_area_split_grid(n=12, grid=8):
+    v, tri, uv = _grid_mesh(n=n)
+    g = np.linspace(-0.84, 0.84, grid+1)
+    xx, yy = np.meshgrid(g, g, indexing="ij")
+    xy = np.stack([xx.ravel(), yy.ravel()], axis=1)
+    quads = np.asarray([
+        [i*(grid+1)+j, (i+1)*(grid+1)+j,
+         (i+1)*(grid+1)+j+1, i*(grid+1)+j+1]
+        for i in range(grid) for j in range(grid)
+    ])
+    return v, tri, uv, xy, quads
+
+
+def test_fixed_chart_off_uses_original_omega_without_calling_bff():
+    """OFF scores the inherited UV; not a BFF call or a silent replacement UV."""
+    v, tri, uv, xy, quads = _example_area_split_grid()
+    def forbidden_bff(*_args):
+        raise AssertionError("reBFF was called despite OFF mode")
+    cuts, report = plan_reflatten_cuts(
+        xy, quads, v, tri, uv,
+        flatten=forbidden_bff, reflatten=False)
+    assert cuts == []
+    assert report["initial_sigma"] == pytest.approx(1.)
+    assert report["final_max_sigma"] == pytest.approx(1.)
+    assert report["reflatten_per_piece"] is False
+    assert report["evaluation_uv"] == "original_omega_fixed_chart"
+
+
+def test_fixed_chart_cut_uses_same_candidate_engine_and_real_area_ratio():
+    """One patch has much larger true 3D area; UV and tiles remain unchanged."""
+    v, tri, uv, xy, quads = _example_area_split_grid(n=24, grid=8)
+    v[:, 2] = 4.0 * np.maximum(v[:, 0], 0.0)
+    cuts, report = plan_reflatten_cuts(
+        xy, quads, v, tri, uv, reflatten=False, max_cuts=1)
+    assert report["initial_sigma"] > 2.
+    assert len(cuts) == len(report["steps"]) == 1
+    assert cuts[0]["axis"] in ("row", "col")
+    assert report["steps"][0]["parent_sigma"] == pytest.approx(report["initial_sigma"])
+    assert report["steps"][0]["validation_forced"] is False
+    assert report["reflatten_per_piece"] is False
+
+
+def test_fixed_chart_forced_cut_is_tagged_and_keeps_sigma_real():
+    """Existing validation switch exercises the same topology with reBFF OFF."""
+    v, tri, uv, xy, quads = _example_area_split_grid()
+    cuts, report = plan_reflatten_cuts(
+        xy, quads, v, tri, uv, reflatten=False, force_one_cut=True,
+        max_cuts=1)
+    assert len(cuts) == 1
+    assert cuts[0]["validation_forced"] is True
+    assert report["validation_cut_generated"] is True
+    assert report["initial_sigma"] == pytest.approx(1.)
+    assert report["final_max_sigma"] == pytest.approx(1., abs=1e-6)
+
+
+def test_fixed_chart_dispatch_and_rebff_dispatch_share_area_cut_owner(monkeypatch):
+    """Only criterion switches: no change to legacy fixed_uv."""
+    from types import SimpleNamespace
+    from onestring_physics import paper_mesh_splitting as splitting
+    from onestring_physics import paper_split_reflatten as engine
+
+    seen = []
+    def fixed(*args):
+        seen.append("fixed_chart")
+        return 17
+    def rebff(*args):
+        seen.append("rebff")
+        return 23
+    monkeypatch.setattr(engine, "split_mesh_fixed_chart_area", fixed)
+    monkeypatch.setattr(engine, "split_mesh_reflatten", rebff)
+    domain = SimpleNamespace(parameterization=SimpleNamespace(method="lscm_free_boundary"))
+    for criterion, expected in (("fixed_chart_tile_area",17),("reflatten_tile_area",23)):
+        params = SimpleNamespace(paper_split_criterion=criterion)
+        assert splitting.split_mesh(None,None,domain,params) == expected
+    assert seen == ["fixed_chart","rebff"]
+
+
+def test_fixed_chart_ui_toggle_and_result_metadata_are_wired():
+    root = Path(__file__).parents[1]
+    app = (root/"app_runtime_base.py").read_text()
+    engine = (root/"src/onestring_physics/paper_split_reflatten.py").read_text()
+    viz = (root/"src/onestring_physics/visualization.py").read_text()
+    assert 'key="split_area_enable_rebff"' in app
+    assert 'paper_split_criterion = "fixed_chart_tile_area"' in app
+    assert 'csf_split_bff_evaluation_enabled=bool(reflatten)' in engine
+    assert 'fixed_chart_area_cut=not bool(reflatten)' in engine
+    assert "record.get('fixed_chart_area_cut', False)" in viz
