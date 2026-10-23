@@ -3241,7 +3241,26 @@ elif view_stage == "Omega":
     _area_grid_metrics = state.surface_parameterization.metrics or {}
     if _area_grid_metrics.get("optcuts_area_grid_boundary_enabled",False):
         with st.expander("面積閾値Grid境界 → Ω再パラメータ化（結果）",expanded=True):
-            st.success("OptCutsのSeamを維持したまま、選択Gridセルの境界へΩを再写像しました。")
+            st.success("Grid-awareに選んだOptCutsのSeamを固定して、採用Grid境界へΩを再写像しました。")
+            if _area_grid_metrics.get("optcuts_area_grid_seam_selection_enabled", False):
+                st.write({
+                    "選択された公式OptCuts初期切断候補": _area_grid_metrics.get(
+                        "optcuts_area_grid_seam_selected_start"),
+                    "Grid-aware seam評価スコア": _area_grid_metrics.get(
+                        "optcuts_area_grid_seam_selected_score"),
+                    "比較した公式Seam候補数": _area_grid_metrics.get(
+                        "optcuts_area_grid_seam_candidate_count"),
+                })
+                with st.expander("OptCuts Seam候補のGrid形状・歪み比較", expanded=True):
+                    st.dataframe(_area_grid_metrics.get(
+                        "optcuts_area_grid_seam_ranking", []),
+                        use_container_width=True)
+                    st.caption(
+                        "実M2D格子上の凹角数、境界角数、周長、"
+                        "元OptCutsのSD/CSF/Seam長で候補を比較。"
+                        "一部候補の境界フィッティングが失敗した場合も記録。"
+                        "選択後のGrid位置と50%採用マスクは固定。"
+                    )
             st.write({
                 "Gridセル採用閾値": _area_grid_metrics.get(
                     "optcuts_area_grid_coverage_threshold"),
