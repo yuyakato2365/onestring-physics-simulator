@@ -208,7 +208,107 @@ def max_seam_gap(vertices,groups):
         for g in groups),default=0.)
 
 
-def fit_k3d_with_exact_pairs(vertices,quad_faces,groups,*,iterations=12):
+def _polish_seam_closed_smoothmax(vertices, faces, groups, *, weight, maxiter=70):
+    """Optimize real SmoothMax on exact-equivalence-reduced unknowns.
+
+    A feasible seam-closed, planarity-restored geometry is ALWAYS retained
+    as a rollback. An iterate is accepted only when the *actual* SmoothMax
+    energy decreases while the original quad-planarity tolerance is not
+    worsened; no approximate weld or relaxed planarity is accepted.
+    """
+    from scipy.optimize import minimize
+    from .optcuts_test_k3d_augmented_lagrangian_patch import (
+        _square_energy_and_gradient, _face_scales,
+        _robust_constraint_faces, _quad_constraint_values_and_gradient,
+        _quad_plane_distances,
+    )
+    baseline=np.asarray(vertices,float).copy()
+    quads=np.asarray(faces,int)
+    scales=_face_scales(baseline,quads)
+    robust,_=_robust_constraint_faces(baseline,quads)
+    dist0=_quad_plane_distances(baseline,robust)
+    ref_max=float(np.max(dist0)) if len(dist0) else 0.
+    square_before=float(_square_energy_and_gradient(
+        baseline,quads,scales,weight)[0])
+    edge_scale=float(np.median(scales)) if len(scales) else 1.
+    max_planarity=max(ref_max*1.005,edge_scale*1e-6,1e-10)
+    # Exact equality is enforced through a quotient of the vertex-index set.
+    # Each original pair of seam copies is a single optimizer unknown.
+    parent=np.arange(len(baseline),dtype=int)
+    def find(i):
+        i=int(i)
+        while parent[i]!=i:
+            parent[i]=parent[parent[i]]
+            i=int(parent[i])
+        return i
+    for group in groups:
+        root=find(group[0])
+        for i in group[1:]:
+            parent[find(i)]=root
+    roots=np.asarray([find(i) for i in range(len(baseline))],int)
+    _,inverse=np.unique(roots,return_inverse=True)
+    n=int(np.max(inverse)+1)
+    def unpack(z):
+        return np.asarray(z,float).reshape(n,3)[inverse]
+    def pack_grad(grad):
+        out=np.zeros((n,3),float)
+        np.add.at(out,inverse,grad)
+        return out.ravel()
+    x0=np.zeros((n,3),float)
+    np.add.at(x0,inverse,baseline)
+    counts=np.bincount(inverse,minlength=n).astype(float)
+    x0/=counts[:,None]
+    # The source is an already seam-closed and almost planar K3D; penalize
+    # normalized triple-products strongly and retain a weak K3D reference.
+    planar_weight=max(1000.,100.*float(weight))
+    anchor_weight=.05*float(weight)
+    nf=max(len(quads),1)
+    def objective(z):
+        v=unpack(z)
+        energy,grad,_=_square_energy_and_gradient(v,quads,scales,weight)
+        c,cg=_quad_constraint_values_and_gradient(v,robust,scales)
+        energy+=.5*planar_weight*float(np.dot(c,c))/nf
+        g=planar_weight*c[:,None,None]*cg/nf
+        for local in range(4):
+            np.add.at(grad,robust[:,local],g[:,local])
+        delta=v-baseline
+        normalizer=max(edge_scale*edge_scale,1e-18)
+        energy+=.5*anchor_weight*float(np.sum(delta*delta))/normalizer/nf
+        grad+=anchor_weight*delta/normalizer/nf
+        return float(energy),pack_grad(grad)
+    # The solver objective penalizes infeasible intermediate states, but
+    # only the final fully audited geometry is allowed to replace baseline.
+    result=minimize(
+        objective,x0.ravel(),method="L-BFGS-B",jac=True,
+        options={"maxiter":int(maxiter),"ftol":1e-11,"gtol":1e-8,"maxls":35},
+    )
+    trial=unpack(result.x)
+    trial_max=float(np.max(_quad_plane_distances(trial,robust)))
+    square_after=float(_square_energy_and_gradient(trial,quads,scales,weight)[0])
+    accepted=bool(np.isfinite(trial).all()
+                  and trial_max<=max_planarity
+                  and square_after<square_before-1e-10
+                  and max_seam_gap(trial,groups)<=1e-12)
+    chosen=trial if accepted else baseline
+    return chosen,{
+        "k3d_seam_smoothmax_attempted":True,
+        "k3d_seam_smoothmax_accepted":accepted,
+        "k3d_seam_smoothmax_weight":float(weight),
+        "k3d_seam_smoothmax_energy_before":square_before,
+        "k3d_seam_smoothmax_energy_trial":square_after,
+        "k3d_seam_smoothmax_energy_final":(
+            square_after if accepted else square_before
+        ),
+        "k3d_seam_smoothmax_planarity_limit":max_planarity,
+        "k3d_seam_smoothmax_planarity_trial":trial_max,
+        "k3d_seam_smoothmax_iterations":int(result.nit),
+        "k3d_seam_smoothmax_solver_success":bool(result.success),
+    }
+
+
+def fit_k3d_with_exact_pairs(
+    vertices,quad_faces,groups,*,iterations=12,square_weight=0.
+):
     """Restore planar quads while enforcing exact vertex equality each step.
 
     Uses the same local best-plane / global least squares model as the
@@ -230,10 +330,20 @@ def fit_k3d_with_exact_pairs(vertices,quad_faces,groups,*,iterations=12):
     gap=max_seam_gap(v,groups)
     if not np.isfinite(v).all() or gap>1e-10:
         raise SeamTopologyMismatch("SEAM_K3D_HARD_EQUALITY_NUMERICAL_FAILURE")
-    return v,{"seam_k3d_gap_before":max_seam_gap(vertices,groups),
-              "seam_k3d_gap_after":gap,
-              "seam_k3d_planarity_before":before,
-              "seam_k3d_planarity_after":after}
+    diagnostics={"seam_k3d_gap_before":max_seam_gap(vertices,groups),
+                 "seam_k3d_planarity_before":before}
+    if float(square_weight)>0.:
+        v,post_metrics=_polish_seam_closed_smoothmax(
+            v,faces,groups,weight=float(square_weight)
+        )
+        diagnostics.update(post_metrics)
+        after=_planarity_error(v,faces)
+        gap=max_seam_gap(v,groups)
+    diagnostics.update({
+        "seam_k3d_gap_after":gap,
+        "seam_k3d_planarity_after":after,
+    })
+    return v,diagnostics
 
 
 def install_optcuts_exact_seam_closure(pipeline):
@@ -289,7 +399,8 @@ def install_optcuts_exact_seam_closure(pipeline):
                 "real original OptCuts cut has no coincident Grid samples"
             )
         result,diag=fit_k3d_with_exact_pairs(
-            out.vertices,out.faces,groups
+            out.vertices,out.faces,groups,
+            square_weight=max(0.,float(getattr(params,"w_square",10.))),
         )
         out.vertices[:]=result
         out.metrics.update(diag)
@@ -302,7 +413,10 @@ def install_optcuts_exact_seam_closure(pipeline):
             f"{len(groups)} matched_edges={len(topo['paired_edges'])} "
             f"gap_before={diag['seam_k3d_gap_before']:.6g} "
             f"gap_after={diag['seam_k3d_gap_after']:.6g} "
-            f"quad_planarity_after={diag['seam_k3d_planarity_after']:.6g}",
+            f"quad_planarity_after={diag['seam_k3d_planarity_after']:.6g} "
+            f"smoothmax_accepted={diag.get('k3d_seam_smoothmax_accepted',False)} "
+            f"smoothmax_before={diag.get('k3d_seam_smoothmax_energy_before',0.):.6g} "
+            f"smoothmax_final={diag.get('k3d_seam_smoothmax_energy_final',0.):.6g}",
             flush=True,
         )
         return out,report
