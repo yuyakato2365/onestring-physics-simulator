@@ -57,6 +57,7 @@ from onestring_physics.optcuts_k3d_validity_patch import install_optcuts_k3d_val
 from onestring_physics.optcuts_k3d_preflight_patch import install_optcuts_k3d_preflight_patch  # noqa: E402
 from onestring_physics.optcuts_visualization_compat_patch import install_optcuts_visualization_compat_patch  # noqa: E402
 from onestring_physics.optcuts_source_seam_visualization_patch import install_optcuts_source_seam_visualization_patch  # noqa: E402
+from onestring_physics.optcuts_seam_exact_closure import install_optcuts_exact_seam_closure  # noqa: E402
 from onestring_physics.optcuts_grid_seam_patch import install_optcuts_seam_metadata_patch  # noqa: E402
 from onestring_physics.optcuts_seam_extraction_patch import install_robust_optcuts_seam_extraction  # noqa: E402
 from onestring_physics.optcuts_rectilinear_seam_patch import install_optcuts_rectilinear_seam_patch  # noqa: E402
@@ -397,6 +398,10 @@ _install_m2d_after_simple_split()
 # Outermost runtime-budget wrapper.  It is a no-op unless the visible selector
 # chose optcuts_test2 (ONESTRING_OPTCUTS_TEST_VARIANT=2).
 install_optcuts_test2_acceleration_patch(pipeline)
+# Outermost K3D and M3D hooks: enforce exact *paired* source-Seam edge
+# equality after every other K3D optimization wrapper. T3D consumes the
+# same hard equality groups in its shared top/bottom Eq.(2) solve.
+install_optcuts_exact_seam_closure(pipeline)
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
