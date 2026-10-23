@@ -831,3 +831,76 @@ def test_correspondence_search_can_use_ear_aware_corner_assignment():
             uv,faces,np.arange(6),mapped)["bad_ids"])
         for _,_,mapped,_ in ranked
     )
+
+
+
+def test_collapsed_ear_raises_recoverable_exception_then_reassigns_grid_corner():
+    """Do not just skip a UV ear that becomes a straight Grid segment."""
+    from onestring_physics.optcuts_grid_ear_correspondence import (
+        FixedBoundaryEarCollapseError,
+        map_boundary_with_corner_indices,
+        require_noncollapsed_boundary_ears,
+        recover_boundary_ear_correspondences,
+    )
+    uv=np.array([
+        [0.,0.],[1.,-.4],[2.,0.],[2.,1.],[1.1,2.],[0.,1.],[1.,.7]
+    ])
+    f=np.array([
+        [0,1,2],[0,2,6],[2,3,6],[3,4,6],[4,5,6],[5,0,6]
+    ],int)
+    loop=np.arange(6)
+    corners=np.array([[0.,0.],[2.,0.],[2.,2.],[0.,2.]])
+    edge=np.linalg.norm(
+        np.roll(uv[loop],-1,axis=0)-uv[loop],axis=1)
+    orig=[0,3,4,5]
+    target=map_boundary_with_corner_indices(uv[loop],edge,corners,orig)
+    with pytest.raises(FixedBoundaryEarCollapseError) as captured:
+        require_noncollapsed_boundary_ears(uv,f,loop,target)
+    assert 0 in captured.value.face_ids
+    before_uv=uv.copy()
+    before_faces=f.copy()
+    options=recover_boundary_ear_correspondences(
+        uv,f,loop,corners,orig,edge)
+    assert options
+    for option in options:
+        fixed=require_noncollapsed_boundary_ears(
+            uv,f,loop,option["mapped"])
+        assert len(fixed["bad_ids"])==0
+        assert min(fixed["ratios"])>=.005
+        assert all(
+            b>a for a,b in zip(option["indices"],option["indices"][1:]))
+        for corner in corners:
+            assert min(np.linalg.norm(
+                option["mapped"]-corner,axis=1)) < 1e-10
+        assert option["edits"]
+    np.testing.assert_array_equal(uv,before_uv)
+    np.testing.assert_array_equal(f,before_faces)
+
+
+def test_exception_recovery_only_changes_correspondence_not_surface():
+    """Multiple trials must not introduce invented Grid/cut geometry."""
+    from onestring_physics.optcuts_area_grid_boundary import (
+        _boundary_target_candidates,
+    )
+    from onestring_physics.optcuts_grid_ear_correspondence import (
+        require_noncollapsed_boundary_ears,
+    )
+    uv=np.array([
+        [0.,0.],[1.,-.4],[2.,0.],[2.,1.],[1.1,2.],[0.,1.],[1.,.7]
+    ])
+    f=np.array([
+        [0,1,2],[0,2,6],[2,3,6],[3,4,6],[4,5,6],[5,0,6]
+    ],int)
+    outline=np.array([[0.,0.],[2.,0.],[2.,2.],[0.,2.]])
+    original_uv=uv.copy()
+    candidates=_boundary_target_candidates(
+        uv,np.arange(6),outline,max_phases=4,faces=f)
+    assert any("ear_exception_recovered" in name
+               for _,_,_,name in candidates)
+    for _,_,mapped,_ in candidates:
+        require_noncollapsed_boundary_ears(
+            uv,f,np.arange(6),mapped)
+        for target_corner in outline:
+            assert np.any(np.linalg.norm(
+                mapped-target_corner,axis=1) < 1e-9)
+    np.testing.assert_array_equal(uv,original_uv)
