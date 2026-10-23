@@ -61,3 +61,46 @@ def test_grid_aware_is_a_separate_omega_selector_mode_not_checkbox():
     assert not t.exception, [str(x.message) for x in t.exception]
     assert t.session_state["_onestring_grid_aware_omega_selected"] is False
     assert not any(x.label=="Grid整列の強さ（実験）" for x in t.sidebar.slider)
+
+
+
+def test_area_threshold_grid_boundary_is_selectable_and_slider_is_independent():
+    """Paper-OFF mode selection and 50% slider are actually interactive."""
+    from streamlit.testing.v1 import AppTest
+    app=Path(__file__).parents[1]/"app_optcuts_20260923_extrusion_aware.py"
+    t=AppTest.from_file(str(app),default_timeout=30).run()
+    assert not t.exception, [str(x.message) for x in t.exception]
+    paper=[x for x in t.sidebar.checkbox
+           if x.label=="Paper-oriented computation mode (2025 Sec.4–5)"]
+    assert len(paper)==1
+    paper[0].set_value(False)
+    t.run()
+    assert not t.exception, [str(x.message) for x in t.exception]
+    modes=[x for x in t.sidebar.selectbox
+           if x.label=="Omega parameterization mode"]
+    assert len(modes)==1
+    candidate=[x for x in modes[0].options
+               if "Area-Threshold Grid Boundary" in x]
+    assert len(candidate)==1
+    modes[0].set_value(candidate[0])
+    t.run()
+    assert not t.exception, [str(x.message) for x in t.exception]
+    assert t.session_state["_onestring_area_grid_boundary_omega_selected"] is True
+    th=[x for x in t.sidebar.slider
+        if x.label=="GridセルのΩ内面積割合・採用閾値"]
+    assert len(th)==1
+    assert float(th[0].value)==.5
+    th[0].set_value(.65)
+    t.run()
+    assert not t.exception, [str(x.message) for x in t.exception]
+    assert float(t.session_state["optcuts_area_grid_coverage_threshold"])==.65
+    modes=[x for x in t.sidebar.selectbox
+           if x.label=="Omega parameterization mode"]
+    baseline=[x for x in modes[0].options if "2026-09-18" in x]
+    assert len(baseline)>0
+    modes[0].set_value(baseline[0])
+    t.run()
+    assert not t.exception, [str(x.message) for x in t.exception]
+    assert t.session_state["_onestring_area_grid_boundary_omega_selected"] is False
+    assert not any(x.label=="GridセルのΩ内面積割合・採用閾値"
+                   for x in t.sidebar.slider)
