@@ -909,6 +909,9 @@ def test_exception_recovery_only_changes_correspondence_not_surface():
 
 def _distortion_retry_fixture(monkeypatch, *, second_mean_sd=4.5):
     """Synthetic fixed-grid trial: first fit bijective but high distortion."""
+    # These older tests isolate the correspondence fallback from the
+    # separate SD-refinement feature (their fake quality lacks SD geometry).
+    monkeypatch.setenv("ONESTRING_GRID_SD_REFINEMENT","0")
     from onestring_physics.optcuts_area_grid_boundary import (
         GridBoundaryReparameterizationError,
     )
