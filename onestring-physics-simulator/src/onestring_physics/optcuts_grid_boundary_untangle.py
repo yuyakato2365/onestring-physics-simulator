@@ -97,12 +97,16 @@ def untangle_fixed_boundary(base,faces,loop,target,harmonic,previous=None):
     return out,diag
 
 
-def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess):
+def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess,*,on_failure=None):
     """Refit at adaptive boundary positions; never suppress an invalid result."""
     progress=0.
     step=.25
     last=np.asarray(base,float).copy()
     history=[]
+    # Capture the last rejected step for failure-only visual diagnosis.
+    rejected_uv=None
+    rejected_harmonic_uv=None
+    rejected_fraction=None
     started = time.monotonic()
     last_progress_log = started
     print(
@@ -150,6 +154,9 @@ def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess):
             progress=fraction
             step=min(.3,step*1.4)
         else:
+            rejected_uv=np.asarray(candidate,float).copy()
+            rejected_harmonic_uv=np.asarray(harmonic,float).copy()
+            rejected_fraction=float(fraction)
             step*=.5
         now=time.monotonic()
         if (now-last_progress_log>=10. or progress>=1.-1e-9):
@@ -185,10 +192,35 @@ def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess):
         f"elapsed={time.monotonic()-started:.1f}s",
         flush=True,
     )
+    saved_diagnosis=""
+    if on_failure is not None and rejected_uv is not None:
+        try:
+            path=on_failure(
+                base=np.asarray(base,float),
+                faces=np.asarray(faces,int),
+                loop=np.asarray(loop,int),
+                mapped=np.asarray(mapped,float),
+                last=np.asarray(last,float),
+                rejected=rejected_uv,
+                harmonic=rejected_harmonic_uv,
+                rejected_fraction=rejected_fraction,
+                progress=float(progress),
+                history=history,
+            )
+            if path:
+                saved_diagnosis=f"; diagnostic_bundle={path}"
+        except Exception as diag_exc:
+            # Do not let diagnostics I/O hide the original solver error.
+            print(
+                "[GRID-DIAG] save_failed="
+                f"{type(diag_exc).__name__}: {diag_exc}",
+                flush=True,
+            )
     raise ValueError(
         "GRID_BOUNDARY_BIJECTIVE_MAPPING_NOT_FOUND: "
         f"last_valid_fraction={progress:.5g}"
         +diagnostic
+        +saved_diagnosis
         +"; current matching and numerical continuation did not yield "
          "a nonoverlapping UV map (not an infeasibility proof)"
     )
