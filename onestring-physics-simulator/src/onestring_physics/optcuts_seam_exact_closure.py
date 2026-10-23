@@ -610,7 +610,44 @@ def install_optcuts_exact_seam_closure(pipeline):
         if (str(getattr(parameterization,"method",""))=="optcuts_test"
                 and bool(parameterization.metrics.get(
                     "optcuts_area_grid_boundary_enabled",False))):
-            out._seam_original_m2d_uv=np.asarray(mesh.vertices,float)[:,:2].copy()
+            uv=np.asarray(mesh.vertices,float)[:,:2].copy()
+            out._seam_original_m2d_uv=uv
+            # Certify the FULL M2D boundary topology *before* K3D. A
+            # conforming source-Seam pair can be constrained during the
+            # actual AL/SmoothMax solve, not merely welded afterward.
+            topo=discover_exact_seam_topology(
+                parameterization,uv,np.asarray(mesh.faces,int)
+            )
+            if (topo["status"]=="conforming" and
+                    topo.get("seam_grid_edges",0)>0 and
+                    topo.get("groups")):
+                out.metrics["seam_exact_vertex_groups"]=[
+                    list(map(int,g)) for g in topo["groups"]
+                ]
+                out.metrics["seam_exact_preflight_certified"]=True
+                out.metrics["seam_exact_preflight_paired_edges"]=len(
+                    topo["paired_edges"]
+                )
+                print(
+                    "[SEAM-K3D-PREFLIGHT] "
+                    f"groups={len(topo['groups'])} "
+                    f"matched_edges={len(topo['paired_edges'])} "
+                    "AL_hard_equality_ready=True",
+                    flush=True,
+                )
+            else:
+                # Do NOT pass uncertified vertex groups to SmoothMax AL.
+                # The existing strict topology audit after K3D still
+                # rejects unclassified or nonconforming boundaries.
+                out.metrics["seam_exact_preflight_certified"]=False
+                print(
+                    "[SEAM-K3D-PREFLIGHT] "
+                    f"status={topo['status']} "
+                    f"unmatched={topo.get('unmatched_edges',0)} "
+                    f"unclassified={topo.get('unclassified_boundary_edges',0)} "
+                    "AL_hard_equality_ready=False",
+                    flush=True,
+                )
         return out,report
 
     def optimize(target,mesh,parameterization,params):
