@@ -208,8 +208,10 @@ def _boundary_target_candidates(uv,loop,outline,max_phases=48,*,faces=None):
     displacement without changing the prescribed target outline.
     """
     from .optcuts_grid_ear_correspondence import (
-        fixed_boundary_ear_report, map_boundary_with_corner_indices,
-        repair_boundary_ears,
+        FixedBoundaryEarCollapseError,
+        map_boundary_with_corner_indices,
+        require_noncollapsed_boundary_ears,
+        recover_boundary_ear_correspondences,
     )
     old=np.asarray(uv,float)[np.asarray(loop,int)]
     new=np.asarray(outline,float)
@@ -232,6 +234,9 @@ def _boundary_target_candidates(uv,loop,outline,max_phases=48,*,faces=None):
     ranked=[]
     impossible_count=0
     repaired_count=0
+    recovery_candidates=0
+    unrecoverable_count=0
+    forced_bad_faces=set()
     for phase in phases:
         corners=np.roll(new,-phase,axis=0)
         lengths=np.linalg.norm(np.roll(corners,-1,axis=0)-corners,axis=1)
@@ -252,32 +257,40 @@ def _boundary_target_candidates(uv,loop,outline,max_phases=48,*,faces=None):
             mapped=map_boundary_with_corner_indices(
                 old,old_length,corners,selected_indices)
             if not np.isfinite(mapped).all():continue
-            if faces is not None:
-                # Necessary endpoint check: a triangle whose ALL vertices
-                # lie on the UV boundary has NO interior degree of freedom.
-                # It must not become collinear or inverted at the exact
-                # snapped Grid outline. No numerical optimizer can repair
-                # a zero-area triangle after its three vertices are fixed.
-                audit=fixed_boundary_ear_report(
-                    uv,faces,loop,mapped,ratio_min=.005)
-                if len(audit["bad_ids"]):
-                    impossible_count+=1
-                    repaired, _assigned, edits, after=repair_boundary_ears(
-                        uv,faces,loop,corners,selected_indices,old_length,
-                        ratio_min=.005)
-                    if len(after["bad_ids"]):
-                        continue
-                    mapped=repaired
-                    method=method+"_ear_safe"
-                    repaired_count+=1
-            sq=np.sum((mapped-old)**2,axis=1)
-            score=float(sq.mean()+.15*sq.max())
-            ranked.append((score,int(phase),mapped,method))
+            try:
+                if faces is not None:
+                    # A forced-zero-area triangle is a recoverable boundary
+                    # CORRESPONDENCE exception, not an optimizer error.
+                    # The 3D mesh, UV faces, target Grid and area guards
+                    # remain unchanged.
+                    require_noncollapsed_boundary_ears(
+                        uv,faces,loop,mapped,ratio_min=.005)
+                corrected=[(mapped,method)]
+            except FixedBoundaryEarCollapseError as collapse:
+                impossible_count+=1
+                forced_bad_faces.update(collapse.face_ids)
+                choices=recover_boundary_ear_correspondences(
+                    uv,faces,loop,corners,selected_indices,old_length,
+                    ratio_min=.005,max_solutions=3)
+                if not choices:
+                    unrecoverable_count+=1
+                    continue
+                repaired_count+=1
+                recovery_candidates+=len(choices)
+                corrected=[
+                    (option["mapped"],method+
+                     f"_ear_exception_recovered_{i+1}")
+                    for i,option in enumerate(choices)]
+            for output,method_name in corrected:
+                sq=np.sum((output-old)**2,axis=1)
+                score=float(sq.mean()+.15*sq.max())
+                ranked.append((score,int(phase),output,method_name))
     if not ranked:
         if faces is not None and impossible_count:
             raise GridBoundaryReparameterizationError(
                 "GRID_BOUNDARY_NO_EAR_FEASIBLE_CORRESPONDENCE: "
                 f"invalid_original_candidates={impossible_count}; "
+                f"worst_constrained_face_ids={sorted(forced_bad_faces)[:12]}; "
                 "all attempted ordered corner matches force at least "
                 "one fully boundary-constrained triangle below its 0.005 "
                 "signed-area ratio guard, even after local ordered "
@@ -293,6 +306,9 @@ def _boundary_target_candidates(uv,loop,outline,max_phases=48,*,faces=None):
             "[GRID-EAR-PREFLIGHT] "
             f"invalid_raw_matches={impossible_count}; "
             f"ear_safe_repaired={repaired_count}; "
+            f"recovery_variants={recovery_candidates}; "
+            f"unrecoverable={unrecoverable_count}; "
+            f"forced_bad_face_ids={sorted(forced_bad_faces)[:12]}; "
             f"eligible_correspondences={len(ranked)}",
             flush=True,
         )
