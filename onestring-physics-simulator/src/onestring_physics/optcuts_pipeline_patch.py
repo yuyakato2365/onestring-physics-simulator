@@ -53,7 +53,7 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be true/false; got {raw!r}")
 
 
-def _config_from_params(params: Any) -> OptCutsConfig:
+def _config_from_params(params: Any, grid: Any = None) -> OptCutsConfig:
     executable = getattr(params, "optcuts_executable", None)
     if not executable:
         executable = os.environ.get("ONESTRING_OPTCUTS_EXECUTABLE") or None
@@ -85,6 +85,14 @@ def _config_from_params(params: Any) -> OptCutsConfig:
         csf_tail_sharpness=float(getattr(params, "optcuts_csf_tail_sharpness", _env_float("ONESTRING_OPTCUTS_CSF_TAIL_SHARPNESS", 20.0))),
         csf_tail_weight=float(getattr(params, "optcuts_csf_tail_weight", _env_float("ONESTRING_OPTCUTS_CSF_TAIL_WEIGHT", 8.0))),
         csf_tail_maxiter=int(getattr(params, "optcuts_csf_tail_maxiter", _env_int("ONESTRING_OPTCUTS_CSF_TAIL_MAXITER", 30))),
+        grid_aware_enabled=(
+            str(getattr(params, "omega_parameterization_mode", ""))=="optcuts"
+            and not bool(getattr(params, "paper_fidelity_mode", False))
+            and bool(getattr(params, "optcuts_grid_aware_enabled", False))
+        ),
+        grid_aware_nx=int(getattr(grid, "nx", 20)),
+        grid_aware_ny=int(getattr(grid, "ny", 20)),
+        grid_aware_strength=float(getattr(params, "optcuts_grid_aware_strength", 3.0)),
     )
 
 
@@ -156,13 +164,13 @@ def _build_optcuts_parameterization(
     params: Any,
     requested_mode: str = "optcuts",
 ):
-    del target, grid
+    del target
     if requested_mode not in {"optcuts", "optcuts_grid"}:
         raise ValueError(f"unsupported OptCuts mode: {requested_mode}")
 
     surface_vertices = np.asarray(surface.vertices, dtype=float)
     surface_faces = np.asarray(surface.faces, dtype=int)[:, :3]
-    result = run_official_optcuts(surface_vertices, surface_faces, _config_from_params(params))
+    result = run_official_optcuts(surface_vertices, surface_faces, _config_from_params(params,grid))
     loop = [int(v) for v in result.boundary_loops[0]]
     boundary = result.uv_vertices_2d[loop + [loop[0]]]
 
