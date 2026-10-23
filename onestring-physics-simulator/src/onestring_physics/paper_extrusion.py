@@ -149,6 +149,18 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         from .extrusion_aware import geometry_view
         mapping = np.asarray(mapping, int)
         view = geometry_view(mesh, mapping)
+        # Geometry-view reindexes K3D vertex IDs. Preserve the exact seam
+        # equality constraints in that reduced geometry; otherwise Paper
+        # T3D would silently lose them despite closed K3D seams.
+        source_seam_groups=(getattr(mesh,"metrics",{}) or {}).get(
+            "seam_exact_vertex_groups",[]
+        )
+        if source_seam_groups:
+            reduced_groups=[]
+            for group in source_seam_groups:
+                reduced=sorted({int(mapping[int(i)]) for i in group})
+                if len(reduced)>1:reduced_groups.append(reduced)
+            view.metrics["seam_exact_vertex_groups"]=reduced_groups
         assembly, report = extrude_paper_face_planarity(view, thickness, stage, pipeline)
         mesh.vertices = view.vertices[mapping].copy()
         mesh.metrics.update(view.metrics)
