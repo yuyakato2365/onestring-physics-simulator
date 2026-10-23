@@ -570,6 +570,14 @@ def split_mesh_reflatten(vertices,faces,domain,params=None,*,reflatten=True):
                 boundary_policy="automatic_reference",timeout_seconds=timeout)
             return np.asarray(result.uv_vertices,float)
     apply_to_m2d=bool(getattr(params,"paper_split_apply_rebff_m2d",False))
+    # Manufacturing UV deformation is a PAPER-ONLY opt-in experiment.
+    # Split evaluation reBFF remains available in Paper OFF unchanged.
+    if apply_to_m2d and not bool(getattr(params,"paper_fidelity_mode",False)):
+        raise ValueError(
+            "POSTCUT_REBFF_M2D_PAPER_ONLY: this experimental geometry "
+            "change is restricted to Paper mode. Paper OFF / OptCuts "
+            "must retain their original M2D and K2D behavior."
+        )
     if apply_to_m2d and not reflatten:
         raise ValueError("Manufacturing M2D reBFF needs the reBFF CSF evaluation enabled")
     leaf_charts=[] if apply_to_m2d else None
