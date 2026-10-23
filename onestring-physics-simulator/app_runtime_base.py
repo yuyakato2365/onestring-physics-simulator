@@ -3003,8 +3003,8 @@ elif view_stage == "Split Map":
             else:
                 st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
             st.dataframe(_split_rows, hide_index=True, width="stretch")
-            if state.mesh_2d_initial.metrics.get("csf_split_criterion") == "reflatten_tile_area":
-                with st.expander("再展開SplitのM3D形状と切断線を3D表示", expanded=False):
+            if state.mesh_2d_initial.metrics.get("csf_split_criterion") in ("reflatten_tile_area", "fixed_chart_tile_area"):
+                with st.expander("面積比SplitのM3D形状と切断線を3D表示", expanded=False):
                     from onestring_physics.reflatten_split_view import figure_reflatten_split_3d
                     _ref_3d, _ref_pieces = figure_reflatten_split_3d(state, _split_step)
                     if _ref_3d is None:
@@ -3013,8 +3013,9 @@ elif view_stage == "Split Map":
                         st.plotly_chart(_ref_3d, use_container_width=True,
                                         key=f"reflatten_original_m3d_{_split_step}")
                         st.dataframe(_ref_pieces, hide_index=True, width="stretch")
-                        st.caption("表示は最終パネルではなく、元のΩ格子から持ち上げたM3Dです。"
-                                   "再展開UVは評価専用で、製造用パネル形状を変更しません。")
+                        st.caption("表示は元のΩ格子から持ち上げたM3Dです。"
+                                   "再BFFがONの場合も新しいUVは評価専用で、"
+                                   "製造用M2Dの頂点座標は変更しません。")
             _split_model = state.mesh_2d_initial.metrics.get("csf_split_criterion")
             if _split_model == "reflatten_tile_area":
                 st.caption(
@@ -3022,8 +3023,14 @@ elif view_stage == "Split Map":
                     "タイルごとの3D/2D面積比の最大/最小でCSF相当量を評価しています。"
                     "最終パネルは元のΩ格子に固定しています。著者実装との一致は未確認です。"
                 )
+            elif _split_model == "fixed_chart_tile_area":
+                st.caption(
+                    "再BFF OFF：初期ΩのUVを3Dピースにそのまま引き継ぎ、"
+                    "タイルごとの3D/2D面積比の最大/最小 ≤ 2で判定しています。"
+                    "再展開は行いません。初期Ωが非等角なら線形CSFの保証ではありません。"
+                )
             else:
-                st.caption("CSFは現在のUV写像に基づく評価値です。")
+                st.caption("既存の固定UV方式です。面積比モードとはCSF計算が異なります。")
             _split_metrics = state.mesh_2d_initial.metrics
             _split_unresolved = int(_split_metrics.get("csf_split_unresolved_component_count", 0) or 0)
             if _split_unresolved:
