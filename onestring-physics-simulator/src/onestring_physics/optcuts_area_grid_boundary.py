@@ -140,11 +140,63 @@ def _sarea(points):
                       np.dot(pts[:,1],np.roll(pts[:,0],-1)))
 
 
-def _boundary_target_candidates(uv,loop,outline,max_phases=48):
-    """Ordered cyclic correspondence minimizing TOTAL displacement.
+def _monotone_corner_indices_dp(old, old_t, corners, times):
+    """Order-preserving landmark matching rather than an arc-length-only guess.
 
-    The former 'nearest corner to loop[0]' fit can rotate the entire
-    staircase relative to the OptCuts seam; this frequently folds at 25%.
+    The first source boundary vertex stays anchored to the first target
+    corner; the caller searches cyclic phases separately. Each later corner
+    gets a distinct boundary vertex, minimizing geometric corner mismatch
+    with a weak arc-length regularizer. This changes neither the target cell
+    mask nor the source UV/3D topology.
+    """
+    n, m = len(old), len(corners)
+    if n == m:
+        return list(range(n))
+    scale = max(float(np.ptp(old, axis=0).max()),
+                float(np.ptp(corners, axis=0).max()), 1e-8)
+    weight = .05 * scale * scale
+    previous = np.full(n, np.inf)
+    previous[0] = 0.
+    predecessor = np.full((m, n), -1, int)
+    for j in range(1, m):
+        current = np.full(n, np.inf)
+        local = np.sum((old - corners[j])**2, axis=1)
+        local += weight * (old_t - times[j])**2
+        best_value = float("inf")
+        best_index = -1
+        # All earlier corners must occupy distinct vertices and all later
+        # corners must retain at least one available vertex.
+        for i in range(j, n - (m - j) + 1):
+            k = i - 1
+            if previous[k] < best_value:
+                best_value = float(previous[k])
+                best_index = k
+            if best_index >= 0 and np.isfinite(best_value):
+                current[i] = best_value + local[i]
+                predecessor[j, i] = best_index
+        previous = current
+    k = int(np.argmin(previous))
+    if not np.isfinite(previous[k]):
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_DP_CORRESPONDENCE_FAILED"
+        )
+    indices = [0] * m
+    for j in range(m - 1, 0, -1):
+        indices[j] = k
+        k = int(predecessor[j, k])
+    if k != 0:
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_DP_BACKTRACK_FAILED"
+        )
+    return indices
+
+
+def _boundary_target_candidates(uv,loop,outline,max_phases=48):
+    """Search cyclic phases and two strictly order-preserving corner fits.
+
+    The arc-length fit can assign an awkward source vertex to a concave grid
+    corner. A dynamic-programming candidate also minimizes landmark
+    displacement without changing the prescribed target outline.
     """
     old=np.asarray(uv,float)[np.asarray(loop,int)]
     new=np.asarray(outline,float)
@@ -176,17 +228,23 @@ def _boundary_target_candidates(uv,loop,outline,max_phases=48):
             if idx<=indices[-1]: break
             indices.append(idx)
         if len(indices)!=m: continue
-        mapped=np.empty_like(old)
-        for j in range(m):
-            start=indices[j]
-            end=indices[j+1] if j<m-1 else n
-            segment=old_length[start:end]
-            fraction=np.r_[0.,np.cumsum(segment[:-1])]/max(float(segment.sum()),1e-12)
-            mapped[start:end]=corners[j]+fraction[:,None]*(corners[(j+1)%m]-corners[j])
-        if not np.isfinite(mapped).all():continue
-        sq=np.sum((mapped-old)**2,axis=1)
-        score=float(sq.mean()+.15*sq.max())
-        ranked.append((score,int(phase),mapped))
+        options=[("arclength",indices)]
+        if n>m:
+            dp_indices=_monotone_corner_indices_dp(old,old_t,corners,times)
+            if dp_indices!=indices:
+                options.append(("corner_dp",dp_indices))
+        for method,selected_indices in options:
+            mapped=np.empty_like(old)
+            for j in range(m):
+                start=selected_indices[j]
+                end=selected_indices[j+1] if j<m-1 else n
+                segment=old_length[start:end]
+                fraction=np.r_[0.,np.cumsum(segment[:-1])]/max(float(segment.sum()),1e-12)
+                mapped[start:end]=corners[j]+fraction[:,None]*(corners[(j+1)%m]-corners[j])
+            if not np.isfinite(mapped).all():continue
+            sq=np.sum((mapped-old)**2,axis=1)
+            score=float(sq.mean()+.15*sq.max())
+            ranked.append((score,int(phase),mapped,method))
     if not ranked:
         raise GridBoundaryReparameterizationError(
             "GRID_BOUNDARY_ORDERED_CORRESPONDENCE_FAILED"
@@ -410,19 +468,26 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     # Keep the SAME selected cell union, change only cyclic vertex matching.
     phase_errors=[]
     chosen_phase=None
+    chosen_method=None
     history=[]
-    for _cost,phase,mapped in boundary_candidates[:min(6,len(boundary_candidates))]:
+    # The former 6-candidate shortlist could fail without trying the
+    # geometrically better monotone corner assignments. Keep a bounded,
+    # explicitly audited search instead of silently changing the cell mask.
+    for _cost,phase,mapped,method in boundary_candidates[:min(12,len(boundary_candidates))]:
         try:
             result,history=fit_by_continuation(
                 base,faces,loop,mapped,_harmonic_dirichlet,assess)
             chosen_phase=int(phase)
+            chosen_method=str(method)
             break
         except ValueError as exc:
-            phase_errors.append(f"phase={phase}: {exc}")
+            phase_errors.append(f"phase={phase}, fit={method}: {exc}")
     if result is None:
         raise GridBoundaryReparameterizationError(
-            "GRID_BOUNDARY_ALL_MONOTONE_CORRESPONDENCES_FAILED: "
-            + " | ".join(phase_errors[-3:])
+            f"GRID_BOUNDARY_ALL_MONOTONE_CORRESPONDENCES_FAILED: "
+            f"attempted={len(phase_errors)} / {len(boundary_candidates)}, "
+            f"remaining_untried={len(boundary_candidates)-len(phase_errors)}; "
+            + " | ".join(phase_errors)
         )
     final=assess(result)
     if float(final["distortion_area_mean"])>max(
@@ -469,6 +534,7 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         optcuts_area_grid_boundary_corner_count=int(len(outline)),
         optcuts_area_grid_subdivided_boundary_vertex_count=int(inserted),
         optcuts_area_grid_boundary_cyclic_phase=int(chosen_phase),
+        optcuts_area_grid_boundary_correspondence_method=chosen_method,
         optcuts_area_grid_boundary_untangle_history=history,
         optcuts_area_grid_min_signed_area_ratio=float(np.min(
             oriented_area_ratio(base,result,faces))),
@@ -481,7 +547,7 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         optcuts_area_grid_margin=int(target["margin"]),
         optcuts_area_grid_selection="exact UV-triangle/cell intersection >= threshold",
         optcuts_area_grid_lattice_source=target["grid_source"],
-        optcuts_area_grid_reparameterization="monotone corner correspondence + fixed-boundary harmonic Dirichlet",
+        optcuts_area_grid_reparameterization="arclength/DP monotone corner correspondence + fixed-boundary harmonic Dirichlet and area untangle",
         optcuts_area_grid_seam_topology_preserved=True,
     )
     # Exact mask stored only transiently in the parameterization object
