@@ -293,7 +293,17 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         failures = []
         selected = None
         selected_report = None
-        for chart, candidate_domain, row in ranked:
+        for candidate_rank, (chart, candidate_domain, row) in enumerate(ranked, 1):
+            print(
+                "[GRID-SEAM-FIT] "
+                f"candidate={candidate_rank}/{len(ranked)} "
+                f"cut={row['source_start_index']} "
+                f"rotation={row['uv_rotation_degrees']:g}deg "
+                f"corners={row['corners']} "
+                f"reflex={row['reflex_corners']} "
+                f"score={row['score']:.5g}",
+                flush=True,
+            )
             try:
                 # Attempt each seam candidate in grid-complexity order.
                 # Only a successfully fitted candidate can be selected;
@@ -302,6 +312,12 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                     chart, grid, params, domain=candidate_domain,
                 )
             except GridBoundaryReparameterizationError as exc:
+                print(
+                    "[GRID-SEAM-FIT] candidate_failed "
+                    f"rank={candidate_rank}/{len(ranked)} "
+                    f"reason={str(exc)[:180]}",
+                    flush=True,
+                )
                 row["status"] = "boundary_fit_failed"
                 row["error"] = str(exc)
                 failures.append(
@@ -311,6 +327,11 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 )
                 continue
             row["status"] = "boundary_fit_accepted"
+            print(
+                "[GRID-SEAM-FIT] candidate_accepted "
+                f"rank={candidate_rank}/{len(ranked)}",
+                flush=True,
+            )
             selected, selected_report = chart, row
             break
 
