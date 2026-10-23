@@ -3238,6 +3238,30 @@ elif view_stage == "Omega":
                    "実際の三角形対応に従って表示しています。")
     else:
         st.plotly_chart(figure_domain(state), use_container_width=True, key="omega_domain")
+    _area_grid_metrics = state.surface_parameterization.metrics or {}
+    if _area_grid_metrics.get("optcuts_area_grid_boundary_enabled",False):
+        with st.expander("面積閾値Grid境界 → Ω再パラメータ化（結果）",expanded=True):
+            st.success("OptCutsのSeamを維持したまま、選択Gridセルの境界へΩを再写像しました。")
+            st.write({
+                "Gridセル採用閾値": _area_grid_metrics.get(
+                    "optcuts_area_grid_coverage_threshold"),
+                "採用セル数": _area_grid_metrics.get("optcuts_area_grid_cell_count"),
+                "候補セル数": _area_grid_metrics.get("optcuts_area_grid_candidate_cell_count"),
+                "Grid境界の角数": _area_grid_metrics.get(
+                    "optcuts_area_grid_boundary_corner_count"),
+                "平均SD（変更前）": _area_grid_metrics.get(
+                    "optcuts_area_grid_original_mean_sd"),
+                "平均SD（変更後）": _area_grid_metrics.get(
+                    "optcuts_area_grid_final_mean_sd"),
+                "状態": _area_grid_metrics.get(
+                    "optcuts_area_grid_boundary_status"),
+            })
+            st.caption(
+                "Gridパネル集合を最初に確定し、その輪郭にOptCuts境界の"
+                "各頂点を順番に対応付け、内部UVを固定境界調和写像で"
+                "再計算しました。公式BFFではありません。"
+                "Seamトポロジーと後段のK3D/K2Dの最適化式は変更していません。"
+            )
     _ga_metrics = state.surface_parameterization.metrics or {}
     if _ga_metrics.get("optcuts_grid_aware_enabled", False):
         with st.expander("Grid-aware OptCuts 実験の結果", expanded=True):
