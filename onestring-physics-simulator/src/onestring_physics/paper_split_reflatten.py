@@ -16,8 +16,12 @@ from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 
 REFLATTEN_CRITERION = "reflatten_tile_area"
+FIXED_CHART_CRITERION = "fixed_chart_tile_area"
 _CSF_MODEL = ("Reconstructed Sec.4.5: free-boundary official BFF per source "
               "component; max(A3D/A2D)/min(A3D/A2D) <= 2 (tile areas)")
+_FIXED_CHART_CSF_MODEL = ("Experimental baseline: inherited original Omega UV per "
+                          "3D piece; max(A3D/A2D)/min(A3D/A2D) <= 2 (tile areas); "
+                          "NO per-piece BFF")
 
 
 def _tri_angles(V, F):
@@ -372,15 +376,16 @@ class SplitDirectionQuestion(BaseException):
         self.info = info
 
 
-def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
+def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
                         rings=3,threshold=2.,max_cuts=64,direction_choices=(),ask=False,
-                        curvature_tie_tolerance=0.02,force_one_cut=False):
-    """Assess a full-grid cut using fresh BFF for both 3D child patches.
+                        curvature_tie_tolerance=0.02,force_one_cut=False,reflatten=True):
+    """Assess complete grid cuts using per-piece BFF or inherited original UV.
 
-    Optional one-cut validation runs the same geometric route even if the
-    initial region already satisfies its CSF criterion. It is NOT a CSF
-    necessity, and is separately identified in every cut record/report.
+    The opt-in validation cut exercises the topology even when sigma <= 2.
+    ReBFF-OFF never invokes the BFF backend during Split evaluation.
     """
+    if reflatten and not callable(flatten):
+        raise ValueError("reBFF Split requires a callable BFF evaluator")
     grid_xy=np.asarray(grid_xy,float);quads=np.asarray(quads,int)
     quad_xy=grid_xy[quads];centres=quad_xy.mean(axis=1)
     pitch=float(np.median(np.linalg.norm(quad_xy[:,1]-quad_xy[:,0],axis=1)))
@@ -394,7 +399,10 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
     vertex_z=np.full(len(grid_xy),-np.inf)
     vertex_z[good]=(bary[good]*np.asarray(xyz,float)[tri_faces[tri[good]],2]).sum(1)
     def sigma(piece,ids):
-        J=tile_area_ratios(piece,quad_xy[ids],flatten(piece[0],piece[1]))
+        # OFF retains the exact original S->Omega UV inherited through
+        # clipping, with no per-piece reparameterization or rescaling.
+        chart_uv=flatten(piece[0],piece[1]) if reflatten else piece[2]
+        J=tile_area_ratios(piece,quad_xy[ids],chart_uv)
         return float(np.max(J)/np.min(J)),J
     def interior(ids):
         edge_count=defaultdict(int)
@@ -404,7 +412,10 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                 edge_count[(min(a,b),max(a,b))]+=1
         boundary={v for edge,c in edge_count.items() if c==1 for v in edge}
         return sorted(set(quads[ids].ravel().tolist())-boundary)
-    report=dict(model=_CSF_MODEL,threshold=float(threshold),curvature_rings=int(rings),
+    report=dict(model=_CSF_MODEL if reflatten else _FIXED_CHART_CSF_MODEL,
+                reflatten_per_piece=bool(reflatten),
+                evaluation_uv="per_piece_official_free_bff" if reflatten else "original_omega_fixed_chart",
+                threshold=float(threshold),curvature_rings=int(rings),
                 pitch=pitch,steps=[],leaves=[],
                 validation_force_one_cut_requested=bool(force_one_cut),
                 validation_cut_generated=False)
@@ -464,6 +475,7 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                 candidates=evaluated,auto_axis=best[1],
                 previous=[dict(axis=c["axis"],value=c["value"],parent_face_ids=st["parent_face_ids"])
                           for c,st in zip(cuts,report["steps"])],
+                reflatten_per_piece=bool(reflatten),validation_forced=validation_forced,
                 grid_xy=grid_xy.tolist(),quads=quads.tolist()))
         choice=str(direction_choices[len(cuts)]) if len(cuts)<len(direction_choices) else "auto"
         if choice=="stop":
