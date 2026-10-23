@@ -116,9 +116,12 @@ def _cell_yield_proxy(uv, loop, nx, ny):
     polygon=xy[np.asarray(loop,dtype=int)]
     lower,h=_lattice(xy,nx,ny)
     # Match the actual 2*nx by 2*ny free-boundary overlay density.
-    nu,nv=2*nx,2*ny
-    x=lower[0]+np.arange(nu+1)*h[0]
-    y=lower[1]+np.arange(nv+1)*h[1]
+    # Avoid O(boundary_vertices * nx * ny * candidate_count) blowups for
+    # very dense meshes. Coarse sampling is explicitly only a *proxy*;
+    # the true M2D crop still uses the production grid independently.
+    nu,nv=min(2*nx,48),min(2*ny,48)
+    x=np.linspace(lower[0],lower[0]+2*nx*h[0],nu+1)
+    y=np.linspace(lower[1],lower[1]+2*ny*h[1],nv+1)
     xx,yy=np.meshgrid(x,y,indexing="xy")
     inside=_points_inside_polygon(np.column_stack([xx.ravel(),yy.ravel()]),polygon).reshape((nv+1,nu+1))
     cx=.5*(x[:-1]+x[1:]);cy=.5*(y[:-1]+y[1:])
