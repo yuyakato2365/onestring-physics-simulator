@@ -438,6 +438,13 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
             raise GridBoundaryReparameterizationError(
                 "GRID_BOUNDARY_CORNER_MATCH_FAILED: corner has no matching UV boundary vertex"
             )
+    # Keep the actual original contour and the target polyomino for a
+    # literal before/mask/after visual audit in the Omega UI.
+    source_loops=np.asarray(parameterization.omega_boundary,float).copy()
+    parameterization._optcuts_area_grid_source_boundary=source_loops
+    parameterization._optcuts_area_grid_target_outline=np.vstack([
+        outline,outline[0],
+    ])
     parameterization.uv_vertices_2d=result
     parameterization.omega_boundary=result[np.r_[loop,loop[0]]]
     # Clear stale inverse accelerator; it was built for the old coordinates.
