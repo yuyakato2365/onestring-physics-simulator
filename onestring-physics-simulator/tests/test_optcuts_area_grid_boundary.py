@@ -461,3 +461,99 @@ def test_corner_dp_square_regression_retains_zero_displacement():
     assert len(result) == 4
     assert result[0][0] == pytest.approx(0.)
     np.testing.assert_allclose(result[0][2], square)
+
+
+
+def test_grid_aware_seam_complexity_prefers_fewer_staircase_corners():
+    from onestring_physics.optcuts_grid_aware_seam_selection import (
+        grid_outline_complexity, grid_seam_selection_score,
+    )
+    # A four-corner square versus a staircase with six reflex corners.
+    square = dict(
+        grid_outline=np.array([[0, 0], [5, 0], [5, 5], [0, 5]], float),
+        step=np.ones(2), mask=np.ones((5, 5), bool),
+    )
+    stairs = dict(
+        grid_outline=np.array([
+            [0, 0], [6, 0], [6, 1], [5, 1], [5, 2], [6, 2],
+            [6, 6], [0, 6], [0, 4], [1, 4], [1, 3], [0, 3],
+        ], float),
+        step=np.ones(2), mask=np.ones((6, 6), bool),
+    )
+    a = grid_outline_complexity(square)
+    b = grid_outline_complexity(stairs)
+    audit = {"distortion_area_mean": 2., "seam_length": 1.,
+             "csf_over_2_area_fraction": .01}
+    assert a["corners"] == 4 and a["reflex_corners"] == 0
+    assert b["corners"] > a["corners"]
+    assert b["reflex_corners"] > 0
+    assert (grid_seam_selection_score(a, audit, reference_sd=2.)
+            < grid_seam_selection_score(b, audit, reference_sd=2.))
+
+
+def test_grid_aware_seam_ranking_uses_each_original_production_grid():
+    from onestring_physics.optcuts_grid_aware_seam_selection import (
+        rank_grid_aware_seam_candidates,
+    )
+    uv, faces, loop = _grid_chart()
+    center = np.array([.5, .5])
+    theta = np.deg2rad(35.)
+    rotation = np.array([[np.cos(theta), -np.sin(theta)],
+                         [np.sin(theta), np.cos(theta)]])
+    rotated = (uv - center) @ rotation.T + center
+    def candidate(points):
+        return SimpleNamespace(
+            surface_vertices_3d=np.c_[uv, np.zeros(len(uv))],
+            surface_faces=faces.copy(),
+            uv_vertices_2d=points.copy(),
+            uv_faces=faces.copy(),
+            metrics={},
+        )
+    square = candidate(uv)
+    diagonal = candidate(rotated)
+    official_quality = {
+        "distortion_area_mean": 2., "seam_length": 1.,
+        "csf_over_2_area_fraction": .0,
+        "flipped_triangles": 0, "degenerate_triangles": 0,
+        "injectivity_overlap_pairs": 0,
+    }
+    param = SimpleNamespace(
+        method="optcuts_test", metrics={},
+        surface_vertices_3d=diagonal.surface_vertices_3d.copy(),
+        surface_faces=faces.copy(),
+        uv_vertices_2d=rotated.copy(),
+        uv_faces=faces.copy(),
+        omega_boundary=rotated[np.r_[loop, loop[0]]],
+        triangle_acceleration=None,
+        _onestring_optcuts_candidates=[diagonal, square],
+        _onestring_optcuts_candidate_qualities=[
+            dict(official_quality), dict(official_quality)],
+    )
+    grid = SimpleNamespace(nx=4, ny=4)
+    params = SimpleNamespace(optcuts_area_grid_coverage_threshold=.5)
+    def actual_grid(chart, _grid, _params):
+        boundary = np.asarray(chart.omega_boundary)
+        step = np.ptp(boundary, axis=0) / (2 * grid.nx)
+        start = np.min(boundary, axis=0) - step
+        x = start[0] + np.arange(11) * step[0]
+        y = start[1] + np.arange(11) * step[1]
+        xx, yy = np.meshgrid(x, y, indexing="xy")
+        return SimpleNamespace(
+            uv_vertices=np.stack([xx, yy], axis=-1).reshape(-1, 2),
+            overlay_nx=10, overlay_ny=10, overlay_margin_tiles=1,
+            boundary=boundary.copy(), parameterization=chart,
+        )
+    ranked, report = rank_grid_aware_seam_candidates(
+        param, grid, params, actual_grid)
+    assert len(ranked) == 2
+    assert all(item["status"] == "scored" for item in report)
+    assert report[0]["corners"] > report[1]["corners"]
+    assert report[0]["reflex_corners"] > report[1]["reflex_corners"]
+    assert ranked[0][2]["candidate_index"] == 1
+    # Scoring never mutates the original chart or its OptCuts starts.
+    np.testing.assert_allclose(param.uv_vertices_2d, rotated)
+    assert len(param._onestring_optcuts_candidates) == 2
+    for chart, domain, row in ranked:
+        assert row["real_grid_origin"] == pytest.approx(
+            domain.uv_vertices[0].tolist())
+        assert row["retained_cells"] > 0
