@@ -424,7 +424,7 @@ with st.sidebar:
             "T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
             "Split CSFの既定は再展開方式です。各切断候補の3D曲面片を"
             "公式自由境界BFFで再展開し、タイルの(A3D/A2D)最大/最小比を2と比較します。"
-            "再展開UVは最終M2Dに反映されず、製造可能性の証明ではありません。"
+            "再展開UVのM2Dへの反映は実験オプション。製造可能性の証明ではありません。"
         )
     # Opt-in extension of the ORIGINAL OneString pipeline, not a separate
     # viewer. Leaves OptCuts / legacy BFF untouched when disabled.
@@ -805,6 +805,24 @@ with st.sidebar:
             st.info("再BFF OFF：初期ΩのUVを保持してタイル面積比を評価します。"
                     "切断候補・曲率・閾値・実際のM2D SplitはONと共通です。"
                     "ただし初期Ωが非等角なら線形CSFの保証ではありません。")
+        paper_split_apply_rebff_m2d = st.checkbox(
+            "実験：Split後の再BFF UVを実際のM2Dパネル形状に反映",
+            value=False,
+            key="split_apply_rebff_to_m2d",
+            disabled=paper_split_criterion != "reflatten_tile_area",
+            help="Split候補・CSF閾値・判定は従来の再BFF ONと全く同じままです。"
+                 "決定されたSplit後の3D領域を再BFFしたUVを、M2Dの頂点に対応づけます。"
+                 "各領域のUVは類似変換で元のΩに位置合わせし、実際のパネル形状を変形します。"
+                 "元のΩ座標はM3Dへの逆写像用に保存します。"
+                 "反転・退化・境界不整合時は中止し、以前のUVへ黙って戻しません。"
+                 "元論文の実装を再現したと証明するものではありません。",
+        )
+        if paper_split_apply_rebff_m2d and paper_split_criterion == "reflatten_tile_area":
+            st.warning("M2D再BFF反映は研究用の実験モードです。Split判定自体は変更せず、"
+                       "最終M2Dを各領域の再BFF形状で変形します。"
+                       "元の格子の正方性やヒンジの製造可能性は別途検証が必要です。")
+        else:
+            paper_split_apply_rebff_m2d = False
         paper_split_validation_force_one_cut = st.checkbox(
             "検証用：CSFが2以下でもSplitを1本入れる",
             value=False,
@@ -856,8 +874,9 @@ with st.sidebar:
                 st.caption(f"再展開Split入力: {uploaded.name}（Lilium固有の形状条件なし）")
             if paper_split_criterion == "reflatten_tile_area":
                 st.info("再BFF ON：3Dの各切断片に公式自由境界BFFを適用し、"
-                        "タイル面積比を評価します。再BFFのUVは元のM2Dに適用しません。"
-                        "各領域の評価には公式BFF実行ファイルが必要です。")
+                        "タイル面積比を評価します。実験チェックをONにした場合だけ"
+                        "再BFFのUVを実際のM2Dパネルにも適用します。"
+                        "公式BFF実行ファイルが必要です。")
             else:
                 st.info("再BFF OFF：同じ3D/2Dタイル面積比を初期Ω固定UVで評価します。"
                         "切断後にBFFは行わず、M2Dの形状とも対応しています。"
@@ -1913,6 +1932,7 @@ def current_pipeline_key() -> tuple:
         bff_nonpaper_tutte_rescue_enabled,
         paper_split_criterion,
         paper_split_validation_force_one_cut,
+        paper_split_apply_rebff_m2d,
         tuple(st.session_state.get("paper_split_direction_choices", ())),
         paper_split_curvature_tie_percent,
         (_manual_corner_mode, str(st.session_state.get("bff_manual_corners") or ())),
@@ -2069,6 +2089,7 @@ pipeline_params = PipelineParameters(
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
     paper_split_validation_force_one_cut=paper_split_validation_force_one_cut,
+    paper_split_apply_rebff_m2d=paper_split_apply_rebff_m2d,
     paper_split_curvature_rings=paper_split_curvature_rings,
     paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
     paper_split_ask_direction=bool(paper_split_ask_direction) and not st.session_state.get("paper_split_ask_suspended", False),
@@ -3014,15 +3035,33 @@ elif view_stage == "Split Map":
                                         key=f"reflatten_original_m3d_{_split_step}")
                         st.dataframe(_ref_pieces, hide_index=True, width="stretch")
                         st.caption("表示は元のΩ格子から持ち上げたM3Dです。"
-                                   "再BFFがONの場合も新しいUVは評価専用で、"
-                                   "製造用M2Dの頂点座標は変更しません。")
+                                   "M2Dへの再BFF反映実験がONでも、"
+                                   "M3Dへの逆写像は元のΩ座標を使用します。")
             _split_model = state.mesh_2d_initial.metrics.get("csf_split_criterion")
             if _split_model == "reflatten_tile_area":
+                _m2d_rebff_applied=bool(state.mesh_2d_initial.metrics.get(
+                    "m2d_postcut_rebff_applied",False))
                 st.caption(
                     "再展開Split：各3D曲面片を公式自由境界BFFで別々に展開し、"
-                    "タイルごとの3D/2D面積比の最大/最小でCSF相当量を評価しています。"
-                    "最終パネルは元のΩ格子に固定しています。著者実装との一致は未確認です。"
+                    "タイル面積比でCSF相当量を評価。"
+                    +("実験ON：再BFF UVを実際のM2D座標に反映しています。"
+                      "M3Dへの逆写像には元のΩ座標を保持しています。"
+                      if _m2d_rebff_applied else
+                      "実験OFF：M2Dは元のΩ格子に固定されています。")
+                    +"著者実装との一致は未確認です。"
                 )
+                if _m2d_rebff_applied:
+                    st.warning(
+                        "実験M2D再BFF反映：格子の正方性・ヒンジ可製造性・"
+                        "最終組立可能性は未保証です。"
+                        "右のSplit過程に示すCSF値は反映前の評価値であり、"
+                        "新しいM2Dの実測値ではありません。"
+                    )
+                    st.json({k:v for k,v in state.mesh_2d_initial.metrics.items()
+                        if k.startswith("m2d_postcut_rebff_")})
+                elif state.mesh_2d_initial.metrics.get("csf_split_m2d_rebff_requested"):
+                    st.info("M2D再BFF反映は選択されていますが、"
+                            "CSF Splitが生成されていないため、M2D形状は変更していません。")
             elif _split_model == "fixed_chart_tile_area":
                 st.caption(
                     "再BFF OFF：初期ΩのUVを3Dピースにそのまま引き継ぎ、"
