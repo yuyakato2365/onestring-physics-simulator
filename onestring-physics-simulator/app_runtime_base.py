@@ -3253,9 +3253,18 @@ elif view_stage == "Omega":
                     "optcuts_area_grid_original_mean_sd"),
                 "平均SD（変更後）": _area_grid_metrics.get(
                     "optcuts_area_grid_final_mean_sd"),
+                "対応付けの位相": _area_grid_metrics.get(
+                    "optcuts_area_grid_boundary_cyclic_phase"),
+                "最小三角形符号付き面積比": _area_grid_metrics.get(
+                    "optcuts_area_grid_min_signed_area_ratio"),
                 "状態": _area_grid_metrics.get(
                     "optcuts_area_grid_boundary_status"),
             })
+            _relax_history=_area_grid_metrics.get(
+                "optcuts_area_grid_boundary_untangle_history",[])
+            if _relax_history:
+                with st.expander("境界移動・内部UV再最適化の診断"):
+                    st.dataframe(_relax_history,use_container_width=True)
             _area_source=getattr(
                 state.surface_parameterization,
                 "_optcuts_area_grid_source_boundary",None)
