@@ -95,7 +95,7 @@ def test_diagnostic_bundle_saved_with_reproducible_uv_and_hotspot_svg(tmp_path):
     assert report["rejected_below_existing_0_005_area_guard_count"] >= 0
     assert len(report["ranked_worst_triangles"]) == len(faces)
     assert "diagnostic_hypothesis" in report
-    assert "proof" in report["limitations"]
+    assert "prove" in report["limitations"]
     with np.load(where / "reproduce_uv.npz") as saved:
         np.testing.assert_allclose(saved["base_uv"], uv)
         np.testing.assert_allclose(saved["rejected_uv"], rejected)
