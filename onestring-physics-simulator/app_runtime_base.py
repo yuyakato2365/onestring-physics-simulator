@@ -3214,6 +3214,40 @@ elif view_stage == "Omega":
                    "実際の三角形対応に従って表示しています。")
     else:
         st.plotly_chart(figure_domain(state), use_container_width=True, key="omega_domain")
+    _ga_metrics = state.surface_parameterization.metrics or {}
+    if _ga_metrics.get("optcuts_grid_aware_enabled", False):
+        with st.expander("Grid-aware OptCuts 実験の結果", expanded=True):
+            _ga_status = _ga_metrics.get("optcuts_grid_aware_status", "unknown")
+            st.write("採用結果：", _ga_status)
+            st.caption("数値が小さいほどSeamは格子線へ整列。"
+                       "Cell yieldは矩形内の全格子セルを分母とする近似値で、"
+                       "最終M2Dのパネル枚数そのものではありません。")
+            st.dataframe([
+                {
+                    "Metric": "Grid seam alignment error",
+                    "Before": _ga_metrics.get("optcuts_grid_aware_alignment_before"),
+                    "After": _ga_metrics.get("optcuts_grid_aware_alignment_after"),
+                },
+                {
+                    "Metric": "Complete grid cell yield proxy",
+                    "Before": _ga_metrics.get("optcuts_grid_aware_cell_yield_proxy_before"),
+                    "After": _ga_metrics.get("optcuts_grid_aware_cell_yield_proxy_after"),
+                },
+                {
+                    "Metric": "Mean Symmetric Dirichlet",
+                    "Before": _ga_metrics.get("optcuts_grid_aware_mean_symmetric_dirichlet_before"),
+                    "After": _ga_metrics.get("optcuts_grid_aware_mean_symmetric_dirichlet_after"),
+                },
+            ], hide_index=True, use_container_width=True)
+            if _ga_status != "accepted":
+                st.info("Grid制約候補を採用しませんでした。安全条件に"
+                        "適合しない場合や、十分な改善がない場合は"
+                        "既存OptCutsのΩをそのまま使用します。")
+            st.caption("元のOptCuts C++の切断トポロジーは未変更。"
+                       "今回の実装は後処理のUV最適化です。")
+            with st.expander("格子最適化の判定詳細"):
+                st.json({k:v for k,v in _ga_metrics.items()
+                         if k.startswith("optcuts_grid_aware_")})
     st.subheader("S ↔ Omega Mapping Distortion")
     st.caption("The same per-triangle S→Omega distortion values are painted on the original surface S and on Omega, so corresponding distorted regions have exactly the same color.")
     distortion_mode = st.selectbox(
