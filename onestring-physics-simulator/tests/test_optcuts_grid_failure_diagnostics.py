@@ -77,6 +77,8 @@ def test_diagnostic_bundle_saved_with_reproducible_uv_and_hotspot_svg(tmp_path):
         ],
         grid_mask=np.array([[True, False], [True, True]]),
         grid_coverage=np.array([[.75, .2], [1., .55]]),
+        source_vertices_3d=np.c_[uv, np.ones(len(uv))],
+        source_faces=faces.copy(),
         metadata={"attempt_tag": "test", "phase": 11, "method": "corner_dp"},
         output_dir=tmp_path,
     )
@@ -90,6 +92,7 @@ def test_diagnostic_bundle_saved_with_reproducible_uv_and_hotspot_svg(tmp_path):
     report = json.loads((where / "diagnosis.json").read_text())
     assert report["schema"] == "onestring-grid-failure-diagnostic-v1"
     assert report["reflex_corner_count"] == 1
+    assert "source_xyz_centroid" in report["ranked_worst_triangles"][0]
     assert report["metadata"]["phase"] == 11
     assert report["boundary_fraction_rejected"] == pytest.approx(.995)
     assert report["rejected_below_existing_0_005_area_guard_count"] >= 0
@@ -100,6 +103,8 @@ def test_diagnostic_bundle_saved_with_reproducible_uv_and_hotspot_svg(tmp_path):
         np.testing.assert_allclose(saved["base_uv"], uv)
         np.testing.assert_allclose(saved["rejected_uv"], rejected)
         np.testing.assert_array_equal(saved["uv_faces"], faces)
+        np.testing.assert_array_equal(saved["source_faces"], faces)
+        np.testing.assert_allclose(saved["source_vertices_3d"][:, 2], 1.)
         np.testing.assert_array_equal(saved["grid_mask"], diagnostics["grid_mask"])
         np.testing.assert_array_equal(saved["reflex_corner_indices"], [3])
     overview = (where / "overview.svg").read_text()
