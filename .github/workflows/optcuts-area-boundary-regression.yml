@@ -7,6 +7,8 @@ on:
     paths:
       - "onestring-physics-simulator/src/onestring_physics/optcuts_area_grid_boundary.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_boundary_untangle.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_aware_seam_selection.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_test_boundary_reparameterization_patch.py"
       - "onestring-physics-simulator/tests/test_optcuts_area_grid_boundary.py"
       - ".github/workflows/optcuts-area-boundary-regression.yml"
   workflow_dispatch:
@@ -27,6 +29,6 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Check syntax
         run: |
-          python -m py_compile src/onestring_physics/optcuts_area_grid_boundary.py src/onestring_physics/optcuts_grid_boundary_untangle.py tests/test_optcuts_area_grid_boundary.py
+          python -m py_compile src/onestring_physics/optcuts_area_grid_boundary.py src/onestring_physics/optcuts_grid_boundary_untangle.py src/onestring_physics/optcuts_grid_aware_seam_selection.py src/onestring_physics/optcuts_test_boundary_reparameterization_patch.py tests/test_optcuts_area_grid_boundary.py
       - name: Test area-grid boundary and fixed-M2D invariants
         run: python -m pytest -q tests/test_optcuts_area_grid_boundary.py
