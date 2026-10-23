@@ -31,7 +31,7 @@ def test_50_percent_rule_includes_half_crossed_cell_but_not_outside():
     assert tgt["mask"][0,0]
     assert tgt["mask"][1,1]
     assert not tgt["mask"][3,3]
-    assert tgt["coverage"][1,1]==pytest.approx(.5)
+    assert tgt["coverage"][1,2]==pytest.approx(.5)
     assert np.any(tgt["mask"] & (tgt["coverage"]<.999))
 
 
