@@ -151,3 +151,40 @@ The implementation and integration are
 `postcut_rebff_m2d.py`, `simple_split_panel_patch.py`, and
 `final_split_panel_pass.py`. Targeted tests are
 `tests/test_postcut_rebff_m2d.py`.
+
+
+## ReBFF M2D -> K2D fold-over guard (2026-10-23)
+
+Empirical failure motivating this diagnostic: reBFF-manufactured M2D looked
+smooth, but Eq.(5) K2D had large central foldovers and inter-panel crossings.
+This is a separate problem from **Split evaluation**; the planner, cut locations,
+area-span threshold and BFF leaf chart selection have not been modified.
+
+For `m2d_postcut_rebff_applied=True` only, the K2D stage now:
+- Checks whether the incoming M2D quadrilaterals are convex, nondegenerate,
+  non-overlapping, and oriented as the **original Omega** quad cells.
+  Refuses invalid M2D rather than blaming/fixing it at K2D.
+- Evaluates the raw K2D result with the same quad and overlap checks.
+  If invalid, it backtracks the raw K2D displacement towards the reBFF-M2D
+  coordinates, choosing the largest tested fraction preserving topology
+  and not worsening mean edge-length error against K3D.
+- Hard-fails with `K2D_REBFF_GEOMETRY_INFEASIBLE` when no valid improving
+  step exists; never silently certifies a nonphysical K2D layout.
+- Records original solver and guarded edge errors, backtracking fraction,
+  overlap counts and geometric-validity status. It does **not** certify
+  physical hinge feasibility or manufacturing.
+
+**Important UI distinction:** Eq.(5) solver snapshots are **raw history**
+and can be distorted even when the final M2D/K2D layout was guarded. The
+main K2D panel displays the *actual post-guard K2D* when this experimental
+mode is active; the prior raw snapshots remain accessible in the history
+expander. This distinction avoids showing a raw optimizer snapshot as the
+downstream geometry.
+
+To reproduce/diagnose, keep Split evaluation reBFF ON and compare only the
+`実験：Split後の再BFF UVを実際のM2Dパネル形状に反映` switch.
+If the new guard stops the pipeline, inspect whether it reports
+`INPUT_INVALID` (bad manufactured M2D), `INPUT_OVERLAP` (independent
+reBFF charts/packing collide), or `GEOMETRY_INFEASIBLE` (K2D edge targets
+cannot be reached safely). The latter is an algorithmic limitation that
+requires a geometry-constrained K2D solver, not a lower CSF threshold.
