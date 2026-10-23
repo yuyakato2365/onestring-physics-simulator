@@ -165,7 +165,7 @@ def summarize(root, *, last=48, max_bundles=6):
         f"{high['rejected_min_signed_area_ratio']:.8g}",
         f"- **Worst UV triangle ID:** "
         f"{high['ranked_worst_triangles'][0]['triangle_id']}",
-        f"- **Failure snapshot:** \`{high['_folder']}\`",
+        f"- **Failure snapshot:** `{high['_folder']}`",
         "",
         "## Across cut sources and UV orientations",
         "",
