@@ -199,6 +199,76 @@ def _boundary_target_map(uv,loop,outline):
     return out
 
 
+def _ensure_boundary_vertices(parameterization,corner_count,loop):
+    """Subdivide REAL boundary triangles if the grid stair has more corners.
+
+    Each new UV vertex is paired with an interpolated 3D source vertex,
+    and BOTH uv_faces and surface_faces are subdivided in lockstep.
+    No fake UV-only boundary vertices and no broken inverse M2D->M3D map.
+    """
+    loop=[int(i) for i in loop]
+    if len(loop)>=corner_count:
+        return loop,0
+    uv=np.asarray(parameterization.uv_vertices_2d,float).copy()
+    xyz=np.asarray(parameterization.surface_vertices_3d,float).copy()
+    uf=np.asarray(parameterization.uv_faces,int).copy().tolist()
+    sf=np.asarray(parameterization.surface_faces,int).copy().tolist()
+    if len(uf)!=len(sf):
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_SOURCE_FACE_MISMATCH: UV/3D triangle correspondence lost"
+        )
+    # Each original boundary edge is evenly subdivided. Worst-case vertex
+    # count grows to <2*n_corners, independent of dense 3D interior geometry.
+    factor=int(np.ceil(float(corner_count)/len(loop)))
+    n_new=0
+    for ai in range(len(loop)):
+        start=int(loop[ai]);end=int(loop[(ai+1)%len(loop)])
+        current=start
+        for k in range(1,factor):
+            found=False
+            for fi,face in enumerate(uf):
+                for edge_i in range(3):
+                    aa=int(face[edge_i]);bb=int(face[(edge_i+1)%3])
+                    if {aa,bb}!={current,end}:
+                        continue
+                    # Use a fraction of the REMAINING edge so all points
+                    # lie evenly along the original boundary edge.
+                    remain=factor-k+1
+                    t=1./float(remain)
+                    z=int(face[(edge_i+2)%3])
+                    xyzface=sf[fi]
+                    xa=int(xyzface[edge_i]);xb=int(xyzface[(edge_i+1)%3])
+                    xz=int(xyzface[(edge_i+2)%3])
+                    vi=len(uv);si=len(xyz)
+                    uv=np.vstack([uv,(1.-t)*uv[aa]+t*uv[bb]])
+                    xyz=np.vstack([xyz,(1.-t)*xyz[xa]+t*xyz[xb]])
+                    uf[fi]=[aa,vi,z]
+                    sf[fi]=[xa,si,xz]
+                    uf.append([vi,bb,z])
+                    sf.append([si,xb,xz])
+                    current=vi
+                    n_new+=1
+                    found=True
+                    break
+                if found:break
+            if not found:
+                raise GridBoundaryReparameterizationError(
+                    "GRID_BOUNDARY_SUBDIVISION_FAILED: original boundary edge "
+                    "is missing from paired UV/3D triangles"
+                )
+    parameterization.uv_vertices_2d=uv
+    parameterization.surface_vertices_3d=xyz
+    parameterization.uv_faces=np.asarray(uf,int)
+    parameterization.surface_faces=np.asarray(sf,int)
+    from .optcuts_backend import _boundary_loops
+    loops=_boundary_loops(parameterization.uv_faces)
+    if len(loops)!=1 or len(loops[0])<corner_count:
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_SUBDIVISION_TOPOLOGY: subdivided UV is not a single disk"
+        )
+    return loops[0],n_new
+
+
 def _harmonic_dirichlet(uv,faces,loop,targets):
     from scipy.sparse import coo_matrix,diags
     from scipy.sparse.linalg import spsolve
@@ -308,6 +378,13 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     margin=int(getattr(params,"omega_overlay_margin",1))
     target=construct_grid_target(uv,faces,loop,nx=grid.nx,ny=grid.ny,
                                  threshold=thresh,margin=margin,domain=domain)
+    loop,inserted=_ensure_boundary_vertices(
+        parameterization,len(target["grid_outline"]),loop
+    )
+    # Work with paired and subdivided triangles throughout; the original
+    # 3D surface remains geometrically identical, only triangulation changes.
+    uv=np.asarray(parameterization.uv_vertices_2d,float)
+    faces=np.asarray(parameterization.uv_faces,int)
     mapped=_boundary_target_map(uv,loop,target["grid_outline"])
     # quality() requires OptCutsResult (not SurfaceParameterization).
     # Evaluate by wrapping the current chart with all corresponding faces.
@@ -364,6 +441,12 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     parameterization.omega_boundary=result[np.r_[loop,loop[0]]]
     # Clear stale inverse accelerator; it was built for the old coordinates.
     parameterization.triangle_acceleration=None
+    # Invalidate obsolete per-triangle diagnostics from BEFORE boundary
+    # subdivision / UV reparameterization. They are not the new Jacobians.
+    for name in ("per_triangle_lambda","per_triangle_csf",
+                 "per_triangle_sigma","per_triangle_distortion"):
+        parameterization.metrics.pop(name,None)
+    parameterization.metrics["boundary_loop"]=[int(i) for i in loop]
     count=int(target["mask"].sum())
     parameterization.metrics.update(
         optcuts_area_grid_boundary_enabled=True,
@@ -372,6 +455,7 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         optcuts_area_grid_cell_count=count,
         optcuts_area_grid_candidate_cell_count=int(target["mask"].size),
         optcuts_area_grid_boundary_corner_count=int(len(outline)),
+        optcuts_area_grid_subdivided_boundary_vertex_count=int(inserted),
         optcuts_area_grid_original_mean_sd=float(baseline["distortion_area_mean"]),
         optcuts_area_grid_final_mean_sd=float(final["distortion_area_mean"]),
         optcuts_area_grid_grid_origin=target["origin"].tolist(),
