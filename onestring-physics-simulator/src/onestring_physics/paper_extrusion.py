@@ -45,21 +45,44 @@ def _best_fit_plane(points):
     return p-np.outer((p-c)@normal,normal)
 
 
-def _solve(n_vertices,constraints,anchor,anchor_weight):
+def _solve(n_vertices,constraints,anchor,anchor_weight,*,equality_groups=()):
+    # Eliminate *exact* equality groups from the unknowns. Penalties
+    # or a weld after solving cannot prevent the T3D Eq.(2) projection
+    # from reopening a previously closed K3D seam.
+    parent=np.arange(n_vertices,dtype=int)
+    def find(i):
+        i=int(i)
+        while parent[i]!=i:
+            parent[i]=parent[parent[i]]
+            i=int(parent[i])
+        return i
+    for group in equality_groups:
+        ids=list(map(int,group))
+        if len(ids)<2:continue
+        if any(v<0 or v>=n_vertices for v in ids):
+            raise ValueError("T3D_SEAM_GROUP_OUT_OF_BOUNDS")
+        root=find(ids[0])
+        for v in ids[1:]:
+            parent[find(v)]=root
+    roots=np.asarray([find(i) for i in range(n_vertices)],int)
+    _,inverse=np.unique(roots,return_inverse=True)
+    reduced_count=int(np.max(inverse)+1) if n_vertices else 0
     rows=[];cols=[];data=[];rhs=[];r=0
     for ids,targets,weight in constraints:
         sw=math.sqrt(max(float(weight),0.0))
         if sw==0: continue
         for vid,target in zip(ids,np.asarray(targets,float)):
             for d in range(3):
-                rows.append(r);cols.append(int(vid)*3+d);data.append(sw);rhs.append(sw*float(target[d]));r+=1
+                rows.append(r);cols.append(int(inverse[int(vid)])*3+d);data.append(sw);rhs.append(sw*float(target[d]));r+=1
     if anchor_weight>0:
         sw=math.sqrt(anchor_weight)
         for i,p in enumerate(anchor):
             for d in range(3):
-                rows.append(r);cols.append(i*3+d);data.append(sw);rhs.append(sw*float(p[d]));r+=1
-    A=sparse.coo_matrix((data,(rows,cols)),shape=(r,n_vertices*3)).tocsr()
-    return lsqr(A,np.asarray(rhs),atol=1e-11,btol=1e-11,iter_lim=max(500,4*n_vertices))[0].reshape(n_vertices,3)
+                rows.append(r);cols.append(int(inverse[i])*3+d);data.append(sw);rhs.append(sw*float(p[d]));r+=1
+    A=sparse.coo_matrix((data,(rows,cols)),shape=(r,reduced_count*3)).tocsr()
+    reduced=lsqr(A,np.asarray(rhs),atol=1e-11,btol=1e-11,
+                 iter_lim=max(500,4*reduced_count))[0].reshape(reduced_count,3)
+    return reduced[inverse]
 
 
 def _planarity_error(x,face_sets):
@@ -149,12 +172,31 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         raise RuntimeError("K3D -> T3D preflight: face index outside K3D vertex range")
 
     n_mesh_vertices=len(top_global)
+    seam_groups=[
+        [int(v) for v in ids] for ids in
+        (getattr(mesh,"metrics",{}) or {}).get("seam_exact_vertex_groups",[])
+    ]
+    if seam_groups:
+        from .optcuts_seam_exact_closure import max_seam_gap
+        if max_seam_gap(top_global,seam_groups)>1e-10:
+            raise RuntimeError(
+                "T3D_SEAM_K3D_TOP_NOT_EXACTLY_CLOSED: "
+                "K3D seam must be equal before its normal-offset extrusion"
+            )
     normals=_vertex_normals(top_global,mesh_faces)
+    # Two UV seam copies represent one physical vertex. Use exactly
+    # the same extrusion normal at all their copies before Eq.(2).
+    for ids in seam_groups:
+        normal=_normalize(np.mean(normals[np.asarray(ids,int)],axis=0))
+        normals[np.asarray(ids,int)]=normal
     bottom_global=top_global-float(thickness)*normals
 
     # Eq.(2) is solved on shared top/bottom mesh vertices.  A mesh edge has one
     # geometric contact quad, even when two tiles are incident to that edge.
     x0=np.vstack([top_global,bottom_global])
+    coupled_groups=seam_groups+[
+        [n_mesh_vertices+v for v in ids] for ids in seam_groups
+    ]
     top_face_ids=[]
     bottom_face_ids=[]
     contact_face_ids=[]
@@ -187,7 +229,8 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
             ids_arr=np.asarray(ids,int)
             projected=_best_fit_plane(x[ids_arr])
             constraints.append((ids,projected,weight))
-        new=_solve(len(x),constraints,x0,anchor_weight)
+        new=_solve(len(x),constraints,x0,anchor_weight,
+                   equality_groups=coupled_groups)
         if not np.isfinite(new).all():
             # Never let a failed T3D local/global step poison K2D/T2D with NaNs.
             # The previous iterate is finite and already represents the paper
@@ -205,6 +248,16 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     after=_planarity_error(x,all_faces)
     top_solved=x[:n_mesh_vertices]
     bottom_solved=x[n_mesh_vertices:]
+    seam_top_gap=seam_bottom_gap=0.
+    if seam_groups:
+        from .optcuts_seam_exact_closure import max_seam_gap
+        seam_top_gap=max_seam_gap(top_solved,seam_groups)
+        seam_bottom_gap=max_seam_gap(bottom_solved,seam_groups)
+        if seam_top_gap>1e-10 or seam_bottom_gap>1e-10:
+            raise RuntimeError(
+                "T3D_SEAM_EXACT_CONSTRAINT_LOST: "
+                f"top_gap={seam_top_gap:g} bottom_gap={seam_bottom_gap:g}"
+            )
 
     # The T3D face-planarity solve moves the shared top vertices.  Keep K3D and
     # T3D geometrically consistent by promoting that solved top surface to the
@@ -297,6 +350,10 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         "tile_thickness":float(thickness),
         "paper_t3d_rest_weight":anchor_weight,
         "paper_t3d_shared_vertex_separation_max":edge_copy_separation,
+        "t3d_seam_exact_equality_group_count":len(seam_groups),
+        "t3d_seam_top_gap_max":seam_top_gap,
+        "t3d_seam_bottom_gap_max":seam_bottom_gap,
+        "t3d_seam_extrusion_normal_coupled":bool(seam_groups),
         "paper_t3d_top_bottom_parallel_angle_max_deg":max(parallel_angles,default=0.0),
         "paper_t3d_top_bottom_parallel_angle_mean_deg":float(np.mean(parallel_angles)) if parallel_angles else 0.0,
         "paper_t3d_rigid_transform_rms":float(np.mean(rigid_rms)) if rigid_rms else 0.0,
@@ -328,6 +385,7 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         f"[PAPER-T3D] iterations={done} planarity={before:.6g}->{after:.6g} "
         f"k3d_promoted_rms={k3d_update_rms:.6g} k3d_promoted_max={k3d_update_max:.6g} "
         f"shared_sep={edge_copy_separation:.3g} "
+        f"seam_top={seam_top_gap:.3g} seam_bottom={seam_bottom_gap:.3g} "
         f"parallel_max_deg={metrics['paper_t3d_top_bottom_parallel_angle_max_deg']:.6g} "
         f"rigid_rms={metrics['paper_t3d_rigid_transform_rms']:.6g}",
         flush=True,
