@@ -128,3 +128,79 @@ def test_mode_is_isolated_and_threshold_wired_to_ui_and_cache_key():
     assert "area_boundary_domain" in carrier
     assert "keep_cells_on_fixed_lattice" in carrier
     assert "apply_area_grid_boundary" in carrier
+
+
+
+def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
+    """Integration without the unavailable native OptCuts CLI.
+
+    Exercise the real optcuts_test wrapper: source Omega -> area threshold
+    -> deformed chart -> frozen domain lattice -> exact selected M2D tiles.
+    """
+    from dataclasses import dataclass
+    from onestring_physics.optcuts_test_boundary_reparameterization_patch import (
+        install_optcuts_test_boundary_reparameterization_patch,
+    )
+
+    uv,tri,loop=_grid_chart()
+    grid=SimpleNamespace(nx=4,ny=4)
+
+    @dataclass
+    class Params:
+        omega_parameterization_mode: str = "optcuts_test"
+        optcuts_try_alternative_initial_cut: bool = True
+        optcuts_area_grid_boundary_enabled: bool = True
+        optcuts_area_grid_coverage_threshold: float = .5
+        omega_overlay_margin: int = 1
+
+    def source_chart(*_):
+        return SimpleNamespace(
+            method="optcuts_official",
+            uv_vertices_2d=uv.copy(),
+            uv_faces=tri.copy(),
+            surface_vertices_3d=np.c_[uv,np.zeros(len(uv))],
+            surface_faces=tri.copy(),
+            omega_boundary=uv[np.r_[loop,loop[0]]].copy(),
+            triangle_acceleration=None,
+            metrics={},
+        )
+
+    def flatten_domain(chart,*_):
+        return SimpleNamespace(boundary=chart.omega_boundary.copy(),
+                               parameterization=chart,
+                               uv_vertices=np.zeros((1,2)),
+                               split_lines=[])
+
+    def m2d_source(_grid,domain,*_):
+        verts=np.c_[domain.uv_vertices,np.zeros(len(domain.uv_vertices))]
+        n,m=domain.overlay_nx,domain.overlay_ny
+        faces=np.asarray([
+            [j*(n+1)+i,j*(n+1)+i+1,
+             (j+1)*(n+1)+i+1,(j+1)*(n+1)+i]
+            for j in range(m) for i in range(n)],int)
+        return SimpleNamespace(vertices=verts,faces=faces,
+                               grid=grid,stage="M2D",metrics={},split_lines=[])
+
+    owner=SimpleNamespace(
+        _build_surface_parameterization=source_chart,
+        _flatten_to_domain=flatten_domain,
+        _build_m2d=m2d_source,
+    )
+    install_optcuts_test_boundary_reparameterization_patch(owner)
+    params=Params()
+    chart=owner._build_surface_parameterization(None,None,grid,params)
+    domain=owner._flatten_to_domain(chart,grid,params)
+    m2d=owner._build_m2d(grid,domain,params)
+    assert len(m2d.faces)==64
+    assert m2d.metrics["optcuts_area_grid_boundary_applied_to_m2d"]
+    assert m2d.metrics["optcuts_area_grid_coverage_threshold"]==.5
+    assert chart.metrics["optcuts_area_grid_boundary_status"]=="accepted_exact_grid_outline"
+    np.testing.assert_allclose(domain.boundary,chart.omega_boundary)
+    assert int(np.sum(domain._optcuts_area_grid_mask))==len(m2d.faces)
+
+    # The previously successful optcuts_test2 carrier stays on its old path
+    # when the new mode is not selected.
+    original=owner._build_surface_parameterization(None,None,grid,
+        Params(optcuts_area_grid_boundary_enabled=False))
+    assert not original.metrics.get("optcuts_area_grid_boundary_enabled",False)
+    assert original.metrics["optcuts_test_grid_outline_reparameterization"] is False
