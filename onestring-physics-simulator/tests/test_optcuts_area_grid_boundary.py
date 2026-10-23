@@ -749,3 +749,85 @@ def test_grid_seam_orientation_toggle_only_one_chart_when_disabled():
     ranks, rows = rank_grid_aware_seam_candidates(chart, grid, params, build)
     assert len(rows) == len(ranks) == 1
     assert rows[0]["uv_rotation_degrees"] == 0.
+
+
+
+def test_boundary_ear_preflight_proves_zero_area_without_optimization():
+    """Three fixed boundary vertices cannot be untangled by interior UV."""
+    from onestring_physics.optcuts_grid_ear_correspondence import (
+        fixed_boundary_ear_report, map_boundary_with_corner_indices,
+    )
+    uv = np.array([
+        [0.,0.], [1.,-.4], [2.,0.],
+        [2.,1.], [1.1,2.], [0.,1.], [1.,.7],
+    ])
+    triangles = np.array([
+        [0,1,2], [0,2,6], [2,3,6],
+        [3,4,6], [4,5,6], [5,0,6],
+    ],int)
+    loop=np.arange(6)
+    corners=np.array([[0.,0.],[2.,0.],[2.,2.],[0.,2.]])
+    edge_lengths=np.linalg.norm(np.roll(uv[loop],-1,axis=0)-
+                                uv[loop],axis=1)
+    target=map_boundary_with_corner_indices(
+        uv[loop],edge_lengths,corners,[0,3,4,5])
+    before=fixed_boundary_ear_report(uv,triangles,loop,target)
+    assert 0 in before["bad_ids"]
+    assert before["minimum_fixed_ratio"] <= 1e-10
+
+
+def test_boundary_ear_repair_keeps_exact_grid_corners_and_uv_topology():
+    from onestring_physics.optcuts_grid_ear_correspondence import (
+        fixed_boundary_ear_report, repair_boundary_ears,
+    )
+    uv = np.array([
+        [0.,0.], [1.,-.4], [2.,0.],
+        [2.,1.], [1.1,2.], [0.,1.], [1.,.7],
+    ])
+    triangles = np.array([
+        [0,1,2], [0,2,6], [2,3,6],
+        [3,4,6], [4,5,6], [5,0,6],
+    ],int)
+    loop=np.arange(6)
+    corners=np.array([[0.,0.],[2.,0.],[2.,2.],[0.,2.]])
+    edge_lengths=np.linalg.norm(np.roll(uv[loop],-1,axis=0)-
+                                uv[loop],axis=1)
+    source=uv.copy()
+    faces_before=triangles.copy()
+    target, revised, edits, check=repair_boundary_ears(
+        uv,triangles,loop,corners,[0,3,4,5],edge_lengths)
+    assert len(check["bad_ids"]) == 0
+    assert check["minimum_fixed_ratio"] >= .005
+    assert len(edits) == 1
+    assert revised[1] == 1
+    assert all(b>a for a,b in zip(revised,revised[1:]))
+    for corner in corners:
+        assert min(np.linalg.norm(target-corner,axis=1)) < 1e-10
+    np.testing.assert_array_equal(uv,source)
+    np.testing.assert_array_equal(triangles,faces_before)
+
+
+def test_correspondence_search_can_use_ear_aware_corner_assignment():
+    from onestring_physics.optcuts_grid_ear_correspondence import (
+        fixed_boundary_ear_report,
+    )
+    from onestring_physics.optcuts_area_grid_boundary import (
+        _boundary_target_candidates,
+    )
+    uv = np.array([
+        [0.,0.], [1.,-.4], [2.,0.],
+        [2.,1.], [1.1,2.], [0.,1.], [1.,.7],
+    ])
+    faces=np.array([
+        [0,1,2],[0,2,6],[2,3,6],
+        [3,4,6],[4,5,6],[5,0,6],
+    ],int)
+    outline=np.array([[0.,0.],[2.,0.],[2.,2.],[0.,2.]])
+    ranked=_boundary_target_candidates(
+        uv,np.arange(6),outline,max_phases=4,faces=faces)
+    assert ranked
+    assert all(
+        not len(fixed_boundary_ear_report(
+            uv,faces,np.arange(6),mapped)["bad_ids"])
+        for _,_,mapped,_ in ranked
+    )
