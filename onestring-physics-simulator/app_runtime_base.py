@@ -715,6 +715,33 @@ with st.sidebar:
     )
     if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
         st.warning("This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.")
+    # Isolated UV-only grid-aware ablation: the OFF path is the unchanged
+    # official OptCuts -> CSF-tail -> M2D path. Paper / OptCuts-grid untouched.
+    optcuts_grid_aware_enabled = False
+    optcuts_grid_aware_strength = 3.0
+    if not paper_fidelity_enabled and omega_parameterization_mode == "optcuts":
+        with st.expander("実験：Grid-aware OptCuts（元のOptCutsは変更しない）", expanded=False):
+            optcuts_grid_aware_enabled = st.checkbox(
+                "Seamを格子線に寄せるUV最適化を追加",
+                value=False,
+                key="optcuts_grid_aware_experiment",
+                help="公式OptCutsのSeam接続は固定したまま、UVのSeam辺を後処理で"
+                     "格子線へ近づけます。各候補のUV反転・重なり、Symmetric Dirichlet、"
+                     "有効四角セル率を検査し、悪化する候補を拒否します。"
+                     "公式C++のSeam同時最適化そのものを変更する機能ではありません。",
+            )
+            optcuts_grid_aware_strength = float(st.slider(
+                "Grid整列の強さ（実験）",
+                min_value=0.5,max_value=10.0,value=3.0,step=0.5,
+                disabled=not optcuts_grid_aware_enabled,
+                key="optcuts_grid_aware_strength",
+            ))
+            st.caption(
+                "OptCutsの切断トポロジーとCSF-tail最適化は変更せず、"
+                "その後にGrid整列を試します。2Dセルの割合は候補選択用の近似値です。"
+                "現在のΩ Gridは横・縦のUV間隔が異なることもあり、"
+                "四角パネルの正方性・完全なSeam一致を保証するものではありません。"
+            )
     with st.expander("Paper-reference BFF settings", expanded=omega_parameterization_mode == "paper_reference_bff"):
         bff_boundary_policy = st.selectbox(
             "BFF boundary policy",
@@ -1965,6 +1992,8 @@ def current_pipeline_key() -> tuple:
         m2d_crop_policy,
         omega_boundary_mode,
         omega_parameterization_mode,
+        optcuts_grid_aware_enabled,
+        optcuts_grid_aware_strength,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
@@ -2123,6 +2152,8 @@ pipeline_params = PipelineParameters(
     m2d_crop_policy=m2d_crop_policy,
     omega_boundary_mode=omega_boundary_mode,
     omega_parameterization_mode=omega_parameterization_mode,
+    optcuts_grid_aware_enabled=optcuts_grid_aware_enabled,
+    optcuts_grid_aware_strength=optcuts_grid_aware_strength,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
