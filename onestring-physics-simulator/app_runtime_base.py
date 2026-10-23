@@ -31,10 +31,10 @@ if __name__ == "__main__" and os.environ.get("ONESTRING_RUNTIME_BASE_BOOTSTRAPPE
     )
     st.stop()
 
-# Fail visibly instead of appearing to freeze during repeated Streamlit startup.
-# The 2026-10-23 report restarted the Paper UI 19 times without ever
-# reaching the pipeline. Keep this limited to the paper-mode UI. Normal
-# OptCuts/Paper-OFF runs are never stopped by this diagnostic guard.
+# Diagnostic only: Streamlit reruns on NORMAL widget interaction, too.
+# A fixed N-reruns-per-minute threshold must NEVER block the app.
+# The earlier PAPER_UI_RERUN_LOOP_DETECTED guard was a false-positive-prone
+# circuit breaker and is intentionally removed.
 if (__name__ == "__main__" and
         st.session_state.get("paper_fidelity_computation_mode", True)):
     _startup_now = time.monotonic()
@@ -44,16 +44,25 @@ if (__name__ == "__main__" and
     ]
     _startup_times.append(_startup_now)
     st.session_state["_onestring_paper_ui_recent_starts"] = _startup_times
-    if len(_startup_times) >= 12:
-        st.error(
-            "PAPER_UI_RERUN_LOOP_DETECTED: StreamlitのPaper画面が60秒以内に"
-            "12回以上再起動されました。計算フリーズではなくUI再実行ループです。"
-            "最新の起動ログを確認し、Streamlitのウィジェット状態が"
-            "繰り返し書き換えられていないかを調べてください。"
-            "60秒間の再実行が収まれば、この保護は自動解除されます。"
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        _paper_startup_ctx = get_script_run_ctx(suppress_warning=True)
+        _paper_sid = getattr(_paper_startup_ctx, "session_id", "unknown")
+    except (ImportError, AttributeError):
+        _paper_sid = "unknown"
+    print(
+        f"[PAPER-UI-START] session={_paper_sid} runs_last_60s={len(_startup_times)} "
+        f"completed_state={'onestring_state' in st.session_state} "
+        f"split_question={bool(st.session_state.get('paper_split_question'))} "
+        f"manual_corners={bool(st.session_state.get('corner_selection_request'))}",
+        flush=True,
+    )
+    if len(_startup_times) == 12:
+        print(
+            "[PAPER-UI-DIAGNOSTIC] 12 reruns within 60 seconds; this may be "
+            "normal interactive usage. The app is NOT blocked.",
+            flush=True,
         )
-        print("[PAPER_UI_RERUN_LOOP_DETECTED] repeated script starts", flush=True)
-        st.stop()
 
 from streamlit_plotly_events import plotly_events
 
