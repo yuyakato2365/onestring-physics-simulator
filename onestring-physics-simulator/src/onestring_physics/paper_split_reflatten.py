@@ -514,18 +514,15 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
     return cuts,report
 
 
-def split_mesh_reflatten(vertices,faces,domain,params=None):
-    """Use present COMPLETE source-M2D cut logic, replacing only the CSF decision."""
+def split_mesh_reflatten(vertices,faces,domain,params=None,*,reflatten=True):
+    """Use the exact same M2D seam-cut owner with either area-span evaluation."""
     from .paper_mesh_splitting import _split_mesh_single,chart_geometry
-    from .reference_bff import run_official_bff
 
     p=domain.parameterization
     xyz,tri_faces,_=chart_geometry(p)
     uv=np.asarray(p.uv_vertices_2d,float)
-    # Normal (Paper OFF) Omega modes can be harmonic/LSCM rather than
-    # official BFF. The same reflatten-area decision is valid only when the
-    # input UV chart is finite and locally unfolded; never silently repair
-    # a degenerate or flipped mapping to obtain a passing Split score.
+    # The original Omega may be BFF, harmonic or LSCM. Both modes require
+    # a valid chart; never silently repair flipped/degenerate triangles.
     from .reference_bff import triangle_jacobian_diagnostics
     chart_check=triangle_jacobian_diagnostics(xyz,uv,tri_faces)
     if (not np.isfinite(uv).all()
@@ -533,23 +530,26 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
             or chart_check["uv_triangle_flip_count"]
             or chart_check["surface_degenerate_triangle_count"]):
         raise ValueError(
-            "Reflatten Split needs a finite, non-flipped, non-degenerate "
-            "initial S->Omega chart (including normal-flow harmonic/LSCM "
-            "charts). Fix the input parameterization before CSF Split."
+            "Area-span Split needs a finite, non-flipped, non-degenerate "
+            "initial S->Omega chart (including normal-flow harmonic/LSCM). "
+            "Fix the input parameterization before CSF Split."
         )
     source_method=str(getattr(p,"method","unknown"))
     angle=np.deg2rad(float(getattr(domain,"reference_grid_rotation_degrees",0.)))
     R=np.array([[np.cos(angle),-np.sin(angle)],[np.sin(angle),np.cos(angle)]])
     grid_xy=np.asarray(vertices,float)[:,:2]@R
-    if params is None: raise ValueError("reflatten Split requires PipelineParameters")
-    exe=getattr(params,"bff_executable",None)
-    timeout=float(getattr(params,"bff_timeout_seconds",120.))
-    def flatten(V,F):
-        result=run_official_bff(V,F,executable=exe,
-            boundary_policy="automatic_reference",timeout_seconds=timeout)
-        return np.asarray(result.uv_vertices,float)
+    if params is None: raise ValueError("area-span Split requires PipelineParameters")
+    flatten=None
+    if reflatten:
+        from .reference_bff import run_official_bff
+        exe=getattr(params,"bff_executable",None)
+        timeout=float(getattr(params,"bff_timeout_seconds",120.))
+        def flatten(V,F):
+            result=run_official_bff(V,F,executable=exe,
+                boundary_policy="automatic_reference",timeout_seconds=timeout)
+            return np.asarray(result.uv_vertices,float)
     cuts,report=plan_reflatten_cuts(
-        grid_xy,faces,xyz,tri_faces,uv@R,flatten=flatten,
+        grid_xy,faces,xyz,tri_faces,uv@R,flatten=flatten,reflatten=reflatten,
         rings=int(getattr(params,"paper_split_curvature_rings",3)),
         threshold=2.,max_cuts=int(getattr(domain,"max_csf_splits",64)),
         direction_choices=tuple(getattr(params,"paper_split_direction_choices",()) or ()),
@@ -578,7 +578,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     csf_records=records[:len(cuts)]
     collision_records=records[len(cuts):]
     for record,step in zip(csf_records,report["steps"]):
-        record.update(collision_driven=False,reflatten_csf_cut=True,
+        record.update(collision_driven=False,reflatten_csf_cut=bool(reflatten),
+            fixed_chart_area_cut=not bool(reflatten),
             validation_forced_cut=bool(step.get("validation_forced",False)),
             face_ids=step["parent_face_ids"],
             child_face_ids=step["child_face_ids"],
@@ -586,16 +587,22 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
             curvature_vertex_id=step["curvature_vertex"],
             gaussian_curvature=step["curvature"],candidate_cuts=step["candidates"])
     metrics.update(
-        csf_model=_CSF_MODEL,
+        csf_model=_CSF_MODEL if reflatten else _FIXED_CHART_CSF_MODEL,
+        csf_split_bff_evaluation_enabled=bool(reflatten),
+        csf_split_evaluation_uv=report["evaluation_uv"],
         csf_split_initial_omega_method=source_method,
         csf_split_initial_omega_is_official_bff=source_method=="paper_reference_bff",
         csf_split_normal_flow_enabled=not bool(getattr(params,"paper_fidelity_mode",False)),
         csf_split_exactness_label=(
-            "RECONSTRUCTION (not author code): per-piece official free-boundary BFF "
-            "used for the decision only; initial S->Omega method="
+            (("RECONSTRUCTION (not author code): per-piece official free-boundary BFF "
+              "used for the decision only; initial S->Omega method=")
+             if reflatten else
+             ("EXPERIMENTAL FIXED CHART (not author code): no per-piece BFF; "
+              "initial S->Omega UV used for the decision; method="))
             +source_method
         ),
-        csf_split_criterion=REFLATTEN_CRITERION,csf_split_threshold=2.,
+        csf_split_criterion=REFLATTEN_CRITERION if reflatten else FIXED_CHART_CRITERION,
+        csf_split_threshold=2.,
         csf_split_validation_force_one_cut_requested=bool(report["validation_force_one_cut_requested"]),
         csf_split_validation_forced_count=int(report["validation_cut_generated"]),
         csf_split_applied=bool(csf_records),number_of_splits=len(records),
@@ -614,13 +621,21 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
         csf_split_step_analysis_model=_CSF_MODEL,
         csf_split_status="satisfied" if report["satisfied"] else "no_admissible_curvature_guided_grid_cut",
         csf_split_stopping_reason="all components <= 2" if report["satisfied"] else "unresolved",
-        csf_split_stopping_rule="new official free-boundary BFF for each 3D source patch; per-tile 3D/free-BFF area span <= 2; actual M2D seams preserved",
-        csf_split_direction_rule="maximum area-smoothed Gaussian curvature interior grid vertex; compare full row/column cuts by worst reflattened child area span",
+        csf_split_stopping_rule=(
+            "new official free-boundary BFF per 3D patch; 3D/re-BFF-2D tile area span <= 2"
+            if reflatten else
+            "original Omega chart inherited by each 3D patch; 3D/fixed-UV tile area span <= 2"
+        ),
+        csf_split_direction_rule=(
+            "maximum smoothed Gaussian curvature interior grid vertex; "
+            "compare row/column cuts by worst child tile area span"
+        ),
         csf_split_budget_exhausted=bool(not report["satisfied"] and len(cuts)>=saved_budget),
         csf_split_area_ratio_after=report["final_max_sigma"],
         csf_split_component_rescale_applied=False,
         csf_split_linear_csf_area_relation="RECONSTRUCTION uses area span directly, not sqrt(area span)",
-        reflatten_split_report=report,
+        reflatten_split_report=report,  # Backward compatible UI/report key.
+        tile_area_split_report=report,
     )
     # Do NOT certify global deployability or panel fabrication from a CSF proxy.
     metrics["csf_split_bound_certified"]=False
@@ -631,3 +646,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     domain.paper_split_diagnostics=dict(metrics,split_count=len(records),status=metrics["csf_split_status"])
     p.metrics["split_diagnostics"]=dict(domain.paper_split_diagnostics)
     return out_v,out_f,records,metrics
+
+
+def split_mesh_fixed_chart_area(vertices,faces,domain,params=None):
+    """Area-span baseline: original S->Omega chart, no per-piece reBFF."""
+    return split_mesh_reflatten(vertices,faces,domain,params,reflatten=False)
