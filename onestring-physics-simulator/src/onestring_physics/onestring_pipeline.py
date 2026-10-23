@@ -1012,6 +1012,13 @@ class PipelineParameters(_original.PipelineParameters):
     paper_split_direction_choices: tuple = ()
     # Ask the user (app) for each Split direction instead of choosing automatically.
     paper_split_ask_direction: bool = False
+    # Explicit smoke-test only: require a complete Split even when the normal
+    # reflatten CSF decision already satisfies sigma <= 2. Never the default.
+    paper_split_validation_force_one_cut: bool = False
+    # Experimental: project saved terminal free-BFF charts onto the ACTUAL
+    # split fabrication M2D. CSF and cut selection are unchanged. The original
+    # UV coordinates remain separate for M2D -> M3D inverse mapping.
+    paper_split_apply_rebff_m2d: bool = False
     # Curvatures within this relative band of the maximum count as equal; the
     # highest (+z) of those vertices is cut through.
     paper_split_curvature_tie_tolerance: float = 0.02

@@ -16,8 +16,12 @@ from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 
 REFLATTEN_CRITERION = "reflatten_tile_area"
+FIXED_CHART_CRITERION = "fixed_chart_tile_area"
 _CSF_MODEL = ("Reconstructed Sec.4.5: free-boundary official BFF per source "
               "component; max(A3D/A2D)/min(A3D/A2D) <= 2 (tile areas)")
+_FIXED_CHART_CSF_MODEL = ("Experimental baseline: inherited original Omega UV per "
+                          "3D piece; max(A3D/A2D)/min(A3D/A2D) <= 2 (tile areas); "
+                          "NO per-piece BFF")
 
 
 def _tri_angles(V, F):
@@ -372,10 +376,32 @@ class SplitDirectionQuestion(BaseException):
         self.info = info
 
 
-def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
+def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
                         rings=3,threshold=2.,max_cuts=64,direction_choices=(),ask=False,
-                        curvature_tie_tolerance=0.02):
-    """Assess a full-grid cut using fresh BFF for both 3D child patches."""
+                        curvature_tie_tolerance=0.02,force_one_cut=False,reflatten=True,
+                        leaf_chart_sink=None):
+    """Assess complete grid cuts using per-piece BFF or inherited original UV.
+
+    The opt-in validation cut exercises the topology even when sigma <= 2.
+    ReBFF-OFF never invokes the BFF backend during Split evaluation.
+    """
+    if reflatten and not callable(flatten):
+        raise ValueError("reBFF Split requires a callable BFF evaluator")
+    if leaf_chart_sink is not None and not reflatten:
+        raise ValueError("postcut manufacturing reBFF requires reBFF evaluation ON")
+    chart_cache = {} if leaf_chart_sink is not None else None
+    def capture_terminal(piece, ids):
+        if leaf_chart_sink is None:
+            return
+        stored = chart_cache.get(id(piece))
+        if stored is None:
+            raise RuntimeError("POSTCUT_REBFF_M2D_NO_LEAF_CHART: score chart lost")
+        leaf_chart_sink.append(dict(
+            face_ids=np.asarray(ids,int).copy(),
+            source_uv=np.asarray(piece[2],float).copy(),
+            piece_faces=np.asarray(piece[1],int).copy(),
+            rebff_uv=np.asarray(stored,float).copy(),
+        ))
     grid_xy=np.asarray(grid_xy,float);quads=np.asarray(quads,int)
     quad_xy=grid_xy[quads];centres=quad_xy.mean(axis=1)
     pitch=float(np.median(np.linalg.norm(quad_xy[:,1]-quad_xy[:,0],axis=1)))
@@ -389,7 +415,12 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
     vertex_z=np.full(len(grid_xy),-np.inf)
     vertex_z[good]=(bary[good]*np.asarray(xyz,float)[tri_faces[tri[good]],2]).sum(1)
     def sigma(piece,ids):
-        J=tile_area_ratios(piece,quad_xy[ids],flatten(piece[0],piece[1]))
+        # OFF retains the exact original S->Omega UV inherited through
+        # clipping, with no per-piece reparameterization or rescaling.
+        chart_uv=flatten(piece[0],piece[1]) if reflatten else piece[2]
+        J=tile_area_ratios(piece,quad_xy[ids],chart_uv)
+        if chart_cache is not None:
+            chart_cache[id(piece)] = np.asarray(chart_uv,float)
         return float(np.max(J)/np.min(J)),J
     def interior(ids):
         edge_count=defaultdict(int)
@@ -399,8 +430,13 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                 edge_count[(min(a,b),max(a,b))]+=1
         boundary={v for edge,c in edge_count.items() if c==1 for v in edge}
         return sorted(set(quads[ids].ravel().tolist())-boundary)
-    report=dict(model=_CSF_MODEL,threshold=float(threshold),curvature_rings=int(rings),
-                pitch=pitch,steps=[],leaves=[])
+    report=dict(model=_CSF_MODEL if reflatten else _FIXED_CHART_CSF_MODEL,
+                reflatten_per_piece=bool(reflatten),
+                evaluation_uv="per_piece_official_free_bff" if reflatten else "original_omega_fixed_chart",
+                threshold=float(threshold),curvature_rings=int(rings),
+                pitch=pitch,steps=[],leaves=[],
+                validation_force_one_cut_requested=bool(force_one_cut),
+                validation_cut_generated=False)
     started=time.perf_counter()
     root=(np.asarray(xyz,float),np.asarray(tri_faces,int),np.asarray(uv,float))
     all_ids=np.arange(len(quads));root_sigma,root_J=sigma(root,all_ids)
@@ -411,7 +447,11 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
     while stack:
         piece,ids,parent_sigma,parent_J,depth=stack.pop()
         candidates=interior(ids)
-        if parent_sigma<=threshold or not candidates or len(cuts)>=max_cuts:
+        validation_forced=bool(force_one_cut and depth==0 and not cuts
+                               and parent_sigma<=threshold)
+        if ((parent_sigma<=threshold and not validation_forced)
+                or not candidates or len(cuts)>=max_cuts):
+            capture_terminal(piece, ids)
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,
                     satisfied=bool(parent_sigma<=threshold),tile_area_ratio=parent_J.tolist()))
             continue
@@ -454,12 +494,14 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                 candidates=evaluated,auto_axis=best[1],
                 previous=[dict(axis=c["axis"],value=c["value"],parent_face_ids=st["parent_face_ids"])
                           for c,st in zip(cuts,report["steps"])],
+                reflatten_per_piece=bool(reflatten),validation_forced=validation_forced,
                 grid_xy=grid_xy.tolist(),quads=quads.tolist()))
         choice=str(direction_choices[len(cuts)]) if len(cuts)<len(direction_choices) else "auto"
         if choice=="stop":
             # The user ended the Split here: this and every remaining piece
             # become leaves as they are (sigma may stay above the threshold).
             max_cuts=len(cuts);report["stopped_by_user"]=True
+            capture_terminal(piece, ids)
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,satisfied=False,
                     reason="stopped_by_user",tile_area_ratio=parent_J.tolist()))
             continue
@@ -467,12 +509,15 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
         if best is not None and choice in options:
             best=options[choice];chosen_by="user"
         if best is None:
+            capture_terminal(piece, ids)
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,
                 satisfied=False,reason="no_complete_grid_cut",tile_area_ratio=parent_J.tolist()))
             continue
         worst,axis,value,children=best
-        cuts.append(dict(axis=axis,value=float(value),source_face_id=int(ids[0])))
+        cuts.append(dict(axis=axis,value=float(value),source_face_id=int(ids[0]),
+                         validation_forced=validation_forced))
         report["steps"].append(dict(depth=depth,parent_tiles=int(len(ids)),
+                validation_forced=validation_forced,
                 parent_sigma=float(parent_sigma),curvature_vertex=int(peak),
                 curvature_xy=grid_xy[peak].tolist(),curvature=float(vertex_k[peak]),
                 peak_rule=peak_rule,near_equal_curvature_vertices=int(len(ties)),height=float(vertex_z[peak]),
@@ -484,36 +529,72 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten,
                 requested_direction=choice,chosen_by=chosen_by))
         for child in children:stack.append((*child,depth+1))
     report["seconds"]=time.perf_counter()-started
+    report["validation_cut_generated"]=any(c.get("validation_forced",False) for c in cuts)
     report["final_max_sigma"]=max((l["sigma"] for l in report["leaves"]),default=1.)
     report["satisfied"]=all(l["satisfied"] for l in report["leaves"])
     return cuts,report
 
 
-def split_mesh_reflatten(vertices,faces,domain,params=None):
-    """Use present COMPLETE source-M2D cut logic, replacing only the CSF decision."""
+def split_mesh_reflatten(vertices,faces,domain,params=None,*,reflatten=True):
+    """Use the exact same M2D seam-cut owner with either area-span evaluation."""
     from .paper_mesh_splitting import _split_mesh_single,chart_geometry
-    from .reference_bff import run_official_bff
 
     p=domain.parameterization
     xyz,tri_faces,_=chart_geometry(p)
     uv=np.asarray(p.uv_vertices_2d,float)
+    # The original Omega may be BFF, harmonic or LSCM. Both modes require
+    # a valid chart; never silently repair flipped/degenerate triangles.
+    from .reference_bff import triangle_jacobian_diagnostics
+    chart_check=triangle_jacobian_diagnostics(xyz,uv,tri_faces)
+    if (not np.isfinite(uv).all()
+            or chart_check["uv_degenerate_triangle_count"]
+            or chart_check["uv_triangle_flip_count"]
+            or chart_check["surface_degenerate_triangle_count"]):
+        raise ValueError(
+            "Area-span Split needs a finite, non-flipped, non-degenerate "
+            "initial S->Omega chart (including normal-flow harmonic/LSCM). "
+            "Fix the input parameterization before CSF Split."
+        )
+    source_method=str(getattr(p,"method","unknown"))
     angle=np.deg2rad(float(getattr(domain,"reference_grid_rotation_degrees",0.)))
     R=np.array([[np.cos(angle),-np.sin(angle)],[np.sin(angle),np.cos(angle)]])
     grid_xy=np.asarray(vertices,float)[:,:2]@R
-    if params is None: raise ValueError("reflatten Split requires PipelineParameters")
-    exe=getattr(params,"bff_executable",None)
-    timeout=float(getattr(params,"bff_timeout_seconds",120.))
-    def flatten(V,F):
-        result=run_official_bff(V,F,executable=exe,
-            boundary_policy="automatic_reference",timeout_seconds=timeout)
-        return np.asarray(result.uv_vertices,float)
+    if params is None: raise ValueError("area-span Split requires PipelineParameters")
+    flatten=None
+    if reflatten:
+        from .reference_bff import run_official_bff
+        exe=getattr(params,"bff_executable",None)
+        timeout=float(getattr(params,"bff_timeout_seconds",120.))
+        def flatten(V,F):
+            result=run_official_bff(V,F,executable=exe,
+                boundary_policy="automatic_reference",timeout_seconds=timeout)
+            return np.asarray(result.uv_vertices,float)
+    apply_to_m2d=bool(getattr(params,"paper_split_apply_rebff_m2d",False))
+    # Manufacturing UV deformation is a PAPER-ONLY opt-in experiment.
+    # Split evaluation reBFF remains available in Paper OFF unchanged.
+    if apply_to_m2d and not bool(getattr(params,"paper_fidelity_mode",False)):
+        raise ValueError(
+            "POSTCUT_REBFF_M2D_PAPER_ONLY: this experimental geometry "
+            "change is restricted to Paper mode. Paper OFF / OptCuts "
+            "must retain their original M2D and K2D behavior."
+        )
+    if apply_to_m2d and not reflatten:
+        raise ValueError("Manufacturing M2D reBFF needs the reBFF CSF evaluation enabled")
+    leaf_charts=[] if apply_to_m2d else None
+    # Keep the original scoring and chosen cut lines byte-for-byte identical.
+    # Only retain the BFF UV already computed for terminal 3D pieces when
+    # explicitly requested for downstream manufacturing M2D remapping.
     cuts,report=plan_reflatten_cuts(
-        grid_xy,faces,xyz,tri_faces,uv@R,flatten=flatten,
+        grid_xy,faces,xyz,tri_faces,uv@R,flatten=flatten,reflatten=reflatten,
+        leaf_chart_sink=leaf_charts,
         rings=int(getattr(params,"paper_split_curvature_rings",3)),
         threshold=2.,max_cuts=int(getattr(domain,"max_csf_splits",64)),
         direction_choices=tuple(getattr(params,"paper_split_direction_choices",()) or ()),
         ask=bool(getattr(params,"paper_split_ask_direction",False)),
-        curvature_tie_tolerance=float(getattr(params,"paper_split_curvature_tie_tolerance",0.02)))
+        curvature_tie_tolerance=float(getattr(params,"paper_split_curvature_tie_tolerance",0.02)),
+        force_one_cut=bool(getattr(params,"paper_split_validation_force_one_cut",False)))
+    # Only charts, not any new CSF evaluation, are handed to the cut owner.
+    domain._split_rebff_leaf_charts=(leaf_charts if apply_to_m2d and cuts else None)
     # Preserve the original forced-cut topology implementation and ALL fields.
     # Use a defensive copy of params so changing the decision cannot leak
     # user-requested collision-driven Split state back into the UI.
@@ -536,16 +617,37 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     csf_records=records[:len(cuts)]
     collision_records=records[len(cuts):]
     for record,step in zip(csf_records,report["steps"]):
-        record.update(collision_driven=False,reflatten_csf_cut=True,
+        record.update(collision_driven=False,reflatten_csf_cut=bool(reflatten),
+            fixed_chart_area_cut=not bool(reflatten),
+            validation_forced_cut=bool(step.get("validation_forced",False)),
             face_ids=step["parent_face_ids"],
             child_face_ids=step["child_face_ids"],
             sigma_before=step["parent_sigma"],sigma_after=step["child_sigma"],
             curvature_vertex_id=step["curvature_vertex"],
             gaussian_curvature=step["curvature"],candidate_cuts=step["candidates"])
     metrics.update(
-        csf_model=_CSF_MODEL,
-        csf_split_exactness_label="RECONSTRUCTION (not author code): per-piece official free-boundary BFF used for decision only",
-        csf_split_criterion=REFLATTEN_CRITERION,csf_split_threshold=2.,
+        csf_model=_CSF_MODEL if reflatten else _FIXED_CHART_CSF_MODEL,
+        csf_split_bff_evaluation_enabled=bool(reflatten),
+        csf_split_evaluation_uv=report.get(
+            "evaluation_uv",
+            "per_piece_official_free_bff" if reflatten else "original_omega_fixed_chart"),
+        csf_split_initial_omega_method=source_method,
+        csf_split_initial_omega_is_official_bff=source_method=="paper_reference_bff",
+        csf_split_normal_flow_enabled=not bool(getattr(params,"paper_fidelity_mode",False)),
+        csf_split_exactness_label=(
+            (("RECONSTRUCTION (not author code): per-piece official free-boundary BFF "
+              "used for the decision only; initial S->Omega method=")
+             if reflatten else
+             ("EXPERIMENTAL FIXED CHART (not author code): no per-piece BFF; "
+              "initial S->Omega UV used for the decision; method="))
+            +source_method
+        ),
+        csf_split_criterion=REFLATTEN_CRITERION if reflatten else FIXED_CHART_CRITERION,
+        csf_split_m2d_rebff_requested=bool(apply_to_m2d),
+        csf_split_m2d_rebff_terminal_chart_count=len(leaf_charts or []),
+        csf_split_threshold=2.,
+        csf_split_validation_force_one_cut_requested=bool(report.get("validation_force_one_cut_requested",False)),
+        csf_split_validation_forced_count=int(report.get("validation_cut_generated",False)),
         csf_split_applied=bool(csf_records),number_of_splits=len(records),
         csf_split_step_analysis=csf_records,csf_split_step_count=len(csf_records),
         csf_split_locations=[[r["axis"],r["snapped_value"]] for r in csf_records],
@@ -559,16 +661,24 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
         csf_split_unresolved_component_count=sum(not leaf["satisfied"] for leaf in report["leaves"]),
         csf_split_initial_components=[dict(face_ids=list(range(len(faces))),sigma=report["initial_sigma"])],
         csf_split_component_sigma=[leaf["sigma"] for leaf in report["leaves"]],
-        csf_split_step_analysis_model=_CSF_MODEL,
+        csf_split_step_analysis_model=_CSF_MODEL if reflatten else _FIXED_CHART_CSF_MODEL,
         csf_split_status="satisfied" if report["satisfied"] else "no_admissible_curvature_guided_grid_cut",
         csf_split_stopping_reason="all components <= 2" if report["satisfied"] else "unresolved",
-        csf_split_stopping_rule="new official free-boundary BFF for each 3D source patch; per-tile 3D/free-BFF area span <= 2; actual M2D seams preserved",
-        csf_split_direction_rule="maximum area-smoothed Gaussian curvature interior grid vertex; compare full row/column cuts by worst reflattened child area span",
+        csf_split_stopping_rule=(
+            "new official free-boundary BFF per 3D patch; 3D/re-BFF-2D tile area span <= 2"
+            if reflatten else
+            "original Omega chart inherited by each 3D patch; 3D/fixed-UV tile area span <= 2"
+        ),
+        csf_split_direction_rule=(
+            "maximum smoothed Gaussian curvature interior grid vertex; "
+            "compare row/column cuts by worst child tile area span"
+        ),
         csf_split_budget_exhausted=bool(not report["satisfied"] and len(cuts)>=saved_budget),
         csf_split_area_ratio_after=report["final_max_sigma"],
         csf_split_component_rescale_applied=False,
         csf_split_linear_csf_area_relation="RECONSTRUCTION uses area span directly, not sqrt(area span)",
-        reflatten_split_report=report,
+        reflatten_split_report=report,  # Backward compatible UI/report key.
+        tile_area_split_report=report,
     )
     # Do NOT certify global deployability or panel fabrication from a CSF proxy.
     metrics["csf_split_bound_certified"]=False
@@ -579,3 +689,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None):
     domain.paper_split_diagnostics=dict(metrics,split_count=len(records),status=metrics["csf_split_status"])
     p.metrics["split_diagnostics"]=dict(domain.paper_split_diagnostics)
     return out_v,out_f,records,metrics
+
+
+def split_mesh_fixed_chart_area(vertices,faces,domain,params=None):
+    """Area-span baseline: original S->Omega chart, no per-piece reBFF."""
+    return split_mesh_reflatten(vertices,faces,domain,params,reflatten=False)

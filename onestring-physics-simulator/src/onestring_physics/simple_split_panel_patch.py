@@ -212,17 +212,41 @@ def apply_paper_split(pipeline_module, mesh, domain, params=None):
         # The reference-BFF builder also publishes this legacy report. Keep
         # it in sync instead of leaving a pending/zero-split result behind.
         domain.reference_split_diagnostics = dict(domain.paper_split_diagnostics)
-    # Work in grid coordinates when opening a rotated grid's seams.
+    # Preserve the original Omega coordinates for M3D inverse mapping,
+    # but optionally use per-piece free-boundary BFF UV for fabrication M2D.
+    # This occurs AFTER the real seams have duplicated vertex IDs.
+    apply_rebff=bool(getattr(params, "paper_split_apply_rebff_m2d", False))
+    physical = canonical.copy()
+    if apply_rebff and bool(measured.get("csf_split_applied", False)):
+        from .postcut_rebff_m2d import apply_leaf_rebff_uv
+        physical, rebff_audit = apply_leaf_rebff_uv(
+            canonical, faces,
+            getattr(domain, "_split_rebff_leaf_charts", None),
+            rotation_degrees=float(getattr(domain,"reference_grid_rotation_degrees",0.)),
+        )
+        metrics.update(rebff_audit)
+    elif apply_rebff:
+        metrics.update(m2d_postcut_rebff_applied=False,
+                       m2d_postcut_rebff_reason="no CSF Split was generated")
+    # Work in grid coordinates when opening rotated grid seams.
     angle = np.deg2rad(float(getattr(domain, 'reference_grid_rotation_degrees', 0.)))
     rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
-    grid_vertices = canonical.copy(); grid_vertices[:, :2] = canonical[:, :2] @ rotation
+    grid_vertices = physical.copy(); grid_vertices[:, :2] = physical[:, :2] @ rotation
     collision_gap_multiplier=float(
         getattr(params,"collision_split_gap_multiplier",1.0)
     )
-    separated, components, panel_vertices, offsets, gap = _open_split_gaps(
-        grid_vertices, faces, records, mesh.grid,
+    # Decide each panel's Split-side offsets in ORIGINAL grid coordinates.
+    # After reBFF a panel may have moved across its former cut line, and
+    # determining left/right from deformed coordinates would invert the gap.
+    source_grid=canonical.copy()
+    source_grid[:,:2] = canonical[:,:2] @ rotation
+    _, components, panel_vertices, offsets, gap = _open_split_gaps(
+        source_grid, faces, records, mesh.grid,
         collision_gap_multiplier=collision_gap_multiplier,
     )
+    separated=grid_vertices.copy()
+    for ids, offset in zip(panel_vertices, offsets):
+        separated[ids,:2] += offset[None,:]
     separated[:, :2] = separated[:, :2] @ rotation.T
     offsets = [offset @ rotation.T for offset in offsets]
     metrics.update(paper_split_finalized=True, simple_split_active=True, simple_split_records=records,
@@ -433,6 +457,39 @@ def install_simple_split_panel_patch(pipeline_module: Any, optimization_debug_mo
             })
             result = _make_quadmesh(pipeline_module, result, verts, np.asarray(result.faces, dtype=int).copy(), metrics)
             _copy_attrs(mesh_2d, result)
+        # ReBFF can strongly deform the reference M2D, while the normal K2D
+        # edge-match objective does not constrain face orientation/non-overlap.
+        # Apply a conservative continuation ONLY for the opt-in reBFF M2D
+        # route; leave legacy/plain-grid K2D bitwise unchanged.
+        if (bool(getattr(params,"paper_fidelity_mode",False))
+                and bool(getattr(params,"paper_split_apply_rebff_m2d",False))
+                and bool((getattr(mesh_2d,"metrics",{}) or {}).get(
+                    "m2d_postcut_rebff_applied",False))):
+            # Do NOT route Paper-OFF or ordinary OptCuts K2D through this
+            # experimental geometry repair, even if stale mesh flags survive.
+            from .rebff_k2d_guard import guard_rebff_k2d
+            guarded_xy,guard_metrics=guard_rebff_k2d(
+                mesh_2d,mesh_3d,result)
+            guarded_vertices=np.asarray(result.vertices,float).copy()
+            guarded_vertices[:,:2]=guarded_xy
+            guarded_metrics=dict(getattr(result,"metrics",{}) or {})
+            guarded_metrics.update(guard_metrics)
+            guarded_metrics.update(
+                edge_matching_error=guard_metrics["k2d_rebff_guard_final_mean_edge_error"],
+                edge_matching_error_after=guard_metrics["k2d_rebff_guard_final_mean_edge_error"],
+                k2d_edge_error_after=guard_metrics["k2d_rebff_guard_final_mean_edge_error"],
+                mean_edge_length_error_after=guard_metrics["k2d_rebff_guard_final_mean_edge_error"],
+                max_edge_length_error_after=guard_metrics["k2d_rebff_guard_final_max_edge_error"],
+                k2d_rebff_guard_solver_metrics_preserved_in_guard_fields=True,
+            )
+            result=_make_quadmesh(pipeline_module,result,guarded_vertices,
+                                  np.asarray(result.faces,int).copy(),guarded_metrics)
+            _copy_attrs(mesh_2d,result)
+            try:
+                report.after_error=guard_metrics["k2d_rebff_guard_final_mean_edge_error"]
+                report.constraint_violation=guard_metrics["k2d_rebff_guard_overlap_count"]
+            except (AttributeError,TypeError):
+                pass
         try:
             render_split_panel_correspondence(mesh_2d, result, mesh_3d)
         except Exception:

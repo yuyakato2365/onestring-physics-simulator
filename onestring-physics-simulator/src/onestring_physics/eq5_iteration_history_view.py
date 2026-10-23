@@ -58,6 +58,44 @@ def render_final_k2d_result(st, history=None):
     return True
 
 
+def render_actual_rebff_k2d_result(st, mesh):
+    """Plot the ACTUAL guarded K2D mesh, not the raw pre-guard Eq.(5) history."""
+    metrics=getattr(mesh,"metrics",{}) or {}
+    if not metrics.get("k2d_rebff_guard_applied",False):
+        return False
+    xy=np.asarray(mesh.vertices,float)[:,:2]
+    faces=np.asarray(mesh.faces,int)
+    if xy.ndim!=2 or xy.shape[1]!=2 or not np.isfinite(xy).all() or not len(faces):
+        raise ValueError("K2D_REBFF_GUARD_DISPLAY_INVALID: final mesh is absent or nonfinite")
+    lo=np.min(xy,axis=0);hi=np.max(xy,axis=0);center=.5*(lo+hi)
+    span=max(float(hi[0]-lo[0]),float(hi[1]-lo[1]),1e-9)*1.04
+    xr=(center[0]-span/2,center[0]+span/2)
+    yr=(center[1]-span/2,center[1]+span/2)
+    st.subheader("K2D（実際の最終メッシュ・再BFF補正後）")
+    st.plotly_chart(
+        _figure(xy,faces,{"final":True},xr,yr,diagnostic=False),
+        use_container_width=True,key="rebff_actual_final_k2d",
+        config={"displaylogo":False,"responsive":True},
+    )
+    st.caption("この図は後段へ渡す最終K2Dです。"
+               "下の最適化履歴は再BFFガード適用前の生の計算結果で、"
+               "最終メッシュとは異なる場合があります。")
+    if metrics.get("k2d_rebff_guard_clipped",False):
+        st.warning(
+            "再BFF M2D→K2Dの反転・交差防止により、元のK2D変位を"
+            f"{float(metrics['k2d_rebff_guard_step_fraction'])*100:.2f}%まで制限しました。"
+            "K3Dとの辺長一致は未保証です。"
+        )
+    st.write({
+        "original_solver_edge_error":metrics.get("k2d_rebff_guard_solver_mean_edge_error"),
+        "guarded_edge_error":metrics.get("k2d_rebff_guard_final_mean_edge_error"),
+        "guarded_max_edge_error":metrics.get("k2d_rebff_guard_final_max_edge_error"),
+        "guard_overlap_count":metrics.get("k2d_rebff_guard_overlap_count"),
+        "guard_valid_quad_geometry":metrics.get("k2d_rebff_guard_geometry_valid"),
+    })
+    return True
+
+
 def render_completed_k2d(history):
     """Publish before T2D/Eq.6, scoped to this Streamlit session."""
     try:

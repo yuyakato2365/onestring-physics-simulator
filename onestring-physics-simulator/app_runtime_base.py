@@ -30,6 +30,40 @@ if __name__ == "__main__" and os.environ.get("ONESTRING_RUNTIME_BASE_BOOTSTRAPPE
         run_name="__main__",
     )
     st.stop()
+
+# Diagnostic only: Streamlit reruns on NORMAL widget interaction, too.
+# A fixed N-reruns-per-minute threshold must NEVER block the app.
+# The earlier PAPER_UI_RERUN_LOOP_DETECTED guard was a false-positive-prone
+# circuit breaker and is intentionally removed.
+if (__name__ == "__main__" and
+        st.session_state.get("paper_fidelity_computation_mode", True)):
+    _startup_now = time.monotonic()
+    _startup_times = [
+        float(t) for t in st.session_state.get("_onestring_paper_ui_recent_starts", ())
+        if _startup_now - float(t) <= 60.0
+    ]
+    _startup_times.append(_startup_now)
+    st.session_state["_onestring_paper_ui_recent_starts"] = _startup_times
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        _paper_startup_ctx = get_script_run_ctx(suppress_warning=True)
+        _paper_sid = getattr(_paper_startup_ctx, "session_id", "unknown")
+    except (ImportError, AttributeError):
+        _paper_sid = "unknown"
+    print(
+        f"[PAPER-UI-START] session={_paper_sid} runs_last_60s={len(_startup_times)} "
+        f"completed_state={'onestring_state' in st.session_state} "
+        f"split_question={bool(st.session_state.get('paper_split_question'))} "
+        f"manual_corners={bool(st.session_state.get('corner_selection_request'))}",
+        flush=True,
+    )
+    if len(_startup_times) == 12:
+        print(
+            "[PAPER-UI-DIAGNOSTIC] 12 reruns within 60 seconds; this may be "
+            "normal interactive usage. The app is NOT blocked.",
+            flush=True,
+        )
+
 from streamlit_plotly_events import plotly_events
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -420,14 +454,11 @@ with st.sidebar:
     )
     if paper_fidelity_enabled:
         st.info(
-            "Paperモード：公式BFFの4つの90°外角による矩形Ω、"
-            "8頂点剛体、T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
-            "Splitは4枚のパネル重心から構成する双対Grid領域のM2D/M3D面積比を評価し、"
-            "その最大/最小比の平方根が2を超えれば、ガウス曲率優先の完全格子切断を試します。"
-            "Splitをまたぐ双対セルと測定不能な子領域は合格判定に使用しません。"
-            "この重心面積評価は研究用であり、四角形機構の製造可能性を保証しません。"
-            "分割後のUV再写像・独立スケール変更は未実装のため、"
-            "論文の製造可能性条件を完全に証明するものではありません。"
+            "Paperモード：公式BFFの矩形Ω、8頂点剛体、"
+            "T2D非貫通修復、Sec.5.3閉経路、Snap/Lift PD。"
+            "Split CSFの既定は再展開方式です。各切断候補の3D曲面片を"
+            "公式自由境界BFFで再展開し、タイルの(A3D/A2D)最大/最小比を2と比較します。"
+            "再展開UVのM2Dへの反映は実験オプション。製造可能性の証明ではありません。"
         )
     # Opt-in extension of the ORIGINAL OneString pipeline, not a separate
     # viewer. Leaves OptCuts / legacy BFF untouched when disabled.
@@ -779,22 +810,74 @@ with st.sidebar:
                 "その場合のSplit本数は元論文のBFF結果と直接比較できません。"
             )
         paper_split_criterion = st.selectbox(
-            "Split CSF判定（論文準拠の研究再構成）",
+            "Split CSF判定（Paper / 通常フロー共通）",
             ["fixed_uv", "reflatten_tile_area"],
             index=1 if _reflatten_bff_path else 0,
-            disabled=not _reflatten_bff_path,
             format_func=lambda v: {
-                "fixed_uv": "既存の固定UV / 現行Split（比較用）",
-                "reflatten_tile_area": "3Dピース自由境界BFF再展開 → タイル面積比 ≤ 2",
+                "fixed_uv": "既存の固定UV / 現行Split（以前のCSF式）",
+                "reflatten_tile_area": "タイル面積比 ≤ 2（下で再BFFのON/OFFを選択）",
             }[v],
-            help="各候補の3D曲面片だけを公式BFFで再展開してCSFを測定。"
-                 "元のM2D格子・K3D・T2Dパネルを再展開UVで置換しません。"
-                 "研究再構成であり著者コードとの一致は未確認。",
+            help="タイル面積比モードは縦横の候補選択・曲率・閾値2・"
+                 "M2Dへの実切断を統一し、再BFFだけ切替えます。"
+                 "ONでは各3D曲面片を公式自由境界BFFで展開して面積比評価、"
+                 "OFFでは初期Ωを切り取ったUVを使って評価します。"
+                 "既存の固定UVは別の旧式CSF計算で、同条件の比較対象ではありません。",
         )
+        paper_split_enable_rebff = st.checkbox(
+            "SplitのCSF判定で各3D領域を再BFFする",
+            value=True,
+            disabled=paper_split_criterion == "fixed_uv",
+            key="split_area_enable_rebff",
+            help="ON：領域ごとに公式自由境界BFFを再実行し、そのUVでタイル面積比を計算。"
+                 "OFF：初期S→ΩのUVをSplit後も保持し、そのUVで同じ面積比を計算。"
+                 "OFFではSplit評価に外部BFFは不要。ただし初期Ωの生成方法にBFFを"
+                 "選んでいる場合、その最初のBFFは引き続き必要です。"
+                 "いずれも再BFFのUVをM2Dパネルへ移植しません。",
+        )
+        if paper_split_criterion == "reflatten_tile_area" and not paper_split_enable_rebff:
+            paper_split_criterion = "fixed_chart_tile_area"
+            st.info("再BFF OFF：初期ΩのUVを保持してタイル面積比を評価します。"
+                    "切断候補・曲率・閾値・実際のM2D SplitはONと共通です。"
+                    "ただし初期Ωが非等角なら線形CSFの保証ではありません。")
+        paper_split_apply_rebff_m2d = st.checkbox(
+            "実験：Split後の再BFF UVを実際のM2Dパネル形状に反映",
+            value=False,
+            key="split_apply_rebff_to_m2d",
+            disabled=(paper_split_criterion != "reflatten_tile_area"
+                      or not paper_fidelity_enabled),
+            help="Paper mode ONかつ再BFFによるSplit判定ONの場合のみ有効。"
+                 "通常のOptCuts・Paper OFFのパイプラインには影響させません。"
+                 "Split候補・CSF閾値・判定は従来の再BFF ONと全く同じままです。"
+                 "決定されたSplit後の3D領域を再BFFしたUVを、M2Dの頂点に対応づけます。"
+                 "各領域のUVは類似変換で元のΩに位置合わせし、実際のパネル形状を変形します。"
+                 "元のΩ座標はM3Dへの逆写像用に保存します。"
+                 "反転・退化・境界不整合時は中止し、以前のUVへ黙って戻しません。"
+                 "元論文の実装を再現したと証明するものではありません。",
+        )
+        if (paper_fidelity_enabled and paper_split_apply_rebff_m2d
+                and paper_split_criterion == "reflatten_tile_area"):
+            st.warning("M2D再BFF反映は研究用の実験モードです。Split判定自体は変更せず、"
+                       "最終M2Dを各領域の再BFF形状で変形します。"
+                       "元の格子の正方性やヒンジの製造可能性は別途検証が必要です。")
+        else:
+            paper_split_apply_rebff_m2d = False
+        paper_split_validation_force_one_cut = st.checkbox(
+            "検証用：CSFが2以下でもSplitを1本入れる",
+            value=False,
+            disabled=paper_split_criterion == "fixed_uv",
+            key="split_validation_force_one_cut",
+            help="CSFの閾値を下げたり値を偽装したりせず、最初の領域に"
+                 "完全な格子Splitを1本追加して、下流M2D→T2D処理を検証します。"
+                 "実際にはSplitが不要な場合も切るため、研究結果には使わないでください。"
+                 "後続領域のCSFが2を超える場合は通常の追加Splitも検討します。",
+        )
+        if paper_split_validation_force_one_cut:
+            st.warning("検証専用の強制Splitが有効です。Split本数は必要本数ではなく、"
+                       "このRunの結果を論文再現・CSF最適解として扱わないでください。")
         paper_split_curvature_rings = int(st.slider(
             "Split切断点：ガウス曲率平滑化リング数",
             min_value=1, max_value=10, value=3, step=1,
-            disabled=paper_split_criterion != "reflatten_tile_area",
+            disabled=paper_split_criterion == "fixed_uv",
         ))
         reference_grid_fit_rectangle = st.checkbox(
             "矩形BFFの外接領域にn×nの正方形グリッドを合わせる（実験）",
@@ -806,7 +889,7 @@ with st.sidebar:
         paper_split_ask_direction = st.checkbox(
             "Splitの向きを処理中に尋ねる（候補が出るたびに縦・横を選ぶ）",
             value=False, key="paper_split_ask_direction",
-            disabled=paper_split_criterion != "reflatten_tile_area",
+            disabled=paper_split_criterion == "fixed_uv",
             help="Split が必要になるたびに計算を止め、M2D 上の縦・横の候補線と子の σ を示して選んでもらいます。"
                  "選ぶたびにパイプラインを最初から計算し直し、次の Split まで進みます。",
         )
@@ -814,11 +897,11 @@ with st.sidebar:
             "Split点：ガウス曲率がほぼ同じとみなす幅（最大値からの差、%）",
             min_value=0.0, max_value=30.0, value=2.0, step=0.5,
             key="paper_split_curvature_tie_percent",
-            disabled=paper_split_criterion != "reflatten_tile_area",
+            disabled=paper_split_criterion == "fixed_uv",
             help="曲率が最大値からこの割合以内の格子点が複数あれば、その中で最も高い（入力の +z）点を通って切ります。"
                  "0% にすると常に曲率最大の点を使います。",
         ))
-        if paper_split_criterion == "reflatten_tile_area":
+        if paper_split_criterion in ("reflatten_tile_area", "fixed_chart_tile_area"):
             if uploaded is None:
                 st.caption(
                     "現在の入力: 内蔵形状 / ローカル自動探索。"
@@ -827,10 +910,15 @@ with st.sidebar:
                 )
             else:
                 st.caption(f"再展開Split入力: {uploaded.name}（Lilium固有の形状条件なし）")
-            st.info("再展開Splitは論文を参考にした研究再構成です。"
-                    "M2Dと後段パネルを元のグリッドに固定して、"
-                    "3Dの切断片の自由BFFのみでCSFを評価します。"
-                    "外部BFF実行ファイルが必要で計算時間が増えます。")
+            if paper_split_criterion == "reflatten_tile_area":
+                st.info("再BFF ON：3Dの各切断片に公式自由境界BFFを適用し、"
+                        "タイル面積比を評価します。実験チェックをONにした場合だけ"
+                        "再BFFのUVを実際のM2Dパネルにも適用します。"
+                        "公式BFF実行ファイルが必要です。")
+            else:
+                st.info("再BFF OFF：同じ3D/2Dタイル面積比を初期Ω固定UVで評価します。"
+                        "切断後にBFFは行わず、M2Dの形状とも対応しています。"
+                        "ただし初期Ωの計算自体にBFFを選んだ場合は公式BFFが必要です。")
         paper_csf_sampling_method = st.selectbox(
             "CSF離散評価（実験）",
             ["m2d_m3d_dual_centroid", "m2d_m3d_panel_area",
@@ -1843,8 +1931,7 @@ def build_target():
         fh.write(uploaded.getbuffer())
         temp_path = fh.name
     result = load_target_shape(temp_path)
-    if (paper_split_criterion == "reflatten_tile_area"
-            and (paper_fidelity_enabled or omega_parameterization_mode == "paper_reference_bff")):
+    if paper_split_criterion in ("reflatten_tile_area", "fixed_chart_tile_area"):
         from onestring_physics.reference_bff import (
             validate_reference_mesh, ReferenceMeshValidationError,
         )
@@ -1852,7 +1939,7 @@ def build_target():
             _mesh_input_topology = validate_reference_mesh(result.points, result.faces)
         except ReferenceMeshValidationError as exc:
             raise ValueError(
-                "再展開Splitが現在対応するのは、三角形が適切に接続した1つの開いた円板型曲面です。"
+                "タイル面積比Splitが現在対応するのは、三角形が適切に接続した1つの開いた円板型曲面です."
                 "閉曲面なら切断・境界追加、穴あき面なら適切な位相修正を先に行ってください。"
                 f" 入力メッシュ診断: {exc}"
             ) from exc
@@ -1882,6 +1969,8 @@ def current_pipeline_key() -> tuple:
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
         paper_split_criterion,
+        paper_split_validation_force_one_cut,
+        paper_split_apply_rebff_m2d,
         tuple(st.session_state.get("paper_split_direction_choices", ())),
         paper_split_curvature_tie_percent,
         (_manual_corner_mode, str(st.session_state.get("bff_manual_corners") or ())),
@@ -2037,6 +2126,8 @@ pipeline_params = PipelineParameters(
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
+    paper_split_validation_force_one_cut=paper_split_validation_force_one_cut,
+    paper_split_apply_rebff_m2d=paper_split_apply_rebff_m2d,
     paper_split_curvature_rings=paper_split_curvature_rings,
     paper_split_direction_choices=tuple(st.session_state.get("paper_split_direction_choices", ())),
     paper_split_ask_direction=bool(paper_split_ask_direction) and not st.session_state.get("paper_split_ask_suspended", False),
@@ -2945,6 +3036,17 @@ elif view_stage == "Split Map":
     else:
         from onestring_physics.split_process_view import figure_split_process
         st.subheader("Splitを追加する過程")
+        _validation_count=int(state.mesh_2d_initial.metrics.get(
+            "csf_split_validation_forced_count",0) or 0)
+        if _validation_count:
+            st.warning(f"検証専用の強制Splitが{_validation_count}本含まれます。"
+                       "これはCSF超過による必要Splitではありません。"
+                       "後段の処理経路をテストする目的だけに使用してください。")
+        elif state.mesh_2d_initial.metrics.get(
+                "csf_split_validation_force_one_cut_requested",False):
+            st.warning("検証用のSplitを要求しましたが、有効な完全格子切断を"
+                       "生成できませんでした。格子数やメッシュの形状、"
+                       "最大Split数を確認してください。")
         _split_records = state.mesh_2d_initial.metrics.get("csf_split_step_analysis", [])
         _split_count = len(_split_records)
         _split_step = st.slider("追加済みのSplit数", 0, _split_count, 0, key=f"split_process_step_{_split_count}") if _split_count else 0
@@ -2960,8 +3062,8 @@ elif view_stage == "Split Map":
             else:
                 st.caption("追加Split前の状態" if _split_count else "追加されたSplitはありません。")
             st.dataframe(_split_rows, hide_index=True, width="stretch")
-            if state.mesh_2d_initial.metrics.get("csf_split_criterion") == "reflatten_tile_area":
-                with st.expander("再展開SplitのM3D形状と切断線を3D表示", expanded=False):
+            if state.mesh_2d_initial.metrics.get("csf_split_criterion") in ("reflatten_tile_area", "fixed_chart_tile_area"):
+                with st.expander("面積比SplitのM3D形状と切断線を3D表示", expanded=False):
                     from onestring_physics.reflatten_split_view import figure_reflatten_split_3d
                     _ref_3d, _ref_pieces = figure_reflatten_split_3d(state, _split_step)
                     if _ref_3d is None:
@@ -2970,17 +3072,42 @@ elif view_stage == "Split Map":
                         st.plotly_chart(_ref_3d, use_container_width=True,
                                         key=f"reflatten_original_m3d_{_split_step}")
                         st.dataframe(_ref_pieces, hide_index=True, width="stretch")
-                        st.caption("表示は最終パネルではなく、元のΩ格子から持ち上げたM3Dです。"
-                                   "再展開UVは評価専用で、製造用パネル形状を変更しません。")
+                        st.caption("表示は元のΩ格子から持ち上げたM3Dです。"
+                                   "M2Dへの再BFF反映実験がONでも、"
+                                   "M3Dへの逆写像は元のΩ座標を使用します。")
             _split_model = state.mesh_2d_initial.metrics.get("csf_split_criterion")
             if _split_model == "reflatten_tile_area":
+                _m2d_rebff_applied=bool(state.mesh_2d_initial.metrics.get(
+                    "m2d_postcut_rebff_applied",False))
                 st.caption(
                     "再展開Split：各3D曲面片を公式自由境界BFFで別々に展開し、"
-                    "タイルごとの3D/2D面積比の最大/最小でCSF相当量を評価しています。"
-                    "最終パネルは元のΩ格子に固定しています。著者実装との一致は未確認です。"
+                    "タイル面積比でCSF相当量を評価。"
+                    +("実験ON：再BFF UVを実際のM2D座標に反映しています。"
+                      "M3Dへの逆写像には元のΩ座標を保持しています。"
+                      if _m2d_rebff_applied else
+                      "実験OFF：M2Dは元のΩ格子に固定されています。")
+                    +"著者実装との一致は未確認です。"
+                )
+                if _m2d_rebff_applied:
+                    st.warning(
+                        "実験M2D再BFF反映：格子の正方性・ヒンジ可製造性・"
+                        "最終組立可能性は未保証です。"
+                        "右のSplit過程に示すCSF値は反映前の評価値であり、"
+                        "新しいM2Dの実測値ではありません。"
+                    )
+                    st.json({k:v for k,v in state.mesh_2d_initial.metrics.items()
+                        if k.startswith("m2d_postcut_rebff_")})
+                elif state.mesh_2d_initial.metrics.get("csf_split_m2d_rebff_requested"):
+                    st.info("M2D再BFF反映は選択されていますが、"
+                            "CSF Splitが生成されていないため、M2D形状は変更していません。")
+            elif _split_model == "fixed_chart_tile_area":
+                st.caption(
+                    "再BFF OFF：初期ΩのUVを3Dピースにそのまま引き継ぎ、"
+                    "タイルごとの3D/2D面積比の最大/最小 ≤ 2で判定しています。"
+                    "再展開は行いません。初期Ωが非等角なら線形CSFの保証ではありません。"
                 )
             else:
-                st.caption("CSFは現在のUV写像に基づく評価値です。")
+                st.caption("既存の固定UV方式です。面積比モードとはCSF計算が異なります。")
             _split_metrics = state.mesh_2d_initial.metrics
             _split_unresolved = int(_split_metrics.get("csf_split_unresolved_component_count", 0) or 0)
             if _split_unresolved:
@@ -3339,14 +3466,19 @@ elif view_stage == "M3D":
         }
     )
 elif view_stage == "K2D":
-    from onestring_physics.eq5_iteration_history_view import render_final_k2d_result, render_eq5_iteration_history
-    if not render_final_k2d_result(st):
+    from onestring_physics.eq5_iteration_history_view import (
+        render_final_k2d_result, render_actual_rebff_k2d_result,
+        render_eq5_iteration_history,
+    )
+    if render_actual_rebff_k2d_result(st,state.mesh_2d_optimized):
+        pass
+    elif not render_final_k2d_result(st):
         st.plotly_chart(
             figure_flat_tile_layout(state.k2d_flat_layout, title="K2D flat independent tile layout", hinge_graph=state.hinge_graph, tile_colors=_corr_tile_colors),
             use_container_width=True,
             key="k2d",
         )
-    with st.expander("K2D optimization history", expanded=False):
+    with st.expander("K2D optimization history（補正前の生ログ）", expanded=False):
         render_eq5_iteration_history(st)
     st.write({"mesh_metrics": state.mesh_2d_optimized.metrics, "layout_metrics": state.k2d_flat_layout.metrics})
     st.subheader("K2D ↔ K3D edge-length diagnostics")

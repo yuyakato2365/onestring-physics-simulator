@@ -387,8 +387,23 @@ def install_final_split_panel_pass(pipeline_module: Any) -> None:
         # actually present. CSF-only runs keep the original packing unchanged.
         factor=(float(getattr(params,"collision_split_gap_multiplier",1.0))
                 if collision_source_records else 1.0)
+        manufacturing = canonical.copy()
+        if bool(getattr(params,"paper_split_apply_rebff_m2d",False)):
+            if not bool(metrics.get("csf_split_applied",False)):
+                metrics.update(m2d_postcut_rebff_applied=False,
+                               m2d_postcut_rebff_reason="no CSF Split was generated")
+            else:
+                from .postcut_rebff_m2d import apply_leaf_rebff_uv
+                manufacturing, rebff_metrics=apply_leaf_rebff_uv(
+                    canonical,faces,
+                    getattr(domain,"_split_rebff_leaf_charts",None),
+                    rotation_degrees=float(getattr(domain,"reference_grid_rotation_degrees",0.)),
+                )
+                metrics.update(rebff_metrics)
+        # Pack the ACTUAL manufacturing geometry, not the original Omega
+        # bounding boxes. Original Omega UV is retained solely for M3D lift.
         packed, offsets = _pack_panels(
-            canonical, pverts, getattr(mesh, "grid", grid),
+            manufacturing, pverts, getattr(mesh, "grid", grid),
             collision_gap_multiplier=factor,
         )
         metrics.update({

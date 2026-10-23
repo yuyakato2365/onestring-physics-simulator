@@ -411,16 +411,17 @@ def _select_optcuts_by_split_count(vertices, faces, domain, params):
 def split_mesh(vertices, faces, domain, params=None):
     # Opt-in Sec.4.5 research reconstruction. Do not alter the default
     # fixed-UV, OptCuts or collision-driven Split route.
-    if str(getattr(params, "paper_split_criterion", "fixed_uv")) == "reflatten_tile_area":
-        if str(getattr(domain.parameterization, "method", "")) not in {
-            "paper_reference_bff", "experimental_tutte_rectangle"
-        }:
-            raise ValueError(
-                "reflatten_tile_area Split requires official BFF or an explicitly "
-                "selected experimental nonconformal Tutte S->Omega map"
-            )
-        from .paper_split_reflatten import split_mesh_reflatten
-        return split_mesh_reflatten(vertices, faces, domain, params)
+    criterion = str(getattr(params, "paper_split_criterion", "fixed_uv"))
+    if criterion in ("reflatten_tile_area", "fixed_chart_tile_area"):
+        # The two modes share curvature peaks, complete grid cuts, area-span
+        # scoring and physical M2D seam updates. The evaluation UV differs:
+        # independent free-boundary BFF or inherited original Omega chart.
+        from .paper_split_reflatten import (
+            split_mesh_reflatten, split_mesh_fixed_chart_area,
+        )
+        if criterion == "reflatten_tile_area":
+            return split_mesh_reflatten(vertices, faces, domain, params)
+        return split_mesh_fixed_chart_area(vertices, faces, domain, params)
     selected,evaluated=_select_optcuts_by_split_count(vertices,faces,domain,params)
     if evaluated is not None:
         domain.parameterization=selected

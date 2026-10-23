@@ -312,9 +312,48 @@ def _surface_peak_markers(state: OneStringDesignState) -> tuple[np.ndarray, np.n
     parameterization = state.surface_parameterization
     if state.mesh_2d_initial.metrics.get('paper_split_finalized', False):
         from .paper_mesh_splitting import chart_geometry
-        ids = sorted({r['curvature_vertex_id'] for r in state.mesh_2d_initial.metrics.get('simple_split_records', [])})
-        xyz, _, _ = chart_geometry(parameterization)
-        return parameterization.uv_vertices_2d[ids], xyz[ids]
+
+        mesh = state.mesh_2d_initial
+        records = mesh.metrics.get('simple_split_records', []) or []
+        # Reflatten CSF cuts record an ORIGINAL M2D GRID vertex id. The
+        # fixed-UV policy instead records a source-chart UV vertex id. These
+        # are different index spaces and must not be conflated. Collision-
+        # driven cuts need not have any Gaussian-curvature peak at all.
+        grid_uv = np.asarray(getattr(mesh, '_split_panel_source_vertices',
+                                     mesh.vertices), dtype=float)
+        grid_xyz = np.asarray(state.mesh_3d_initial.vertices, dtype=float)
+        chart_uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
+        chart_xyz, _, _ = chart_geometry(parameterization)
+        points_uv, points_xyz = [], []
+        seen = set()
+        for record in records:
+            raw_id = record.get('curvature_vertex_id')
+            if raw_id is None:
+                continue  # Collision-driven cut; no curvature peak to draw.
+            try:
+                peak_id = int(raw_id)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            is_grid_peak = bool(record.get('reflatten_csf_cut', False)
+                                or record.get('fixed_chart_area_cut', False))
+            key = (is_grid_peak, peak_id)
+            if key in seen or peak_id < 0:
+                continue
+            if is_grid_peak:
+                if peak_id >= len(grid_uv) or peak_id >= len(grid_xyz):
+                    continue
+                uv_point, xyz_point = grid_uv[peak_id, :2], grid_xyz[peak_id, :3]
+            else:
+                if peak_id >= len(chart_uv) or peak_id >= len(chart_xyz):
+                    continue
+                uv_point, xyz_point = chart_uv[peak_id, :2], chart_xyz[peak_id, :3]
+            if not np.isfinite(uv_point).all() or not np.isfinite(xyz_point).all():
+                continue
+            seen.add(key)
+            points_uv.append(uv_point)
+            points_xyz.append(xyz_point)
+        return (np.asarray(points_uv, dtype=float).reshape(-1, 2),
+                np.asarray(points_xyz, dtype=float).reshape(-1, 3))
     peak_uv = _surface_peak_uvs(parameterization)
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     xyz = np.asarray(parameterization.surface_vertices_3d, dtype=float)

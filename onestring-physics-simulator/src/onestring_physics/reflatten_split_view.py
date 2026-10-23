@@ -19,7 +19,7 @@ def figure_reflatten_split_3d(state, step):
     metrics=getattr(m2d,"metrics",{})
     records=list(metrics.get("csf_split_step_analysis",()))
     initial=metrics.get("csf_split_initial_components")
-    if initial is None or metrics.get("csf_split_criterion")!="reflatten_tile_area":
+    if initial is None or metrics.get("csf_split_criterion") not in ("reflatten_tile_area", "fixed_chart_tile_area"):
         return None,[]
     faces=np.asarray(m3d.faces,int)
     vertices=np.asarray(m3d.vertices,float)
@@ -54,7 +54,7 @@ def figure_reflatten_split_3d(state, step):
             showlegend=True,
             hovertemplate=f"Piece {i+1}<br>{len(ids)} M2D panels<br>area span {sigma:.4g}<extra></extra>",
         ))
-        rows.append({"Piece":i+1,"M2D panel count":len(ids),"reflatten area span":sigma})
+        rows.append({"Piece":i+1,"M2D panel count":len(ids),"tile area span":sigma})
     # Draw only TRUE saved broken edges, not inferred new connections.
     for newest in (False,True):
         source=records[max(0,limit-1):limit] if newest else records[:max(0,limit-1)]
@@ -74,7 +74,9 @@ def figure_reflatten_split_3d(state, step):
                 name="Latest real source cut" if newest else "Earlier source cuts",
             ))
     fig.update_layout(
-        title=f"Reflatten-based source Split · M3D · {limit}/{len(records)} cuts",
+        title=(("Free-boundary reBFF" if metrics.get("csf_split_bff_evaluation_enabled",True)
+                else "Fixed original Omega UV")
+               +f" area-span Split · M3D · {limit}/{len(records)} cuts"),
         scene=dict(aspectmode="data",xaxis_title="x",yaxis_title="y",zaxis_title="z"),
         margin=dict(l=5,r=5,t=45,b=5),height=630,
         uirevision="reflatten-original-M3D",
