@@ -217,28 +217,9 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         # an intermediate M2D and DO NOT move/re-solve Omega from its footprint.
         ordinary_params = replace(params, omega_parameterization_mode="optcuts", optcuts_try_alternative_initial_cut=True)
         parameterization = base_parameterization(surface, target, grid, ordinary_params)
-        if bool(getattr(params, "optcuts_area_grid_boundary_enabled", False)):
-            from .optcuts_area_grid_boundary import apply_area_grid_boundary
-            parameterization = apply_area_grid_boundary(parameterization, grid, params)
-            # The provisional OptCuts multi-start UV charts were created
-            # BEFORE the grid-boundary fit. Do not let a later Split-count
-            # selector replace our fitted UV with an unrelated stale chart.
-            # One preliminary official OptCuts start is still selected by
-            # its original scoring; downstream re-selection is disabled ONLY
-            # for this new experimental mode until each alternative can be
-            # independently reparameterized against its own snapped outline.
-            if hasattr(parameterization,"_onestring_optcuts_candidates"):
-                parameterization._onestring_optcuts_candidates=[]
-            if hasattr(parameterization,"_onestring_optcuts_candidate_qualities"):
-                parameterization._onestring_optcuts_candidate_qualities=[]
-            parameterization.metrics.update(
-                optcuts_area_grid_multistart_downstream_swap_enabled=False,
-                optcuts_split_count_selection_pending=False,
-                optcuts_area_grid_multistart_note=(
-                    "provisional official OptCuts start retained; stale, "
-                    "unfitted alternative UV charts disabled downstream"
-                ),
-            )
+        # In the area-boundary mode, fit only AFTER the original OptCuts
+        # Ω has constructed its ACTUAL production M2D lattice. The previous
+        # code invented a different grid here and was not the user's method.
         parameterization.method = "optcuts_test"
         parameterization.metrics.update(
             {
@@ -282,41 +263,104 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         return parameterization
 
     def area_boundary_domain(parameterization: Any, grid: Any, params: Any = None):
+        # Step 1: ordinary OptCuts Omega -> its REAL M2D lattice.
         domain = base_domain(parameterization, grid, params)
         if (params is not None and _is_optcuts_test(params)
                 and bool(getattr(params,"optcuts_area_grid_boundary_enabled",False))):
-            from .optcuts_area_grid_boundary import fix_domain_lattice
+            from .optcuts_area_grid_boundary import (
+                apply_area_grid_boundary,fix_domain_lattice,
+            )
+            # Step 2: select >= threshold cells ON THAT EXACT lattice,
+            # construct the retained-M2D boundary, remap Ω and its interior.
+            parameterization=apply_area_grid_boundary(
+                parameterization,grid,params,domain=domain,
+            )
+            # Any alternative OptCuts chart was made before this Ω fit.
+            # Do not let later downstream multistart selection undo it.
+            if hasattr(parameterization,"_onestring_optcuts_candidates"):
+                parameterization._onestring_optcuts_candidates=[]
+            if hasattr(parameterization,"_onestring_optcuts_candidate_qualities"):
+                parameterization._onestring_optcuts_candidate_qualities=[]
+            parameterization.metrics.update(
+                optcuts_area_grid_multistart_downstream_swap_enabled=False,
+                optcuts_split_count_selection_pending=False,
+                optcuts_area_grid_multistart_note=(
+                    "original OptCuts chart fitted to REAL M2D footprint; "
+                    "unfitted alternative charts cannot overwrite the fit"
+                ),
+            )
+            # Step 3: recompute charts/CSF downstream for changed UV.
+            # The recomputed domain can propose a new lattice; discard THAT
+            # candidate grid, preserving the exact original M2D lattice.
+            domain = base_domain(parameterization, grid, params)
             domain=fix_domain_lattice(domain,parameterization)
             domain.parameterization=parameterization
         return domain
 
     def paper_m2d(grid: Any, domain: Any, params: Any = None):
-        mesh = base_m2d(grid, domain, params)
-        if params is None or not _is_optcuts_test(params):
-            return mesh
-
-        polygon = _clean_polygon(getattr(domain, "boundary", []))
-        if len(polygon) < 3:
-            raise RuntimeError("OPTCUTS_TEST_PAPER_CROP_INVALID_OMEGA_BOUNDARY")
-
-        vertices = np.asarray(mesh.vertices, dtype=float)
-        faces = np.asarray(mesh.faces, dtype=int)
-        area_mode=bool(getattr(params,"optcuts_area_grid_boundary_enabled",False))
+        area_mode=bool(
+            params is not None and _is_optcuts_test(params)
+            and getattr(params,"optcuts_area_grid_boundary_enabled",False)
+        )
         if area_mode:
+            # Never first call base_m2d(): it would already crop partial
+            # cells and can discard the very >=50% tiles we must KEEP.
+            from .optcuts_area_grid_boundary import keep_cells_on_fixed_lattice
+            count_x=int(domain.overlay_nx);count_y=int(domain.overlay_ny)
+            original=getattr(pipeline,"_original",None)
+            if original is not None and hasattr(original,"create_quad_grid"):
+                full_grid=original.create_quad_grid(
+                    count_x,count_y,grid.tile_size,grid.gap_size)
+                full_faces=np.asarray(
+                    [tile.vertex_ids for tile in (full_grid.tiles or [])],int
+                ).reshape(-1,4)
+                mesh_cls=original.QuadMesh
+                verts=np.column_stack([
+                    np.asarray(domain.uv_vertices,float),
+                    np.zeros(len(domain.uv_vertices)),
+                ])
+                metrics={
+                    "max_csf_before_split":float(
+                        getattr(domain,"csf_before",domain.max_csf)),
+                    "max_csf_after_split":float(
+                        getattr(domain,"csf_after_split",domain.max_csf)),
+                    "number_of_splits":len(domain.split_lines),
+                    "m2d_overlay_total_quad_count":len(full_faces),
+                    "m2d_overlay_grid_nx":count_x,
+                    "m2d_overlay_grid_ny":count_y,
+                    "m2d_crop_policy":"original_omega_overlap_area",
+                }
+                mesh=mesh_cls(
+                    verts,full_faces,full_grid,"M2D",metrics,
+                    list(getattr(domain,"split_lines",[])),
+                )
+            else:
+                # Unit-test lightweight pipeline (also supplies the complete
+                # overlay). Native app always takes the branch above.
+                mesh=base_m2d(grid,domain,params)
             from .optcuts_area_grid_boundary import keep_cells_on_fixed_lattice
             keep=keep_cells_on_fixed_lattice(mesh,domain)
         else:
+            mesh=base_m2d(grid, domain, params)
+            if params is None or not _is_optcuts_test(params):
+                return mesh
+            polygon = _clean_polygon(getattr(domain, "boundary", []))
+            if len(polygon) < 3:
+                raise RuntimeError("OPTCUTS_TEST_PAPER_CROP_INVALID_OMEGA_BOUNDARY")
+            vertices = np.asarray(mesh.vertices, dtype=float)
+            faces = np.asarray(mesh.faces, dtype=int)
             keep = np.asarray(
                 [_quad_fully_contained(vertices[face, :2], polygon) for face in faces],
                 dtype=bool,
             )
+        faces = np.asarray(mesh.faces, dtype=int)
         retained = int(np.count_nonzero(keep))
         rejected = int(len(faces) - retained)
         metrics = dict(getattr(mesh, "metrics", {}) or {})
         metrics.update(
             {
                 "paper_m2d_one_way_from_fixed_omega": True,
-                "paper_m2d_strict_full_cell_crop": True,
+                "paper_m2d_strict_full_cell_crop": not area_mode,
                 "paper_m2d_crop_rule": (
                     "retain exactly the original-grid cells with overlap >= configured threshold"
                     if area_mode else
@@ -336,7 +380,7 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         print(
             "[OPTCUTS-TEST-PAPER-M2D] "
             f"candidates={len(faces)} retained={retained} rejected_partial={rejected} "
-            "rule=full-cell-contained-in-fixed-Omega"
+            "rule=" + ("real-M2D-area-overlap" if area_mode else "full-cell-contained-in-fixed-Omega")
         )
         return _compact_quad_mesh(pipeline, mesh, keep, metrics)
 
