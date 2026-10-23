@@ -51,3 +51,49 @@ The stored report explicitly distinguishes:
 If the geometry has no complete admissible internal grid line, or if the Split budget is zero, **no cut is generated**; the UI shows a warning instead of fabricating a successful result.
 
 **Scope:** The debug mode verifies that the Split-to-downstream execution path is reachable and surfaces real failures. A unit test verifies a geometrically flat `sigma=1` case can yield one *explicitly marked* debug cut. It does not by itself prove mechanical assembly or that any natural Split is required.
+
+
+## ReBFF ON/OFF comparison (2026-10-23)
+
+The **Split CSF判定** menu has an area-span option and a separate checkbox
+**SplitのCSF判定で各3D領域を再BFFする**:
+
+- **ON** (`paper_split_criterion="reflatten_tile_area"`): each candidate 3D piece
+  is independently reflattened with official free-boundary BFF, and the
+  3D-to-new-2D quad area span determines its Split score. This is an
+  *evaluation-only* UV; downstream M2D still retains the original grid.
+- **OFF** (`paper_split_criterion="fixed_chart_tile_area"`): the exact same
+  curvature peak, full grid-line candidates, threshold (`max(J)/min(J) <= 2`),
+  direction chooser, collision-cut handling and final M2D topology operations
+  are used. The only difference is that the piece inherits the original
+  S-to-Omega UV coordinates through triangle clipping. It does **not** call
+  BFF when evaluating candidate source patches, and does not independently
+  rescale or reparameterize the child patch. An **initial Omega mode that uses
+  BFF still needs BFF for its initial Omega creation**.
+- **Legacy fixed_uv** (the other menu option): previously implemented
+  area/linear stretch test, **not the same formula**. Do not use it as the
+  one-variable reBFF ON/OFF comparison.
+
+In both new modes, for each sampled M2D tile `q`, `J_q=A3D_q/A2D_q` and
+`sigma_piece=max(J_q)/min(J_q)`. The 2D chart differs; the 3D geometry,
+quad IDs, scan of curvature peaks, choice of complete row/column cuts, and
+physical seam-duplication code are the same.
+
+The evaluation chart must be finite, non-flipped and non-degenerate.
+Both modes support the **検証用：CSFが2以下でもSplitを1本入れる** option.
+The report stores `csf_split_evaluation_uv`,
+`csf_split_bff_evaluation_enabled`, `csf_split_criterion`,
+`tile_area_split_report`, and the existing compatibility report
+`reflatten_split_report`; per-cut metadata includes
+`fixed_chart_area_cut` or `reflatten_csf_cut`.
+
+Neither a small reBFF score nor a small fixed-chart area span alone proves
+global conformal distortion, physical deployability, or completed T2D
+assembly. The area span on an anisotropic initial Omega map is **not**
+a guarantee on the linear CSF.
+
+To compare fairly, keep the input surface, Omega solver, grid size,
+grid rotation, curvature rings, Split budget, and collision feedback settings
+the same, then toggle only reBFF, rerun and compare
+`max_csf_before_split`, `csf_split_step_count`,
+`max_csf_after_split`, cut lines and downstream failure diagnostics.
