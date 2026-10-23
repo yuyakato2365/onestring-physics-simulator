@@ -82,3 +82,42 @@ Bunny, Lilium, final M3D/K3D/T2D output, and whether either official start
 avoids the reported 99.67% UV fitting failure. The ranking may favor an
 outline with fewer corners yet have a worse true minimum Jacobian. Assess
 those metrics on the real input before claiming research success.
+
+
+## 2026-10-23 correction after valid_seam_candidates=1 failure
+
+The initial candidate-ranking implementation did **not** make new seams, and
+could leave only one valid input. A single remaining chart reproduced the
+original `last_valid_fraction ≈ 0.98669` boundary fitting error.
+
+The amended experimental mode therefore:
+
+1. Records the real number of official OptCuts source seam candidates
+   separately from grid candidate orientations, including the existing
+   OptCuts multistart skip/failure status.
+2. Searches rigid pre-grid UV rotations of **0, 22.5, 45, 67.5 degrees**
+   by default. The same official seam topology is kept at each rotation.
+   For each rotated chart, obtain the real production lattice for that
+   chart **before** selecting the area-threshold panels; that lattice is then
+   fixed exactly. There is no after-the-fact grid translation, rephasing,
+   scaling or seam movement.
+3. Retains a valid secondary seam source even when its original SD is
+   >1.5x the best source: the existing lexicographic ranking penalizes
+   larger SD, and the final inverse map's hard checks still reject excessive
+   distortion, overlaps, inversion or degeneration.
+4. On failure, reports the `official_cut_sources`,
+   `official_multistart_status`, `evaluated_uv_orientations`, and the
+   tested cut+rotation combinations, without claiming a mathematical proof
+   of impossibility.
+5. Exposes a Streamlit checkbox to opt out of the extra orientations.
+   It is included in the pipeline cache key.
+
+**This is a UV orientation experiment, not a C++ Grid-aware cut optimizer.**
+With one official OptCuts source there is still only **one seam topology**.
+The added orientations only change its alignment with the original production
+M2D grid and therefore its 50%-cell staircase. If every combination fails,
+the next research step is genuinely generating/modifying cut topology within
+OptCuts (or a separate cut graph optimizer), then reparameterizing the newly
+cut surface and confirming inverse-mapping topology and distortion.
+
+Native Bunny failure resolution is **not verified by the current CI**.
