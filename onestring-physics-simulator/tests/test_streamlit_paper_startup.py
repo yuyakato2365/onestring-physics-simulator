@@ -29,12 +29,22 @@ def test_grid_aware_is_a_separate_omega_selector_mode_not_checkbox():
     app=Path(__file__).parents[1]/"app_optcuts_20260923_extrusion_aware.py"
     t=AppTest.from_file(str(app),default_timeout=30).run()
     assert not t.exception, [str(x.message) for x in t.exception]
+    # Paper is enabled by default and intentionally disables Omega choices.
+    paper=[x for x in t.sidebar.checkbox
+           if x.label=="Paper-oriented computation mode (2025 Sec.4–5)"]
+    assert len(paper)==1
+    paper[0].set_value(False)
+    t.run()
+    assert not t.exception, [str(x.message) for x in t.exception]
     selectboxes=[s for s in t.sidebar.selectbox
                  if s.label=="Omega parameterization mode"]
     assert len(selectboxes)==1
     menu=selectboxes[0]
-    assert "optcuts_grid_aware" in menu.options
-    menu.set_value("optcuts_grid_aware")
+    assert not menu.disabled
+    # AppTest exposes formatted display labels instead of the internal values.
+    grid_labels=[x for x in menu.options if "Grid-aware OptCuts Ω" in x]
+    assert len(grid_labels)==1
+    menu.set_value(grid_labels[0])
     t.run()
     assert not t.exception, [str(x.message) for x in t.exception]
     assert t.session_state["_onestring_grid_aware_omega_selected"] is True
@@ -42,7 +52,11 @@ def test_grid_aware_is_a_separate_omega_selector_mode_not_checkbox():
     assert not any(x.key=="optcuts_grid_aware_experiment" for x in t.sidebar.checkbox)
     menu=[s for s in t.sidebar.selectbox
           if s.label=="Omega parameterization mode"][0]
-    menu.set_value("optcuts_test2")
+    baseline=[x for x in menu.options if "2026-09-18" in x or "optcuts_test2"==x]
+    if not baseline:
+        baseline=[x for x in menu.options if "2026-09-13" in x]
+    assert len(baseline)>=1
+    menu.set_value(baseline[0])
     t.run()
     assert not t.exception, [str(x.message) for x in t.exception]
     assert t.session_state["_onestring_grid_aware_omega_selected"] is False
