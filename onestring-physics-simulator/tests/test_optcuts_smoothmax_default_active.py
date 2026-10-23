@@ -115,3 +115,52 @@ def test_smoothmax_beta_zero_continuation_stays_enabled(monkeypatch):
     )
     assert diag["k3d_smoothmax_enabled"]
     assert diag["k3d_smoothmax_beta"]==0.
+
+
+
+def test_smoothmax_al_hard_seam_equality_even_from_open_initial_gap(monkeypatch):
+    """Prove soft square penalty cannot reopen truly shared seam unknowns."""
+    monkeypatch.setenv("ONESTRING_K3D_SHAPE_PRESERVING_PLANARITY","0")
+    monkeypatch.setenv("ONESTRING_K3D_SQUARE_TAIL_ALPHA","4")
+    monkeypatch.setenv("ONESTRING_K3D_SQUARE_TAIL_BETA","12")
+    v,faces,groups=skewed_pair()
+    v[4]+=[-.12,.02,.035]
+    v[7]+=[.15,-.01,-.035]
+    assert max_seam_gap(v,groups)>.1
+    solved,diag=al._augmented_lagrangian_planarize(
+        v,faces,anchor_weight=.2,square_weight=10.,
+        outer_iterations=3,inner_iterations=90,
+        restoration_sweeps=5,final_polish_sweeps=25,
+        equality_groups=groups,
+    )
+    # Hard constraint, exactly identical floats, not mere small penalty.
+    np.testing.assert_array_equal(solved[1],solved[4])
+    np.testing.assert_array_equal(solved[2],solved[7])
+    assert diag["k3d_al_source_seam_hard_equality"] is True
+    assert diag["k3d_al_source_seam_group_count"]==2
+    assert diag["k3d_al_source_seam_reduced_unknowns"]==6
+    assert diag["k3d_al_source_seam_max_gap"]==0.
+    assert diag["k3d_smoothmax_enabled"] is True
+    assert np.isfinite(solved).all()
+
+
+def test_renumbered_geometry_view_maps_seam_groups_for_al_not_stale_original():
+    from onestring_physics.extrusion_aware import geometry_view
+    from types import SimpleNamespace
+    v,faces,groups=skewed_pair()
+    mesh=SimpleNamespace(
+        vertices=v,faces=faces,
+        metrics={"seam_exact_preflight_certified":True,
+                 "seam_exact_vertex_groups":groups},
+    )
+    # Merge a nonseam pair; seam endpoints must be re-indexed.
+    mapping=np.array([0,1,2,3,4,5,6,7],int)
+    mapping[6]=5
+    mapping[7]=6
+    reduced=geometry_view(mesh,mapping)
+    assert len(reduced.vertices)==7
+    assert reduced.metrics["seam_exact_vertex_groups"]==[
+        [1,4],[2,6]
+    ]
+    assert reduced.metrics["seam_exact_groups_reindexed_for_reduction"]
+    assert mesh.metrics["seam_exact_vertex_groups"]==groups
