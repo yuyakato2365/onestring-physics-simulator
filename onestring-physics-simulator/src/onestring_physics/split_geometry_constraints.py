@@ -56,6 +56,16 @@ def optimize_shared(base, target, mesh, parameterization, params):
     reduced.vertices = np.asarray(mesh.vertices)[representatives].copy()
     reduced.faces = mapping[np.asarray(mesh.faces)]
     reduced.metrics = dict(mesh.metrics, split_vertex_pairs=[], split_boundary_pairs=[])
+    if hasattr(mesh,"_seam_original_m2d_uv"):
+        # This reduction renumbers source grid vertices. Original UV seam
+        # correspondence must not be interpreted on this reduced topology.
+        reduced._seam_defer_until_full_mesh=True
+        print(
+            "[SEAM-K3D-INDEX] deferred_split_reduced "
+            f"full_vertices={len(mesh.vertices)} "
+            f"reduced_vertices={len(reduced.vertices)}",
+            flush=True,
+        )
     result, report = base(target, reduced, parameterization, params)
     if result.vertices.shape != reduced.vertices.shape or not np.array_equal(result.faces, reduced.faces):
         raise RuntimeError('K3D solver changed reduced mesh topology; Split correspondence cannot be restored')
@@ -68,4 +78,20 @@ def optimize_shared(base, target, mesh, parameterization, params):
                           split_geometry_constraint='shared optimization variables; exported topology unchanged',
                           split_geometry_classification='project-specific exact equality constraint')
     result.metrics.update(pair_errors(result.vertices, pairs))
+    if hasattr(mesh,"_seam_original_m2d_uv"):
+        from .optcuts_seam_exact_closure import (
+            close_k3d_seam_after_full_vertex_restore,
+        )
+        mesh._seam_deferred_from_reduced_K3D=True
+        result=close_k3d_seam_after_full_vertex_restore(
+            mesh,result,parameterization,params
+        )
+        result.metrics["seam_exact_closure_deferred"]=False
+        result.metrics["seam_exact_closure_deferred_completed"]=True
+        print(
+            "[SEAM-K3D-INDEX] split_full_vertex_restore_closed "
+            f"vertices={len(result.vertices)} "
+            f"status={result.metrics.get('seam_exact_closure_enabled',False)}",
+            flush=True,
+        )
     return result, report
