@@ -534,18 +534,32 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     chosen_phase=None
     chosen_method=None
     history=[]
+    chosen_attempt=None
     fit_started = time.perf_counter()
     max_attempts = min(12, len(boundary_candidates))
+    max_mean_sd = max(
+        1.30*float(baseline["distortion_area_mean"]),
+        float(baseline["distortion_area_mean"])+.1,
+    )
+    best_valid_sd = float("inf")
+    best_valid_method = None
+    full_boundary_count = 0
+    quality_reject_count = 0
+    outline=np.asarray(target["grid_outline"],float)
+    tolerance=max(float(np.max(target["step"]))*1e-6,1e-9)
     print(
         "[GRID-BOUNDARY-FIT] start "
-        f"faces={len(faces)} outline_corners={len(target['grid_outline'])} "
+        f"faces={len(faces)} outline_corners={len(outline)} "
         f"possible_correspondences={len(boundary_candidates)} "
-        f"attempt_limit={max_attempts}",
+        f"attempt_limit={max_attempts} "
+        f"mean_sd_limit={max_mean_sd:.5g}",
         flush=True,
     )
-    # The former 6-candidate shortlist could fail without trying the
-    # geometrically better monotone corner assignments. Keep a bounded,
-    # explicitly audited search instead of silently changing the cell mask.
+    # Check ALL constraints inside the correspondence loop. A mapping
+    # reaching 100% boundary displacement is not a usable solution if its
+    # symmetric-Dirichlet distortion exceeds the unchanged quality guard.
+    # That candidate is rejected, and other ear-safe vertex assignments
+    # are attempted before abandoning the same fixed-grid orientation.
     for attempt, (_cost,phase,mapped,method) in enumerate(
         boundary_candidates[:max_attempts], 1
     ):
@@ -604,17 +618,9 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
                 },
             )
         try:
-            result,history=fit_by_continuation(
+            trial_uv,trial_history=fit_by_continuation(
                 base,faces,loop,mapped,_harmonic_dirichlet,assess,
                 on_failure=diagnose_failed_continuation)
-            chosen_phase=int(phase)
-            chosen_method=str(method)
-            print(
-                f"[GRID-BOUNDARY-FIT] accepted={attempt}/{max_attempts} "
-                f"duration={time.perf_counter()-started_attempt:.1f}s",
-                flush=True,
-            )
-            break
         except ValueError as exc:
             phase_errors.append(f"phase={phase}, fit={method}: {exc}")
             print(
@@ -623,31 +629,78 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
                 f"cause={str(exc)[:150]}",
                 flush=True,
             )
+            continue
+        full_boundary_count+=1
+        # The same full-quality test used previously *after* the loop must
+        # now gate acceptance *inside* the loop. Never silently relax SD.
+        trial_quality=assess(trial_uv)
+        trial_sd=float(trial_quality["distortion_area_mean"])
+        if np.isfinite(trial_sd) and trial_sd < best_valid_sd:
+            best_valid_sd=trial_sd
+            best_valid_method=f"phase={phase}, fit={method}"
+        if not np.isfinite(trial_sd) or trial_sd>max_mean_sd:
+            quality_reject_count+=1
+            cause=(
+                "GRID_BOUNDARY_DISTORTION_EXCESS: "
+                f"mean SD {baseline['distortion_area_mean']:.5g}"
+                f" -> {trial_sd:.5g}; limit={max_mean_sd:.5g}"
+            )
+            phase_errors.append(f"phase={phase}, fit={method}: {cause}")
+            print(
+                f"[GRID-BOUNDARY-FIT] quality_rejected="
+                f"{attempt}/{max_attempts} "
+                f"{cause} "
+                f"duration={time.perf_counter()-started_attempt:.1f}s; "
+                "retrying another boundary correspondence",
+                flush=True,
+            )
+            continue
+        uv_bound=np.asarray(trial_uv,float)[np.asarray(loop,int)]
+        missing=sum(
+            float(np.min(np.linalg.norm(uv_bound-corner,axis=1)))>tolerance
+            for corner in outline
+        )
+        if missing:
+            phase_errors.append(
+                f"phase={phase}, fit={method}: "
+                f"GRID_BOUNDARY_CORNER_MATCH_FAILED: {missing} missing corners"
+            )
+            print(
+                f"[GRID-BOUNDARY-FIT] corner_rejected={attempt}/{max_attempts} "
+                f"missing={missing}; retrying another correspondence",
+                flush=True,
+            )
+            continue
+        result=trial_uv
+        history=trial_history
+        final=trial_quality
+        chosen_phase=int(phase)
+        chosen_method=str(method)
+        chosen_attempt=int(attempt)
+        print(
+            f"[GRID-BOUNDARY-FIT] accepted={attempt}/{max_attempts} "
+            f"mean_sd={trial_sd:.5g} limit={max_mean_sd:.5g} "
+            f"duration={time.perf_counter()-started_attempt:.1f}s",
+            flush=True,
+        )
+        break
     if result is None:
+        sd_summary=(
+            f"; best_rejected_mean_sd={best_valid_sd:.5g} "
+            f"({best_valid_method})"
+            if np.isfinite(best_valid_sd) else ""
+        )
         raise GridBoundaryReparameterizationError(
-            f"GRID_BOUNDARY_ALL_MONOTONE_CORRESPONDENCES_FAILED: "
-            f"attempted={len(phase_errors)} / {len(boundary_candidates)}, "
+            "GRID_BOUNDARY_ALL_ACCEPTABLE_CORRESPONDENCES_FAILED: "
+            f"attempted={len(phase_errors)} / {len(boundary_candidates)}; "
             f"remaining_untried={len(boundary_candidates)-len(phase_errors)}; "
+            f"boundary_completed={full_boundary_count}; "
+            f"quality_rejected={quality_reject_count}; "
+            f"baseline_mean_sd={baseline['distortion_area_mean']:.5g}; "
+            f"mean_sd_limit={max_mean_sd:.5g}"
+            +sd_summary+"; "
             + " | ".join(phase_errors)
         )
-    final=assess(result)
-    if float(final["distortion_area_mean"])>max(
-        1.30*float(baseline["distortion_area_mean"]),
-        float(baseline["distortion_area_mean"])+.1):
-        raise GridBoundaryReparameterizationError(
-            "GRID_BOUNDARY_DISTORTION_EXCESS: mean SD grew too much "
-            f"({baseline['distortion_area_mean']:.4g} -> {final['distortion_area_mean']:.4g})"
-        )
-    # Check the grid boundary vertices exactly lie on the new UV boundary
-    # within numerical tolerance, not just near it.
-    outline=np.asarray(target["grid_outline"],float)
-    uv_bound=np.asarray(result,float)[np.asarray(loop,int)]
-    tolerance=max(float(np.max(target["step"]))*1e-6,1e-9)
-    for corner in outline:
-        if float(np.min(np.linalg.norm(uv_bound-corner,axis=1)))>tolerance:
-            raise GridBoundaryReparameterizationError(
-                "GRID_BOUNDARY_CORNER_MATCH_FAILED: corner has no matching UV boundary vertex"
-            )
     # Keep the actual original contour and the target polyomino for a
     # literal before/mask/after visual audit in the Omega UI.
     source_loops=np.asarray(parameterization.omega_boundary,float).copy()
@@ -677,6 +730,10 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         optcuts_area_grid_boundary_cyclic_phase=int(chosen_phase),
         optcuts_area_grid_boundary_correspondence_method=chosen_method,
         optcuts_area_grid_boundary_untangle_history=history,
+        optcuts_area_grid_boundary_selected_attempt=chosen_attempt,
+        optcuts_area_grid_boundary_full_boundary_attempts=full_boundary_count,
+        optcuts_area_grid_boundary_quality_rejections=quality_reject_count,
+        optcuts_area_grid_boundary_mean_sd_limit=max_mean_sd,
         optcuts_area_grid_min_signed_area_ratio=float(np.min(
             oriented_area_ratio(base,result,faces))),
         optcuts_area_grid_original_mean_sd=float(baseline["distortion_area_mean"]),
