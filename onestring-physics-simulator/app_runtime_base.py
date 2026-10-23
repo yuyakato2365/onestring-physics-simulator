@@ -3256,11 +3256,76 @@ elif view_stage == "Omega":
                 "状態": _area_grid_metrics.get(
                     "optcuts_area_grid_boundary_status"),
             })
+            _area_source=getattr(
+                state.surface_parameterization,
+                "_optcuts_area_grid_source_boundary",None)
+            _area_target=getattr(
+                state.surface_parameterization,
+                "_optcuts_area_grid_target_outline",None)
+            _area_mask=getattr(
+                state.surface_parameterization,
+                "_optcuts_area_grid_mask",None)
+            if (_area_source is not None and _area_target is not None
+                    and _area_mask is not None):
+                import plotly.graph_objects as _area_go
+                _origin=np.asarray(
+                    _area_grid_metrics["optcuts_area_grid_grid_origin"],float)
+                _step=np.asarray(
+                    _area_grid_metrics["optcuts_area_grid_grid_step"],float)
+                _mask=np.asarray(_area_mask,bool)
+                _fig=_area_go.Figure()
+                _fig.add_trace(_area_go.Heatmap(
+                    x=_origin[0]+(np.arange(_mask.shape[1])+.5)*_step[0],
+                    y=_origin[1]+(np.arange(_mask.shape[0])+.5)*_step[1],
+                    z=np.where(_mask,1.,np.nan),
+                    colorscale=[[0.,"rgba(51,140,190,0.18)"],
+                                [1.,"rgba(51,140,190,0.30)"]],
+                    showscale=False,hovertemplate="採用M2Dパネル<extra></extra>",
+                    name="50%以上で採用したGridセル",
+                ))
+                _fitted=np.asarray(
+                    state.surface_parameterization.omega_boundary,float)
+                for _points,_name,_color in (
+                    (np.asarray(_area_source,float),
+                     "元のOptCuts Ω境界","#de6956"),
+                    (np.asarray(_area_target,float),
+                     "採用パネル群の輪郭","#2678b7"),
+                    (_fitted,"再写像後のΩ境界","#299768"),
+                ):
+                    _fig.add_trace(_area_go.Scatter(
+                        x=_points[:,0],y=_points[:,1],
+                        mode="lines",name=_name,
+                        line=dict(color=_color,width=2.5),
+                    ))
+                _fig.update_yaxes(scaleanchor="x",scaleratio=1)
+                _fig.update_layout(
+                    title="元のΩ / 50%以上のM2Dパネル / 再写像Ω",
+                    legend=dict(orientation="h"),height=530,
+                    margin=dict(l=15,r=15,b=15,t=65),
+                )
+                st.plotly_chart(_fig,use_container_width=True,
+                                key="area_threshold_omega_contour_comparison")
+                _retained_count=int(_mask.sum())
+                _m2d_result=getattr(state,"mesh_2d_initial",None)
+                if _m2d_result is not None:
+                    _count=int((_m2d_result.metrics or {}).get(
+                        "paper_m2d_retained_face_count",-1))
+                    if _count!=_retained_count:
+                        st.error(
+                            "GRID_BOUNDARY_M2D_COUNT_MISMATCH: 採用Gridセル数と"
+                            "実際に生成したM2Dパネル数が一致しません。"
+                            f" mask={_retained_count}, M2D={_count}"
+                        )
+                    else:
+                        st.caption(
+                            f"GridマスクとM2D採用パネル数が一致：{_count}枚。"
+                            "これは後続のCSF Split前の値です。"
+                        )
             st.caption(
-                "Gridパネル集合を最初に確定し、その輪郭にOptCuts境界の"
-                "各頂点を順番に対応付け、内部UVを固定境界調和写像で"
-                "再計算しました。公式BFFではありません。"
-                "Seamトポロジーと後段のK3D/K2Dの最適化式は変更していません。"
+                "最初のOptCuts Ω上に実際のM2D Gridを重ねて50%判定し、"
+                "選択したパネル群の輪郭にΩの境界を対応付けました。"
+                "内部は固定境界調和写像で再計算しています（公式BFFではありません）。"
+                "Seamの接続関係と後段のK3D/K2D最適化式は変更していません。"
             )
     _ga_metrics = state.surface_parameterization.metrics or {}
     if _ga_metrics.get("optcuts_grid_aware_enabled", False):
