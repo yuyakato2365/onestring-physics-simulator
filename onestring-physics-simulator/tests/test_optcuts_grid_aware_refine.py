@@ -62,6 +62,28 @@ def test_fixed_seam_targets_and_harmonic_step_reduce_diagonal_alignment():
         np.testing.assert_array_equal(final.uv_vertices_2d,uv)
 
 
+def test_beneficial_sheared_seam_is_actually_refined():
+    """Regression against a no-op-only experiment.
+
+    The two 3D triangles share a horizontal source seam. Each separated
+    UV copy has a sheared, diagonal seam, so flattening it improves SD.
+    """
+    xyz=np.array([[0.,0.,0.],[1.,0.,0.],[1.,1.,0.],[0.,-1.,0.]])
+    sf=np.array([[0,1,2],[1,0,3]],int)
+    uv=np.array([[0.,.30],[1.,.60],[1.,1.60],
+                 [1.,-.05],[0.,-.35],[0.,-1.35]])
+    uf=np.array([[0,1,2],[3,4,5]],int)
+    obj=OptCutsResult(xyz,sf,uv,uf,[[0,1,2]],"sheared.obj",{})
+    baseline=_seam_quality(uv,_seam_sides(obj),8,8)
+    assert baseline>0.
+    out=refine_optcuts_grid_aware(obj,nx=8,ny=8,strength=3.)
+    assert out.metrics["optcuts_grid_aware_status"]=="accepted", out.metrics
+    assert out.metrics["optcuts_grid_aware_alignment_after"]<baseline
+    assert quality(out)["injectivity_overlap_pairs"]==0
+    np.testing.assert_array_equal(out.uv_faces,uf)
+    np.testing.assert_array_equal(out.surface_faces,sf)
+
+
 def test_no_seam_rejects_without_touching_original_geometry():
     obj=_two_patches()
     obj.uv_vertices_2d[3]=obj.uv_vertices_2d[0]
