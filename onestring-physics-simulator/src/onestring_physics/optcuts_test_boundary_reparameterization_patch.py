@@ -263,38 +263,86 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         return parameterization
 
     def area_boundary_domain(parameterization: Any, grid: Any, params: Any = None):
-        # Step 1: ordinary OptCuts Omega -> its REAL M2D lattice.
+        area_mode = bool(
+            params is not None and _is_optcuts_test(params)
+            and getattr(params, "optcuts_area_grid_boundary_enabled", False)
+        )
+        if not area_mode:
+            return base_domain(parameterization, grid, params)
+
+        from .optcuts_area_grid_boundary import (
+            GridBoundaryReparameterizationError,
+            apply_area_grid_boundary, fix_domain_lattice,
+        )
+        from .optcuts_grid_aware_seam_selection import (
+            rank_grid_aware_seam_candidates, copy_selected_chart_to_original,
+        )
+
+        # A: Choose among ACTUAL official OptCuts initial-cut/seam
+        # topologies, using each candidate's own REAL production M2D grid.
+        # No independently invented lattice or silent change in the 50% mask.
+        ranked, report = rank_grid_aware_seam_candidates(
+            parameterization, grid, params, base_domain,
+        )
+        failures = []
+        selected = None
+        selected_report = None
+        for chart, candidate_domain, row in ranked:
+            try:
+                # Attempt each seam candidate in grid-complexity order.
+                # Only a successfully fitted candidate can be selected;
+                # a simpler staircase alone is not sufficient.
+                apply_area_grid_boundary(
+                    chart, grid, params, domain=candidate_domain,
+                )
+            except GridBoundaryReparameterizationError as exc:
+                row["status"] = "boundary_fit_failed"
+                row["error"] = str(exc)
+                failures.append(
+                    f"start={row['candidate_index']},score={row['score']:.5g}: "
+                    f"{str(exc)[:360]}"
+                )
+                continue
+            row["status"] = "boundary_fit_accepted"
+            selected, selected_report = chart, row
+            break
+
+        if selected is None:
+            raise GridBoundaryReparameterizationError(
+                "GRID_SEAM_ALL_RANKED_OFFICIAL_CUTS_FAILED: "
+                f"valid_seam_candidates={len(ranked)}; "
+                + " | ".join(failures)
+            )
+
+        selected.metrics.update(
+            optcuts_area_grid_seam_selection_enabled=True,
+            optcuts_area_grid_seam_candidate_count=len(report),
+            optcuts_area_grid_seam_ranking=report,
+            optcuts_area_grid_seam_selected_start=int(
+                selected_report["candidate_index"]),
+            optcuts_area_grid_seam_selected_score=float(
+                selected_report["score"]),
+            optcuts_area_grid_seam_selection_model=(
+                "official OptCuts initial cut candidates ranked on each "
+                "real pre-fit M2D grid by reflex corners, corners, "
+                "perimeter and UV quality; fixed-Grid bijective fit required"
+            ),
+            optcuts_area_grid_multistart_downstream_swap_enabled=False,
+            optcuts_split_count_selection_pending=False,
+            optcuts_area_grid_multistart_note=(
+                "Selected official seam start fitted to its own real "
+                "M2D footprint. Unfitted alternate charts cannot overwrite it."
+            ),
+        )
+        # Downstream OneString retains the ORIGINAL SurfaceParameterization
+        # object, so copy all paired chart data into that reference. Merely
+        # returning a new chart would silently leave the old UV in the state.
+        copy_selected_chart_to_original(parameterization, selected)
+        # Recompute downstream CSF on the chosen final UV, but restore the
+        # exact M2D grid that was evaluated BEFORE boundary deformation.
         domain = base_domain(parameterization, grid, params)
-        if (params is not None and _is_optcuts_test(params)
-                and bool(getattr(params,"optcuts_area_grid_boundary_enabled",False))):
-            from .optcuts_area_grid_boundary import (
-                apply_area_grid_boundary,fix_domain_lattice,
-            )
-            # Step 2: select >= threshold cells ON THAT EXACT lattice,
-            # construct the retained-M2D boundary, remap Ω and its interior.
-            parameterization=apply_area_grid_boundary(
-                parameterization,grid,params,domain=domain,
-            )
-            # Any alternative OptCuts chart was made before this Ω fit.
-            # Do not let later downstream multistart selection undo it.
-            if hasattr(parameterization,"_onestring_optcuts_candidates"):
-                parameterization._onestring_optcuts_candidates=[]
-            if hasattr(parameterization,"_onestring_optcuts_candidate_qualities"):
-                parameterization._onestring_optcuts_candidate_qualities=[]
-            parameterization.metrics.update(
-                optcuts_area_grid_multistart_downstream_swap_enabled=False,
-                optcuts_split_count_selection_pending=False,
-                optcuts_area_grid_multistart_note=(
-                    "original OptCuts chart fitted to REAL M2D footprint; "
-                    "unfitted alternative charts cannot overwrite the fit"
-                ),
-            )
-            # Step 3: recompute charts/CSF downstream for changed UV.
-            # The recomputed domain can propose a new lattice; discard THAT
-            # candidate grid, preserving the exact original M2D lattice.
-            domain = base_domain(parameterization, grid, params)
-            domain=fix_domain_lattice(domain,parameterization)
-            domain.parameterization=parameterization
+        domain = fix_domain_lattice(domain, parameterization)
+        domain.parameterization = parameterization
         return domain
 
     def paper_m2d(grid: Any, domain: Any, params: Any = None):
