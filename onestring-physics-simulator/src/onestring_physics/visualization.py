@@ -334,11 +334,12 @@ def _surface_peak_markers(state: OneStringDesignState) -> tuple[np.ndarray, np.n
                 peak_id = int(raw_id)
             except (TypeError, ValueError, OverflowError):
                 continue
-            is_reflatten = bool(record.get('reflatten_csf_cut', False))
-            key = (is_reflatten, peak_id)
+            is_grid_peak = bool(record.get('reflatten_csf_cut', False)
+                                or record.get('fixed_chart_area_cut', False))
+            key = (is_grid_peak, peak_id)
             if key in seen or peak_id < 0:
                 continue
-            if is_reflatten:
+            if is_grid_peak:
                 if peak_id >= len(grid_uv) or peak_id >= len(grid_xyz):
                     continue
                 uv_point, xyz_point = grid_uv[peak_id, :2], grid_xyz[peak_id, :3]
