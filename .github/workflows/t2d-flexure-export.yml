@@ -1,17 +1,20 @@
 name: Experimental T2D flexure, AL and reflatten Split
 on:
   push:
-    branches: [feature/isogami-flexure-t2d-20261021, feature/normal-flow-reflatten-csf-20261023, feature/grid-aware-optcuts-20261023, feature/optcuts-area-grid-boundary-20261023]
+    branches: [feature/isogami-flexure-t2d-20261021, feature/normal-flow-reflatten-csf-20261023, feature/grid-aware-optcuts-20261023, feature/optcuts-area-grid-boundary-20261023, fix/optcuts-real-m2d-footprint-20261023]
     paths:
       - "onestring-physics-simulator/src/onestring_physics/t2d_flexure_fabrication.py"
       - "onestring-physics-simulator/app_runtime_base.py"
-      - "onestring-physics-simulator/src/onestring_physics/optcuts_area_grid_boundary.py tests/test_optcuts_area_grid_boundary.py src/onestring_physics/optcuts_grid_aware_refine.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_area_grid_boundary.py"
+      - "onestring-physics-simulator/tests/test_optcuts_area_grid_boundary.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_aware_refine.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_backend.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_pipeline_patch.py"
       - "onestring-physics-simulator/tests/test_optcuts_grid_aware_refine.py"
       - "onestring-physics-simulator/tests/test_optcuts_area_grid_boundary.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_area_grid_boundary.py"
       - "onestring-physics-simulator/app_optcuts_core_20260916.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_test_boundary_reparameterization_patch.py"
       - "onestring-physics-simulator/tests/test_k3d_al_launcher_wiring.py"
       - "onestring-physics-simulator/tests/test_paper_split_reflatten.py"
       - "onestring-physics-simulator/tests/test_postcut_rebff_m2d.py"
