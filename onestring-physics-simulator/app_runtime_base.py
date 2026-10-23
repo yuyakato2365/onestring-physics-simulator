@@ -809,15 +809,19 @@ with st.sidebar:
             "実験：Split後の再BFF UVを実際のM2Dパネル形状に反映",
             value=False,
             key="split_apply_rebff_to_m2d",
-            disabled=paper_split_criterion != "reflatten_tile_area",
-            help="Split候補・CSF閾値・判定は従来の再BFF ONと全く同じままです。"
+            disabled=(paper_split_criterion != "reflatten_tile_area"
+                      or not paper_fidelity_enabled),
+            help="Paper mode ONかつ再BFFによるSplit判定ONの場合のみ有効。"
+                 "通常のOptCuts・Paper OFFのパイプラインには影響させません。"
+                 "Split候補・CSF閾値・判定は従来の再BFF ONと全く同じままです。"
                  "決定されたSplit後の3D領域を再BFFしたUVを、M2Dの頂点に対応づけます。"
                  "各領域のUVは類似変換で元のΩに位置合わせし、実際のパネル形状を変形します。"
                  "元のΩ座標はM3Dへの逆写像用に保存します。"
                  "反転・退化・境界不整合時は中止し、以前のUVへ黙って戻しません。"
                  "元論文の実装を再現したと証明するものではありません。",
         )
-        if paper_split_apply_rebff_m2d and paper_split_criterion == "reflatten_tile_area":
+        if (paper_fidelity_enabled and paper_split_apply_rebff_m2d
+                and paper_split_criterion == "reflatten_tile_area"):
             st.warning("M2D再BFF反映は研究用の実験モードです。Split判定自体は変更せず、"
                        "最終M2Dを各領域の再BFF形状で変形します。"
                        "元の格子の正方性やヒンジの製造可能性は別途検証が必要です。")
