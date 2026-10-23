@@ -281,6 +281,12 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         # A: Choose among ACTUAL official OptCuts initial-cut/seam
         # topologies, using each candidate's own REAL production M2D grid.
         # No independently invented lattice or silent change in the 50% mask.
+        source_count = len(getattr(
+            parameterization, "_onestring_optcuts_candidates", []) or []) or 1
+        source_status = str(parameterization.metrics.get(
+            "optcuts_multistart_status", "not_reported"))
+        source_error = str(parameterization.metrics.get(
+            "optcuts_multistart_candidate_error", ""))
         ranked, report = rank_grid_aware_seam_candidates(
             parameterization, grid, params, base_domain,
         )
@@ -299,8 +305,9 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 row["status"] = "boundary_fit_failed"
                 row["error"] = str(exc)
                 failures.append(
-                    f"start={row['candidate_index']},score={row['score']:.5g}: "
-                    f"{str(exc)[:360]}"
+                    f"cut={row['source_start_index']},"
+                    f"uv_rotation={row['uv_rotation_degrees']:g}deg,"
+                    f"score={row['score']:.5g}: {str(exc)[:210]}"
                 )
                 continue
             row["status"] = "boundary_fit_accepted"
@@ -308,10 +315,22 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             break
 
         if selected is None:
+            skipped = [
+                f"cut={r['source_start_index']},"
+                f"rotation={r['uv_rotation_degrees']:g}deg: "
+                f"{r.get('status')}: {str(r.get('error',''))[:130]}"
+                for r in report if r.get("status") == "invalid"
+            ]
             raise GridBoundaryReparameterizationError(
-                "GRID_SEAM_ALL_RANKED_OFFICIAL_CUTS_FAILED: "
-                f"valid_seam_candidates={len(ranked)}; "
-                + " | ".join(failures)
+                "GRID_SEAM_ALL_GRID_ORIENTATION_CANDIDATES_FAILED: "
+                f"official_cut_sources={source_count}; "
+                f"official_multistart_status={source_status}; "
+                f"official_multistart_error={source_error[:160]}; "
+                f"evaluated_uv_orientations={len(report)}; "
+                f"valid_grid_candidates={len(ranked)}; "
+                + " | ".join(failures + skipped)
+                + "; Rotation variants do NOT generate new seams. "
+                  "No exact-grid fit was silently accepted."
             )
 
         selected.metrics.update(
@@ -319,13 +338,17 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             optcuts_area_grid_seam_candidate_count=len(report),
             optcuts_area_grid_seam_ranking=report,
             optcuts_area_grid_seam_selected_start=int(
-                selected_report["candidate_index"]),
+                selected_report["source_start_index"]),
+            optcuts_area_grid_seam_selected_rotation_degrees=float(
+                selected_report["uv_rotation_degrees"]),
+            optcuts_area_grid_seam_official_source_count=source_count,
             optcuts_area_grid_seam_selected_score=float(
                 selected_report["score"]),
             optcuts_area_grid_seam_selection_model=(
-                "official OptCuts initial cut candidates ranked on each "
-                "real pre-fit M2D grid by reflex corners, corners, "
-                "perimeter and UV quality; fixed-Grid bijective fit required"
+                "official OptCuts initial cuts plus rigid pre-grid "
+                "UV orientation variants ranked on each original production "
+                "M2D grid by corners, concavity, perimeter and UV quality; "
+                "NO new cut topology from rotations; exact fit required"
             ),
             optcuts_area_grid_multistart_downstream_swap_enabled=False,
             optcuts_split_count_selection_pending=False,
