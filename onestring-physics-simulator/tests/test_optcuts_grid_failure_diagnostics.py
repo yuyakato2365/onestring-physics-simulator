@@ -182,3 +182,42 @@ def test_diagnostic_io_failure_never_hides_original_mapping_error(monkeypatch):
             lambda *_args: harmonic.copy(),
             lambda *_: {}, on_failure=bad_diagnostic,
         )
+
+
+
+def test_summary_synthesizes_failure_evidence_and_shareable_zip(tmp_path):
+    from scripts.summarize_grid_boundary_failures import summarize
+    from zipfile import ZipFile
+    uv, faces, loop, outline, rejected, harmonic = fixture_uv()
+    for rotation, progress in [(0., .96), (67.5, .99368)]:
+        save_failure_bundle(
+            base=uv, faces=faces, boundary_indices=loop,
+            mapped_boundary=uv[loop], accepted=uv, rejected=rejected,
+            harmonic=harmonic, grid_outline=outline,
+            grid_step=np.ones(2), fraction=progress+.001,
+            last_valid_fraction=progress,
+            history=[{"fraction": progress, "accepted": True}],
+            metadata={
+                "official_seam_start_index": 0,
+                "uv_rotation_degrees": rotation,
+                "correspondence_attempt": 1,
+                "phase": 7,
+                "method": "corner_dp",
+            },
+            output_dir=tmp_path,
+        )
+    result = summarize(tmp_path, last=10, max_bundles=2)
+    assert result["attempts"] == 2
+    assert result["best_fraction"] == pytest.approx(.99368)
+    assert Path(result["summary"]).exists()
+    assert Path(result["csv"]).exists()
+    assert Path(result["zip"]).exists()
+    summary = Path(result["summary"]).read_text()
+    assert "67.5°" in summary
+    assert "0.993680" in summary
+    assert "Next experiments justified" in summary
+    with ZipFile(result["zip"]) as z:
+        names = z.namelist()
+        assert "analysis_summary.md" in names
+        assert "comparison.csv" in names
+        assert sum(x.endswith("reproduce_uv.npz") for x in names) == 2
