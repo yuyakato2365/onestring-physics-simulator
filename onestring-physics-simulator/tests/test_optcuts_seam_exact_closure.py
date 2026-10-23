@@ -140,3 +140,73 @@ def test_paper_extrusion_preserves_closed_seam_on_top_and_bottom():
         result.vertices[0,6],result.vertices[1,7])
     np.testing.assert_array_equal(mesh.vertices[1],mesh.vertices[4])
     np.testing.assert_array_equal(mesh.vertices[2],mesh.vertices[7])
+
+
+
+def test_launcher_seam_hook_routes_m2d_uv_to_k3d_and_retains_exact_groups():
+    from onestring_physics.optcuts_seam_exact_closure import (
+        install_optcuts_exact_seam_closure,
+    )
+    chart,uv,faces=conforming()
+    chart.method="optcuts_test"
+    chart.metrics={"optcuts_area_grid_boundary_enabled":True}
+    original_xyz=np.array([
+        [0,0,0],[1,0,0],[1,1,0],[0,1,0],
+        [1,0,0],[2,0,0],[2,1,0],[1,1,0],
+    ],float)
+    def source_lift(target,mesh,parameterization,params):
+        return SimpleNamespace(
+            stage="M3D",vertices=original_xyz.copy(),
+            faces=faces.copy(),grid=mesh.grid,metrics={}),None
+    def source_k3d(target,mesh,parameterization,params):
+        geometry=mesh.vertices.copy()
+        geometry[1]+=[.015,0,.01]
+        geometry[4]-=[.008,0,.015]
+        out=SimpleNamespace(
+            stage="K3D",vertices=geometry,faces=mesh.faces.copy(),
+            metrics={},grid=mesh.grid)
+        return out,None
+    owner=SimpleNamespace(
+        _lift_m2d_to_m3d=source_lift,
+        _optimize_k3d=source_k3d,
+    )
+    install_optcuts_exact_seam_closure(owner)
+    m2d=SimpleNamespace(
+        stage="M2D",vertices=np.c_[uv,np.zeros(len(uv))],
+        faces=faces.copy(),grid=SimpleNamespace(tile_size=1.),
+    )
+    m3d,_=owner._lift_m2d_to_m3d(None,m2d,chart,None)
+    k3d,_=owner._optimize_k3d(None,m3d,chart,None)
+    assert k3d.metrics["seam_exact_closure_enabled"]
+    assert k3d.metrics["seam_exact_paired_grid_edges"]==1
+    assert k3d.metrics["seam_k3d_gap_after"]==pytest.approx(0.)
+    np.testing.assert_allclose(k3d.vertices[1],k3d.vertices[4],atol=1e-10)
+
+
+def test_launcher_rejects_nonconforming_real_seam_not_claiming_exact_fit():
+    from onestring_physics.optcuts_seam_exact_closure import (
+        install_optcuts_exact_seam_closure,
+    )
+    chart,_,_=conforming()
+    chart.method="optcuts_test"
+    chart.metrics={"optcuts_area_grid_boundary_enabled":True}
+    uv=np.array([
+        [0,0],[1,0],[1,1],[0,1],
+        [2,0],[3,0],[3,.5],[2,.5],[3,1],[2,1]
+    ],float)
+    faces=np.array([[0,1,2,3],[4,5,6,7],[7,6,8,9]],int)
+    def source_lift(_target,mesh,_param,_params):
+        return SimpleNamespace(
+            stage="M3D",vertices=np.c_[mesh.vertices[:,:2],np.zeros(len(uv))],
+            faces=mesh.faces.copy(),metrics={}),None
+    def source_opt(_target,mesh,_param,_params):
+        return SimpleNamespace(
+            stage="K3D",vertices=mesh.vertices.copy(),
+            faces=mesh.faces.copy(),metrics={}),None
+    owner=SimpleNamespace(
+        _lift_m2d_to_m3d=source_lift,_optimize_k3d=source_opt)
+    install_optcuts_exact_seam_closure(owner)
+    mesh=SimpleNamespace(vertices=np.c_[uv,np.zeros(len(uv))],faces=faces)
+    lifted,_=owner._lift_m2d_to_m3d(None,mesh,chart,None)
+    with pytest.raises(SeamTopologyMismatch,match="SEAM_K3D_NONCONFORMING_GRID_EDGE_SAMPLING"):
+        owner._optimize_k3d(None,lifted,chart,None)
