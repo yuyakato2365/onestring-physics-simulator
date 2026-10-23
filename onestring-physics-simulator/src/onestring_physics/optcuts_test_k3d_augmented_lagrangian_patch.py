@@ -423,7 +423,19 @@ def _augmented_lagrangian_planarize(
 
     shape_mode = _shape_preserving_enabled()
     shape_weight = max(0.0, _safe_float_env("ONESTRING_K3D_SHAPE_PRESERVATION_WEIGHT", 100.0)) if shape_mode else 0.0
-    effective_square_weight = max(0.0, float(square_weight)) if shape_mode else 0.0
+    # The global smooth-maximum square penalty is part of EVERY active
+    # optcuts_test hard-planarity solve. Shape-preserving reference metrics
+    # remain a separate optional term; they must not gate E_Square.
+    effective_square_weight = max(0.0, float(square_weight))
+    square_tail_alpha=max(0.,_safe_float_env("ONESTRING_K3D_SQUARE_TAIL_ALPHA",4.))
+    square_tail_beta=max(0.,_safe_float_env("ONESTRING_K3D_SQUARE_TAIL_BETA",12.))
+    print(
+        f"[K3D-SMOOTHMAX] stage=AL enabled="
+        f"{bool(effective_square_weight>0 and square_tail_alpha>0)} "
+        f"w_square={effective_square_weight:.6g} "
+        f"alpha={square_tail_alpha:.6g} beta={square_tail_beta:.6g} "
+        f"shape_preserving={shape_mode}",flush=True,
+    )
     reference_lengths = _metric_reference(ref, f4, scales)
 
     x = ref.copy()
@@ -452,7 +464,7 @@ def _augmented_lagrangian_planarize(
             )
             energy += shape_energy
             grad_total += shape_grad
-        if shape_mode and effective_square_weight > 0.0:
+        if effective_square_weight > 0.0:
             square_energy, square_grad, _ = _square_energy_and_gradient(
                 verts, f4, scales, effective_square_weight
             )
@@ -581,7 +593,12 @@ def _augmented_lagrangian_planarize(
         "k3d_shape_metric_relative_rms": float(shape_rms),
         "k3d_shape_metric_relative_max": float(shape_max),
         "k3d_shape_preserving_restore_relaxation": float(restore_relaxation),
-        "k3d_global_square_regularization_enabled": bool(shape_mode and effective_square_weight > 0.0),
+        "k3d_global_square_regularization_enabled": bool(effective_square_weight > 0.0),
+        "k3d_smoothmax_enabled": bool(effective_square_weight>0 and square_tail_alpha>0),
+        "k3d_smoothmax_alpha":float(square_tail_alpha),
+        "k3d_smoothmax_beta":float(square_tail_beta),
+        "k3d_smoothmax_weight":float(effective_square_weight),
+        "k3d_smoothmax_stage":"optcuts_test_al",
         "k3d_global_square_regularization_model": "all quads: four cyclic edge equalities + equal diagonals",
         "k3d_global_square_weight_requested": float(square_weight),
         "k3d_global_square_weight_effective": float(effective_square_weight),
@@ -636,7 +653,7 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
             report.constraint_violation = float(al_metrics.get("k3d_hard_planarity_max_distance_after", 0.0))
         except Exception:
             pass
-        if _shape_preserving_enabled():
+        if bool(al_metrics.get("k3d_global_square_regularization_enabled",False)):
             print(
                 "[OPTCUTS-TEST-K3D-WEIGHTS] "
                 f"w_square requested/effective={requested_square_weight:.6g}/"
