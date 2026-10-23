@@ -179,6 +179,23 @@ def geometry_view(mesh, mapping):
     view.vertices, view.faces = v, mapping[np.asarray(mesh.faces)]
     view.metrics = dict(mesh.metrics)
     view.metrics.pop('assembled_geometry_map', None)
+    # The reduced AL must preserve the same physically certified source
+    # seam groups, but expressed in its OWN compressed vertex index space.
+    # Do not pass original M2D indices straight into the reduced solver.
+    preflight=bool(view.metrics.get("seam_exact_preflight_certified",False))
+    if preflight:
+        original_groups=view.metrics.get("seam_exact_vertex_groups",[])
+        view.metrics["seam_exact_vertex_groups"]=[
+            sorted({int(mapping[int(v)]) for v in group})
+            for group in original_groups
+            if len({int(mapping[int(v)]) for v in group})>1
+        ]
+        view.metrics["seam_exact_groups_reindexed_for_reduction"]=True
+        view.metrics["seam_exact_groups_removed_by_reduction"]=int(
+            len(original_groups)-len(
+                view.metrics["seam_exact_vertex_groups"]
+            )
+        )
     return view
 
 
