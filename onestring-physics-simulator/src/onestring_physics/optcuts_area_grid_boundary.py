@@ -566,6 +566,9 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
                 source_vertices_3d=parameterization.surface_vertices_3d,
                 source_faces=parameterization.surface_faces,
                 metadata={
+                    "diagnostic_run_id": parameterization.metrics.get(
+                        "optcuts_area_grid_diagnostic_run_id", ""),
+                    "ear_preflight_version": "ear-safe-v1",
                     "grid_origin": target["origin"].tolist(),
                     "grid_step": target["step"].tolist(),
                     "overlay_nx": int(target["nx"]),
