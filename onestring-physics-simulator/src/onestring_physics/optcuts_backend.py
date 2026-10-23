@@ -52,6 +52,12 @@ class OptCutsConfig:
     csf_tail_sharpness: float = 20.0
     csf_tail_weight: float = 8.0
     csf_tail_maxiter: int = 30
+    # Experimental UV-only grid-aware step, AFTER official OptCuts + CSF tail.
+    # Off by default and never edits the authors' C++ cut topology.
+    grid_aware_enabled: bool = False
+    grid_aware_nx: int = 20
+    grid_aware_ny: int = 20
+    grid_aware_strength: float = 3.0
 
 
 @dataclass
@@ -602,6 +608,17 @@ def _refine_uv_for_csf_tail(result, cfg):
         print('[OPTCUTS-CSF-TAIL] failed: %s: %s' % (type(exc).__name__,exc),flush=True)
         return result
 
+def _refine_uv_for_grid_aware(result, cfg):
+    if not cfg.grid_aware_enabled:
+        return result
+    from .optcuts_grid_aware_refine import refine_optcuts_grid_aware
+    return refine_optcuts_grid_aware(
+        result, nx=cfg.grid_aware_nx, ny=cfg.grid_aware_ny,
+        strength=cfg.grid_aware_strength,
+        distortion_bound=cfg.distortion_bound,
+    )
+
+
 def run_official_optcuts(surface_vertices, surface_faces, config=None):
     """Run official OptCuts starts and retain both candidates for OneString selection.
 
@@ -612,6 +629,7 @@ def run_official_optcuts(surface_vertices, surface_faces, config=None):
     cfg = config or OptCutsConfig()
     baseline = _run_official_optcuts_once(surface_vertices, surface_faces, cfg)
     baseline = _refine_uv_for_csf_tail(baseline, cfg)
+    baseline = _refine_uv_for_grid_aware(baseline, cfg)
     baseline_quality = quality(baseline)
     baseline.metrics['optcuts_quality_audit'] = baseline_quality
     baseline.metrics['optcuts_multistart_classification'] = 'official starts; final OneString Split-count selection deferred downstream'
@@ -625,6 +643,7 @@ def run_official_optcuts(surface_vertices, surface_faces, config=None):
     try:
         candidate=_run_official_optcuts_once(surface_vertices,surface_faces,replace(cfg,initial_cut_option=1-cfg.initial_cut_option,try_alternative_initial_cut=False))
         candidate=_refine_uv_for_csf_tail(candidate,cfg)
+        candidate=_refine_uv_for_grid_aware(candidate,cfg)
         candidate_quality=quality(candidate)
     except OptCutsError as exc:
         baseline.metrics.update(optcuts_multistart_status='candidate_failed_retained_baseline',optcuts_multistart_candidate_error=str(exc))
