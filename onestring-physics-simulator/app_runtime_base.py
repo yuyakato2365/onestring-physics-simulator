@@ -719,7 +719,8 @@ with st.sidebar:
     # official OptCuts -> CSF-tail -> M2D path. Paper / OptCuts-grid untouched.
     optcuts_grid_aware_enabled = False
     optcuts_grid_aware_strength = 3.0
-    if not paper_fidelity_enabled and omega_parameterization_mode == "optcuts":
+    if (not paper_fidelity_enabled and
+            omega_parameterization_mode in ("optcuts", "optcuts_test", "optcuts_test2")):
         with st.expander("実験：Grid-aware OptCuts（元のOptCutsは変更しない）", expanded=False):
             optcuts_grid_aware_enabled = st.checkbox(
                 "Seamを格子線に寄せるUV最適化を追加",
