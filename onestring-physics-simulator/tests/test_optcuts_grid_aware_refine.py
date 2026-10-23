@@ -142,6 +142,25 @@ def test_param_config_and_ui_are_only_optcuts_nonpaper():
     root=Path(__file__).parents[1]
     app=(root/"app_runtime_base.py").read_text()
     pipe=(root/"src/onestring_physics/onestring_pipeline.py").read_text()
-    assert 'key="optcuts_grid_aware_experiment"' in app
+    selector=(root/"app_optcuts_core_20260916.py").read_text()
+    assert '"optcuts_grid_aware"' in selector
+    assert 'st.session_state["_onestring_grid_aware_omega_selected"]' in selector
+    assert 'value in {"optcuts_test2","optcuts_grid_aware"}' in selector
+    assert 'omega_parameterization_mode == "optcuts_test"' in app
+    assert 'st.session_state.get("_onestring_grid_aware_omega_selected", False)' in app
+    assert 'key="optcuts_grid_aware_experiment"' not in app
     assert 'optcuts_grid_aware_enabled=optcuts_grid_aware_enabled' in app
     assert "optcuts_grid_aware_enabled: bool = False" in pipe
+
+
+
+def test_omega_mode_switch_is_preserved_as_metadata_not_new_solver_family():
+    root=Path(__file__).parents[1]
+    path=root/"src/onestring_physics/optcuts_test_boundary_reparameterization_patch.py"
+    source=path.read_text()
+    assert '"optcuts_grid_aware" if bool(getattr(' in source
+    assert 'optcuts_grid_aware_selected_as_omega_mode' in source
+    assert 'replace(params, omega_parameterization_mode="optcuts"' in source
+    # The downstream mode remains optcuts_test to preserve the mature
+    # K3D/K2D/strict-M2D carrier used by 2026-09-18.
+    assert 'parameterization.method = "optcuts_test"' in source
