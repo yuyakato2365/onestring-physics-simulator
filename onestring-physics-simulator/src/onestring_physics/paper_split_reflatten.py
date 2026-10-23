@@ -589,7 +589,9 @@ def split_mesh_reflatten(vertices,faces,domain,params=None,*,reflatten=True):
     metrics.update(
         csf_model=_CSF_MODEL if reflatten else _FIXED_CHART_CSF_MODEL,
         csf_split_bff_evaluation_enabled=bool(reflatten),
-        csf_split_evaluation_uv=report["evaluation_uv"],
+        csf_split_evaluation_uv=report.get(
+            "evaluation_uv",
+            "per_piece_official_free_bff" if reflatten else "original_omega_fixed_chart"),
         csf_split_initial_omega_method=source_method,
         csf_split_initial_omega_is_official_bff=source_method=="paper_reference_bff",
         csf_split_normal_flow_enabled=not bool(getattr(params,"paper_fidelity_mode",False)),
@@ -618,7 +620,7 @@ def split_mesh_reflatten(vertices,faces,domain,params=None,*,reflatten=True):
         csf_split_unresolved_component_count=sum(not leaf["satisfied"] for leaf in report["leaves"]),
         csf_split_initial_components=[dict(face_ids=list(range(len(faces))),sigma=report["initial_sigma"])],
         csf_split_component_sigma=[leaf["sigma"] for leaf in report["leaves"]],
-        csf_split_step_analysis_model=_CSF_MODEL,
+        csf_split_step_analysis_model=_CSF_MODEL if reflatten else _FIXED_CHART_CSF_MODEL,
         csf_split_status="satisfied" if report["satisfied"] else "no_admissible_curvature_guided_grid_cut",
         csf_split_stopping_reason="all components <= 2" if report["satisfied"] else "unresolved",
         csf_split_stopping_rule=(
