@@ -73,7 +73,7 @@ def grid_seam_selection_score(complexity, audit, *, reference_sd=1.,
     return float(grid_cost + quality_cost)
 
 
-def _make_chart(original, optcuts_result, rank_index):
+def _make_chart(original, optcuts_result, rank_index, *, rotation_degrees=0.):
     """Copy a full paired UV/3D chart; never combine incompatible face IDs."""
     chart = copy.copy(original)
     chart.metrics = dict(getattr(original, "metrics", {}) or {})
@@ -99,6 +99,27 @@ def _make_chart(original, optcuts_result, rank_index):
     chart._onestring_optcuts_candidate_qualities = []
     chart.metrics["optcuts_split_count_selection_pending"] = False
     chart.metrics["optcuts_area_grid_seam_start_index"] = int(rank_index)
+    chart.metrics["optcuts_area_grid_rotation_degrees"] = float(rotation_degrees)
+    if rotation_degrees:
+        # Rigidity keeps face geometry, UV distortion and seam topology
+        # invariant, but changes the relative orientation of the ORIGINAL
+        # UV domain to the as-yet-unconstructed production M2D grid.
+        # This is NOT a new seam and is named accordingly in diagnostics.
+        angle = math.radians(float(rotation_degrees))
+        c, sn = math.cos(angle), math.sin(angle)
+        r = np.array([[c, -sn], [sn, c]], dtype=float)
+        uv = np.asarray(chart.uv_vertices_2d, dtype=float)
+        centre = np.mean(uv, axis=0)
+        chart.uv_vertices_2d = (uv - centre) @ r.T + centre
+        boundary_ids = chart.metrics.get("boundary_loop")
+        if not boundary_ids:
+            from .optcuts_backend import _boundary_loops
+            loops = _boundary_loops(chart.uv_faces)
+            if len(loops) != 1:
+                raise ValueError("GRID_SEAM_ROTATED_CHART_NOT_DISK")
+            boundary_ids = [int(v) for v in loops[0]]
+        loop = [int(i) for i in boundary_ids]
+        chart.omega_boundary = chart.uv_vertices_2d[loop + [loop[0]]]
     chart.triangle_acceleration = None
     return chart
 
@@ -118,16 +139,31 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
                                 "_onestring_optcuts_candidates", []) or [])
     audits = list(getattr(parameterization,
                           "_onestring_optcuts_candidate_qualities", []) or [])
-    # Synthetic fixtures and open meshes may have just one official result.
+    # Each actual official seam topology is evaluated unrotated first.
+    # If it cannot produce a feasible polygon, additional RIGID UV rotations
+    # may choose a more grid-compatible Ω footprint without changing seams.
+    # Rotation is allowed only BEFORE constructing each production lattice.
     sources = alternatives if alternatives else [None]
+    rotations = (0., 22.5, 45., 67.5) if bool(
+        getattr(params, "optcuts_area_grid_orientation_search_enabled",
+                True)) else (0.,)
+    tasks = ([(i, source, 0.) for i, source in enumerate(sources)] +
+             [(i, source, degrees)
+              for degrees in rotations if degrees != 0.
+              for i, source in enumerate(sources)])
     evaluated = []
     report = []
-    for index, source in enumerate(sources):
-        summary = {"candidate_index": int(index),
-                   "source": "official_initial_cut" if source is not None
-                   else "single_official_chart"}
+    for index, (source_index, source, rotation) in enumerate(tasks):
+        summary = {
+            "candidate_index": int(index),
+            "source_start_index": int(source_index),
+            "uv_rotation_degrees": float(rotation),
+            "source": ("official_initial_cut" if source is not None
+                       else "single_official_chart"),
+        }
         try:
-            chart = _make_chart(parameterization, source, index)
+            chart = _make_chart(parameterization, source, source_index,
+                                rotation_degrees=rotation)
             audit = (dict(audits[index]) if index < len(audits)
                      else quality(OptCutsResult(
                          chart.surface_vertices_3d, chart.surface_faces,
@@ -169,8 +205,9 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
     if not evaluated:
         raise GridBoundaryReparameterizationError(
             "GRID_SEAM_NO_VALID_CANDIDATE: "
-            + " | ".join(f"start={r['candidate_index']}: {r.get('error')}"
-                         for r in report))
+            + " | ".join(
+                f"cut={r['source_start_index']} rotation={r['uv_rotation_degrees']}: "
+                f"{r.get('error')}" for r in report))
     ref_sd = min(float(a["distortion_area_mean"])
                  for _c, _d, _r, a in evaluated)
     seam_lengths = [float(a.get("seam_length", 0.))
@@ -179,13 +216,11 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
     ref_seam = min(seam_lengths) if seam_lengths else 1.
     ranked = []
     for chart, domain, summary, audit in evaluated:
-        # A more rectilinear seam must not win only by destroying the
-        # pre-existing OptCuts low-distortion guarantee.
-        sd = float(audit["distortion_area_mean"])
-        if sd > max(1.5 * ref_sd, ref_sd + .25):
-            summary.update(status="rejected_uv_quality",
-                           error="source SD exceeds 1.5x reference guard")
-            continue
+        # A source candidate is accepted only when its *actual* UV is
+        # locally nonflipped, nonoverlapping and finite. Retain other valid
+        # OptCuts seams even when SD exceeds the former arbitrary 1.5x
+        # relative guard: score penalizes it, while the FINAL fitting step
+        # separately enforces its distortion/injectivity hard checks.
         summary["score"] = grid_seam_selection_score(
             summary, audit, reference_sd=ref_sd,
             reference_seam=ref_seam)
