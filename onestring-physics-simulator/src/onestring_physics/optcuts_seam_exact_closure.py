@@ -29,7 +29,7 @@ def _uv_boundary_edges(quad_faces):
     return [(item[0][1],item[0][2]) for item in edges.values() if len(item)==1]
 
 
-def _cut_uv_segments(parameterization):
+def _cut_uv_segments(parameterization, *, include_open=False):
     """(UV line, 3D line, physical edge key, side number) for real cuts."""
     xyz=np.asarray(parameterization.surface_vertices_3d,float)
     sf=np.asarray(parameterization.surface_faces,int)
@@ -67,7 +67,11 @@ def _cut_uv_segments(parameterization):
     uvscale=max(float(np.ptp(uv,axis=0).max()),1e-9)
     uvtol=max(uvscale*1e-8,1e-10)
     segments=[]
+    open_boundary=[]
     for key,sides in incident.items():
+        if len(sides)==1:
+            open_boundary.append(np.stack(sides[0][:2]))
+            continue
         if len(sides)!=2:continue
         s0,s1=sides
         if (np.linalg.norm(s0[0]-s1[0])<=uvtol and
@@ -77,7 +81,7 @@ def _cut_uv_segments(parameterization):
                 np.stack(seg[:2]),np.stack(seg[2:]),
                 key,side,
             ))
-    return segments
+    return (segments,open_boundary) if include_open else segments
 
 
 def _source_seam_sample(uvp,segments,tol):
@@ -112,7 +116,9 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
     """
     uv=np.asarray(uv_vertices,float)
     faces=np.asarray(quad_faces,int)
-    segments=_cut_uv_segments(parameterization)
+    segments,open_uv_edges=_cut_uv_segments(
+        parameterization,include_open=True
+    )
     if not segments:
         return {"status":"no_original_cut","groups":[],"paired_edges":[],
                 "unmatched_edges":0,"seam_grid_edges":0}
@@ -123,13 +129,30 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
     qtol=max(1e-7*xyzspan,1e-9)
     edges=_uv_boundary_edges(faces)
     sampled={}
+    on_open={}
     for a,b in edges:
         for v in (a,b):
             if v not in sampled:
                 sampled[v]=_source_seam_sample(uv[v],segments,tol)
-    # Every edge on the true source seam must be matched on the other side.
-    seam_edges=[(a,b) for a,b in edges
-                if sampled[a] is not None and sampled[b] is not None]
+                on_open[v]=any(
+                    np.linalg.norm(uv[v]-(line[0]+
+                        np.clip(np.dot(uv[v]-line[0],line[1]-line[0])/
+                        max(np.dot(line[1]-line[0],line[1]-line[0]),1e-20),
+                        0.,1.)*(line[1]-line[0])))<=tol
+                    for line in open_uv_edges
+                )
+    seam_edges=[]
+    unclassified=[]
+    for a,b in edges:
+        if sampled[a] is not None and sampled[b] is not None:
+            seam_edges.append((a,b))
+        elif on_open[a] and on_open[b]:
+            pass   # Genuine open source boundary: not a seam.
+        else:
+            unclassified.append((a,b))
+    # Unknown Grid boundary edges are not allowed to quietly escape the
+    # seam coverage audit; they indicate an incomplete correspondence.
+    # A connected closed 3D source must have NO open-source UV edges.
     vertex_keys={}
     for v,p in sampled.items():
         if p is not None:
@@ -157,6 +180,10 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
         "groups":[sorted(x) for x in groups],
         "paired_edges":paired,
         "unmatched_edges":len(unmatched),
+        "unclassified_boundary_edges":len(unclassified),
+        "unclassified_boundary_edge_ids_sample":[
+            [int(a),int(b)] for a,b in unclassified[:12]
+        ],
         "seam_grid_edges":len(seam_edges),
         "seam_grid_vertices":len(vertex_keys),
         "original_cut_segments":len(segments)//2,
@@ -237,14 +264,23 @@ def install_optcuts_exact_seam_closure(pipeline):
         out.metrics.update({f"seam_closure_{k}":v for k,v in log.items()})
         if topo["status"]=="no_original_cut":
             return out,report
+        if topo["unclassified_boundary_edges"]:
+            raise SeamTopologyMismatch(
+                "SEAM_K3D_UNCLASSIFIED_GRID_BOUNDARY: "
+                f"edges={topo['unclassified_boundary_edges']} "
+                f"sample={topo['unclassified_boundary_edge_ids_sample']}; "
+                "boundary must be proven to be a source cut or a genuine "
+                "open-source edge before exact seam closure"
+            )
         if topo["unmatched_edges"]:
             raise SeamTopologyMismatch(
                 "SEAM_K3D_NONCONFORMING_GRID_EDGE_SAMPLING: "
                 f"unmatched_grid_boundary_edges={topo['unmatched_edges']} "
                 f"of {topo['seam_grid_edges']}; "
                 "the two UV seam sides have different Grid edge partitions. "
-                "Exact K3D/T3D boundary correspondence requires conforming "
-                "seam subdivision BEFORE M3D, not nearest-neighbor welding."
+                "This implementation requires matching source seam samples "
+                "on both sides. Remesh/realign the Grid seam subdivisions "
+                "before M3D; do not apply nearest-neighbor welding."
             )
         groups=topo["groups"]
         if not groups:
