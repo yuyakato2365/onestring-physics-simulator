@@ -321,9 +321,9 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 ])
                 metrics={
                     "max_csf_before_split":float(
-                        getattr(domain,"csf_before",domain.max_csf)),
+                        getattr(domain,"csf_before",getattr(domain,"max_csf",1.))),
                     "max_csf_after_split":float(
-                        getattr(domain,"csf_after_split",domain.max_csf)),
+                        getattr(domain,"csf_after_split",getattr(domain,"max_csf",1.))),
                     "number_of_splits":len(domain.split_lines),
                     "m2d_overlay_total_quad_count":len(full_faces),
                     "m2d_overlay_grid_nx":count_x,
@@ -382,7 +382,15 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             f"candidates={len(faces)} retained={retained} rejected_partial={rejected} "
             "rule=" + ("real-M2D-area-overlap" if area_mode else "full-cell-contained-in-fixed-Omega")
         )
-        return _compact_quad_mesh(pipeline, mesh, keep, metrics)
+        result=_compact_quad_mesh(pipeline, mesh, keep, metrics)
+        if (area_mode and getattr(domain,"paper_split_policy",False)
+                and not getattr(domain,"_paper_split_deferred",False)):
+            # Keep the SAME downstream source-M2D Split stage used by
+            # ordinary OptCuts; do not accidentally skip it when we
+            # deliberately bypass its premature M2D crop.
+            from .simple_split_panel_patch import apply_paper_split
+            return apply_paper_split(pipeline,result,domain,params)
+        return result
 
     pipeline._build_surface_parameterization = paper_parameterization
     pipeline._flatten_to_domain = area_boundary_domain
