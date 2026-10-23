@@ -545,6 +545,9 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     best_valid_method = None
     full_boundary_count = 0
     quality_reject_count = 0
+    sd_refinement_attempts=0
+    sd_refinement_improvements=0
+    chosen_sd_refinement=None
     outline=np.asarray(target["grid_outline"],float)
     tolerance=max(float(np.max(target["step"]))*1e-6,1e-9)
     print(
@@ -635,6 +638,52 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         # now gate acceptance *inside* the loop. Never silently relax SD.
         trial_quality=assess(trial_uv)
         trial_sd=float(trial_quality["distortion_area_mean"])
+        refinement=None
+        if (trial_sd>max_mean_sd and os.environ.get(
+            "ONESTRING_GRID_SD_REFINEMENT","1"
+        ).strip().lower() not in {"0","off","false","no"}):
+            # Harmonic mapping optimizes a Laplacian; the untangler only
+            # prevents triangle inversions. Neither minimizes the actual
+            # 3D-to-UV symmetric Dirichlet energy. When a mapped boundary
+            # reaches 100% but is over-distorted, optimize the independent
+            # source-surface SD objective BEFORE abandoning this exact
+            # mask/corner correspondence.
+            from .optcuts_grid_sd_refinement import refine_exact_grid_uv
+            sd_refinement_attempts+=1
+            try:
+                refined_uv,refinement=refine_exact_grid_uv(
+                    parameterization.surface_vertices_3d,
+                    parameterization.surface_faces,
+                    faces,base,trial_uv,loop,outline,
+                    assess=assess,mean_sd_limit=max_mean_sd,
+                    min_area_ratio=.005,
+                )
+                refined_quality=assess(refined_uv)
+                refined_sd=float(refined_quality["distortion_area_mean"])
+                if refined_sd<trial_sd-1e-7:
+                    trial_uv=refined_uv
+                    trial_quality=refined_quality
+                    trial_sd=refined_sd
+                    sd_refinement_improvements+=1
+                print(
+                    f"[GRID-SD] correspondence={attempt}/{max_attempts} "
+                    f"mean_sd={float(refinement['mean_sd_before']):.6g}"
+                    f"->{trial_sd:.6g} "
+                    f"limit={max_mean_sd:.6g} "
+                    f"status={refinement['status']}",
+                    flush=True,
+                )
+            except (ValueError,FloatingPointError,OverflowError) as exc:
+                # Never let experimental refinement bypass the original
+                # SD acceptance guard or conceal a successful-but-over-
+                # distorted correspondence. Restore its original trial.
+                refinement={"status":"error",
+                            "error":f"{type(exc).__name__}: {exc}"}
+                print(
+                    f"[GRID-SD] refinement_unavailable={exc}; "
+                    "original SD quality gate remains enforced",
+                    flush=True,
+                )
         if np.isfinite(trial_sd) and trial_sd < best_valid_sd:
             best_valid_sd=trial_sd
             best_valid_method=f"phase={phase}, fit={method}"
@@ -677,6 +726,7 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         chosen_phase=int(phase)
         chosen_method=str(method)
         chosen_attempt=int(attempt)
+        chosen_sd_refinement=refinement
         print(
             f"[GRID-BOUNDARY-FIT] accepted={attempt}/{max_attempts} "
             f"mean_sd={trial_sd:.5g} limit={max_mean_sd:.5g} "
@@ -733,6 +783,9 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         optcuts_area_grid_boundary_selected_attempt=chosen_attempt,
         optcuts_area_grid_boundary_full_boundary_attempts=full_boundary_count,
         optcuts_area_grid_boundary_quality_rejections=quality_reject_count,
+        optcuts_area_grid_sd_refinement_attempts=sd_refinement_attempts,
+        optcuts_area_grid_sd_refinement_improvements=sd_refinement_improvements,
+        optcuts_area_grid_sd_refinement=chosen_sd_refinement,
         optcuts_area_grid_boundary_mean_sd_limit=max_mean_sd,
         optcuts_area_grid_min_signed_area_ratio=float(np.min(
             oriented_area_ratio(base,result,faces))),
