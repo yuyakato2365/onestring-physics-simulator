@@ -206,6 +206,7 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         return
 
     base_parameterization = pipeline._build_surface_parameterization
+    base_domain = pipeline._flatten_to_domain
     base_m2d = pipeline._build_m2d
 
     def paper_parameterization(surface: Any, target: Any, grid: Any, params: Any):
@@ -216,6 +217,9 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         # an intermediate M2D and DO NOT move/re-solve Omega from its footprint.
         ordinary_params = replace(params, omega_parameterization_mode="optcuts", optcuts_try_alternative_initial_cut=True)
         parameterization = base_parameterization(surface, target, grid, ordinary_params)
+        if bool(getattr(params, "optcuts_area_grid_boundary_enabled", False)):
+            from .optcuts_area_grid_boundary import apply_area_grid_boundary
+            parameterization = apply_area_grid_boundary(parameterization, grid, params)
         parameterization.method = "optcuts_test"
         parameterization.metrics.update(
             {
@@ -236,16 +240,31 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                     "strict full-cell crop; no M2D-to-Omega feedback"
                 ),
                 "optcuts_test_paper_one_way_omega_to_m2d": True,
-                "optcuts_test_grid_outline_reparameterization": False,
-                "optcuts_test_omega_modified_from_m2d": False,
+                "optcuts_test_grid_outline_reparameterization": bool(
+                    getattr(params, "optcuts_area_grid_boundary_enabled", False)
+                ),
+                "optcuts_test_omega_modified_from_m2d": bool(
+                    getattr(params, "optcuts_area_grid_boundary_enabled", False)
+                ),
                 "optcuts_test_seam_topology_preserved": True,
             }
         )
         print(
-            "[OPTCUTS-TEST-PAPER-OMEGA] fixed OptCuts Omega; "
-            "disabled M2D-footprint boundary reparameterization"
+            "[OPTCUTS-TEST-PAPER-OMEGA] "
+            +("area-threshold grid footprint -> fixed-boundary harmonic UV"
+              if bool(getattr(params,"optcuts_area_grid_boundary_enabled",False)) else
+              "fixed OptCuts Omega; disabled M2D-footprint boundary reparameterization")
         )
         return parameterization
+
+    def area_boundary_domain(parameterization: Any, grid: Any, params: Any = None):
+        domain = base_domain(parameterization, grid, params)
+        if (params is not None and _is_optcuts_test(params)
+                and bool(getattr(params,"optcuts_area_grid_boundary_enabled",False))):
+            from .optcuts_area_grid_boundary import fix_domain_lattice
+            domain=fix_domain_lattice(domain,parameterization)
+            domain.parameterization=parameterization
+        return domain
 
     def paper_m2d(grid: Any, domain: Any, params: Any = None):
         mesh = base_m2d(grid, domain, params)
@@ -258,10 +277,15 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
 
         vertices = np.asarray(mesh.vertices, dtype=float)
         faces = np.asarray(mesh.faces, dtype=int)
-        keep = np.asarray(
-            [_quad_fully_contained(vertices[face, :2], polygon) for face in faces],
-            dtype=bool,
-        )
+        area_mode=bool(getattr(params,"optcuts_area_grid_boundary_enabled",False))
+        if area_mode:
+            from .optcuts_area_grid_boundary import keep_cells_on_fixed_lattice
+            keep=keep_cells_on_fixed_lattice(mesh,domain)
+        else:
+            keep = np.asarray(
+                [_quad_fully_contained(vertices[face, :2], polygon) for face in faces],
+                dtype=bool,
+            )
         retained = int(np.count_nonzero(keep))
         rejected = int(len(faces) - retained)
         metrics = dict(getattr(mesh, "metrics", {}) or {})
@@ -269,7 +293,16 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             {
                 "paper_m2d_one_way_from_fixed_omega": True,
                 "paper_m2d_strict_full_cell_crop": True,
-                "paper_m2d_crop_rule": "retain quad iff the complete cell is contained in Omega",
+                "paper_m2d_crop_rule": (
+                    "retain exactly the original-grid cells with overlap >= configured threshold"
+                    if area_mode else
+                    "retain quad iff the complete cell is contained in Omega"
+                ),
+                "optcuts_area_grid_boundary_applied_to_m2d":bool(area_mode),
+                "optcuts_area_grid_coverage_threshold": (
+                    float(getattr(params,"optcuts_area_grid_coverage_threshold",.5))
+                    if area_mode else None
+                ),
                 "paper_m2d_candidate_face_count": int(len(faces)),
                 "paper_m2d_retained_face_count": retained,
                 "paper_m2d_rejected_partial_face_count": rejected,
@@ -284,10 +317,12 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         return _compact_quad_mesh(pipeline, mesh, keep, metrics)
 
     pipeline._build_surface_parameterization = paper_parameterization
+    pipeline._flatten_to_domain = area_boundary_domain
     pipeline._build_m2d = paper_m2d
     original = getattr(pipeline, "_original", None)
     if original is not None:
         original._build_surface_parameterization = paper_parameterization
+        original._flatten_to_domain = area_boundary_domain
         original._build_m2d = paper_m2d
 
     for fn in (
@@ -298,6 +333,7 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         glb = getattr(fn, "__globals__", None)
         if isinstance(glb, dict):
             glb["_build_surface_parameterization"] = paper_parameterization
+            glb["_flatten_to_domain"] = area_boundary_domain
             glb["_build_m2d"] = paper_m2d
 
     pipeline._onestring_optcuts_test_boundary_patch_installed = True
