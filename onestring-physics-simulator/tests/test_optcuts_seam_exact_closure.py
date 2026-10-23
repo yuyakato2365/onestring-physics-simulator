@@ -217,3 +217,61 @@ def test_launcher_rejects_nonconforming_real_seam_not_claiming_exact_fit():
     lifted,_=owner._lift_m2d_to_m3d(None,mesh,chart,None)
     with pytest.raises(SeamTopologyMismatch,match="SEAM_K3D_NONCONFORMING_GRID_EDGE_SAMPLING"):
         owner._optimize_k3d(None,lifted,chart,None)
+
+
+
+def test_topological_uv_seam_detected_even_when_two_copies_touch_in_uv():
+    """Seam identity depends on paired source incidence, not UV distance."""
+    from onestring_physics.optcuts_seam_exact_closure import (
+        _cut_uv_segments
+    )
+    chart,_,_=conforming()
+    # Distinct UV vertex IDs encode the cut, even when its two border
+    # realizations numerically meet. The chart itself would overlap if
+    # accepted without reparameterization; this tests ONLY classification.
+    chart.uv_vertices_2d[4,0]=1.
+    chart.uv_vertices_2d[7,0]=1.
+    segments,open_lines=_cut_uv_segments(chart,include_open=True)
+    assert len(segments)==2
+    assert len(open_lines)==6
+    paired=[s for s in segments if s[2]==(1,4)]
+    assert len(paired)==2
+
+
+def test_unclassified_grid_edge_reports_real_source_boundary_coverage():
+    chart,uv,faces=conforming()
+    # Reproduce the category of fault from Bunny: one 2D Grid edge is no
+    # longer precisely on the chart's UV source boundary.
+    bad_uv=uv.copy()
+    bad_uv[1,0]-=.15
+    out=discover_exact_seam_topology(chart,bad_uv,faces)
+    assert out["status"]=="nonconforming"
+    assert out["unclassified_boundary_edges"]>0
+    sample=out["unclassified_boundary_diagnostics"]
+    assert any(v["all_source_boundary_coverage"]<1.
+               for v in sample)
+    assert all("uv_a" in v and "uv_b" in v and
+               "nearest_cut_distances" in v and
+               "likely_reason" in v for v in sample)
+    assert any(v["likely_reason"]==
+               "M2D_grid_edge_not_on_actual_omega_boundary"
+               for v in sample)
+
+
+def test_grid_edge_requires_full_source_cut_coverage_not_endpoints_only():
+    from onestring_physics.optcuts_seam_exact_closure import (
+        _covered_fraction_on_source_boundary
+    )
+    a=np.array([0.,0.])
+    b=np.array([1.,0.])
+    # The cut occupies only the endpoints' immediate neighborhoods;
+    # a straight quad edge cannot legally bridge the intervening gap.
+    lines=[np.array([[0.,0.],[.25,0.]]),
+           np.array([[.75,0.],[1.,0.]])]
+    assert _covered_fraction_on_source_boundary(a,b,lines,1e-10)==pytest.approx(.5)
+    assert _covered_fraction_on_source_boundary(
+        a,b,lines+[np.array([[.25,0.],[.75,0.]])],1e-10
+    )==pytest.approx(1.)
+    assert _covered_fraction_on_source_boundary(
+        a,b,[np.array([[0.,.1],[1.,.1]])],1e-10
+    )==pytest.approx(0.)
