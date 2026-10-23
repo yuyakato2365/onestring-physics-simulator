@@ -338,6 +338,7 @@ def _consensus_planarity_restore(
     relaxation: float = 1.0,
     tolerance: float | None = None,
     constraint_faces: np.ndarray | None = None,
+    equality_inverse: np.ndarray | None = None,
 ) -> tuple[np.ndarray, int, float]:
     """Nearest-plane consensus feasibility restoration."""
     x = np.asarray(vertices, dtype=float).copy()
@@ -374,6 +375,15 @@ def _consensus_planarity_restore(
         consensus = x.copy()
         consensus[active] = accum[active] / counts[active, None]
         x[active] = (1.0 - alpha) * x[active] + alpha * consensus[active]
+        if equality_inverse is not None:
+            # AL's subsequent planarity-consensus step must not reopen
+            # hard seam equality. Project by the SAME variable quotient.
+            labels=np.asarray(equality_inverse,int)
+            n=int(labels.max())+1
+            total=np.zeros((n,3),float)
+            np.add.at(total,labels,x)
+            count=np.bincount(labels,minlength=n)
+            x=total[labels]/count[labels,None]
         used = sweep + 1
         if tolerance is not None and constraint_faces is not None:
             distances = _quad_plane_distances(x, constraint_faces)
@@ -398,6 +408,7 @@ def _augmented_lagrangian_planarize(
     relative_plane_tolerance: float = 1e-6,
     restoration_sweeps: int = 8,
     final_polish_sweeps: int = 400,
+    equality_groups: tuple | list = (),
 ) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
     ref = np.asarray(reference, dtype=float)
     f = np.asarray(faces, dtype=int)
@@ -438,7 +449,50 @@ def _augmented_lagrangian_planarize(
     )
     reference_lengths = _metric_reference(ref, f4, scales)
 
-    x = ref.copy()
+    # HARD source-Seam equalities: quotient optimizer unknowns by proven
+    # pairs, rather than optimizing independently then approximating with
+    # a post-hoc positional penalty or averaging.
+    parent=np.arange(len(ref),dtype=int)
+    def root(k):
+        k=int(k)
+        while parent[k]!=k:
+            parent[k]=parent[parent[k]]
+            k=int(parent[k])
+        return k
+    for group in equality_groups or ():
+        ids=list(map(int,group))
+        if len(ids)<2:
+            continue
+        if any(i<0 or i>=len(ref) for i in ids):
+            raise ValueError("K3D_SEAM_AL_GROUP_VERTEX_OUT_OF_RANGE")
+        representative=root(ids[0])
+        for v in ids[1:]:
+            parent[root(v)]=representative
+    roots=np.asarray([root(i) for i in range(len(ref))],int)
+    _,equality_inverse=np.unique(roots,return_inverse=True)
+    unique_count=int(equality_inverse.max())+1
+    has_equalities=unique_count<len(ref)
+    counts=np.bincount(equality_inverse,minlength=unique_count)
+    def flatten_equal(verts):
+        total=np.zeros((unique_count,3),float)
+        np.add.at(total,equality_inverse,np.asarray(verts,float))
+        return total/counts[:,None]
+    def expand_equal(flat):
+        return np.asarray(flat,float).reshape(unique_count,3)[equality_inverse]
+    def reduce_gradient(grad):
+        accumulated=np.zeros((unique_count,3),float)
+        np.add.at(accumulated,equality_inverse,np.asarray(grad,float))
+        return accumulated.ravel()
+    # Initial feasible pair positions are identical, bitwise, and stay
+    # identical throughout ALL AL and consensus steps.
+    x=expand_equal(flatten_equal(ref)) if has_equalities else ref.copy()
+    if has_equalities:
+        print(
+            "[K3D-SEAM-AL] hard_shared_unknowns=True "
+            f"groups={len(equality_groups)} "
+            f"original_vertices={len(ref)} free_vertices={unique_count}",
+            flush=True,
+        )
     lambdas = np.zeros(len(f4), dtype=float)
     rho = max(float(rho0), 1e-6)
     w_anchor = max(float(anchor_weight), 1e-10)
@@ -454,7 +508,7 @@ def _augmented_lagrangian_planarize(
     last_inner_message = ""
 
     def objective_and_grad(flat: np.ndarray) -> tuple[float, np.ndarray]:
-        verts = np.asarray(flat, dtype=float).reshape(ref.shape)
+        verts = expand_equal(flat) if has_equalities else np.asarray(flat, dtype=float).reshape(ref.shape)
         delta = verts - ref
         energy = 0.5 * w_anchor * float(np.sum(delta * delta))
         grad_total = w_anchor * delta
@@ -476,7 +530,7 @@ def _augmented_lagrangian_planarize(
         contribution = coeff[:, None, None] * local_grad
         for corner in range(4):
             np.add.at(grad_total, constraint_faces[:, corner], contribution[:, corner])
-        return energy, grad_total.ravel()
+        return energy, reduce_gradient(grad_total) if has_equalities else grad_total.ravel()
 
     restore_relaxation = 0.35 if shape_mode else 1.0
 
@@ -484,7 +538,7 @@ def _augmented_lagrangian_planarize(
         outer_done = outer + 1
         result = minimize(
             fun=lambda z: objective_and_grad(z)[0],
-            x0=x.ravel(),
+            x0=flatten_equal(x).ravel() if has_equalities else x.ravel(),
             jac=lambda z: objective_and_grad(z)[1],
             method="L-BFGS-B",
             options={"maxiter": max(10, int(inner_iterations)), "ftol": 1e-13, "gtol": 1e-10, "maxls": 50},
@@ -492,7 +546,7 @@ def _augmented_lagrangian_planarize(
         inner_total += int(getattr(result, "nit", 0))
         last_inner_success = bool(getattr(result, "success", False))
         last_inner_message = str(getattr(result, "message", ""))
-        x = np.asarray(result.x, dtype=float).reshape(ref.shape)
+        x = expand_equal(result.x) if has_equalities else np.asarray(result.x, dtype=float).reshape(ref.shape)
         before_restore = _quad_plane_distances(x, constraint_faces)
         max_before_restore = float(np.max(before_restore)) if len(before_restore) else 0.0
         x, used, _ = _consensus_planarity_restore(
@@ -502,6 +556,7 @@ def _augmented_lagrangian_planarize(
             relaxation=restore_relaxation,
             tolerance=plane_tol,
             constraint_faces=constraint_faces,
+            equality_inverse=equality_inverse if has_equalities else None,
         )
         restoration_total += int(used)
         constraints, _ = _quad_constraint_values_and_gradient(x, constraint_faces, scales)
@@ -538,9 +593,17 @@ def _augmented_lagrangian_planarize(
             relaxation=restore_relaxation if shape_mode else 1.0,
             tolerance=plane_tol,
             constraint_faces=constraint_faces,
+            equality_inverse=equality_inverse if has_equalities else None,
         )
         restoration_total += int(polish_used)
 
+    if has_equalities:
+        exact=expand_equal(flatten_equal(x))
+        if np.max(np.abs(exact-x))>1e-12:
+            raise RuntimeError(
+                "K3D_SEAM_AL_HARD_EQUALITY_LOST_IN_RESTORATION"
+            )
+        x=exact
     after_dist = _quad_plane_distances(x, constraint_faces)
     max_after = float(np.max(after_dist)) if len(after_dist) else 0.0
     rms_after = float(np.sqrt(np.mean(after_dist * after_dist))) if len(after_dist) else 0.0
@@ -563,6 +626,15 @@ def _augmented_lagrangian_planarize(
 
     return x, {
         "k3d_augmented_lagrangian_applied": True,
+        "k3d_al_source_seam_hard_equality":bool(has_equalities),
+        "k3d_al_source_seam_group_count":int(len(equality_groups or ())),
+        "k3d_al_source_seam_reduced_unknowns":int(unique_count),
+        "k3d_al_source_seam_max_gap":float(
+            max((np.max(np.linalg.norm(
+                x[np.asarray(g,int)]-x[int(g[0])],axis=1))
+                for g in (equality_groups or ()) if len(g)>1),
+                default=0.)
+        ),
         "k3d_planarity_constraint_type": "robust max-area scalar triple product equality per quad",
         "k3d_planarity_constraint": "max-area base triangle; remaining corner coplanar",
         "k3d_planarity_constraint_reordered_faces": True,
@@ -631,6 +703,9 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
             relative_plane_tolerance=float(getattr(params, "k3d_al_relative_planarity_tolerance", 1e-6)),
             restoration_sweeps=int(getattr(params, "k3d_al_restoration_sweeps", 8)),
             final_polish_sweeps=int(getattr(params, "k3d_al_final_polish_sweeps", 400)),
+            equality_groups=(
+                getattr(mesh,"metrics",{}).get("seam_exact_vertex_groups",[])
+            ),
         )
         k3d.vertices[:] = solved
         try:
