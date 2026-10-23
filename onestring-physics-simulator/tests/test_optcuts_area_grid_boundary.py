@@ -904,3 +904,125 @@ def test_exception_recovery_only_changes_correspondence_not_surface():
             assert np.any(np.linalg.norm(
                 mapped-target_corner,axis=1) < 1e-9)
     np.testing.assert_array_equal(uv,original_uv)
+
+
+
+def _distortion_retry_fixture(monkeypatch, *, second_mean_sd=4.5):
+    """Synthetic fixed-grid trial: first fit bijective but high distortion."""
+    from onestring_physics.optcuts_area_grid_boundary import (
+        GridBoundaryReparameterizationError,
+    )
+    import onestring_physics.optcuts_area_grid_boundary as boundary_module
+    import onestring_physics.optcuts_grid_boundary_untangle as untangler
+    import onestring_physics.optcuts_quality_audit as audit_module
+
+    uv=np.array([
+        [0.,0.],[1.,0.],[1.,1.],[0.,1.],[.5,.5]
+    ],float)
+    faces=np.array([
+        [0,1,4],[1,2,4],[2,3,4],[3,0,4]
+    ],int)
+    p=SimpleNamespace(
+        uv_vertices_2d=uv.copy(), uv_faces=faces.copy(),
+        surface_vertices_3d=np.c_[uv,np.zeros(len(uv))],
+        surface_faces=faces.copy(),
+        omega_boundary=uv[np.array([0,1,2,3,0])].copy(),
+        metrics={}, triangle_acceleration=None,
+    )
+    target=dict(
+        mask=np.ones((2,2),bool),
+        coverage=np.ones((2,2),float),
+        grid_outline=uv[:4].copy(),
+        step=np.array([.5,.5]), origin=np.array([0.,0.]),
+        nx=2, ny=2, margin=0,
+        grid_source="real_production_m2d_overlay",
+    )
+    monkeypatch.setattr(
+        boundary_module,"construct_grid_target",
+        lambda *_args,**_kwargs:target,
+    )
+    # Two distinct corner matching / fitting trials with the same
+    # prescribed exact grid. Only one meets the ORIGINAL quality cutoff.
+    candidates=[
+        (1.,"bad_phase",uv[:4].copy(),"corner_dp_ear_exception_recovered_1"),
+        (2.,"good_phase",uv[:4].copy(),"corner_dp_ear_exception_recovered_2"),
+    ]
+    candidates=[(x,idx,points,method)
+                for idx,(x,_phase,points,method) in enumerate(candidates)]
+    monkeypatch.setattr(
+        boundary_module,"_boundary_target_candidates",
+        lambda *_args,**_kwargs:candidates,
+    )
+    num={"calls":0}
+    def fake_fit(base,faces,loop,mapped,harmonic,assess,**_kwargs):
+        num["calls"]+=1
+        result=base.copy()
+        result[4,0] = .56 if num["calls"]==1 else .44
+        return result,[{"fraction":1., "accepted":True}]
+    monkeypatch.setattr(untangler,"fit_by_continuation",fake_fit)
+
+    def fake_quality(res):
+        cx=float(res.uv_vertices_2d[4,0])
+        if cx>.53:return {
+            "distortion_area_mean":8.663,
+            "flipped_triangles":0,"injectivity_overlap_pairs":0,
+        }
+        if cx<.47:return {
+            "distortion_area_mean":second_mean_sd,
+            "flipped_triangles":0,"injectivity_overlap_pairs":0,
+        }
+        return {
+            "distortion_area_mean":4.1,
+            "flipped_triangles":0,"injectivity_overlap_pairs":0,
+        }
+    monkeypatch.setattr(audit_module,"quality",fake_quality)
+    return p, SimpleNamespace(nx=4,ny=4), SimpleNamespace(
+        optcuts_area_grid_coverage_threshold=.5,omega_overlay_margin=0
+    ), num
+
+
+def test_grid_fit_tries_second_correspondence_when_first_is_too_distorted(
+    monkeypatch
+):
+    """Exactly reached boundary does not mean the mapping is acceptable."""
+    from onestring_physics.optcuts_area_grid_boundary import (
+        apply_area_grid_boundary,
+    )
+    p,grid,params,num=_distortion_retry_fixture(monkeypatch)
+    output=apply_area_grid_boundary(p,grid,params,domain=object())
+    assert output is p
+    assert num["calls"]==2
+    assert p.metrics["optcuts_area_grid_boundary_selected_attempt"]==2
+    assert p.metrics["optcuts_area_grid_boundary_quality_rejections"]==1
+    assert p.metrics["optcuts_area_grid_boundary_full_boundary_attempts"]==2
+    assert p.metrics["optcuts_area_grid_final_mean_sd"]==pytest.approx(4.5)
+    assert p.metrics["optcuts_area_grid_boundary_mean_sd_limit"]==pytest.approx(5.33)
+    np.testing.assert_allclose(p.omega_boundary[:4],np.array([
+        [0.,0.],[1.,0.],[1.,1.],[0.,1.]
+    ]))
+    assert p._optcuts_area_grid_mask.sum()==4
+
+
+def test_grid_fit_does_not_claim_success_when_all_full_boundary_maps_exceed_sd(
+    monkeypatch
+):
+    """No lowering distortion guard and no half-committed failed UV."""
+    from onestring_physics.optcuts_area_grid_boundary import (
+        GridBoundaryReparameterizationError,apply_area_grid_boundary,
+    )
+    p,grid,params,num=_distortion_retry_fixture(
+        monkeypatch,second_mean_sd=10.7)
+    old_uv=p.uv_vertices_2d.copy()
+    old_omega=p.omega_boundary.copy()
+    with pytest.raises(
+        GridBoundaryReparameterizationError,
+        match="ALL_ACCEPTABLE_CORRESPONDENCES_FAILED",
+    ) as err:
+        apply_area_grid_boundary(p,grid,params,domain=object())
+    assert num["calls"]==2
+    assert "quality_rejected=2" in str(err.value)
+    assert "boundary_completed=2" in str(err.value)
+    assert "mean_sd_limit=5.33" in str(err.value)
+    np.testing.assert_allclose(p.uv_vertices_2d,old_uv)
+    np.testing.assert_allclose(p.omega_boundary,old_omega)
+    assert not p.metrics.get("optcuts_area_grid_boundary_enabled",False)
