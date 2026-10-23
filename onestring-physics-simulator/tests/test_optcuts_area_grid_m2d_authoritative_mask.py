@@ -40,6 +40,7 @@ def case():
         boundary=np.vstack([outline, outline[0]]),
         uv_vertices=uv,
         overlay_nx=nx, overlay_ny=ny,
+        overlay_margin_tiles=0,
         _optcuts_area_grid_mask=mask.copy(),
         _optcuts_area_grid_coverage=mask.astype(float),
         split_lines=[], _optcuts_test_clip_boundary=True,
