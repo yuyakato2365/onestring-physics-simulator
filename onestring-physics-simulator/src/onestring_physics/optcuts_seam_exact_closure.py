@@ -30,19 +30,29 @@ def _uv_boundary_edges(quad_faces):
 
 
 def _cut_uv_segments(parameterization, *, include_open=False):
-    """(UV line, 3D line, physical edge key, side number) for real cuts."""
+    """Extract *topological UV-chart boundary* edges with 3D provenance.
+
+    The previous method iterated over physical edges and called an edge a
+    seam only if the two 3D incident triangles mapped to numerically
+    different UV line segments. That loses topological cuts when two
+    distinct UV boundary copies are coincident (or very close) in UV.
+
+    Instead first find UV-chart boundary edges by UV vertex indices, and
+    only then classify each edge by its physical 3D incident count.
+    Two UV border copies of the same 3D edge are a seam even if their
+    UV coordinates happen to be equal. A one-sided physical edge is an
+    actual open-source boundary. Three-plus incidences are ambiguous.
+    """
     xyz=np.asarray(parameterization.surface_vertices_3d,float)
     sf=np.asarray(parameterization.surface_faces,int)
     uv=np.asarray(parameterization.uv_vertices_2d,float)
     uf=np.asarray(parameterization.uv_faces,int)
     if len(sf)!=len(uf) or sf.shape!=uf.shape:
         raise SeamTopologyMismatch("SEAM_SOURCE_FACE_UV_CORRESPONDENCE_MISSING")
-    if len(xyz)==0 or len(uv)==0:
-        raise SeamTopologyMismatch("SEAM_SOURCE_EMPTY")
+    if len(xyz)==0 or len(uv)==0 or sf.ndim!=2 or sf.shape[1]!=3:
+        raise SeamTopologyMismatch("SEAM_SOURCE_EMPTY_OR_INVALID_TRIANGULATION")
     scale=max(float(np.ptp(xyz,axis=0).max()),1e-9)
     tol=max(scale*1e-9,1e-12)
-    # Physical IDs, not UV IDs. Coincident source coordinates are canonical
-    # only for discovering *original source edges*, never for K3D welding.
     rounded=np.rint(xyz/tol).astype(np.int64)
     canonical={}
     ids=[]
@@ -51,38 +61,73 @@ def _cut_uv_segments(parameterization, *, include_open=False):
         if key not in canonical:canonical[key]=len(canonical)
         ids.append(canonical[key])
     physical=np.asarray(ids,int)
-    incident=defaultdict(list)
-    for tri3,triuv in zip(sf,uf):
+    # Map each *source* UV boundary edge to a paired 3D edge.
+    uv_edge_incidences=defaultdict(list)
+    physical_incidences=defaultdict(list)
+    for fi,(tri3,triuv) in enumerate(zip(sf,uf)):
         for i,j in ((0,1),(1,2),(2,0)):
             a,b=int(tri3[i]),int(tri3[j])
+            u,v=int(triuv[i]),int(triuv[j])
             ca,cb=int(physical[a]),int(physical[b])
-            if ca==cb:continue
-            key=tuple(sorted((ca,cb)))
+            if ca==cb:
+                raise SeamTopologyMismatch(
+                    "SEAM_SOURCE_DEGENERATE_3D_EDGE: "
+                    f"face={fi} original_vertices=({a},{b})"
+                )
+            key=(min(ca,cb),max(ca,cb))
             if key[0]==ca:
-                incident[key].append((uv[int(triuv[i])],uv[int(triuv[j])],
-                                      xyz[a],xyz[b]))
+                uv_segment=np.array([uv[u],uv[v]],float)
+                xyz_segment=np.array([xyz[a],xyz[b]],float)
             else:
-                incident[key].append((uv[int(triuv[j])],uv[int(triuv[i])],
-                                      xyz[b],xyz[a]))
-    uvscale=max(float(np.ptp(uv,axis=0).max()),1e-9)
-    uvtol=max(uvscale*1e-8,1e-10)
+                uv_segment=np.array([uv[v],uv[u]],float)
+                xyz_segment=np.array([xyz[b],xyz[a]],float)
+            record=(uv_segment,xyz_segment,key,fi)
+            uv_edge_incidences[tuple(sorted((u,v)))].append(record)
+            physical_incidences[key].append(record)
     segments=[]
     open_boundary=[]
-    for key,sides in incident.items():
-        if len(sides)==1:
-            open_boundary.append(np.stack(sides[0][:2]))
+    nonmanifold=[]
+    inconsistent=[]
+    for uvkey,side_records in uv_edge_incidences.items():
+        if len(side_records)!=1:
             continue
-        if len(sides)!=2:continue
-        s0,s1=sides
-        if (np.linalg.norm(s0[0]-s1[0])<=uvtol and
-                np.linalg.norm(s0[1]-s1[1])<=uvtol):continue
-        for side,seg in enumerate(sides):
-            segments.append((
-                np.stack(seg[:2]),np.stack(seg[2:]),
-                key,side,
-            ))
+        uvline,xyzline,key,fi=side_records[0]
+        count=len(physical_incidences[key])
+        if count==1:
+            open_boundary.append(uvline)
+        elif count==2:
+            # Check that the *other* physical incidence is also a UV
+            # border edge, as required of a genuine chart cut.
+            others=physical_incidences[key]
+            border_count=sum(
+                len(uv_edge_incidences[tuple(sorted((
+                    int(uf[r[3],i]),int(uf[r[3],j])
+                )))])==1
+                for r in others
+                for i,j in ((0,1),(1,2),(2,0))
+                if tuple(sorted((
+                    int(physical[sf[r[3],i]]),
+                    int(physical[sf[r[3],j]])
+                )))==key
+            )
+            if border_count!=2:
+                inconsistent.append((key,fi,border_count))
+                continue
+            # Pair via physical source edge ID, never by UV closeness.
+            segments.append((uvline,xyzline,key,0))
+        else:
+            nonmanifold.append((key,count))
+    if nonmanifold:
+        raise SeamTopologyMismatch(
+            "SEAM_SOURCE_NONMANIFOLD_BOUNDARY_PROVENANCE: "
+            f"count={len(nonmanifold)} sample={nonmanifold[:5]}"
+        )
+    if inconsistent:
+        raise SeamTopologyMismatch(
+            "SEAM_SOURCE_UV_BOUNDARY_INCIDENCE_MISMATCH: "
+            f"count={len(inconsistent)} sample={inconsistent[:5]}"
+        )
     return (segments,open_boundary) if include_open else segments
-
 
 def _source_seam_sample(uvp,segments,tol):
     """Source-mesh physical 3D sample for this Grid boundary UV coordinate."""
