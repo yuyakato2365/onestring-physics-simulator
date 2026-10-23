@@ -155,8 +155,17 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
 
     def source_chart(*_):
         return SimpleNamespace(
-            _onestring_optcuts_candidates=["stale-original-UV"],
-            _onestring_optcuts_candidate_qualities=["stale-quality"],
+            _onestring_optcuts_candidates=[SimpleNamespace(
+                surface_vertices_3d=np.c_[uv,np.zeros(len(uv))],
+                surface_faces=tri.copy(), uv_vertices_2d=uv.copy(),
+                uv_faces=tri.copy(), metrics={},
+            )],
+            _onestring_optcuts_candidate_qualities=[{
+                "distortion_area_mean": 2., "seam_length": 0.,
+                "csf_over_2_area_fraction": 0.,
+                "flipped_triangles": 0, "degenerate_triangles": 0,
+                "injectivity_overlap_pairs": 0,
+            }],
             method="optcuts_official",
             uv_vertices_2d=uv.copy(),
             uv_faces=tri.copy(),
@@ -205,7 +214,7 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
     params=Params()
     chart=owner._build_surface_parameterization(None,None,grid,params)
     # Fitting must NOT occur before real M2D lattice is available.
-    assert chart._onestring_optcuts_candidates==["stale-original-UV"]
+    assert len(chart._onestring_optcuts_candidates)==1
     assert not chart.metrics.get("optcuts_area_grid_boundary_enabled",False)
     domain=owner._flatten_to_domain(chart,grid,params)
     assert chart._onestring_optcuts_candidates==[]
@@ -227,7 +236,7 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
         Params(optcuts_area_grid_boundary_enabled=False))
     assert not original.metrics.get("optcuts_area_grid_boundary_enabled",False)
     assert original.metrics["optcuts_test_grid_outline_reparameterization"] is False
-    assert original._onestring_optcuts_candidates==["stale-original-UV"]
+    assert len(original._onestring_optcuts_candidates)==1
 
 
 
