@@ -275,3 +275,107 @@ def test_grid_edge_requires_full_source_cut_coverage_not_endpoints_only():
     assert _covered_fraction_on_source_boundary(
         a,b,[np.array([[0.,.1],[1.,.1]])],1e-10
     )==pytest.approx(0.)
+
+
+
+def _seam_reduction_test_fixture():
+    """Two quads sharing a physical source edge but separate grid UV copies."""
+    from onestring_physics.optcuts_seam_exact_closure import (
+        install_optcuts_exact_seam_closure
+    )
+    from types import SimpleNamespace
+    import copy
+    chart,uv,faces=conforming()
+    chart.method="optcuts_test"
+    chart.metrics={"optcuts_area_grid_boundary_enabled":True}
+    xyz=np.array([
+        [0,0,0],[1.04,0,.01],[1.04,1,.03],[0,1,0],
+        [.96,0,-.01],[2,0,0],[2,1,0],[.96,1,-.03],
+    ],float)
+    flat=SimpleNamespace(
+        vertices=np.c_[uv,np.zeros(len(uv))],faces=faces.copy(),
+        metrics={"split_vertex_pairs":[]},
+    )
+    m3d=SimpleNamespace(
+        vertices=xyz,faces=faces.copy(),stage="M3D",metrics={},
+        _seam_original_m2d_uv=uv.copy(),
+    )
+    seen=[]
+    def base_k3d(target,mesh,parameterization,params):
+        seen.append({
+            "vertices":len(mesh.vertices),
+            "faces":mesh.faces.copy(),
+            "deferred":bool(getattr(mesh,"_seam_defer_until_full_mesh",False)),
+        })
+        out=copy.copy(mesh)
+        out.vertices=mesh.vertices.copy()
+        out.faces=mesh.faces.copy()
+        out.metrics=dict(mesh.metrics)
+        out.stage="K3D"
+        return out,SimpleNamespace(objective="synthetic")
+    owner=SimpleNamespace(
+        _lift_m2d_to_m3d=lambda *_: (None,None),
+        _optimize_k3d=base_k3d,
+    )
+    install_optcuts_exact_seam_closure(owner)
+    params=SimpleNamespace(w_square=0.,use_extrusion_aware_k3d=False)
+    return chart,flat,m3d,params,owner,seen
+
+
+def test_extrusion_aware_renumbering_defers_seam_until_original_index_restore(
+    monkeypatch
+):
+    from onestring_physics import extrusion_aware as exp
+    chart,flat,m3d,params,owner,seen=_seam_reduction_test_fixture()
+    monkeypatch.setattr(exp,"enabled",lambda _params:True)
+    monkeypatch.setattr(exp,"feature_mask",lambda _params:"1000")
+    # Merge the two UV copies of each physical seam vertex. This has
+    # different indices and face topology than the original quad grid.
+    mapping=np.array([0,1,2,3,1,4,5,2],int)
+    monkeypatch.setattr(exp,"source_equivalence",
+                        lambda *_args:mapping.copy())
+    out,_=exp.optimize_assembled(
+        owner._optimize_k3d,None,flat,m3d,chart,params,None
+    )
+    assert seen[0]["deferred"] is True
+    assert seen[0]["vertices"]==6
+    assert len(out.vertices)==8
+    assert out.metrics["seam_exact_closure_deferred_completed"] is True
+    assert out.metrics["seam_exact_closure_vertex_space"]=="full_original_M2D_grid"
+    assert out.metrics["seam_exact_closure_executed_after_reduction"] is True
+    assert out.metrics["seam_exact_closure_enabled"] is True
+    assert out.metrics["seam_exact_paired_grid_edges"]==1
+    assert out.metrics["seam_k3d_gap_after"]<=1e-12
+    np.testing.assert_allclose(out.vertices[1],out.vertices[4],atol=1e-12)
+    np.testing.assert_allclose(out.vertices[2],out.vertices[7],atol=1e-12)
+
+
+def test_simple_split_shared_reduction_defers_seam_until_full_index_restore():
+    from onestring_physics.split_geometry_constraints import optimize_shared
+    chart,flat,m3d,params,owner,seen=_seam_reduction_test_fixture()
+    m3d.metrics["split_vertex_pairs"]=[[1,4],[2,7]]
+    out,_=optimize_shared(
+        owner._optimize_k3d,None,m3d,chart,params
+    )
+    assert seen[0]["deferred"] is True
+    assert seen[0]["vertices"]==6
+    assert len(out.vertices)==8
+    assert out.metrics["seam_exact_closure_deferred_completed"] is True
+    assert out.metrics["seam_exact_closure_executed_after_reduction"] is True
+    assert out.metrics["seam_exact_paired_grid_edges"]==1
+    assert out.metrics["seam_k3d_gap_after"]<=1e-12
+
+
+def test_full_original_uv_grid_index_mismatch_is_never_silently_accepted():
+    from onestring_physics.optcuts_seam_exact_closure import (
+        close_k3d_seam_after_full_vertex_restore
+    )
+    chart,flat,m3d,params,owner,seen=_seam_reduction_test_fixture()
+    short=SimpleNamespace(
+        vertices=m3d.vertices[:6].copy(),faces=m3d.faces.copy(),
+        metrics={},
+    )
+    with pytest.raises(SeamTopologyMismatch,match="SEAM_K3D_VERTEX_INDEX_SPACE_MISMATCH"):
+        close_k3d_seam_after_full_vertex_restore(
+            m3d,short,chart,params
+        )
