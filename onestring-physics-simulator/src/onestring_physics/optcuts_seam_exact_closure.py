@@ -172,8 +172,10 @@ def _covered_fraction_on_source_boundary(a,b,lines,tol):
         edge=np.asarray(line,float)
         # Source boundary segments must be entirely on the Grid edge's
         # supporting line, with nonzero interval overlap.
-        off0=abs(float(np.cross(d,edge[0]-a)))/length
-        off1=abs(float(np.cross(d,edge[1]-a)))/length
+        e0=edge[0]-a
+        e1=edge[1]-a
+        off0=abs(float(d[0]*e0[1]-d[1]*e0[0]))/length
+        off1=abs(float(d[0]*e1[1]-d[1]*e1[0]))/length
         if max(off0,off1)>tol:
             continue
         tt=np.dot(edge-a,d)/denom
