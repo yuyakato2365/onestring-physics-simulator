@@ -220,7 +220,16 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         parameterization.metrics.update(
             {
                 "omega_parameterization_mode": "optcuts_test",
-                "requested_omega_parameterization_mode": "optcuts_test",
+                # Expose the user-visible Omega choice without altering the
+                # stable internal optcuts_test carrier and its K3D/K2D patches.
+                "requested_omega_parameterization_mode": (
+                    "optcuts_grid_aware" if bool(getattr(
+                        params,"optcuts_grid_aware_enabled",False))
+                    else "optcuts_test"
+                ),
+                "optcuts_grid_aware_selected_as_omega_mode": bool(
+                    getattr(params,"optcuts_grid_aware_enabled",False)
+                ),
                 "optcuts_test_enabled": True,
                 "optcuts_test_model": (
                     "official OptCuts Omega/cut topology kept fixed -> regular quad grid -> "
