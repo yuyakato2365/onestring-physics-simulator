@@ -8,14 +8,26 @@ can we reduce the damage from seams crossing the regular M2D grid?
 This branch is an opt-in experiment, **not a replacement for the successful baseline**:
 `feature/grid-aware-optcuts-20261023`.
 
-UI:
+UI (revised: Grid-aware is its own Omega parameterization mode):
 - **Paper mode: OFF**
-- Omega parameterization mode: `optcuts` or the stable
-  `optcuts_test2` (displayed with a dated paper-aligned title and internally
-  passed into the pipeline as `optcuts_test`).
-- Under Omega mode, open **実験：Grid-aware OptCuts** and toggle
-  **Seamを格子線に寄せるUV最適化を追加**. Default OFF.
-- Strength slider (default 3.0), no changes to K3D/K2D/T2D.
+- **Omega parameterization mode**:
+  - existing `optcuts_test2`: successful 2026-09-18 paper-aligned baseline;
+  - **new `optcuts_grid_aware`** shown as
+    **2026-10-23 | Grid-aware OptCuts Ω + paper-aligned K3D/K2D (UV refinement)**.
+- **No separate enable checkbox.** Selecting the new Omega entry activates
+  the refinement; returning to `optcuts_test2` restores the original route.
+- Under the new Omega mode, expand **Grid-aware OptCuts のUV設定（実験）**
+  to adjust strength (default 3.0).
+- The visible mode is mapped to the same internal `optcuts_test` carrier as
+  `optcuts_test2` with `ONESTRING_OPTCUTS_TEST_VARIANT=2`, retaining the
+  successful K3D/K2D and strict full-cell M2D crop behavior.
+  A per-session selection flag becomes
+  `PipelineParameters.optcuts_grid_aware_enabled`, so the OptCuts
+  backend can activate its UV-only extra stage without changing later stages.
+  The metrics `requested_omega_parameterization_mode` and
+  `optcuts_grid_aware_selected_as_omega_mode` retain the actual UI choice.
+- The original `optcuts`, `optcuts_test`, `optcuts_test2`, native
+  `optcuts_grid`, and all Paper/BFF modes remain available unmodified.
 
 The `optcuts_test` entry wraps its official OptCuts backend using
 `replace(params, omega_parameterization_mode="optcuts")` in
@@ -72,9 +84,9 @@ authoritative. The grid currently can have `h_u != h_v`, so this is grid
 
 1. Keep the **identical input, grid size, OptCuts executable, initial cut,
    distortion bound, K3D/K2D settings**.
-2. Run with experiment **OFF**, save the Omega/M2D/Split/K2D views.
-3. Run with the experiment **ON**, inspect **View stage > Omega >
-   Grid-aware OptCuts 実験の結果**, compare:
+2. Select `optcuts_test2` as the baseline; save Omega/M2D/Split/K2D.
+3. Change **only** Omega mode to `optcuts_grid_aware`; inspect
+   **View stage > Omega > Grid-aware OptCuts 実験の結果**, compare:
    - `optcuts_grid_aware_status` (accepted or rejected),
    - `optcuts_grid_aware_alignment_before/after` (lower better),
    - `optcuts_grid_aware_cell_yield_proxy_before/after` (higher better),
