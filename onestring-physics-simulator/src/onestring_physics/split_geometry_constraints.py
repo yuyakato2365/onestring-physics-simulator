@@ -56,6 +56,14 @@ def optimize_shared(base, target, mesh, parameterization, params):
     reduced.vertices = np.asarray(mesh.vertices)[representatives].copy()
     reduced.faces = mapping[np.asarray(mesh.faces)]
     reduced.metrics = dict(mesh.metrics, split_vertex_pairs=[], split_boundary_pairs=[])
+    if bool(reduced.metrics.get("seam_exact_preflight_certified",False)):
+        source_groups=mesh.metrics.get("seam_exact_vertex_groups",[])
+        reduced.metrics["seam_exact_vertex_groups"]=[
+            sorted({int(mapping[int(v)]) for v in group})
+            for group in source_groups
+            if len({int(mapping[int(v)]) for v in group})>1
+        ]
+        reduced.metrics["seam_exact_groups_reindexed_for_reduction"]=True
     if hasattr(mesh,"_seam_original_m2d_uv"):
         # This reduction renumbers source grid vertices. Original UV seam
         # correspondence must not be interpreted on this reduced topology.
