@@ -220,6 +220,25 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         if bool(getattr(params, "optcuts_area_grid_boundary_enabled", False)):
             from .optcuts_area_grid_boundary import apply_area_grid_boundary
             parameterization = apply_area_grid_boundary(parameterization, grid, params)
+            # The provisional OptCuts multi-start UV charts were created
+            # BEFORE the grid-boundary fit. Do not let a later Split-count
+            # selector replace our fitted UV with an unrelated stale chart.
+            # One preliminary official OptCuts start is still selected by
+            # its original scoring; downstream re-selection is disabled ONLY
+            # for this new experimental mode until each alternative can be
+            # independently reparameterized against its own snapped outline.
+            if hasattr(parameterization,"_onestring_optcuts_candidates"):
+                parameterization._onestring_optcuts_candidates=[]
+            if hasattr(parameterization,"_onestring_optcuts_candidate_qualities"):
+                parameterization._onestring_optcuts_candidate_qualities=[]
+            parameterization.metrics.update(
+                optcuts_area_grid_multistart_downstream_swap_enabled=False,
+                optcuts_split_count_selection_pending=False,
+                optcuts_area_grid_multistart_note=(
+                    "provisional official OptCuts start retained; stale, "
+                    "unfitted alternative UV charts disabled downstream"
+                ),
+            )
         parameterization.method = "optcuts_test"
         parameterization.metrics.update(
             {
