@@ -164,6 +164,14 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         assembly, report = extrude_paper_face_planarity(view, thickness, stage, pipeline)
         mesh.vertices = view.vertices[mapping].copy()
         mesh.metrics.update(view.metrics)
+        # The reduced view uses reduced vertex IDs, but the authoritative
+        # K3D still uses original vertex IDs. Do not overwrite its source
+        # seam-equivalence metadata with the view's remapped groups.
+        if source_seam_groups:
+            mesh.metrics["seam_exact_vertex_groups"]=source_seam_groups
+            assembly.metrics["seam_exact_original_vertex_group_count"]=len(
+                source_seam_groups
+            )
         assembly.metrics["assembled_geometry_map"] = mapping.tolist()
         # Faces and vertex IDs on the caller are untouched; only geometry moved.
         return assembly, report
