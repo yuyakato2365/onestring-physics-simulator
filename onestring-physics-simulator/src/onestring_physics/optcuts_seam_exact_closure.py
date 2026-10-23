@@ -506,6 +506,98 @@ def fit_k3d_with_exact_pairs(
     return v,diagnostics
 
 
+def close_k3d_seam_after_full_vertex_restore(
+    mesh, out, parameterization, params
+):
+    """Close source seams ONLY with full original M2D/M3D vertex IDs.
+
+    A reduced extrusion-aware solve has a different vertex index space
+    from the UV grid. It is invalid to interpret reduced face indices
+    as original full-grid UV vertex indices. Always call this after
+    the reduced K3D has been expanded to the original M3D vertex IDs.
+    """
+    uv=getattr(mesh,"_seam_original_m2d_uv",None)
+    if uv is None:
+        return out
+    if len(uv)!=len(mesh.vertices) or len(uv)!=len(out.vertices):
+        raise SeamTopologyMismatch(
+            "SEAM_K3D_VERTEX_INDEX_SPACE_MISMATCH: "
+            f"UV={len(uv)}, M3D={len(mesh.vertices)}, "
+            f"K3D={len(out.vertices)}; "
+            "must restore the full M2D/M3D vertex space before seam closure"
+        )
+    if not np.array_equal(np.asarray(mesh.faces,int),
+                          np.asarray(out.faces,int)):
+        raise SeamTopologyMismatch("SEAM_K3D_FACE_TOPOLOGY_CHANGED")
+    topo=discover_exact_seam_topology(parameterization,uv,mesh.faces)
+    log={k:v for k,v in topo.items() if k not in ("groups","paired_edges")}
+    out.metrics.update({f"seam_closure_{k}":v for k,v in log.items()})
+    if topo["status"]=="no_original_cut":
+        # Explicit, unambiguous telemetry: this is NOT a successful seam
+        # closure. The source chart may genuinely have no internal cut,
+        # or its physical edge provenance may be incomplete.
+        out.metrics["seam_exact_closure_enabled"]=False
+        out.metrics["seam_exact_closure_reason"]="no_original_cut"
+        print(
+            "[SEAM-K3D] no_source_cut_detected; "
+            "no seam vertices welded; source input open boundaries "
+            "or source cut provenance must be inspected",flush=True,
+        )
+        return out
+    if topo["unclassified_boundary_edges"]:
+        raise SeamTopologyMismatch(
+            "SEAM_K3D_UNCLASSIFIED_GRID_BOUNDARY: "
+            f"edges={topo['unclassified_boundary_edges']} "
+            f"sample={topo['unclassified_boundary_edge_ids_sample']}; "
+            f"diagnostics={topo['unclassified_boundary_diagnostics'][:4]}; "
+            "the Grid edge must lie ENTIRELY on a paired source cut "
+            "or true original open boundary. Do not weld/unclassify "
+            "without restoring the Omega-M2D correspondence."
+        )
+    if topo["unmatched_edges"]:
+        raise SeamTopologyMismatch(
+            "SEAM_K3D_NONCONFORMING_GRID_EDGE_SAMPLING: "
+            f"unmatched_grid_boundary_edges={topo['unmatched_edges']} "
+            f"of {topo['seam_grid_edges']}; "
+            "the two UV seam sides have different Grid edge partitions. "
+            "This implementation requires matching source seam samples "
+            "on both sides. Remesh/realign the Grid seam subdivisions "
+            "before M3D; do not apply nearest-neighbor welding."
+        )
+    groups=topo["groups"]
+    if not groups:
+        raise SeamTopologyMismatch(
+            "SEAM_K3D_NO_PAIRED_BOUNDARY_VERTICES: "
+            "real original OptCuts cut has no coincident Grid samples"
+        )
+    result,diag=fit_k3d_with_exact_pairs(
+        out.vertices,out.faces,groups,
+        square_weight=max(0.,float(getattr(params,"w_square",10.))),
+    )
+    out.vertices[:]=result
+    out.metrics.update(diag)
+    out.metrics["seam_exact_vertex_groups"]=[
+        list(map(int,g)) for g in groups]
+    out.metrics["seam_exact_paired_grid_edges"]=len(topo["paired_edges"])
+    out.metrics["seam_exact_closure_enabled"]=True
+    out.metrics["seam_exact_closure_vertex_space"]="full_original_M2D_grid"
+    out.metrics["seam_exact_closure_executed_after_reduction"]=bool(
+        getattr(mesh,"_seam_deferred_from_reduced_K3D",False)
+    )
+    print(
+        "[SEAM-K3D] exact_groups="
+        f"{len(groups)} matched_edges={len(topo['paired_edges'])} "
+        f"gap_before={diag['seam_k3d_gap_before']:.6g} "
+        f"gap_after={diag['seam_k3d_gap_after']:.6g} "
+        f"quad_planarity_after={diag['seam_k3d_planarity_after']:.6g} "
+        f"smoothmax_accepted={diag.get('k3d_seam_smoothmax_accepted',False)} "
+        f"smoothmax_before={diag.get('k3d_seam_smoothmax_energy_before',0.):.6g} "
+        f"smoothmax_final={diag.get('k3d_seam_smoothmax_energy_final',0.):.6g}",
+        flush=True,
+    )
+    return out
+
+
 def install_optcuts_exact_seam_closure(pipeline):
     """Install LAST, outside K3D solver and M3D lift wrappers."""
     if getattr(pipeline,"_onestring_exact_seam_closure_installed",False):
@@ -523,65 +615,21 @@ def install_optcuts_exact_seam_closure(pipeline):
 
     def optimize(target,mesh,parameterization,params):
         out,report=old_optimize(target,mesh,parameterization,params)
-        uv=getattr(mesh,"_seam_original_m2d_uv",None)
-        if uv is None:
+        if getattr(mesh,"_seam_defer_until_full_mesh",False):
+            # extrusion_aware.optimize_assembled() maps vertices to a
+            # reduced index space, solves K3D, then expands its result.
+            # Defer source-Seam classification/welding until expansion:
+            # the retained UV lattice still refers to FULL vertex IDs.
+            out.metrics["seam_exact_closure_deferred"]=True
+            print(
+                "[SEAM-K3D] deferred_for_full_vertex_restore "
+                f"reduced_vertices={len(mesh.vertices)}",
+                flush=True,
+            )
             return out,report
-        if not np.array_equal(np.asarray(mesh.faces,int),
-                              np.asarray(out.faces,int)):
-            raise SeamTopologyMismatch("SEAM_K3D_FACE_TOPOLOGY_CHANGED")
-        topo=discover_exact_seam_topology(parameterization,uv,mesh.faces)
-        log={k:v for k,v in topo.items() if k not in ("groups","paired_edges")}
-        out.metrics.update({f"seam_closure_{k}":v for k,v in log.items()})
-        if topo["status"]=="no_original_cut":
-            return out,report
-        if topo["unclassified_boundary_edges"]:
-            raise SeamTopologyMismatch(
-                "SEAM_K3D_UNCLASSIFIED_GRID_BOUNDARY: "
-                f"edges={topo['unclassified_boundary_edges']} "
-                f"sample={topo['unclassified_boundary_edge_ids_sample']}; "
-                f"diagnostics={topo['unclassified_boundary_diagnostics'][:4]}; "
-                "the Grid edge must lie ENTIRELY on a paired source cut "
-                "or true original open boundary. Do not weld/unclassify "
-                "without restoring the Omega-M2D correspondence."
-            )
-        if topo["unmatched_edges"]:
-            raise SeamTopologyMismatch(
-                "SEAM_K3D_NONCONFORMING_GRID_EDGE_SAMPLING: "
-                f"unmatched_grid_boundary_edges={topo['unmatched_edges']} "
-                f"of {topo['seam_grid_edges']}; "
-                "the two UV seam sides have different Grid edge partitions. "
-                "This implementation requires matching source seam samples "
-                "on both sides. Remesh/realign the Grid seam subdivisions "
-                "before M3D; do not apply nearest-neighbor welding."
-            )
-        groups=topo["groups"]
-        if not groups:
-            raise SeamTopologyMismatch(
-                "SEAM_K3D_NO_PAIRED_BOUNDARY_VERTICES: "
-                "real original OptCuts cut has no coincident Grid samples"
-            )
-        result,diag=fit_k3d_with_exact_pairs(
-            out.vertices,out.faces,groups,
-            square_weight=max(0.,float(getattr(params,"w_square",10.))),
-        )
-        out.vertices[:]=result
-        out.metrics.update(diag)
-        out.metrics["seam_exact_vertex_groups"]=[
-            list(map(int,g)) for g in groups]
-        out.metrics["seam_exact_paired_grid_edges"]=len(topo["paired_edges"])
-        out.metrics["seam_exact_closure_enabled"]=True
-        print(
-            "[SEAM-K3D] exact_groups="
-            f"{len(groups)} matched_edges={len(topo['paired_edges'])} "
-            f"gap_before={diag['seam_k3d_gap_before']:.6g} "
-            f"gap_after={diag['seam_k3d_gap_after']:.6g} "
-            f"quad_planarity_after={diag['seam_k3d_planarity_after']:.6g} "
-            f"smoothmax_accepted={diag.get('k3d_seam_smoothmax_accepted',False)} "
-            f"smoothmax_before={diag.get('k3d_seam_smoothmax_energy_before',0.):.6g} "
-            f"smoothmax_final={diag.get('k3d_seam_smoothmax_energy_final',0.):.6g}",
-            flush=True,
-        )
-        return out,report
+        return close_k3d_seam_after_full_vertex_restore(
+            mesh,out,parameterization,params
+        ),report
 
     pipeline._lift_m2d_to_m3d=lift
     pipeline._optimize_k3d=optimize
@@ -603,4 +651,5 @@ def install_optcuts_exact_seam_closure(pipeline):
 
 __all__=["SeamTopologyMismatch","discover_exact_seam_topology",
          "enforce_shared_positions","fit_k3d_with_exact_pairs",
-         "install_optcuts_exact_seam_closure"]
+         "install_optcuts_exact_seam_closure",
+         "close_k3d_seam_after_full_vertex_restore"]
