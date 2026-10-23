@@ -200,13 +200,17 @@ def _monotone_corner_indices_dp(old, old_t, corners, times):
     return indices
 
 
-def _boundary_target_candidates(uv,loop,outline,max_phases=48):
+def _boundary_target_candidates(uv,loop,outline,max_phases=48,*,faces=None):
     """Search cyclic phases and two strictly order-preserving corner fits.
 
     The arc-length fit can assign an awkward source vertex to a concave grid
     corner. A dynamic-programming candidate also minimizes landmark
     displacement without changing the prescribed target outline.
     """
+    from .optcuts_grid_ear_correspondence import (
+        fixed_boundary_ear_report, map_boundary_with_corner_indices,
+        repair_boundary_ears,
+    )
     old=np.asarray(uv,float)[np.asarray(loop,int)]
     new=np.asarray(outline,float)
     if _sarea(old)*_sarea(new)<0:
@@ -226,6 +230,8 @@ def _boundary_target_candidates(uv,loop,outline,max_phases=48):
             list(dict.fromkeys([nearest]+list(np.linspace(
                 0,m-1,max_phases,dtype=int)))))
     ranked=[]
+    impossible_count=0
+    repaired_count=0
     for phase in phases:
         corners=np.roll(new,-phase,axis=0)
         lengths=np.linalg.norm(np.roll(corners,-1,axis=0)-corners,axis=1)
@@ -243,20 +249,52 @@ def _boundary_target_candidates(uv,loop,outline,max_phases=48):
             if dp_indices!=indices:
                 options.append(("corner_dp",dp_indices))
         for method,selected_indices in options:
-            mapped=np.empty_like(old)
-            for j in range(m):
-                start=selected_indices[j]
-                end=selected_indices[j+1] if j<m-1 else n
-                segment=old_length[start:end]
-                fraction=np.r_[0.,np.cumsum(segment[:-1])]/max(float(segment.sum()),1e-12)
-                mapped[start:end]=corners[j]+fraction[:,None]*(corners[(j+1)%m]-corners[j])
+            mapped=map_boundary_with_corner_indices(
+                old,old_length,corners,selected_indices)
             if not np.isfinite(mapped).all():continue
+            if faces is not None:
+                # Necessary endpoint check: a triangle whose ALL vertices
+                # lie on the UV boundary has NO interior degree of freedom.
+                # It must not become collinear or inverted at the exact
+                # snapped Grid outline. No numerical optimizer can repair
+                # a zero-area triangle after its three vertices are fixed.
+                audit=fixed_boundary_ear_report(
+                    uv,faces,loop,mapped,ratio_min=.005)
+                if len(audit["bad_ids"]):
+                    impossible_count+=1
+                    repaired, _assigned, edits, after=repair_boundary_ears(
+                        uv,faces,loop,corners,selected_indices,old_length,
+                        ratio_min=.005)
+                    if len(after["bad_ids"]):
+                        continue
+                    mapped=repaired
+                    method=method+"_ear_safe"
+                    repaired_count+=1
             sq=np.sum((mapped-old)**2,axis=1)
             score=float(sq.mean()+.15*sq.max())
             ranked.append((score,int(phase),mapped,method))
     if not ranked:
+        if faces is not None and impossible_count:
+            raise GridBoundaryReparameterizationError(
+                "GRID_BOUNDARY_NO_EAR_FEASIBLE_CORRESPONDENCE: "
+                f"invalid_original_candidates={impossible_count}; "
+                "all attempted ordered corner matches force at least "
+                "one fully boundary-constrained triangle below its 0.005 "
+                "signed-area ratio guard, even after local ordered "
+                "grid-corner assignment repairs. Need a different "
+                "landmark assignment or compatible retriangulation; "
+                "do not relax the hard area constraint."
+            )
         raise GridBoundaryReparameterizationError(
             "GRID_BOUNDARY_ORDERED_CORRESPONDENCE_FAILED"
+        )
+    if faces is not None:
+        print(
+            "[GRID-EAR-PREFLIGHT] "
+            f"invalid_raw_matches={impossible_count}; "
+            f"ear_safe_repaired={repaired_count}; "
+            f"eligible_correspondences={len(ranked)}",
+            flush=True,
         )
     return sorted(ranked,key=lambda x:(x[0],x[1]))
 
@@ -452,7 +490,8 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     # 3D surface remains geometrically identical, only triangulation changes.
     uv=np.asarray(parameterization.uv_vertices_2d,float)
     faces=np.asarray(parameterization.uv_faces,int)
-    boundary_candidates=_boundary_target_candidates(uv,loop,target["grid_outline"])
+    boundary_candidates=_boundary_target_candidates(
+        uv,loop,target["grid_outline"],faces=faces)
     # quality() requires OptCutsResult (not SurfaceParameterization).
     # Evaluate by wrapping the current chart with all corresponding faces.
     # Homotopy is diagnostic and prevents accepting a folded intermediate.
