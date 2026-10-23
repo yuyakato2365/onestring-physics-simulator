@@ -286,7 +286,7 @@ def _svg_failure_view(arrays, analysis, *, focus=False):
     # Source and target outlines are distinct from the actual cut graph.
     parts.append(_svg_polyline(np.vstack([base[loop], base[loop[0]]]),
                                tr, "#a3a3a3", 1., opacity=.75))
-    parts.append(_svg_polyline(np.vstack([grid, grid[0]]]),
+    parts.append(_svg_polyline(np.vstack([grid, grid[0]]),
                                tr, "#3b82f6", 1.8, dash="6,4"))
     # Color only the 100 most compressed triangles (not the entire 16k mesh).
     for fid in hot_ids:
