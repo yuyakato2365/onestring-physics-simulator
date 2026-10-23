@@ -738,6 +738,30 @@ with st.sidebar:
                 "UV反転・重なり・SD歪み・格子セル率が悪化する候補は不採用。"
                 "元のSeam接続は変更しません（C++の制約付きOptCutsではありません）。"
             )
+    optcuts_area_grid_boundary_enabled = bool(
+        not paper_fidelity_enabled
+        and omega_parameterization_mode == "optcuts_test"
+        and st.session_state.get("_onestring_area_grid_boundary_omega_selected",False)
+    )
+    optcuts_area_grid_coverage_threshold = 0.50
+    if optcuts_area_grid_boundary_enabled:
+        with st.expander("Area-Threshold Grid Boundary（新Ω生成モード）", expanded=True):
+            optcuts_area_grid_coverage_threshold = st.slider(
+                "GridセルのΩ内面積割合・採用閾値",
+                min_value=0.10, max_value=0.95,
+                value=0.50, step=0.05,
+                format="%.2f",
+                key="optcuts_area_grid_coverage_threshold",
+                help="各四角Gridセルが、最初のOptCuts Ωと交わる面積を"
+                     "セル全面積で割った割合。50%以上なら採用します。"
+                     "M2D境界を作り、Ωの境界と内部UVを再パラメータ化します。",
+            )
+            st.warning(
+                "実験モード：OptCutsのSeam接続は維持します。"
+                "連結で穴のないパネル輪郭と、反転のない再パラメータ化"
+                "を両立できない場合はエラー停止します。"
+                "元のOptCuts Ωへ黙って戻すことはありません。"
+            )
     with st.expander("Paper-reference BFF settings", expanded=omega_parameterization_mode == "paper_reference_bff"):
         bff_boundary_policy = st.selectbox(
             "BFF boundary policy",
@@ -1990,6 +2014,8 @@ def current_pipeline_key() -> tuple:
         omega_parameterization_mode,
         optcuts_grid_aware_enabled,
         optcuts_grid_aware_strength,
+        optcuts_area_grid_boundary_enabled,
+        optcuts_area_grid_coverage_threshold,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
@@ -2150,6 +2176,8 @@ pipeline_params = PipelineParameters(
     omega_parameterization_mode=omega_parameterization_mode,
     optcuts_grid_aware_enabled=optcuts_grid_aware_enabled,
     optcuts_grid_aware_strength=optcuts_grid_aware_strength,
+    optcuts_area_grid_boundary_enabled=optcuts_area_grid_boundary_enabled,
+    optcuts_area_grid_coverage_threshold=optcuts_area_grid_coverage_threshold,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
