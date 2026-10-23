@@ -151,9 +151,16 @@ section[data-testid=stSidebar] .os-eq-card{padding:12px 13px;margin:6px 0 14px;b
    if wanted is not None:
     options=opts;k=dict(k);k["index"]=wanted
     if os.environ.get("ONESTRING_EXTRUSION_AWARE_20260923")=="1":
+     # Streamlit initializes a keyed selectbox from index automatically.
+     # Assigning the SAME widget key to session_state *before* selectbox()
+     # produces the warning in the 2026-10-23 freeze report and can trigger
+     # frontend/widget-state churn on reruns. Preserve any user selection.
      key="onestring_model_version_20260923";k["key"]=key
-     if key not in st.session_state:st.session_state[key]=opts[wanted]
-    print(f"[VERSION-DEFAULT] {opts[wanted]['id']} index={wanted}",flush=True)
+    # Log once per server process, not once per Streamlit script rerun:
+    # repeated version messages otherwise obscure the actual halt stage.
+    if not getattr(st,"_onestring_version_default_logged",False):
+     print(f"[VERSION-DEFAULT] {opts[wanted]['id']} index={wanted}",flush=True)
+     st._onestring_version_default_logged=True
   val=sel0(label,options,*a,**k)
   if str(label)=="View stage":
    s=VIEW.get(str(val),"");_render(st,"Original Figure 5 · blue frame = displayed stage",s,1 if s else 0)
