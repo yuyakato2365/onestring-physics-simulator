@@ -524,7 +524,13 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
                 history=history,
                 grid_mask=target["mask"],
                 grid_coverage=target["coverage"],
+                source_vertices_3d=parameterization.surface_vertices_3d,
+                source_faces=parameterization.surface_faces,
                 metadata={
+                    "grid_origin": target["origin"].tolist(),
+                    "grid_step": target["step"].tolist(),
+                    "overlay_nx": int(target["nx"]),
+                    "overlay_ny": int(target["ny"]),
                     "attempt_tag": f"cut{parameterization.metrics.get('optcuts_area_grid_seam_start_index',0)}_rot{parameterization.metrics.get('optcuts_area_grid_rotation_degrees',0):g}_corr{attempt}",
                     "official_seam_start_index": int(parameterization.metrics.get(
                         "optcuts_area_grid_seam_start_index",0)),
