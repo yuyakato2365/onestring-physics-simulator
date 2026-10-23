@@ -566,3 +566,108 @@ def test_grid_aware_seam_ranking_uses_each_original_production_grid():
         assert row["real_grid_origin"] == pytest.approx(
             domain.uv_vertices[0].tolist())
         assert row["retained_cells"] > 0
+
+
+
+def test_grid_seam_selection_tries_next_official_cut_after_fit_failure(monkeypatch):
+    """Only a geometrically accepted fit is committed to the pipeline state."""
+    from dataclasses import dataclass
+    from onestring_physics.optcuts_area_grid_boundary import (
+        GridBoundaryReparameterizationError,
+    )
+    from onestring_physics.optcuts_test_boundary_reparameterization_patch import (
+        install_optcuts_test_boundary_reparameterization_patch,
+    )
+    import onestring_physics.optcuts_area_grid_boundary as boundary_module
+
+    uv, faces, loop = _grid_chart()
+    result = SimpleNamespace(
+        surface_vertices_3d=np.c_[uv, np.zeros(len(uv))],
+        surface_faces=faces.copy(), uv_vertices_2d=uv.copy(),
+        uv_faces=faces.copy(), metrics={},
+    )
+    metrics = {
+        "distortion_area_mean": 2., "seam_length": 1.,
+        "csf_over_2_area_fraction": 0.,
+        "flipped_triangles": 0, "degenerate_triangles": 0,
+        "injectivity_overlap_pairs": 0,
+    }
+    original = SimpleNamespace(
+        method="optcuts_test", metrics={},
+        surface_vertices_3d=result.surface_vertices_3d.copy(),
+        surface_faces=faces.copy(), uv_vertices_2d=uv.copy(),
+        uv_faces=faces.copy(),
+        omega_boundary=uv[np.r_[loop, loop[0]]].copy(),
+        triangle_acceleration=None,
+        _onestring_optcuts_candidates=[result, result],
+        _onestring_optcuts_candidate_qualities=[dict(metrics), dict(metrics)],
+    )
+    grid = SimpleNamespace(nx=4, ny=4)
+    @dataclass
+    class Params:
+        omega_parameterization_mode: str = "optcuts_test"
+        optcuts_try_alternative_initial_cut: bool = True
+        optcuts_area_grid_boundary_enabled: bool = True
+        optcuts_area_grid_coverage_threshold: float = .5
+
+    def domain_for(chart, *_args):
+        x = np.linspace(-.125, 1.125, 11)
+        xx, yy = np.meshgrid(x, x, indexing="xy")
+        return SimpleNamespace(
+            uv_vertices=np.stack([xx, yy], axis=-1).reshape(-1, 2),
+            overlay_nx=10, overlay_ny=10, overlay_margin_tiles=1,
+            boundary=chart.omega_boundary.copy(), parameterization=chart,
+            split_lines=[],
+        )
+
+    invoked = []
+    def fake_fit(chart, _grid, _params, *, domain):
+        invoked.append(int(chart.metrics["optcuts_area_grid_seam_start_index"]))
+        if len(invoked) == 1:
+            raise GridBoundaryReparameterizationError("synthetic first fit failure")
+        # Only the control-flow/lattice-reuse branch is mocked. Full UV fitting
+        # remains covered separately by the geometric regression tests.
+        chart._optcuts_area_grid_mask = np.ones((10, 10), bool)
+        chart._optcuts_area_grid_coverage = np.ones((10, 10), float)
+        chart._optcuts_area_grid_source_boundary = chart.omega_boundary.copy()
+        chart._optcuts_area_grid_target_outline = chart.omega_boundary.copy()
+        chart.metrics.update(
+            optcuts_area_grid_boundary_enabled=True,
+            optcuts_area_grid_grid_origin=[-.125, -.125],
+            optcuts_area_grid_grid_step=[.125, .125],
+            optcuts_area_grid_overlay_nx=10,
+            optcuts_area_grid_overlay_ny=10,
+            optcuts_area_grid_margin=1,
+        )
+        return chart
+
+    monkeypatch.setattr(boundary_module, "apply_area_grid_boundary", fake_fit)
+    owner = SimpleNamespace(
+        _build_surface_parameterization=lambda *_: original,
+        _flatten_to_domain=domain_for,
+        _build_m2d=lambda *_: None,
+    )
+    install_optcuts_test_boundary_reparameterization_patch(owner)
+    domain = owner._flatten_to_domain(original, grid, Params())
+    assert invoked == [0, 1]
+    assert domain.parameterization is original
+    assert original.metrics["optcuts_area_grid_seam_selected_start"] == 1
+    assert (original.metrics["optcuts_area_grid_seam_ranking"][0]["status"]
+            == "boundary_fit_failed")
+    assert (original.metrics["optcuts_area_grid_seam_ranking"][1]["status"]
+            == "boundary_fit_accepted")
+    assert len(original._onestring_optcuts_candidates) == 0
+
+
+def test_grid_seam_score_rejects_excessive_original_uv_distortion():
+    from onestring_physics.optcuts_grid_aware_seam_selection import (
+        grid_seam_selection_score,
+    )
+    shape = {"corners": 4, "reflex_corners": 0,
+             "perimeter_grid_units": 20., "retained_cells": 25}
+    base = dict(distortion_area_mean=2., seam_length=1.,
+                csf_over_2_area_fraction=0.)
+    bad = dict(distortion_area_mean=8., seam_length=1.,
+               csf_over_2_area_fraction=.4)
+    assert (grid_seam_selection_score(shape, bad, reference_sd=2.)
+            > grid_seam_selection_score(shape, base, reference_sd=2.))
