@@ -285,6 +285,37 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     # retained by the pipeline/state, so downstream K2D construction and the K3D
     # viewer both consume exactly the top surface used by T3D.
     k3d_before=np.asarray(mesh.vertices,float).copy()
+    # Eq.(2) promotes the T3D top face back into the final K3D mesh.
+    # Record whether that later projection changes the SmoothMax achieved
+    # by K3D; an active K3D penalty does not constrain Eq.(2) by itself.
+    smoothmax_audit={}
+    if bool((getattr(mesh,"metrics",{}) or {}).get("k3d_smoothmax_enabled",False)):
+        from .optcuts_test_k3d_augmented_lagrangian_patch import (
+            _square_energy_and_gradient,_face_scales
+        )
+        square_weight=float(mesh.metrics.get("k3d_smoothmax_weight",0.))
+        if square_weight>0:
+            scales=_face_scales(k3d_before,mesh_faces)
+            energy_before=_square_energy_and_gradient(
+                k3d_before,mesh_faces,scales,square_weight
+            )[0]
+            energy_after=_square_energy_and_gradient(
+                top_solved,mesh_faces,scales,square_weight
+            )[0]
+            smoothmax_audit={
+                "t3d_final_k3d_smoothmax_energy_before":float(energy_before),
+                "t3d_final_k3d_smoothmax_energy_after":float(energy_after),
+                "t3d_final_k3d_smoothmax_energy_change":float(
+                    energy_after-energy_before
+                ),
+                "t3d_final_k3d_smoothmax_audited":True,
+            }
+            print(
+                f"[K3D-SMOOTHMAX-T3D-AUDIT] before={energy_before:.6g} "
+                f"after={energy_after:.6g} "
+                f"delta={energy_after-energy_before:.6g} "
+                "(T3D Eq.2 remains authoritative)",flush=True,
+            )
     k3d_update_rms=float(np.sqrt(np.mean(np.sum((top_solved-k3d_before)**2,axis=1))))
     k3d_update_max=float(np.max(np.linalg.norm(top_solved-k3d_before,axis=1),initial=0.0))
     mesh.vertices=np.asarray(top_solved,float).copy()
@@ -294,6 +325,7 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
             "paper_t3d_k3d_update_rms":k3d_update_rms,
             "paper_t3d_k3d_update_max":k3d_update_max,
             "paper_t3d_k3d_source":"T3D shared top vertices after face-planarity solve",
+            **smoothmax_audit,
         })
 
     # Expand only after optimization.  Shared vertices are copied verbatim into
@@ -363,6 +395,7 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         "paper_t3d_planarity_promoted_to_k3d":True,
         "paper_t3d_k3d_update_rms":k3d_update_rms,
         "paper_t3d_k3d_update_max":k3d_update_max,
+        **smoothmax_audit,
         "face_planarity_error":after,
         "top_face_planarity_error":grouped["top"],
         "bottom_face_planarity_error":grouped["bottom"],
