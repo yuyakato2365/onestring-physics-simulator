@@ -26,7 +26,7 @@ def _uv_boundary_edges(quad_faces):
         for i in range(len(face)):
             a,b=face[i],face[(i+1)%len(face)]
             edges[tuple(sorted((a,b)))].append((face_idx,a,b))
-    return [item[0] for item in edges.values() if len(item)==1]
+    return [(item[0][1],item[0][2]) for item in edges.values() if len(item)==1]
 
 
 def _cut_uv_segments(parameterization):
