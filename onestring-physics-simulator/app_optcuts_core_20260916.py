@@ -84,13 +84,16 @@ def _install_optcuts_selector() -> None:
             return original_selectbox(label, options, *args, **kwargs)
 
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
-                     "optcuts_grid_aware", "optcuts_grid"):
+                     "optcuts_grid_aware", "optcuts_area_grid_boundary",
+                     "optcuts_grid"):
             if mode not in option_list:
                 option_list.append(mode)
         original_format=kwargs.get("format_func")
         def label_for_mode(mode):
             if mode=="optcuts_grid_aware":
                 return "2026-10-23 | Grid-aware OptCuts Ω + paper-aligned K3D/K2D (UV refinement)"
+            if mode=="optcuts_area_grid_boundary":
+                return "2026-10-23 | OptCuts Ω + Area-Threshold Grid Boundary → Reparameterization"
             return str(original_format(mode)) if original_format else str(mode)
         kwargs["format_func"]=label_for_mode
         value = original_selectbox(label, option_list, *args, **kwargs)
@@ -100,8 +103,12 @@ def _install_optcuts_selector() -> None:
         st.session_state["_onestring_grid_aware_omega_selected"] = (
             value == "optcuts_grid_aware"
         )
+        st.session_state["_onestring_area_grid_boundary_omega_selected"] = (
+            value == "optcuts_area_grid_boundary"
+        )
         if value not in {"optcuts", "optcuts_test", "optcuts_test2",
-                         "optcuts_grid_aware", "optcuts_grid"}:
+                         "optcuts_grid_aware", "optcuts_area_grid_boundary",
+                         "optcuts_grid"}:
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "0"
             return value
 
@@ -126,6 +133,15 @@ def _install_optcuts_selector() -> None:
                 "+ experimental grid-aligned UV refinement after official OptCuts. "
                 "The original OptCuts topology and K3D/K2D solvers remain unchanged. "
                 "Use OptCuts_test2 as the baseline comparison."
+            )
+        elif value == "optcuts_area_grid_boundary":
+            st.caption(
+                "NEW EXPERIMENT: official OptCuts Omega -> exact area-overlap "
+                "threshold for grid cells (default 50%) -> rectilinear cell-union "
+                "boundary -> order-preserving boundary UV fit and harmonic "
+                "interior reparameterization. The ORIGINAL lattice is held fixed. "
+                "Non-disk outlines, insufficient boundary vertices, UV foldovers "
+                "and excessive distortion fail explicitly; no silent fallback."
             )
         else:
             st.caption(
@@ -167,7 +183,7 @@ def _install_optcuts_selector() -> None:
         )
 
         if value in {"optcuts", "optcuts_test", "optcuts_test2",
-                      "optcuts_grid_aware"}:
+                      "optcuts_grid_aware","optcuts_area_grid_boundary"}:
             use_bijectivity = st.checkbox(
                 "OptCuts enforce bijectivity",
                 value=os.environ.get("ONESTRING_OPTCUTS_USE_BIJECTIVITY", "1").lower()
@@ -187,7 +203,7 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = "0"
 
             if value in {"optcuts_test", "optcuts_test2",
-                          "optcuts_grid_aware"}:
+                          "optcuts_grid_aware","optcuts_area_grid_boundary"}:
                 st.markdown("**K3D hard-planarity (Augmented Lagrangian)**")
                 anchor_weight = st.number_input(
                     "K3D AL anchor weight (w_a)",
@@ -208,7 +224,8 @@ def _install_optcuts_selector() -> None:
                     "Smaller w_a = stronger freedom to planarize; larger w_a = stronger preservation "
                     "of the original K3D shape."
                 )
-                if value in {"optcuts_test2","optcuts_grid_aware"}:
+                if value in {"optcuts_test2","optcuts_grid_aware",
+                             "optcuts_area_grid_boundary"}:
                     st.caption(
                         "Test2 speed profile: K3D AL outer=8; K2D kinematic outer<=2, nfev<=40, "
                         "collision candidates<=900; SciPy finite-difference workers are used when supported."
@@ -280,7 +297,8 @@ def _install_optcuts_selector() -> None:
         # Keep the visible selector value distinct while routing test2 through the
         # mature optcuts_test patch stack.  The environment flag is the only
         # behavioral difference and is read by the acceleration wrapper.
-        if value in {"optcuts_test2","optcuts_grid_aware"}:
+        if value in {"optcuts_test2","optcuts_grid_aware",
+                      "optcuts_area_grid_boundary"}:
             # Both keep the same proven K3D/K2D and paper-aligned M2D route.
             # Grid awareness is a separate Omega-only parameter.
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "2"
