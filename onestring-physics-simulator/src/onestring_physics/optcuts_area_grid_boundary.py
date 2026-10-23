@@ -16,6 +16,7 @@ must be finite, flipped-free, overlap-free and inside the M2D inverse map.
 from __future__ import annotations
 
 from collections import defaultdict
+import os
 import time
 import numpy as np
 
@@ -500,9 +501,48 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
             f"elapsed={started_attempt-fit_started:.1f}s",
             flush=True,
         )
+        def diagnose_failed_continuation(
+            *,base,faces,loop,mapped,last,rejected,harmonic,
+            rejected_fraction,progress,history,
+        ):
+            # Diagnostic capture is strictly orthogonal to UV optimization.
+            # Only rejected attempts create files; the exact source lattice,
+            # mask and all acceptance thresholds remain unchanged.
+            if os.environ.get(
+                "ONESTRING_GRID_BOUNDARY_DIAGNOSTICS", "1"
+            ).strip().lower() in {"0","false","off","no"}:
+                return None
+            from .optcuts_grid_failure_diagnostics import save_failure_bundle
+            return save_failure_bundle(
+                base=base, faces=faces, boundary_indices=loop,
+                mapped_boundary=mapped, accepted=last,
+                rejected=rejected, harmonic=harmonic,
+                grid_outline=target["grid_outline"],
+                grid_step=target["step"],
+                fraction=rejected_fraction,
+                last_valid_fraction=progress,
+                history=history,
+                grid_mask=target["mask"],
+                grid_coverage=target["coverage"],
+                metadata={
+                    "attempt_tag": f"cut{parameterization.metrics.get('optcuts_area_grid_seam_start_index',0)}_rot{parameterization.metrics.get('optcuts_area_grid_rotation_degrees',0):g}_corr{attempt}",
+                    "official_seam_start_index": int(parameterization.metrics.get(
+                        "optcuts_area_grid_seam_start_index",0)),
+                    "uv_rotation_degrees": float(parameterization.metrics.get(
+                        "optcuts_area_grid_rotation_degrees",0.)),
+                    "correspondence_attempt": int(attempt),
+                    "phase": int(phase),
+                    "method": str(method),
+                    "correspondence_cost": float(_cost),
+                    "retained_cell_count": int(np.count_nonzero(target["mask"])),
+                    "selection_coverage_threshold": float(thresh),
+                    "boundary_correspondence_count": int(len(boundary_candidates)),
+                },
+            )
         try:
             result,history=fit_by_continuation(
-                base,faces,loop,mapped,_harmonic_dirichlet,assess)
+                base,faces,loop,mapped,_harmonic_dirichlet,assess,
+                on_failure=diagnose_failed_continuation)
             chosen_phase=int(phase)
             chosen_method=str(method)
             print(
