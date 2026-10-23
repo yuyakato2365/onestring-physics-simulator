@@ -226,3 +226,59 @@ def test_summary_synthesizes_failure_evidence_and_shareable_zip(tmp_path):
         assert "analysis_summary.md" in names
         assert "comparison.csv" in names
         assert sum(x.endswith("reproduce_uv.npz") for x in names) == 2
+
+
+
+def test_latest_run_marker_does_not_repackage_old_failure_snapshots(tmp_path):
+    """A new run with no failures must never publish an old diagnosis ZIP."""
+    from scripts.summarize_grid_boundary_failures import summarize
+    uv, faces, loop, outline, rejected, harmonic = fixture_uv()
+
+    def snapshot(run_id):
+        return save_failure_bundle(
+            base=uv, faces=faces, boundary_indices=loop,
+            mapped_boundary=uv[loop], accepted=uv,
+            rejected=rejected, harmonic=harmonic,
+            grid_outline=outline, grid_step=np.ones(2),
+            fraction=.995, last_valid_fraction=.99, history=[],
+            output_dir=tmp_path,
+            metadata={
+                "attempt_tag": run_id,
+                "diagnostic_run_id": run_id,
+                "ear_preflight_version": "ear-safe-v1",
+                "official_seam_start_index": 0,
+                "uv_rotation_degrees": 0.,
+                "phase": 72,
+                "method": "corner_dp",
+            },
+        )
+
+    snapshot("previous-run")
+    marker = tmp_path / "last_run.json"
+    marker.write_text(json.dumps({
+        "run_id": "new-run", "started_utc": "2026-10-23T12:55:00+00:00",
+        "ear_preflight_version": "ear-safe-v1",
+    }))
+    with pytest.raises(FileNotFoundError, match="Older evidence"):
+        summarize(tmp_path)
+
+    snapshot("new-run")
+    result = summarize(tmp_path)
+    assert result["attempts"] == 1
+    summary = Path(result["summary"]).read_text()
+    assert "new-run" in summary
+    assert "previous-run" not in summary
+    assert "ear-safe-v1" in summary
+
+
+def test_start_new_grid_diagnostic_run_marks_fresh_execution(tmp_path):
+    import os
+    from onestring_physics.optcuts_grid_failure_diagnostics import (
+        begin_diagnostic_run,
+    )
+    first = begin_diagnostic_run(output_dir=tmp_path)
+    second = begin_diagnostic_run(output_dir=tmp_path)
+    assert first != second
+    saved = json.loads((tmp_path / "last_run.json").read_text())
+    assert saved["run_id"] == second
+    assert saved["ear_preflight_version"] == "ear-safe-v1"
