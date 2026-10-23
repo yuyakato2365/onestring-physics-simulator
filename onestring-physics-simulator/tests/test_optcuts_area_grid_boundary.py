@@ -1029,3 +1029,74 @@ def test_grid_fit_does_not_claim_success_when_all_full_boundary_maps_exceed_sd(
     np.testing.assert_allclose(p.uv_vertices_2d,old_uv)
     np.testing.assert_allclose(p.omega_boundary,old_omega)
     assert not p.metrics.get("optcuts_area_grid_boundary_enabled",False)
+
+
+
+def test_area_grid_accepts_first_correspondence_after_sd_refinement(
+    monkeypatch
+):
+    """A 100%-Grid bijective chart can become acceptable via the new step.
+
+    The source masks, triangulation, Grid target and downstream quality
+    gate are unchanged. This isolates hook routing: numerical convergence
+    is independently tested with exact SD gradients.
+    """
+    from onestring_physics.optcuts_area_grid_boundary import (
+        apply_area_grid_boundary,
+    )
+    import onestring_physics.optcuts_grid_sd_refinement as sd_module
+    p,grid,params,num=_distortion_retry_fixture(monkeypatch)
+    monkeypatch.setenv("ONESTRING_GRID_SD_REFINEMENT","1")
+    called=[]
+    def fake_refine(xyz,surface_faces,uv_faces,original_uv,
+                    full_grid_uv,boundary_loop,grid_outline,
+                    *,assess,mean_sd_limit,min_area_ratio,**kwargs):
+        called.append({
+            "limit":mean_sd_limit,
+            "min_area_ratio":min_area_ratio,
+            "boundary":np.asarray(boundary_loop).copy(),
+        })
+        assert min_area_ratio==.005
+        assert mean_sd_limit==pytest.approx(5.33)
+        after=full_grid_uv.copy()
+        after[4,0]=.44
+        np.testing.assert_allclose(
+            after[np.asarray(boundary_loop,int)],
+            full_grid_uv[np.asarray(boundary_loop,int)],
+        )
+        return after,{
+            "status":"within_limit",
+            "mean_sd_before":8.663,
+            "mean_sd_after":4.5,
+            "improvement":4.163,
+            "phases":[{"phase":"interior"}],
+        }
+    monkeypatch.setattr(sd_module,"refine_exact_grid_uv",fake_refine)
+    out=apply_area_grid_boundary(p,grid,params,domain=object())
+    assert out is p
+    assert num["calls"]==1
+    assert len(called)==1
+    assert p.metrics["optcuts_area_grid_boundary_selected_attempt"]==1
+    assert p.metrics["optcuts_area_grid_sd_refinement_attempts"]==1
+    assert p.metrics["optcuts_area_grid_sd_refinement_improvements"]==1
+    assert p.metrics["optcuts_area_grid_final_mean_sd"]==pytest.approx(4.5)
+    assert p.metrics["optcuts_area_grid_sd_refinement"]["status"]=="within_limit"
+
+
+def test_area_grid_sd_solver_failure_keeps_original_strict_gate(monkeypatch):
+    from onestring_physics.optcuts_area_grid_boundary import (
+        apply_area_grid_boundary,
+    )
+    import onestring_physics.optcuts_grid_sd_refinement as sd_module
+    p,grid,params,num=_distortion_retry_fixture(monkeypatch)
+    monkeypatch.setenv("ONESTRING_GRID_SD_REFINEMENT","1")
+    def error_refine(*args,**kwargs):
+        raise ValueError("synthetic SD optimizer nonconvergence")
+    monkeypatch.setattr(sd_module,"refine_exact_grid_uv",error_refine)
+    out=apply_area_grid_boundary(p,grid,params,domain=object())
+    assert out is p
+    assert num["calls"]==2
+    assert p.metrics["optcuts_area_grid_boundary_selected_attempt"]==2
+    assert p.metrics["optcuts_area_grid_boundary_quality_rejections"]==1
+    assert p.metrics["optcuts_area_grid_sd_refinement_attempts"]==1
+    assert p.metrics["optcuts_area_grid_sd_refinement_improvements"]==0
