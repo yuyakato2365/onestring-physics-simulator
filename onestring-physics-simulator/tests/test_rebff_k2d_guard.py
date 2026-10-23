@@ -73,3 +73,49 @@ def test_k2d_guard_is_gated_to_rebff_manufacturing_m2d():
     assert 'm2d_postcut_rebff_applied",False' in app
     assert 'guard_rebff_k2d(' in app
     assert 'k2d_rebff_guard_final_mean_edge_error' in app
+
+
+def test_rebff_m2d_geometry_is_paper_only_and_normal_optcuts_is_preserved():
+    """Outside Paper, an old mesh's reBFF flag alone must not activate K2D guard."""
+    root=Path(__file__).parents[1]
+    ui=(root/"app_runtime_base.py").read_text()
+    panel=(root/"src/onestring_physics/simple_split_panel_patch.py").read_text()
+    engine=(root/"src/onestring_physics/paper_split_reflatten.py").read_text()
+    assert 'or not paper_fidelity_enabled' in ui
+    assert 'paper_split_apply_rebff_m2d = False' in ui
+    assert 'getattr(params,"paper_fidelity_mode",False)' in panel
+    assert 'getattr(params,"paper_split_apply_rebff_m2d",False)' in panel
+    assert "POSTCUT_REBFF_M2D_PAPER_ONLY" in engine
+
+
+def test_programmatic_nonpaper_rebff_m2d_request_is_explicitly_rejected():
+    """A direct pipeline caller cannot silently turn on this Paper-only patch."""
+    from types import SimpleNamespace
+    from onestring_physics.paper_split_reflatten import split_mesh_reflatten
+
+    uv=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+    tri=np.array([[0,1,2],[0,2,3]],dtype=int)
+    chart=SimpleNamespace(
+        uv_vertices_2d=uv,surface_vertices_3d=np.c_[uv,np.zeros(4)],
+        uv_faces=tri,surface_faces=tri,method="harmonic",metrics={},
+    )
+    domain=SimpleNamespace(
+        parameterization=chart,reference_grid_rotation_degrees=0.,max_csf_splits=4,
+    )
+    params=SimpleNamespace(
+        paper_fidelity_mode=False,paper_split_apply_rebff_m2d=True,
+        bff_executable=None,bff_timeout_seconds=1.,
+    )
+    with pytest.raises(ValueError,match="POSTCUT_REBFF_M2D_PAPER_ONLY"):
+        split_mesh_reflatten(uv,np.array([[0,1,2,3]],int),domain,params)
+
+
+def test_version_selector_no_longer_assigns_streamlit_widget_state():
+    """The reported freeze log shows a selectbox session-state/default conflict."""
+    root=Path(__file__).parents[1]
+    ui_patch=(root/"src/onestring_physics/paper_ui_20260916_patch.py").read_text()
+    app=(root/"app_runtime_base.py").read_text()
+    assert 'k["key"]=key' in ui_patch
+    assert 'st.session_state[key]=opts[wanted]' not in ui_patch
+    assert "PAPER_UI_RERUN_LOOP_DETECTED" in app
+    assert "paper_fidelity_computation_mode" in app
