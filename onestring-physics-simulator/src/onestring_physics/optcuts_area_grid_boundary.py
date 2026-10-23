@@ -234,7 +234,8 @@ def _ensure_boundary_vertices(parameterization,corner_count,loop):
                     # Use a fraction of the REMAINING edge so all points
                     # lie evenly along the original boundary edge.
                     remain=factor-k+1
-                    t=1./float(remain)
+                    t=(1./float(remain) if aa==current
+                       else 1.-1./float(remain))
                     z=int(face[(edge_i+2)%3])
                     xyzface=sf[fi]
                     xa=int(xyzface[edge_i]);xb=int(xyzface[(edge_i+1)%3])
