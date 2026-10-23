@@ -140,63 +140,62 @@ def _sarea(points):
                       np.dot(pts[:,1],np.roll(pts[:,0],-1)))
 
 
-def _boundary_target_map(uv,loop,outline):
-    """Unique ordered boundary-vertex targets on EVERY target grid corner.
+def _boundary_target_candidates(uv,loop,outline,max_phases=48):
+    """Ordered cyclic correspondence minimizing TOTAL displacement.
 
-    The initial cyclic phase is picked by nearest grid corner to loop[0].
-    The correspondence is strictly monotone by boundary arclength.
-    Extra original vertices are placed on the grid outline segments.
+    The former 'nearest corner to loop[0]' fit can rotate the entire
+    staircase relative to the OptCuts seam; this frequently folds at 25%.
     """
     old=np.asarray(uv,float)[np.asarray(loop,int)]
     new=np.asarray(outline,float)
     if _sarea(old)*_sarea(new)<0:
         new=new[::-1].copy()
-    start=int(np.argmin(np.linalg.norm(new-old[0],axis=1)))
-    new=np.roll(new,-start,axis=0)
     n,m=len(old),len(new)
     if n<m:
         raise GridBoundaryReparameterizationError(
-            f"GRID_BOUNDARY_NOT_ENOUGH_VERTICES: target has {m} grid corners "
-            f"but OptCuts UV boundary has only {n} vertices. "
-            "Subdivide boundary triangles before exact snapping."
+            f"GRID_BOUNDARY_NOT_ENOUGH_VERTICES: need {m}, got {n}"
         )
-    old_lengths=np.linalg.norm(np.roll(old,-1,axis=0)-old,axis=1)
-    new_lengths=np.linalg.norm(np.roll(new,-1,axis=0)-new,axis=1)
-    if min(float(old_lengths.sum()),float(new_lengths.sum()))<1e-12:
+    old_length=np.linalg.norm(np.roll(old,-1,axis=0)-old,axis=1)
+    new_length=np.linalg.norm(np.roll(new,-1,axis=0)-new,axis=1)
+    if min(float(old_length.sum()),float(new_length.sum()))<1e-12:
         raise GridBoundaryReparameterizationError("GRID_BOUNDARY_DEGENERATE_CONTOUR")
-    old_fraction=np.r_[0.,np.cumsum(old_lengths[:-1])]/old_lengths.sum()
-    new_fraction=np.r_[0.,np.cumsum(new_lengths[:-1])]/new_lengths.sum()
-    # Assign each corner to a distinct OptCuts boundary vertex in order,
-    # reserving enough vertices for the remaining corners.
-    indexes=[0]
-    for j in range(1,m):
-        nearest=int(np.searchsorted(old_fraction,new_fraction[j]))
-        chosen=max(indexes[-1]+1,nearest)
-        chosen=min(chosen,n-(m-j))
-        if chosen<=indexes[-1]:
-            raise GridBoundaryReparameterizationError(
-                "GRID_BOUNDARY_ORDERED_CORRESPONDENCE_FAILED"
-            )
-        indexes.append(chosen)
-    out=np.empty((n,2),float)
-    for j in range(m):
-        begin=indexes[j]
-        end=indexes[(j+1)%m] if j<m-1 else n
-        a,b=new[j],new[(j+1)%m]
-        if end<=begin:
-            raise GridBoundaryReparameterizationError("GRID_BOUNDARY_CORNER_ORDER")
-        indices=np.arange(begin,end)
-        if j==m-1:
-            distances=np.r_[old_lengths[begin:n]]
-        else:
-            distances=old_lengths[begin:end]
-        cumulative=np.r_[0.,np.cumsum(distances[:-1])]
-        denom=float(np.sum(distances))
-        t=cumulative/max(denom,1e-12)
-        out[indices]=a[None,:]+t[:,None]*(b-a)[None,:]
-    if len(out)!=n or not np.isfinite(out).all():
-        raise GridBoundaryReparameterizationError("GRID_BOUNDARY_TARGET_INVALID")
-    return out
+    old_t=np.r_[0.,np.cumsum(old_length[:-1])]/old_length.sum()
+    nearest=int(np.argmin(np.linalg.norm(new-old[0],axis=1)))
+    phases=(list(range(m)) if m<=max_phases else
+            list(dict.fromkeys([nearest]+list(np.linspace(
+                0,m-1,max_phases,dtype=int)))))
+    ranked=[]
+    for phase in phases:
+        corners=np.roll(new,-phase,axis=0)
+        lengths=np.linalg.norm(np.roll(corners,-1,axis=0)-corners,axis=1)
+        times=np.r_[0.,np.cumsum(lengths[:-1])]/lengths.sum()
+        indices=[0]
+        for j in range(1,m):
+            idx=max(indices[-1]+1,int(np.searchsorted(old_t,times[j])))
+            idx=min(idx,n-(m-j))
+            if idx<=indices[-1]: break
+            indices.append(idx)
+        if len(indices)!=m: continue
+        mapped=np.empty_like(old)
+        for j in range(m):
+            start=indices[j]
+            end=indices[j+1] if j<m-1 else n
+            segment=old_length[start:end]
+            fraction=np.r_[0.,np.cumsum(segment[:-1])]/max(float(segment.sum()),1e-12)
+            mapped[start:end]=corners[j]+fraction[:,None]*(corners[(j+1)%m]-corners[j])
+        if not np.isfinite(mapped).all():continue
+        sq=np.sum((mapped-old)**2,axis=1)
+        score=float(sq.mean()+.15*sq.max())
+        ranked.append((score,int(phase),mapped))
+    if not ranked:
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_ORDERED_CORRESPONDENCE_FAILED"
+        )
+    return sorted(ranked,key=lambda x:(x[0],x[1]))
+
+
+def _boundary_target_map(uv,loop,outline):
+    return _boundary_target_candidates(uv,loop,outline)[0][2]
 
 
 def _ensure_boundary_vertices(parameterization,corner_count,loop):
