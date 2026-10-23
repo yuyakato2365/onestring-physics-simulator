@@ -1028,6 +1028,10 @@ class PipelineParameters(_original.PipelineParameters):
     reference_grid_fit_rectangle: bool = False
     optcuts_distortion_bound: float = 4.1
     optcuts_try_alternative_initial_cut: bool = True
+    # Experimental, opt-in, Paper-OFF and official OptCuts ONLY.
+    # UV is refined with fixed OptCuts seam topology, not C++ joint cuts.
+    optcuts_grid_aware_enabled: bool = False
+    optcuts_grid_aware_strength: float = 3.0
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
