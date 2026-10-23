@@ -378,7 +378,8 @@ class SplitDirectionQuestion(BaseException):
 
 def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
                         rings=3,threshold=2.,max_cuts=64,direction_choices=(),ask=False,
-                        curvature_tie_tolerance=0.02,force_one_cut=False,reflatten=True):
+                        curvature_tie_tolerance=0.02,force_one_cut=False,reflatten=True,
+                        leaf_chart_sink=None):
     """Assess complete grid cuts using per-piece BFF or inherited original UV.
 
     The opt-in validation cut exercises the topology even when sigma <= 2.
@@ -386,6 +387,21 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
     """
     if reflatten and not callable(flatten):
         raise ValueError("reBFF Split requires a callable BFF evaluator")
+    if leaf_chart_sink is not None and not reflatten:
+        raise ValueError("postcut manufacturing reBFF requires reBFF evaluation ON")
+    chart_cache = {} if leaf_chart_sink is not None else None
+    def capture_terminal(piece, ids):
+        if leaf_chart_sink is None:
+            return
+        stored = chart_cache.get(id(piece))
+        if stored is None:
+            raise RuntimeError("POSTCUT_REBFF_M2D_NO_LEAF_CHART: score chart lost")
+        leaf_chart_sink.append(dict(
+            face_ids=np.asarray(ids,int).copy(),
+            source_uv=np.asarray(piece[2],float).copy(),
+            piece_faces=np.asarray(piece[1],int).copy(),
+            rebff_uv=np.asarray(stored,float).copy(),
+        ))
     grid_xy=np.asarray(grid_xy,float);quads=np.asarray(quads,int)
     quad_xy=grid_xy[quads];centres=quad_xy.mean(axis=1)
     pitch=float(np.median(np.linalg.norm(quad_xy[:,1]-quad_xy[:,0],axis=1)))
@@ -403,6 +419,8 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
         # clipping, with no per-piece reparameterization or rescaling.
         chart_uv=flatten(piece[0],piece[1]) if reflatten else piece[2]
         J=tile_area_ratios(piece,quad_xy[ids],chart_uv)
+        if chart_cache is not None:
+            chart_cache[id(piece)] = np.asarray(chart_uv,float)
         return float(np.max(J)/np.min(J)),J
     def interior(ids):
         edge_count=defaultdict(int)
@@ -433,6 +451,7 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
                                and parent_sigma<=threshold)
         if ((parent_sigma<=threshold and not validation_forced)
                 or not candidates or len(cuts)>=max_cuts):
+            capture_terminal(piece, ids)
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,
                     satisfied=bool(parent_sigma<=threshold),tile_area_ratio=parent_J.tolist()))
             continue
@@ -482,6 +501,7 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
             # The user ended the Split here: this and every remaining piece
             # become leaves as they are (sigma may stay above the threshold).
             max_cuts=len(cuts);report["stopped_by_user"]=True
+            capture_terminal(piece, ids)
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,satisfied=False,
                     reason="stopped_by_user",tile_area_ratio=parent_J.tolist()))
             continue
@@ -489,6 +509,7 @@ def plan_reflatten_cuts(grid_xy,quads,xyz,tri_faces,uv,*,flatten=None,
         if best is not None and choice in options:
             best=options[choice];chosen_by="user"
         if best is None:
+            capture_terminal(piece, ids)
             report["leaves"].append(dict(face_ids=ids.tolist(),sigma=parent_sigma,
                 satisfied=False,reason="no_complete_grid_cut",tile_area_ratio=parent_J.tolist()))
             continue
@@ -548,14 +569,24 @@ def split_mesh_reflatten(vertices,faces,domain,params=None,*,reflatten=True):
             result=run_official_bff(V,F,executable=exe,
                 boundary_policy="automatic_reference",timeout_seconds=timeout)
             return np.asarray(result.uv_vertices,float)
+    apply_to_m2d=bool(getattr(params,"paper_split_apply_rebff_m2d",False))
+    if apply_to_m2d and not reflatten:
+        raise ValueError("Manufacturing M2D reBFF needs the reBFF CSF evaluation enabled")
+    leaf_charts=[] if apply_to_m2d else None
+    # Keep the original scoring and chosen cut lines byte-for-byte identical.
+    # Only retain the BFF UV already computed for terminal 3D pieces when
+    # explicitly requested for downstream manufacturing M2D remapping.
     cuts,report=plan_reflatten_cuts(
         grid_xy,faces,xyz,tri_faces,uv@R,flatten=flatten,reflatten=reflatten,
+        leaf_chart_sink=leaf_charts,
         rings=int(getattr(params,"paper_split_curvature_rings",3)),
         threshold=2.,max_cuts=int(getattr(domain,"max_csf_splits",64)),
         direction_choices=tuple(getattr(params,"paper_split_direction_choices",()) or ()),
         ask=bool(getattr(params,"paper_split_ask_direction",False)),
         curvature_tie_tolerance=float(getattr(params,"paper_split_curvature_tie_tolerance",0.02)),
         force_one_cut=bool(getattr(params,"paper_split_validation_force_one_cut",False)))
+    # Only charts, not any new CSF evaluation, are handed to the cut owner.
+    domain._split_rebff_leaf_charts=(leaf_charts if apply_to_m2d and cuts else None)
     # Preserve the original forced-cut topology implementation and ALL fields.
     # Use a defensive copy of params so changing the decision cannot leak
     # user-requested collision-driven Split state back into the UI.
@@ -604,6 +635,8 @@ def split_mesh_reflatten(vertices,faces,domain,params=None,*,reflatten=True):
             +source_method
         ),
         csf_split_criterion=REFLATTEN_CRITERION if reflatten else FIXED_CHART_CRITERION,
+        csf_split_m2d_rebff_requested=bool(apply_to_m2d),
+        csf_split_m2d_rebff_terminal_chart_count=len(leaf_charts or []),
         csf_split_threshold=2.,
         csf_split_validation_force_one_cut_requested=bool(report.get("validation_force_one_cut_requested",False)),
         csf_split_validation_forced_count=int(report.get("validation_cut_generated",False)),
