@@ -1037,6 +1037,9 @@ class PipelineParameters(_original.PipelineParameters):
     # Defaults to OFF to preserve all existing OptCuts/Paper workflows.
     optcuts_area_grid_boundary_enabled: bool = False
     optcuts_area_grid_coverage_threshold: float = 0.50
+    # Try rigid orientations BEFORE each official chart's production M2D grid
+    # is first constructed. Does not edit seam topology or rephase a fixed grid.
+    optcuts_area_grid_orientation_search_enabled: bool = True
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
