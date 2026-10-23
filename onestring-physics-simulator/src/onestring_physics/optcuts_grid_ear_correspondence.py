@@ -278,7 +278,7 @@ def recover_boundary_ear_correspondences(
     # Greedy repair may get stuck because one anchor shift leaves the same
     # number of invalid ears while enabling the next shift to fix both.
     # Search a small collection of such combinations before giving up.
-    if len(solutions) < max_solutions:
+    if len(first_report["bad_ids"]) and len(solutions) < max_solutions:
         queue = [(seed, [])]
         visited = {seed}
         evaluated = 0
