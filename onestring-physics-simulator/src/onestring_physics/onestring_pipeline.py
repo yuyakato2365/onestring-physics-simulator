@@ -1032,6 +1032,11 @@ class PipelineParameters(_original.PipelineParameters):
     # UV is refined with fixed OptCuts seam topology, not C++ joint cuts.
     optcuts_grid_aware_enabled: bool = False
     optcuts_grid_aware_strength: float = 3.0
+    # Distinct Omega mode: original OptCuts -> area-selected grid footprint
+    # -> rectilinear boundary + interior harmonic reparameterization.
+    # Defaults to OFF to preserve all existing OptCuts/Paper workflows.
+    optcuts_area_grid_boundary_enabled: bool = False
+    optcuts_area_grid_coverage_threshold: float = 0.50
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
