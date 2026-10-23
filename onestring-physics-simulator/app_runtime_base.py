@@ -780,19 +780,35 @@ with st.sidebar:
             ["fixed_uv", "reflatten_tile_area"],
             index=1 if _reflatten_bff_path else 0,
             format_func=lambda v: {
-                "fixed_uv": "既存の固定UV / 現行Split（比較用）",
-                "reflatten_tile_area": "3Dピース自由境界BFF再展開 → タイル面積比 ≤ 2",
+                "fixed_uv": "既存の固定UV / 現行Split（以前のCSF式）",
+                "reflatten_tile_area": "タイル面積比 ≤ 2（下で再BFFのON/OFFを選択）",
             }[v],
-            help="Paper ON/OFFのどちらでも使えます。各候補の3D曲面片を公式の"
-                 "自由境界BFFで再展開し、タイル面積比の最大/最小が2以下かを判定。"
-                 "初期Ωは通常フローのharmonic/LSCM等でも構いませんが、非等角の場合は"
-                 "論文再現ではありません。元のM2D/K3D/T2Dを再BFFのUVで置換しません。"
-                 "外部の公式BFF実行ファイルが必要です。",
+            help="タイル面積比モードは縦横の候補選択・曲率・閾値2・"
+                 "M2Dへの実切断を統一し、再BFFだけ切替えます。"
+                 "ONでは各3D曲面片を公式自由境界BFFで展開して面積比評価、"
+                 "OFFでは初期Ωを切り取ったUVを使って評価します。"
+                 "既存の固定UVは別の旧式CSF計算で、同条件の比較対象ではありません。",
         )
+        paper_split_enable_rebff = st.checkbox(
+            "SplitのCSF判定で各3D領域を再BFFする",
+            value=True,
+            disabled=paper_split_criterion == "fixed_uv",
+            key="split_area_enable_rebff",
+            help="ON：領域ごとに公式自由境界BFFを再実行し、そのUVでタイル面積比を計算。"
+                 "OFF：初期S→ΩのUVをSplit後も保持し、そのUVで同じ面積比を計算。"
+                 "OFFではSplit評価に外部BFFは不要。ただし初期Ωの生成方法にBFFを"
+                 "選んでいる場合、その最初のBFFは引き続き必要です。"
+                 "いずれも再BFFのUVをM2Dパネルへ移植しません。",
+        )
+        if paper_split_criterion == "reflatten_tile_area" and not paper_split_enable_rebff:
+            paper_split_criterion = "fixed_chart_tile_area"
+            st.info("再BFF OFF：初期ΩのUVを保持してタイル面積比を評価します。"
+                    "切断候補・曲率・閾値・実際のM2D SplitはONと共通です。"
+                    "ただし初期Ωが非等角なら線形CSFの保証ではありません。")
         paper_split_validation_force_one_cut = st.checkbox(
             "検証用：CSFが2以下でもSplitを1本入れる",
             value=False,
-            disabled=paper_split_criterion != "reflatten_tile_area",
+            disabled=paper_split_criterion == "fixed_uv",
             key="split_validation_force_one_cut",
             help="CSFの閾値を下げたり値を偽装したりせず、最初の領域に"
                  "完全な格子Splitを1本追加して、下流M2D→T2D処理を検証します。"
@@ -805,7 +821,7 @@ with st.sidebar:
         paper_split_curvature_rings = int(st.slider(
             "Split切断点：ガウス曲率平滑化リング数",
             min_value=1, max_value=10, value=3, step=1,
-            disabled=paper_split_criterion != "reflatten_tile_area",
+            disabled=paper_split_criterion == "fixed_uv",
         ))
         reference_grid_fit_rectangle = st.checkbox(
             "矩形BFFの外接領域にn×nの正方形グリッドを合わせる（実験）",
@@ -817,7 +833,7 @@ with st.sidebar:
         paper_split_ask_direction = st.checkbox(
             "Splitの向きを処理中に尋ねる（候補が出るたびに縦・横を選ぶ）",
             value=False, key="paper_split_ask_direction",
-            disabled=paper_split_criterion != "reflatten_tile_area",
+            disabled=paper_split_criterion == "fixed_uv",
             help="Split が必要になるたびに計算を止め、M2D 上の縦・横の候補線と子の σ を示して選んでもらいます。"
                  "選ぶたびにパイプラインを最初から計算し直し、次の Split まで進みます。",
         )
@@ -825,11 +841,11 @@ with st.sidebar:
             "Split点：ガウス曲率がほぼ同じとみなす幅（最大値からの差、%）",
             min_value=0.0, max_value=30.0, value=2.0, step=0.5,
             key="paper_split_curvature_tie_percent",
-            disabled=paper_split_criterion != "reflatten_tile_area",
+            disabled=paper_split_criterion == "fixed_uv",
             help="曲率が最大値からこの割合以内の格子点が複数あれば、その中で最も高い（入力の +z）点を通って切ります。"
                  "0% にすると常に曲率最大の点を使います。",
         ))
-        if paper_split_criterion == "reflatten_tile_area":
+        if paper_split_criterion in ("reflatten_tile_area", "fixed_chart_tile_area"):
             if uploaded is None:
                 st.caption(
                     "現在の入力: 内蔵形状 / ローカル自動探索。"
@@ -838,11 +854,14 @@ with st.sidebar:
                 )
             else:
                 st.caption(f"再展開Split入力: {uploaded.name}（Lilium固有の形状条件なし）")
-            st.info("再展開SplitはPaper ON/OFFの両方で同じ計算を使います。"
-                    "M2Dと後段パネルは元のグリッドに固定し、"
-                    "3Dの切断片を公式の自由境界BFFで再展開してタイル面積比を評価します。"
-                    "通常フローで非等角Ωを使う場合は論文再現ではありません。"
-                    "公式BFF外部実行ファイルが必要で計算時間が増えます。")
+            if paper_split_criterion == "reflatten_tile_area":
+                st.info("再BFF ON：3Dの各切断片に公式自由境界BFFを適用し、"
+                        "タイル面積比を評価します。再BFFのUVは元のM2Dに適用しません。"
+                        "各領域の評価には公式BFF実行ファイルが必要です。")
+            else:
+                st.info("再BFF OFF：同じ3D/2Dタイル面積比を初期Ω固定UVで評価します。"
+                        "切断後にBFFは行わず、M2Dの形状とも対応しています。"
+                        "ただし初期Ωの計算自体にBFFを選んだ場合は公式BFFが必要です。")
         paper_csf_sampling_method = st.selectbox(
             "CSF離散評価（実験）",
             ["m2d_m3d_dual_centroid", "m2d_m3d_panel_area",
@@ -1855,7 +1874,7 @@ def build_target():
         fh.write(uploaded.getbuffer())
         temp_path = fh.name
     result = load_target_shape(temp_path)
-    if paper_split_criterion == "reflatten_tile_area":
+    if paper_split_criterion in ("reflatten_tile_area", "fixed_chart_tile_area"):
         from onestring_physics.reference_bff import (
             validate_reference_mesh, ReferenceMeshValidationError,
         )
@@ -1863,7 +1882,7 @@ def build_target():
             _mesh_input_topology = validate_reference_mesh(result.points, result.faces)
         except ReferenceMeshValidationError as exc:
             raise ValueError(
-                "再展開Splitが現在対応するのは、三角形が適切に接続した1つの開いた円板型曲面です。"
+                "タイル面積比Splitが現在対応するのは、三角形が適切に接続した1つの開いた円板型曲面です."
                 "閉曲面なら切断・境界追加、穴あき面なら適切な位相修正を先に行ってください。"
                 f" 入力メッシュ診断: {exc}"
             ) from exc
