@@ -22,15 +22,46 @@ from zipfile import ZIP_DEFLATED, ZipFile
 def _rows(root, limit):
     found = sorted(root.glob("*/diagnosis.json"),
                    key=lambda p: p.parent.name, reverse=True)
+    manifest_file = root / "last_run.json"
+    manifest = None
+    if manifest_file.exists():
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        run_id = manifest.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError(
+                "Latest Grid diagnostic run marker is invalid; "
+                "do not silently republish older failures."
+            )
     data = []
-    for p in found[:limit]:
+    for p in found:
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as e:
             print(f"[GRID-DIAG-SUMMARY] ignored unreadable {p}: {e}")
             continue
+        if manifest is not None:
+            if d.get("metadata", {}).get("diagnostic_run_id") != run_id:
+                continue
         d["_folder"] = p.parent
         data.append(d)
+        if len(data) >= limit:
+            break
+    if manifest is not None and not data:
+        raise FileNotFoundError(
+            "Latest Grid run " + run_id + " (started "
+            + str(manifest.get("started_utc", "?"))
+            + ") has not produced diagnostic failures. "
+            "Older evidence was intentionally excluded. "
+            "If the Omega pipeline succeeded, this is expected; "
+            "otherwise check the current Streamlit terminal output."
+        )
+    if manifest is None and data:
+        print(
+            "[GRID-DIAG-SUMMARY] WARNING: old snapshots lack the "
+            "latest-run marker; cannot certify these files were produced "
+            "by the current implementation.",
+            flush=True,
+        )
     return data
 
 
@@ -144,11 +175,25 @@ def summarize(root, *, last=48, max_bundles=6):
         int(_number(d, "rejected_below_existing_0_005_area_guard_count", 0)),
     ))
     high = sorted_rows[0]
+    run_id = str(high.get("metadata", {}).get("diagnostic_run_id") or
+                 "LEGACY_UNKNOWN_RUN")
+    version = str(high.get("metadata", {}).get("ear_preflight_version") or
+                  "LEGACY_BEFORE_EAR_PREFLIGHT")
+    created = str(high.get("created_utc", "unknown"))
     per_source = defaultdict(list)
     for d in rows:
         per_source[_group_key(d)].append(d)
     outline = [
         "# OptCuts → Grid boundary failure evidence",
+        "",
+        f"**Diagnostic run ID:** \`{run_id}\`",
+        f"**Implementation version:** \`{version}\`",
+        f"**Newest referenced snapshot created (UTC):** {created}",
+        "**Data provenance:** " + (
+            "This report is restricted to the latest marked Grid run."
+            if run_id != "LEGACY_UNKNOWN_RUN"
+            else "Unverified legacy snapshots; rerun the ear-safe version."
+        ),
         "",
         f"Analyzed **{len(rows)}** failed correspondences. "
         "All are numerical failures, not mathematical impossibility proofs.",
