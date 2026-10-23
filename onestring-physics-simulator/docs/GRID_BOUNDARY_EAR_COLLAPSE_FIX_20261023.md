@@ -51,6 +51,43 @@ These numbers come from this **one specific input snapshot**. They are not
 new native OptCuts execution and do not prove a globally bijective solution
 for the repaired target.
 
+## Added automatic recovery on a collapsed boundary ear
+
+An area ratio of zero at a fully fixed-boundary triangle now raises the
+typed internal `FixedBoundaryEarCollapseError` (rather than being treated as
+an ordinary numerical minimization failure). The experimental Grid mode
+intercepts the exception and does the following **before** expensive fitting:
+
+1. Move existing Grid-corner anchors to appropriate *source boundary
+   vertices* in strictly cyclic order, maintaining the original 3D/UV
+   triangulation and **exact same** 50%-selected Grid footprint.
+2. Retest the 0.005 minimum signed-area ratio for **every** triangle whose
+   vertices are all fixed boundary vertices. Only valid candidates proceed.
+3. Produce up to three different viable boundary mappings. If the first
+   candidate's interior harmonic + untangling optimizer fails, the remaining
+   candidates can be tried instead.
+4. If the cheap local repair cannot fix all boundary-ear triangles, try a
+   bounded depth-3, width-8 multi-anchor search (64 evaluations max per
+   failed correspondence). This can resolve cases where two anchors must
+   move before the number of forced-collapse triangles decreases.
+5. If none of the searched corrections is feasible, report
+   `GRID_BOUNDARY_NO_EAR_FEASIBLE_CORRESPONDENCE` with offending face IDs.
+   The code does **not** silently change M2D selection, relax area guards or
+   accept degenerate UV.
+
+The terminal prints `[GRID-EAR-PREFLIGHT]` with counts:
+`invalid_raw_matches`, `ear_safe_repaired`, `recovery_variants`,
+`unrecoverable`, `forced_bad_face_ids`, and
+`eligible_correspondences`. Methods with suffix
+`_ear_exception_recovered_N` are actual automatic recovery variants.
+
+This catches a **specific mathematically forced** collapse. A different
+failure (e.g. an interior triangle flipping or nonlinear boundary self-crossing)
+may still require a different numerical/geometry algorithm. There is
+no end-to-end Bunny success claim from unit tests alone.
+
+---
+
 ## Implemented code correction
 
 - `optcuts_grid_ear_correspondence.py`: exact signed-area preflight on
