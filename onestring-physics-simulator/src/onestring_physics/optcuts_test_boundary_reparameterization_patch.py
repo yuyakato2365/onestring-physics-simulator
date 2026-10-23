@@ -227,12 +227,17 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 # Expose the user-visible Omega choice without altering the
                 # stable internal optcuts_test carrier and its K3D/K2D patches.
                 "requested_omega_parameterization_mode": (
-                    "optcuts_grid_aware" if bool(getattr(
+                    "optcuts_area_grid_boundary" if bool(getattr(
+                        params,"optcuts_area_grid_boundary_enabled",False))
+                    else ("optcuts_grid_aware" if bool(getattr(
                         params,"optcuts_grid_aware_enabled",False))
-                    else "optcuts_test"
+                    else "optcuts_test")
                 ),
                 "optcuts_grid_aware_selected_as_omega_mode": bool(
                     getattr(params,"optcuts_grid_aware_enabled",False)
+                ),
+                "optcuts_area_grid_boundary_selected_as_omega_mode": bool(
+                    getattr(params,"optcuts_area_grid_boundary_enabled",False)
                 ),
                 "optcuts_test_enabled": True,
                 "optcuts_test_model": (
