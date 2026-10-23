@@ -413,3 +413,51 @@ def test_boundary_phase_selection_uses_global_displacement():
     assert len(phases)==4
     np.testing.assert_allclose(phases[0][2],uv)
     assert phases[0][0]<1e-12
+
+
+
+def test_corner_dp_search_preserves_boundary_order_and_grid_corners():
+    """A nonuniform sampled contour needs more than arc-length landmarks."""
+    from onestring_physics.optcuts_area_grid_boundary import (
+        _monotone_corner_indices_dp, _boundary_target_candidates,
+    )
+    old = np.array([
+        [0., 0.], [.3, 0.], [1., 0.], [2., 0.], [2., 1.],
+        [2., 2.], [1., 2.], [0., 2.], [0., 1.],
+    ])
+    outline = np.array([
+        [0., 0.], [2., 0.], [2., .3],
+        [.6, .3], [.6, 2.], [0., 2.],
+    ])
+    old_lengths = np.linalg.norm(np.roll(old, -1, axis=0) - old, axis=1)
+    new_lengths = np.linalg.norm(np.roll(outline, -1, axis=0) - outline, axis=1)
+    old_t = np.r_[0., np.cumsum(old_lengths[:-1])] / old_lengths.sum()
+    times = np.r_[0., np.cumsum(new_lengths[:-1])] / new_lengths.sum()
+    indices = _monotone_corner_indices_dp(old, old_t, outline, times)
+    assert indices[0] == 0
+    assert len(set(indices)) == len(outline)
+    assert all(b > a for a, b in zip(indices, indices[1:]))
+    candidates = _boundary_target_candidates(
+        old, np.arange(len(old)), outline, max_phases=6,
+    )
+    assert any(method == "corner_dp" for _, _, _, method in candidates)
+    assert all(len(mapped) == len(old) for _, _, mapped, _ in candidates)
+    # Each candidate exactly interpolates the SAME corners, never softens
+    # the 50% cell footprint or reduces the number of mandatory Grid turns.
+    for _, phase, mapped, method in candidates:
+        shifted = np.roll(outline, -phase, axis=0)
+        assert all(np.min(np.linalg.norm(mapped - corner, axis=1)) < 1e-10
+                   for corner in shifted)
+
+
+def test_corner_dp_square_regression_retains_zero_displacement():
+    from onestring_physics.optcuts_area_grid_boundary import (
+        _boundary_target_candidates,
+    )
+    square = np.array([[0., 0.], [1., 0.], [1., 1.], [0., 1.]])
+    result = _boundary_target_candidates(
+        square, np.arange(4), square, max_phases=4,
+    )
+    assert len(result) == 4
+    assert result[0][0] == pytest.approx(0.)
+    np.testing.assert_allclose(result[0][2], square)
