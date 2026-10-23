@@ -109,6 +109,8 @@ def test_paper_extrusion_preserves_closed_seam_on_top_and_bottom():
     ],float)
     mesh=SimpleNamespace(vertices=xyz.copy(),faces=faces,stage="K3D",
         metrics={"seam_exact_vertex_groups":topo["groups"],
+                 "k3d_smoothmax_enabled":True,
+                 "k3d_smoothmax_weight":10.,
                  "paper_t3d_planarity_iterations":5})
     # Actual upstream helpers are omitted, but the shared top/bottom solve
     # and output geometry must still follow real K3D+seam equality groups.
@@ -128,6 +130,11 @@ def test_paper_extrusion_preserves_closed_seam_on_top_and_bottom():
         mesh,.1,"T3D",pipeline
     )
     assert result.metrics["t3d_seam_exact_equality_group_count"]==2
+    assert result.metrics["t3d_final_k3d_smoothmax_audited"] is True
+    assert np.isfinite(
+        result.metrics["t3d_final_k3d_smoothmax_energy_after"]
+    )
+    assert result.metrics["t3d_final_k3d_smoothmax_energy_before"]>=0.
     assert result.metrics["t3d_seam_top_gap_max"]==0.
     assert result.metrics["t3d_seam_bottom_gap_max"]==0.
     np.testing.assert_array_equal(
