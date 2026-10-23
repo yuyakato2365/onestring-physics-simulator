@@ -16,6 +16,7 @@ must be finite, flipped-free, overlap-free and inside the M2D inverse map.
 from __future__ import annotations
 
 from collections import defaultdict
+import time
 import numpy as np
 
 
@@ -477,18 +478,47 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     chosen_phase=None
     chosen_method=None
     history=[]
+    fit_started = time.perf_counter()
+    max_attempts = min(12, len(boundary_candidates))
+    print(
+        "[GRID-BOUNDARY-FIT] start "
+        f"faces={len(faces)} outline_corners={len(target['grid_outline'])} "
+        f"possible_correspondences={len(boundary_candidates)} "
+        f"attempt_limit={max_attempts}",
+        flush=True,
+    )
     # The former 6-candidate shortlist could fail without trying the
     # geometrically better monotone corner assignments. Keep a bounded,
     # explicitly audited search instead of silently changing the cell mask.
-    for _cost,phase,mapped,method in boundary_candidates[:min(12,len(boundary_candidates))]:
+    for attempt, (_cost,phase,mapped,method) in enumerate(
+        boundary_candidates[:max_attempts], 1
+    ):
+        started_attempt = time.perf_counter()
+        print(
+            f"[GRID-BOUNDARY-FIT] correspondence={attempt}/{max_attempts} "
+            f"phase={phase} method={method} "
+            f"elapsed={started_attempt-fit_started:.1f}s",
+            flush=True,
+        )
         try:
             result,history=fit_by_continuation(
                 base,faces,loop,mapped,_harmonic_dirichlet,assess)
             chosen_phase=int(phase)
             chosen_method=str(method)
+            print(
+                f"[GRID-BOUNDARY-FIT] accepted={attempt}/{max_attempts} "
+                f"duration={time.perf_counter()-started_attempt:.1f}s",
+                flush=True,
+            )
             break
         except ValueError as exc:
             phase_errors.append(f"phase={phase}, fit={method}: {exc}")
+            print(
+                f"[GRID-BOUNDARY-FIT] failed={attempt}/{max_attempts} "
+                f"duration={time.perf_counter()-started_attempt:.1f}s "
+                f"cause={str(exc)[:150]}",
+                flush=True,
+            )
     if result is None:
         raise GridBoundaryReparameterizationError(
             f"GRID_BOUNDARY_ALL_MONOTONE_CORRESPONDENCES_FAILED: "
