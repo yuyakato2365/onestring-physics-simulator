@@ -715,33 +715,28 @@ with st.sidebar:
     )
     if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
         st.warning("This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.")
-    # Isolated UV-only grid-aware ablation: the OFF path is the unchanged
-    # official OptCuts -> CSF-tail -> M2D path. Paper / OptCuts-grid untouched.
-    optcuts_grid_aware_enabled = False
+    # The grid-aware variant is now selected directly from Omega
+    # parameterization mode. The dated UI choice is internally routed through
+    # the proven optcuts_test2 carrier, while this per-session flag selects
+    # only the additional UV-stage refinement. No second ON/OFF checkbox.
+    optcuts_grid_aware_enabled = bool(
+        not paper_fidelity_enabled
+        and omega_parameterization_mode == "optcuts_test"
+        and st.session_state.get("_onestring_grid_aware_omega_selected", False)
+    )
     optcuts_grid_aware_strength = 3.0
-    if (not paper_fidelity_enabled and
-            omega_parameterization_mode in ("optcuts", "optcuts_test", "optcuts_test2")):
-        with st.expander("実験：Grid-aware OptCuts（元のOptCutsは変更しない）", expanded=False):
-            optcuts_grid_aware_enabled = st.checkbox(
-                "Seamを格子線に寄せるUV最適化を追加",
-                value=False,
-                key="optcuts_grid_aware_experiment",
-                help="公式OptCutsのSeam接続は固定したまま、UVのSeam辺を後処理で"
-                     "格子線へ近づけます。各候補のUV反転・重なり、Symmetric Dirichlet、"
-                     "有効四角セル率を検査し、悪化する候補を拒否します。"
-                     "公式C++のSeam同時最適化そのものを変更する機能ではありません。",
-            )
+    if optcuts_grid_aware_enabled:
+        with st.expander("Grid-aware OptCuts のUV設定（実験）", expanded=False):
             optcuts_grid_aware_strength = float(st.slider(
                 "Grid整列の強さ（実験）",
-                min_value=0.5,max_value=10.0,value=3.0,step=0.5,
-                disabled=not optcuts_grid_aware_enabled,
+                min_value=0.5, max_value=10.0, value=3.0, step=0.5,
                 key="optcuts_grid_aware_strength",
             ))
             st.caption(
-                "OptCutsの切断トポロジーとCSF-tail最適化は変更せず、"
-                "その後にGrid整列を試します。2Dセルの割合は候補選択用の近似値です。"
-                "現在のΩ Gridは横・縦のUV間隔が異なることもあり、"
-                "四角パネルの正方性・完全なSeam一致を保証するものではありません。"
+                "既存のOptCuts_test2と同じK3D/K2D処理です。"
+                "公式OptCuts→CSF-tailの後、SeamのUVを格子線へ近づけます。"
+                "UV反転・重なり・SD歪み・格子セル率が悪化する候補は不採用。"
+                "元のSeam接続は変更しません（C++の制約付きOptCutsではありません）。"
             )
     with st.expander("Paper-reference BFF settings", expanded=omega_parameterization_mode == "paper_reference_bff"):
         bff_boundary_policy = st.selectbox(
