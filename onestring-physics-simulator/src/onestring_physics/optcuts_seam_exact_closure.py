@@ -226,8 +226,49 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
         parameterization,include_open=True
     )
     if not segments:
-        return {"status":"no_original_cut","groups":[],"paired_edges":[],
-                "unmatched_edges":0,"seam_grid_edges":0}
+        # The old implementation silently returned "no_original_cut",
+        # claiming nothing and proceeding to K3D even when a CLOSED input
+        # had a visible M2D boundary. That is not a legitimate closure.
+        edges=_uv_boundary_edges(faces)
+        if not edges:
+            return {
+                "status":"no_boundary","groups":[],"paired_edges":[],
+                "unmatched_edges":0,"unclassified_boundary_edges":0,
+                "seam_grid_edges":0,"source_open_grid_edges":0,
+                "boundary_grid_edges":0,
+            }
+        if not open_uv_edges:
+            raise SeamTopologyMismatch(
+                "SEAM_K3D_NO_SOURCE_CUT_FOR_GRID_BOUNDARY: "
+                f"grid_boundary_edges={len(edges)}; "
+                "the chart has a nonempty Grid boundary but the paired "
+                "3D/UV source has neither a two-sided cut nor a genuine "
+                "open 3D edge. Source seam provenance/UV topology is "
+                "missing: SmoothMax cannot generate missing seam pairs."
+            )
+        tol=max(float(np.ptp(uv,axis=0).max())*1e-8,1e-9)
+        uncovered=[]
+        for i,j in edges:
+            fraction=_covered_fraction_on_source_boundary(
+                uv[i],uv[j],open_uv_edges,tol
+            )
+            if fraction<1.-tol/max(
+                float(np.linalg.norm(uv[i]-uv[j])),1e-12
+            ):
+                uncovered.append((int(i),int(j),float(fraction)))
+        if uncovered:
+            raise SeamTopologyMismatch(
+                "SEAM_K3D_GRID_NOT_ON_SOURCE_OPEN_BOUNDARY: "
+                f"uncovered_edges={len(uncovered)} sample={uncovered[:6]}"
+            )
+        return {
+            "status":"source_open_boundary_only","groups":[],
+            "paired_edges":[],"unmatched_edges":0,
+            "unclassified_boundary_edges":0,"seam_grid_edges":0,
+            "source_open_grid_edges":len(edges),
+            "boundary_grid_edges":len(edges),
+            "source_open_boundary_edge_count":len(open_uv_edges),
+        }
     uvspan=max(float(np.ptp(uv,axis=0).max()),1.)
     tol=max(1e-8*uvspan,1e-9)
     xyz=np.asarray(parameterization.surface_vertices_3d,float)
@@ -248,6 +289,7 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
                     for line in open_uv_edges
                 )
     seam_edges=[]
+    source_open_grid_edges=0
     unclassified=[]
     diagnostics=[]
     cut_lines=[record[0] for record in segments]
@@ -271,7 +313,9 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
                 sampled[a] is not None and sampled[b] is not None):
             seam_edges.append((a,b))
         elif open_covered>=1.-edge_tol:
-            pass   # Proven entire true source-open boundary edge.
+            # An actual open input surface stays physically open.
+            # It is NOT a two-sided seam and cannot be closed by welding.
+            source_open_grid_edges+=1
         else:
             unclassified.append((a,b))
             midpoint=(uv[a]+uv[b])*.5
@@ -344,6 +388,8 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
         "unclassified_boundary_diagnostics":diagnostics[:12],
         "source_open_boundary_edge_count":len(open_uv_edges),
         "source_cut_boundary_edge_count":len(segments),
+        "source_open_grid_edges":int(source_open_grid_edges),
+        "boundary_grid_edges":int(len(edges)),
         "seam_grid_edges":len(seam_edges),
         "seam_grid_vertices":len(vertex_keys),
         "original_cut_segments":len(segments)//2,
@@ -532,16 +578,20 @@ def close_k3d_seam_after_full_vertex_restore(
     topo=discover_exact_seam_topology(parameterization,uv,mesh.faces)
     log={k:v for k,v in topo.items() if k not in ("groups","paired_edges")}
     out.metrics.update({f"seam_closure_{k}":v for k,v in log.items()})
-    if topo["status"]=="no_original_cut":
-        # Explicit, unambiguous telemetry: this is NOT a successful seam
-        # closure. The source chart may genuinely have no internal cut,
-        # or its physical edge provenance may be incomplete.
+    if topo["status"] in ("no_boundary","source_open_boundary_only"):
         out.metrics["seam_exact_closure_enabled"]=False
-        out.metrics["seam_exact_closure_reason"]="no_original_cut"
+        out.metrics["seam_exact_closure_reason"]=topo["status"]
+        out.metrics["seam_exact_source_open_edge_count"]=int(
+            topo.get("source_open_grid_edges",0)
+        )
         print(
-            "[SEAM-K3D] no_source_cut_detected; "
-            "no seam vertices welded; source input open boundaries "
-            "or source cut provenance must be inspected",flush=True,
+            "[SEAM-K3D] no_two_sided_cut "
+            f"status={topo['status']} "
+            f"genuine_source_open_grid_edges="
+            f"{topo.get('source_open_grid_edges',0)}; "
+            "there is NO corresponding side to weld. "
+            "A genuine input hole cannot be closed by SmoothMax.",
+            flush=True,
         )
         return out
     if topo["unclassified_boundary_edges"]:
@@ -580,6 +630,12 @@ def close_k3d_seam_after_full_vertex_restore(
         list(map(int,g)) for g in groups]
     out.metrics["seam_exact_paired_grid_edges"]=len(topo["paired_edges"])
     out.metrics["seam_exact_closure_enabled"]=True
+    out.metrics["seam_exact_source_open_edge_count"]=int(
+        topo.get("source_open_grid_edges",0)
+    )
+    out.metrics["seam_exact_full_shape_closed"]=bool(
+        topo.get("source_open_grid_edges",0)==0
+    )
     out.metrics["seam_exact_closure_vertex_space"]="full_original_M2D_grid"
     out.metrics["seam_exact_closure_executed_after_reduction"]=bool(
         getattr(mesh,"_seam_deferred_from_reduced_K3D",False)
