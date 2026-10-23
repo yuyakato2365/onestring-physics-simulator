@@ -151,6 +151,65 @@ def _source_seam_sample(uvp,segments,tol):
     return matched[0][1]
 
 
+def _covered_fraction_on_source_boundary(a,b,lines,tol):
+    """Total fraction of a Grid edge covered by collinear UV source edges.
+
+    Endpoint-only classification falsely accepts a chord whose endpoints
+    touch a source boundary but whose interior cuts across the chart.
+    Intersect the real collinear segment intervals instead. This does not
+    relax the UV proximity threshold or geometrically snap any panels.
+    """
+    a=np.asarray(a,float)
+    b=np.asarray(b,float)
+    d=b-a
+    denom=float(np.dot(d,d))
+    if denom<=1e-24:
+        raise SeamTopologyMismatch("SEAM_M2D_ZERO_LENGTH_BOUNDARY_EDGE")
+    length=denom**.5
+    eps=max(float(tol)/length,1e-12)
+    intervals=[]
+    for line in lines:
+        edge=np.asarray(line,float)
+        # Source boundary segments must be entirely on the Grid edge's
+        # supporting line, with nonzero interval overlap.
+        off0=abs(float(np.cross(d,edge[0]-a)))/length
+        off1=abs(float(np.cross(d,edge[1]-a)))/length
+        if max(off0,off1)>tol:
+            continue
+        tt=np.dot(edge-a,d)/denom
+        low=max(0.,float(min(tt)))
+        high=min(1.,float(max(tt)))
+        if high>low:
+            intervals.append((low,high))
+    if not intervals:
+        return 0.
+    intervals.sort()
+    total=0.
+    left,right=intervals[0]
+    for lo,hi in intervals[1:]:
+        if lo<=right+eps:
+            right=max(right,hi)
+        else:
+            total+=right-left
+            left,right=lo,hi
+    total+=right-left
+    return float(np.clip(total,0.,1.))
+
+
+def _distance_to_uv_segments(p,lines):
+    p=np.asarray(p,float)
+    best=float("inf")
+    for line in lines:
+        line=np.asarray(line,float)
+        d=line[1]-line[0]
+        denom=float(np.dot(d,d))
+        if denom<=1e-24:
+            continue
+        t=float(np.clip(np.dot(p-line[0],d)/denom,0.,1.))
+        best=min(best,float(np.linalg.norm(p-(line[0]+t*d))))
+    return best if np.isfinite(best) else None
+
+
 def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
     """Return pairs and counts using original UV->source-seam provenance.
 
@@ -188,16 +247,64 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
                 )
     seam_edges=[]
     unclassified=[]
+    diagnostics=[]
+    cut_lines=[record[0] for record in segments]
+    full_source_lines=cut_lines+open_uv_edges
+    # Verify each COMPLETE Grid boundary edge, not only its two endpoints:
+    # both endpoint coordinates can land on a source curve even when their
+    # straight connecting segment cuts across the true chart boundary.
     for a,b in edges:
-        if sampled[a] is not None and sampled[b] is not None:
+        seam_covered=_covered_fraction_on_source_boundary(
+            uv[a],uv[b],cut_lines,tol
+        )
+        open_covered=_covered_fraction_on_source_boundary(
+            uv[a],uv[b],open_uv_edges,tol
+        )
+        full_covered=_covered_fraction_on_source_boundary(
+            uv[a],uv[b],full_source_lines,tol
+        )
+        edge_tol=max(tol/max(float(np.linalg.norm(uv[b]-uv[a])),1e-12),
+                     1e-9)
+        if (seam_covered>=1.-edge_tol and
+                sampled[a] is not None and sampled[b] is not None):
             seam_edges.append((a,b))
-        elif on_open[a] and on_open[b]:
-            pass   # Genuine open source boundary: not a seam.
+        elif open_covered>=1.-edge_tol:
+            pass   # Proven entire true source-open boundary edge.
         else:
             unclassified.append((a,b))
-    # Unknown Grid boundary edges are not allowed to quietly escape the
-    # seam coverage audit; they indicate an incomplete correspondence.
-    # A connected closed 3D source must have NO open-source UV edges.
+            midpoint=(uv[a]+uv[b])*.5
+            diagnostics.append({
+                "edge":[int(a),int(b)],
+                "uv_a":np.round(uv[a],9).tolist(),
+                "uv_b":np.round(uv[b],9).tolist(),
+                "cut_coverage":round(seam_covered,8),
+                "open_coverage":round(open_covered,8),
+                "all_source_boundary_coverage":round(full_covered,8),
+                "seam_endpoint_ids":[
+                    bool(sampled[a] is not None),
+                    bool(sampled[b] is not None),
+                ],
+                "nearest_cut_distances":[
+                    _distance_to_uv_segments(uv[a],cut_lines),
+                    _distance_to_uv_segments(midpoint,cut_lines),
+                    _distance_to_uv_segments(uv[b],cut_lines),
+                ],
+                "nearest_open_distances":[
+                    _distance_to_uv_segments(uv[a],open_uv_edges),
+                    _distance_to_uv_segments(midpoint,open_uv_edges),
+                    _distance_to_uv_segments(uv[b],open_uv_edges),
+                ],
+                "likely_reason":(
+                    "M2D_grid_edge_not_on_actual_omega_boundary"
+                    if full_covered<1.-edge_tol else
+                    "grid_edge_crosses_seam_to_open_source_boundary"
+                    if (seam_covered>0 and open_covered>0) else
+                    "uv_boundary_correspondence_or_source_topology"
+                ),
+            })
+    # Fail closed if even one cell boundary is not proven to correspond
+    # to a real source cut (two-sided) or true source open boundary.
+    # In particular, don't weld an edge that only PARTLY lies on a cut.
     vertex_keys={}
     for v,p in sampled.items():
         if p is not None:
@@ -221,7 +328,10 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
         else:
             unmatched.extend(copies)
     return {
-        "status":("conforming" if not unmatched else "nonconforming"),
+        "status":(
+            "conforming" if not unmatched and not unclassified
+            else "nonconforming"
+        ),
         "groups":[sorted(x) for x in groups],
         "paired_edges":paired,
         "unmatched_edges":len(unmatched),
@@ -229,6 +339,9 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
         "unclassified_boundary_edge_ids_sample":[
             [int(a),int(b)] for a,b in unclassified[:12]
         ],
+        "unclassified_boundary_diagnostics":diagnostics[:12],
+        "source_open_boundary_edge_count":len(open_uv_edges),
+        "source_cut_boundary_edge_count":len(segments),
         "seam_grid_edges":len(seam_edges),
         "seam_grid_vertices":len(vertex_keys),
         "original_cut_segments":len(segments)//2,
@@ -424,8 +537,10 @@ def install_optcuts_exact_seam_closure(pipeline):
                 "SEAM_K3D_UNCLASSIFIED_GRID_BOUNDARY: "
                 f"edges={topo['unclassified_boundary_edges']} "
                 f"sample={topo['unclassified_boundary_edge_ids_sample']}; "
-                "boundary must be proven to be a source cut or a genuine "
-                "open-source edge before exact seam closure"
+                f"diagnostics={topo['unclassified_boundary_diagnostics'][:4]}; "
+                "the Grid edge must lie ENTIRELY on a paired source cut "
+                "or true original open boundary. Do not weld/unclassify "
+                "without restoring the Omega-M2D correspondence."
             )
         if topo["unmatched_edges"]:
             raise SeamTopologyMismatch(
