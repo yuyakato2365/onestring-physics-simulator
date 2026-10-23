@@ -356,3 +356,60 @@ def test_area_mode_m2d_does_not_call_prior_strict_crop():
     m2d=owner._build_m2d(grid,domain,params)
     assert calls["strict"]==0
     assert len(m2d.faces)==64
+
+
+
+def test_no_flip_untangling_repairs_a_folded_harmonic_interior():
+    """The user's 25%-boundary-motion failure must trigger an actual
+    interior optimization, not immediate rejection or threshold reduction.
+    """
+    from onestring_physics.optcuts_grid_boundary_untangle import (
+        untangle_fixed_boundary, oriented_area_ratio,
+        fit_by_continuation,
+    )
+    uv=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.],[.5,.5]])
+    faces=np.array([[0,1,4],[1,2,4],[2,3,4],[3,0,4]],int)
+    loop=np.array([0,1,2,3])
+    # Target boundary stays a simple square. A wrong harmonic interior
+    # guess lies outside, folding three triangles.
+    harmonic=uv.copy()
+    harmonic[4]=[-1.,-1.]
+    assert np.min(oriented_area_ratio(uv,harmonic,faces))<0.
+    out,diag=untangle_fixed_boundary(
+        uv,faces,loop,uv[loop],harmonic,uv)
+    np.testing.assert_allclose(out[loop],uv[loop])
+    assert float(np.min(oriented_area_ratio(uv,out,faces)))>=.005
+    assert diag["solver"]=="orientation_barrier_lbfgsb"
+
+    def fake_harmonic(base,faces,loop,targets):
+        folded=base.copy()
+        folded[loop]=targets
+        folded[4]=[-1.,-1.]
+        return folded
+
+    def check(candidate):
+        ratio=oriented_area_ratio(uv,candidate,faces)
+        return dict(
+            flipped_triangles=int(np.count_nonzero(ratio<=0)),
+            degenerate_triangles=int(np.count_nonzero(ratio<.005)),
+            injectivity_overlap_pairs=0,
+        )
+    fitted,history=fit_by_continuation(
+        uv,faces,loop,uv[loop],fake_harmonic,check)
+    assert len(history)>=4
+    assert any(row.get("solver")=="orientation_barrier_lbfgsb"
+               for row in history)
+    assert all(row["accepted"] for row in history)
+    assert np.min(oriented_area_ratio(uv,fitted,faces))>=.005
+
+
+def test_boundary_phase_selection_uses_global_displacement():
+    from onestring_physics.optcuts_area_grid_boundary import (
+        _boundary_target_candidates,
+    )
+    uv=np.array([[0.,0.],[2.,0.],[2.,1.],[0.,1.]])
+    reversed_start=np.roll(uv,2,axis=0)
+    phases=_boundary_target_candidates(uv,np.arange(4),reversed_start)
+    assert len(phases)==4
+    np.testing.assert_allclose(phases[0][2],uv)
+    assert phases[0][0]<1e-12
