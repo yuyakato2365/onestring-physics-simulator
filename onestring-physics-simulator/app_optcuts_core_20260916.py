@@ -83,11 +83,25 @@ def _install_optcuts_selector() -> None:
         if label != "Omega parameterization mode":
             return original_selectbox(label, options, *args, **kwargs)
 
-        for mode in ("optcuts", "optcuts_test", "optcuts_test2", "optcuts_grid"):
+        for mode in ("optcuts", "optcuts_test", "optcuts_test2",
+                     "optcuts_grid_aware", "optcuts_grid"):
             if mode not in option_list:
                 option_list.append(mode)
+        original_format=kwargs.get("format_func")
+        def label_for_mode(mode):
+            if mode=="optcuts_grid_aware":
+                return "2026-10-23 | Grid-aware OptCuts Ω + paper-aligned K3D/K2D (UV refinement)"
+            return str(original_format(mode)) if original_format else str(mode)
+        kwargs["format_func"]=label_for_mode
         value = original_selectbox(label, option_list, *args, **kwargs)
-        if value not in {"optcuts", "optcuts_test", "optcuts_test2", "optcuts_grid"}:
+        # Preserve the chosen frontend mode even though the numerical carrier
+        # for this mode (same as the working 2026-09-18 setup) is optcuts_test.
+        # Never use a process-global env flag as the sole mode source.
+        st.session_state["_onestring_grid_aware_omega_selected"] = (
+            value == "optcuts_grid_aware"
+        )
+        if value not in {"optcuts", "optcuts_test", "optcuts_test2",
+                         "optcuts_grid_aware", "optcuts_grid"}:
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "0"
             return value
 
@@ -105,6 +119,13 @@ def _install_optcuts_selector() -> None:
                 "OptCuts_test2: same geometry/constraint pipeline as OptCuts_test, but with a shorter "
                 "K3D AL budget and an accelerated K2D kinematic solve. OptCuts_test remains unchanged "
                 "for comparison."
+            )
+        elif value == "optcuts_grid_aware":
+            st.caption(
+                "Grid-aware OptCuts Ω: working OptCuts_test2 / paper-aligned K3D-K2D path "
+                "+ experimental grid-aligned UV refinement after official OptCuts. "
+                "The original OptCuts topology and K3D/K2D solvers remain unchanged. "
+                "Use OptCuts_test2 as the baseline comparison."
             )
         else:
             st.caption(
@@ -145,7 +166,8 @@ def _install_optcuts_selector() -> None:
             key="onestring_optcuts_timeout",
         )
 
-        if value in {"optcuts", "optcuts_test", "optcuts_test2"}:
+        if value in {"optcuts", "optcuts_test", "optcuts_test2",
+                      "optcuts_grid_aware"}:
             use_bijectivity = st.checkbox(
                 "OptCuts enforce bijectivity",
                 value=os.environ.get("ONESTRING_OPTCUTS_USE_BIJECTIVITY", "1").lower()
@@ -164,7 +186,8 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_U"] = "0"
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = "0"
 
-            if value in {"optcuts_test", "optcuts_test2"}:
+            if value in {"optcuts_test", "optcuts_test2",
+                          "optcuts_grid_aware"}:
                 st.markdown("**K3D hard-planarity (Augmented Lagrangian)**")
                 anchor_weight = st.number_input(
                     "K3D AL anchor weight (w_a)",
@@ -185,7 +208,7 @@ def _install_optcuts_selector() -> None:
                     "Smaller w_a = stronger freedom to planarize; larger w_a = stronger preservation "
                     "of the original K3D shape."
                 )
-                if value == "optcuts_test2":
+                if value in {"optcuts_test2","optcuts_grid_aware"}:
                     st.caption(
                         "Test2 speed profile: K3D AL outer=8; K2D kinematic outer<=2, nfev<=40, "
                         "collision candidates<=900; SciPy finite-difference workers are used when supported."
@@ -257,7 +280,9 @@ def _install_optcuts_selector() -> None:
         # Keep the visible selector value distinct while routing test2 through the
         # mature optcuts_test patch stack.  The environment flag is the only
         # behavioral difference and is read by the acceleration wrapper.
-        if value == "optcuts_test2":
+        if value in {"optcuts_test2","optcuts_grid_aware"}:
+            # Both keep the same proven K3D/K2D and paper-aligned M2D route.
+            # Grid awareness is a separate Omega-only parameter.
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "2"
             return "optcuts_test"
         if value == "optcuts_test":
