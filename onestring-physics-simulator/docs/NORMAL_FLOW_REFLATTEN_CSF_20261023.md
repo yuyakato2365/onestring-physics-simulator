@@ -97,3 +97,57 @@ grid rotation, curvature rings, Split budget, and collision feedback settings
 the same, then toggle only reBFF, rerun and compare
 `max_csf_before_split`, `csf_split_step_count`,
 `max_csf_after_split`, cut lines and downstream failure diagnostics.
+
+
+## Optional reBFF UV applied to manufacturing M2D (2026-10-23)
+
+New independent UI checkbox (default **OFF**):
+**実験：Split後の再BFF UVを実際のM2Dパネル形状に反映**.
+It is available only when the Split CSF area-span evaluator uses reBFF ON.
+
+**Most important invariant: unchanged Split evaluation and choices.**
+The same `plan_reflatten_cuts` evaluates the same source shape, curvature
+peak, candidate full-grid row/column seams, per-patch BFF area spans, and
+fixed threshold 2. The new option merely retains the *already calculated*
+terminal 3D-piece BFF UV charts in transient `domain` state. Disabling
+the option preserves the original M2D coordinates and original behavior.
+
+When this geometry option is ON and at least one CSF Split is accepted:
+
+1. The original `M2D` grid is cut using the **unchanged** complete seam
+   algorithm, with duplicated seam vertex IDs in disconnected components.
+2. Each terminal 3D piece has its source-Ω UV triangle chart and the BFF UV
+   chart it had when its area span was evaluated. Corresponding M2D vertices
+   are barycentrically mapped from source UV into the terminal BFF chart.
+3. Each BFF chart is similarity-aligned (translation / rotation / possible
+   reflection / uniform scale) to its original Ω chart to fix BFF's arbitrary
+   gauge. Similarity does not modify the max/min area-span metric.
+4. M2D receives the aligned BFF coordinates. The original Ω coordinates
+   remain in `_split_panel_source_vertices` for the exact original
+   M2D->M3D inverse lift. The M2D geometry changed, but the 3D source
+   surface correspondence does **not** change. K3D/K2D/T2D receive the
+   rebuilt actual M2D geometry.
+5. All quadrilaterals must retain signed orientation and positive area;
+   an incomplete face-to-leaf mapping, a shared seam vertex between two
+   independent reBFF leaves, missing charts, or collapsed/flipped quads
+   produce a **hard error**, not a silent fallback to old UV.
+   A small (<=1.2% grid pitch) extrapolation is explicitly counted
+   where the candidate 3D clip was offset by up to 0.6% of pitch to avoid
+   degenerate triangles.
+6. Panel packing uses the changed manufacturing UV bounding boxes, and
+   avoids packing based on outdated Ω positions.
+
+**Limits:** The per-piece charts are the terminal leaves of the *CSF Split*
+planner. A further collision-feedback seam can subdivide such a leaf; its
+sub-parts inherit the same BFF chart rather than being independently
+reflattened. Re-BFF can deform square M2D grid panels into non-square ones;
+hinge manufacture and actual physical assembly are **not certified**.
+The reported Split CSF scores remain the original evaluation metrics, not
+a re-measurement of the final packed manufacturing UV. For a shape with
+no generated CSF Split, even if this checkbox is ON, the original M2D stays
+unchanged and the UI explains why.
+
+The implementation and integration are
+`postcut_rebff_m2d.py`, `simple_split_panel_patch.py`, and
+`final_split_panel_pass.py`. Targeted tests are
+`tests/test_postcut_rebff_m2d.py`.
