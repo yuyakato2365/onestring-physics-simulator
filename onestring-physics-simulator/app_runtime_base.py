@@ -30,6 +30,31 @@ if __name__ == "__main__" and os.environ.get("ONESTRING_RUNTIME_BASE_BOOTSTRAPPE
         run_name="__main__",
     )
     st.stop()
+
+# Fail visibly instead of appearing to freeze during repeated Streamlit startup.
+# The 2026-10-23 report restarted the Paper UI 19 times without ever
+# reaching the pipeline. Keep this limited to the paper-mode UI. Normal
+# OptCuts/Paper-OFF runs are never stopped by this diagnostic guard.
+if (__name__ == "__main__" and
+        st.session_state.get("paper_fidelity_computation_mode", True)):
+    _startup_now = time.monotonic()
+    _startup_times = [
+        float(t) for t in st.session_state.get("_onestring_paper_ui_recent_starts", ())
+        if _startup_now - float(t) <= 60.0
+    ]
+    _startup_times.append(_startup_now)
+    st.session_state["_onestring_paper_ui_recent_starts"] = _startup_times
+    if len(_startup_times) >= 12:
+        st.error(
+            "PAPER_UI_RERUN_LOOP_DETECTED: StreamlitのPaper画面が60秒以内に"
+            "12回以上再起動されました。計算フリーズではなくUI再実行ループです。"
+            "最新の起動ログを確認し、Streamlitのウィジェット状態が"
+            "繰り返し書き換えられていないかを調べてください。"
+            "60秒間の再実行が収まれば、この保護は自動解除されます。"
+        )
+        print("[PAPER_UI_RERUN_LOOP_DETECTED] repeated script starts", flush=True)
+        st.stop()
+
 from streamlit_plotly_events import plotly_events
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
