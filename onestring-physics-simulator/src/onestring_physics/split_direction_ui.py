@@ -68,7 +68,7 @@ def render_split_direction_ui(st, state):
     steps = [s for s in report.get("steps", []) if s.get("candidates")]
     st.subheader("Splitの向きを選ぶ（M2Dの候補線）")
     if not steps:
-        st.caption("この結果には Split の候補線の記録がありません（Split なし、または再展開判定以外）。")
+        st.caption("この結果には Split の候補線の記録がありません（Split なし、または面積比判定以外）。")
         return
     current = list(st.session_state.get(SESSION_KEY, ()))
     current += ["auto"] * (len(steps) - len(current))
@@ -154,9 +154,14 @@ def render_split_question(st):
                       margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h", y=-0.02),
                       paper_bgcolor="white", plot_bgcolor="white")
     st.subheader(f"Split {int(q['step']) + 1} の向きを選んでください")
-    st.caption(f"オレンジのピース（{len(parent)}枚）の σ = {float(q['parent_sigma']):.3f} > 2 なので切ります。"
-               "どちらの候補も、平滑化ガウス曲率が最大のグリッド頂点を通る端から端までの格子線です。"
-               "子の σ は、切った2片をそれぞれ自由境界BFFで展開し直して測った値です（2以下なら、その片はそれ以上切りません）。")
+    reason=("検証専用の強制Splitです" if q.get("validation_forced",False)
+            else "閾値2を超えたため切断を検討しています")
+    evaluation=("各子の3D曲面に公式自由境界BFFを適用"
+                if q.get("reflatten_per_piece",True)
+                else "初期ΩのUVを各子に保持（再BFFは実行しない）")
+    st.caption(f"オレンジのピース（{len(parent)}枚）の σ = {float(q['parent_sigma']):.3f}。{reason}。"
+               "どちらの候補も、平滑化ガウス曲率最大点を通る端から端までの格子線です。"
+               f"子のσの評価：{evaluation}。")
     st.plotly_chart(fig, use_container_width=True, key="split_question_figure")
     cols = st.columns(3)
     for col, axis in zip(cols, ("col", "row")):
