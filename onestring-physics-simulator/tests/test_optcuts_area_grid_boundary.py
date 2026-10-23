@@ -168,10 +168,23 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
         )
 
     def flatten_domain(chart,*_):
-        return SimpleNamespace(boundary=chart.omega_boundary.copy(),
-                               parameterization=chart,
-                               uv_vertices=np.zeros((1,2)),
-                               split_lines=[])
+        # The actual free-boundary overlay in the dated app is 2*nx by
+        # 2*ny, with an extra cell of margin on ALL four sides.
+        # The same lattice is used for selection and final M2D.
+        n=2*grid.nx+2;m=2*grid.ny+2
+        origin=np.asarray(chart.omega_boundary,float).min(axis=0)[:2]
+        extent=np.ptp(np.asarray(chart.omega_boundary,float),axis=0)
+        step=np.maximum(extent/np.array([2*grid.nx,2*grid.ny]),1e-8)
+        x=origin[0]+(np.arange(n+1)-1)*step[0]
+        y=origin[1]+(np.arange(m+1)-1)*step[1]
+        xx,yy=np.meshgrid(x,y,indexing="xy")
+        return SimpleNamespace(
+            boundary=chart.omega_boundary.copy(),
+            parameterization=chart,uv_vertices=np.stack([xx,yy],axis=-1).reshape(-1,2),
+            overlay_nx=n,overlay_ny=m,overlay_margin_tiles=1,
+            overlay_step_u=step[0],overlay_step_v=step[1],
+            split_lines=[],
+        )
 
     def m2d_source(_grid,domain,*_):
         verts=np.c_[domain.uv_vertices,np.zeros(len(domain.uv_vertices))]
@@ -191,11 +204,17 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
     install_optcuts_test_boundary_reparameterization_patch(owner)
     params=Params()
     chart=owner._build_surface_parameterization(None,None,grid,params)
+    # Fitting must NOT occur before real M2D lattice is available.
+    assert chart._onestring_optcuts_candidates==["stale-original-UV"]
+    assert not chart.metrics.get("optcuts_area_grid_boundary_enabled",False)
+    domain=owner._flatten_to_domain(chart,grid,params)
     assert chart._onestring_optcuts_candidates==[]
     assert chart.metrics["optcuts_area_grid_multistart_downstream_swap_enabled"] is False
-    domain=owner._flatten_to_domain(chart,grid,params)
+    assert chart.metrics["optcuts_area_grid_lattice_source"]=="real_production_m2d_overlay"
+    assert domain.overlay_nx==10 and domain.overlay_ny==10
     m2d=owner._build_m2d(grid,domain,params)
     assert len(m2d.faces)==64
+    assert m2d.metrics["paper_m2d_candidate_face_count"]==100
     assert m2d.metrics["optcuts_area_grid_boundary_applied_to_m2d"]
     assert m2d.metrics["optcuts_area_grid_coverage_threshold"]==.5
     assert chart.metrics["optcuts_area_grid_boundary_status"]=="accepted_exact_grid_outline"
@@ -209,3 +228,131 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
     assert not original.metrics.get("optcuts_area_grid_boundary_enabled",False)
     assert original.metrics["optcuts_test_grid_outline_reparameterization"] is False
     assert original._onestring_optcuts_candidates==["stale-original-UV"]
+
+
+
+def test_actual_m2d_lattice_phase_is_preserved_not_invented():
+    from onestring_physics.optcuts_area_grid_boundary import (
+        _actual_overlay_lattice,
+    )
+    uv,tri,loop=_grid_chart()
+    origin=np.array([-.0625,-.1875])
+    h=np.array([.125,.125])
+    nx=10;ny=10
+    x=origin[0]+np.arange(nx+1)*h[0]
+    y=origin[1]+np.arange(ny+1)*h[1]
+    xx,yy=np.meshgrid(x,y,indexing="xy")
+    domain=SimpleNamespace(
+        overlay_nx=nx,overlay_ny=ny,overlay_margin_tiles=1,
+        uv_vertices=np.stack([xx,yy],axis=-1).reshape(-1,2),
+    )
+    target=construct_grid_target(
+        uv,tri,loop,nx=4,ny=4,threshold=.5,domain=domain,
+    )
+    assert target["grid_source"]=="real_production_m2d_overlay"
+    np.testing.assert_allclose(target["origin"],origin)
+    np.testing.assert_allclose(target["step"],h)
+    assert target["mask"].shape==(ny,nx)
+    assert target["mask"][0,0] is np.False_ or not bool(target["mask"][0,0])
+    assert np.any(target["mask"])
+    invalid=SimpleNamespace(
+        overlay_nx=nx,overlay_ny=ny,overlay_margin_tiles=1,
+        uv_vertices=domain.uv_vertices.copy(),
+    )
+    invalid.uv_vertices[5,0]+=.03
+    with pytest.raises(GridBoundaryReparameterizationError,match="LATTICE_MISMATCH"):
+        _actual_overlay_lattice(invalid)
+
+
+def test_subdivision_adds_paired_3d_uv_boundary_vertices_with_same_geometry():
+    from onestring_physics.optcuts_area_grid_boundary import (
+        _ensure_boundary_vertices,
+    )
+    from onestring_physics.optcuts_backend import _boundary_loops
+    uv=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+    faces=np.array([[0,1,2],[0,2,3]],int)
+    p=SimpleNamespace(
+        uv_vertices_2d=uv.copy(),
+        uv_faces=faces.copy(),
+        surface_vertices_3d=np.c_[uv,np.zeros(4)],
+        surface_faces=faces.copy(),
+    )
+    loop=_boundary_loops(faces)[0]
+    new_loop,inserted=_ensure_boundary_vertices(p,12,loop)
+    assert inserted==8
+    assert len(new_loop)==12
+    assert len(p.uv_vertices_2d)==12
+    assert len(p.surface_vertices_3d)==12
+    assert len(p.uv_faces)==len(p.surface_faces)==10
+    for triangle_uv,triangle_xyz in zip(p.uv_faces,p.surface_faces):
+        np.testing.assert_allclose(
+            p.uv_vertices_2d[triangle_uv],
+            p.surface_vertices_3d[triangle_xyz,:2],
+        )
+    assert len(_boundary_loops(p.uv_faces))==1
+
+
+def test_area_mode_m2d_does_not_call_prior_strict_crop():
+    """Unlike the old code, already-removed >=50% quads must survive."""
+    from onestring_physics.optcuts_test_boundary_reparameterization_patch import (
+        install_optcuts_test_boundary_reparameterization_patch,
+    )
+    uv,tri,loop=_grid_chart()
+    p=SimpleNamespace(
+        method="optcuts_official",uv_vertices_2d=uv.copy(),uv_faces=tri.copy(),
+        surface_vertices_3d=np.c_[uv,np.zeros(len(uv))],
+        surface_faces=tri.copy(),
+        omega_boundary=uv[np.r_[loop,loop[0]]].copy(),metrics={},
+        triangle_acceleration=None,
+    )
+    grid=SimpleNamespace(nx=4,ny=4)
+    calls={"strict":0}
+    def fake_legacy_crop(*_args,**_kwargs):
+        calls["strict"]+=1
+        raise AssertionError("M2D pre-crop would permanently remove valid boundary quads")
+    from dataclasses import dataclass
+    @dataclass
+    class Params:
+        omega_parameterization_mode:str="optcuts_test"
+        optcuts_try_alternative_initial_cut:bool=True
+        optcuts_area_grid_boundary_enabled:bool=True
+        optcuts_area_grid_coverage_threshold:float=.5
+        omega_overlay_margin:int=1
+    def actual_domain(param, *_):
+        x=np.linspace(-.125,1.125,11)
+        xx,yy=np.meshgrid(x,x,indexing="xy")
+        return SimpleNamespace(
+            boundary=param.omega_boundary.copy(),parameterization=param,
+            uv_vertices=np.stack([xx,yy],axis=-1).reshape(-1,2),
+            overlay_nx=10,overlay_ny=10,overlay_margin_tiles=1,
+            split_lines=[],
+        )
+    class FakeQuadMesh:
+        def __init__(self,vertices,faces,grid,stage,metrics,split_lines):
+            self.vertices=vertices;self.faces=faces;self.grid=grid
+            self.stage=stage;self.metrics=metrics;self.split_lines=split_lines
+    class FakeGrid:
+        def __init__(self,n,m):
+            self.tiles=[SimpleNamespace(vertex_ids=(
+                j*(n+1)+i,j*(n+1)+i+1,
+                (j+1)*(n+1)+i+1,(j+1)*(n+1)+i))
+                for j in range(m) for i in range(n)]
+    origin=SimpleNamespace(
+        QuadMesh=FakeQuadMesh,
+        create_quad_grid=lambda n,m,*_args: FakeGrid(n,m),
+    )
+    owner=SimpleNamespace(
+        _original=origin,
+        _build_surface_parameterization=lambda *_args:p,
+        _flatten_to_domain=actual_domain,
+        _build_m2d=fake_legacy_crop,
+    )
+    install_optcuts_test_boundary_reparameterization_patch(owner)
+    params=Params()
+    chart=owner._build_surface_parameterization(None,None,grid,params)
+    domain=owner._flatten_to_domain(chart,grid,params)
+    # QuadMesh uses original 50% mask directly, even if previous crop would fail.
+    grid.tile_size=1.;grid.gap_size=0.
+    m2d=owner._build_m2d(grid,domain,params)
+    assert calls["strict"]==0
+    assert len(m2d.faces)==64
