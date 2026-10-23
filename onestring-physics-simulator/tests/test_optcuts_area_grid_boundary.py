@@ -155,6 +155,8 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
 
     def source_chart(*_):
         return SimpleNamespace(
+            _onestring_optcuts_candidates=["stale-original-UV"],
+            _onestring_optcuts_candidate_qualities=["stale-quality"],
             method="optcuts_official",
             uv_vertices_2d=uv.copy(),
             uv_faces=tri.copy(),
@@ -189,6 +191,8 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
     install_optcuts_test_boundary_reparameterization_patch(owner)
     params=Params()
     chart=owner._build_surface_parameterization(None,None,grid,params)
+    assert chart._onestring_optcuts_candidates==[]
+    assert chart.metrics["optcuts_area_grid_multistart_downstream_swap_enabled"] is False
     domain=owner._flatten_to_domain(chart,grid,params)
     m2d=owner._build_m2d(grid,domain,params)
     assert len(m2d.faces)==64
@@ -204,3 +208,4 @@ def test_new_mode_runs_parameterization_domain_and_m2d_as_one_fixed_lattice():
         Params(optcuts_area_grid_boundary_enabled=False))
     assert not original.metrics.get("optcuts_area_grid_boundary_enabled",False)
     assert original.metrics["optcuts_test_grid_outline_reparameterization"] is False
+    assert original._onestring_optcuts_candidates==["stale-original-UV"]
