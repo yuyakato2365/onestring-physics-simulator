@@ -620,15 +620,78 @@ def close_k3d_seam_after_full_vertex_restore(
             "SEAM_K3D_NO_PAIRED_BOUNDARY_VERTICES: "
             "real original OptCuts cut has no coincident Grid samples"
         )
-    result,diag=fit_k3d_with_exact_pairs(
-        out.vertices,out.faces,groups,
-        square_weight=max(0.,float(getattr(params,"w_square",10.))),
-    )
+    # If the real AL solve has already optimized SmoothMax with HARD
+    # shared seam unknowns, do not perturb that converged result by
+    # running a second best-plane consensus and a new square polish.
+    # The old post-hoc projection could undo the AL square improvement.
+    al_shared=bool(out.metrics.get("k3d_al_source_seam_hard_equality",False))
+    al_gap=max_seam_gap(out.vertices,groups)
+    plane_tol=float(out.metrics.get("k3d_hard_planarity_tolerance",0.))
+    already_feasible=False
+    if al_shared and al_gap<=1e-12 and plane_tol>0:
+        from .optcuts_test_k3d_augmented_lagrangian_patch import (
+            _robust_constraint_faces,_quad_plane_distances,
+        )
+        cf,_=_robust_constraint_faces(out.vertices,out.faces)
+        measured=float(np.max(_quad_plane_distances(
+            out.vertices,cf
+        )))
+        already_feasible=bool(
+            np.isfinite(measured) and
+            measured<=max(plane_tol,1e-10)
+        )
+    if already_feasible:
+        result=np.asarray(out.vertices,float).copy()
+        from .paper_extrusion import _planarity_error
+        diag={
+            "seam_k3d_gap_before":float(al_gap),
+            "seam_k3d_gap_after":float(al_gap),
+            "seam_k3d_planarity_before":_planarity_error(
+                result,np.asarray(out.faces,int)
+            ),
+            "seam_k3d_planarity_after":_planarity_error(
+                result,np.asarray(out.faces,int)
+            ),
+            "k3d_seam_smoothmax_attempted":False,
+            "k3d_seam_post_projection_skipped":True,
+            "k3d_seam_closed_in_single_AL_optimization":True,
+        }
+        print(
+            "[SEAM-K3D] single_AL_hard_constraint_feasible "
+            "post_projection=SKIPPED preserves_SmoothMax=True",
+            flush=True,
+        )
+    else:
+        result,diag=fit_k3d_with_exact_pairs(
+            out.vertices,out.faces,groups,
+            square_weight=max(0.,float(getattr(params,"w_square",10.))),
+        )
+        diag["k3d_seam_post_projection_skipped"]=False
+        diag["k3d_seam_closed_in_single_AL_optimization"]=False
     out.vertices[:]=result
     out.metrics.update(diag)
     out.metrics["seam_exact_vertex_groups"]=[
         list(map(int,g)) for g in groups]
     out.metrics["seam_exact_paired_grid_edges"]=len(topo["paired_edges"])
+    # Audit actual 3D boundary *segments*, not just independently welded
+    # vertices. If both endpoint groups are shared, both entire straight
+    # mesh edges must coincide under the same or reversed orientation.
+    actual=np.asarray(out.vertices,float)
+    edge_gap=0.
+    for pair in topo["paired_edges"]:
+        (a,b),(c,d)=pair
+        p,q=actual[[int(a),int(b)]],actual[[int(c),int(d)]]
+        gap_forward=max(float(np.linalg.norm(p-q)),
+                        float(np.linalg.norm(actual[b]-actual[d])))
+        gap_reverse=max(float(np.linalg.norm(actual[a]-actual[d])),
+                        float(np.linalg.norm(actual[b]-actual[c])))
+        edge_gap=max(edge_gap,min(gap_forward,gap_reverse))
+    out.metrics["seam_exact_paired_edge_gap_max"]=float(edge_gap)
+    if edge_gap>1e-10:
+        raise SeamTopologyMismatch(
+            "SEAM_K3D_PAIRED_EDGE_NOT_CLOSED_AFTER_SMOOTHMAX: "
+            f"max_edge_endpoint_gap={edge_gap:.9g}"
+        )
     out.metrics["seam_exact_closure_enabled"]=True
     out.metrics["seam_exact_source_open_edge_count"]=int(
         topo.get("source_open_grid_edges",0)
