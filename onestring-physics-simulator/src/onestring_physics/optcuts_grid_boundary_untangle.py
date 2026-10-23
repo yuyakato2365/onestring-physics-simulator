@@ -104,6 +104,9 @@ def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess):
         valid=np.isfinite(candidate).all() and ratio>=.005
         if valid:
             metrics=assess(candidate)
+            row["flipped_triangles"]=int(metrics["flipped_triangles"])
+            row["degenerate_triangles"]=int(metrics["degenerate_triangles"])
+            row["uv_overlap_pairs"]=int(metrics["injectivity_overlap_pairs"])
             valid=not (metrics["flipped_triangles"]
                        or metrics["degenerate_triangles"]
                        or metrics["injectivity_overlap_pairs"])
@@ -115,8 +118,24 @@ def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess):
             step=min(.3,step*1.4)
         else:
             step*=.5
+    # This is failure of the attempted numerical continuation, not a proof
+    # that no topology-preserving map to the prescribed outline exists.
+    rejected=next((item for item in reversed(history)
+                   if not item["accepted"]),None)
+    diagnostic=""
+    if rejected is not None:
+        diagnostic=(
+            f"; last_rejected_fraction={rejected['fraction']:.5g}"
+            f"; harmonic_min_area_ratio={rejected['harmonic_min_area_ratio']:.5g}"
+            f"; optimized_min_area_ratio={rejected['min_area_ratio']:.5g}"
+            f"; flipped={rejected.get('flipped_triangles', 'not_audited')}"
+            f"; degenerate={rejected.get('degenerate_triangles', 'not_audited')}"
+            f"; overlap={rejected.get('uv_overlap_pairs', 'not_audited')}"
+        )
     raise ValueError(
         "GRID_BOUNDARY_BIJECTIVE_MAPPING_NOT_FOUND: "
-        f"last_valid_fraction={progress:.5g}; "
-        "no safe inverse mapping for this exact grid-cell outline"
+        f"last_valid_fraction={progress:.5g}"
+        +diagnostic
+        +"; current matching and numerical continuation did not yield "
+         "a nonoverlapping UV map (not an infeasibility proof)"
     )
