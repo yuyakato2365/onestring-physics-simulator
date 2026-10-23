@@ -125,7 +125,9 @@ def _grid_boundary(mask):
     points=np.asarray(ordered,int)
     previous=np.roll(points,1,axis=0)
     after=np.roll(points,-1,axis=0)
-    turn=np.cross(points-previous,after-points)
+    incoming=points-previous
+    outgoing=after-points
+    turn=incoming[:,0]*outgoing[:,1]-incoming[:,1]*outgoing[:,0]
     corners=points[np.abs(turn)>0]
     if len(corners)<4:
         raise GridBoundaryReparameterizationError("GRID_BOUNDARY_INVALID_OUTLINE")
@@ -256,8 +258,6 @@ def construct_grid_target(uv,faces,boundary_loop,*,nx,ny,threshold=.5,margin=1):
 
 
 def apply_area_grid_boundary(parameterization,grid,params):
-    from .optcuts_quality_audit import quality
-    from .optcuts_uv_overlap_guard import positive_area_uv_overlaps
     from .optcuts_backend import _boundary_loops
     uv=np.asarray(parameterization.uv_vertices_2d,float)
     faces=np.asarray(parameterization.uv_faces,int)
@@ -272,10 +272,8 @@ def apply_area_grid_boundary(parameterization,grid,params):
     target=construct_grid_target(uv,faces,loop,nx=grid.nx,ny=grid.ny,
                                  threshold=thresh,margin=margin)
     mapped=_boundary_target_map(uv,loop,target["grid_outline"])
-    old=quality(parameterization) if False else None
-    # quality() requires OptCutsResult (not SurfaceParameterization);
-    # use the canonical UV/3D symmetric-Dirichlet diagnostics directly.
-    from .reference_bff import triangle_jacobian_diagnostics
+    # quality() requires OptCutsResult (not SurfaceParameterization).
+    # Evaluate by wrapping the current chart with all corresponding faces.
     # Homotopy is diagnostic and prevents accepting a folded intermediate.
     # The final full-boundary target (not a fractional approximation) must pass.
     base=uv.copy()
