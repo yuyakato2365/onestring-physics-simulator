@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 
 import numpy as np
 
@@ -153,7 +154,24 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
               for i, source in enumerate(sources)])
     evaluated = []
     report = []
+    # Rotation is rigid: SD, area Jacobian, seam length and overlap counts
+    # are invariant, so do not re-run expensive source audits per orientation.
+    quality_by_source = {}
+    started = time.perf_counter()
+    print(
+        "[GRID-SEAM-SEARCH] started; official_cut_sources="
+        f"{len(sources)}; orientations={list(rotations)}; "
+        f"grid_variants={len(tasks)}",
+        flush=True,
+    )
     for index, (source_index, source, rotation) in enumerate(tasks):
+        iteration_started = time.perf_counter()
+        print(
+            f"[GRID-SEAM-SEARCH] evaluate={index+1}/{len(tasks)} "
+            f"cut={source_index} rotation={rotation:g}deg "
+            f"elapsed={iteration_started-started:.1f}s",
+            flush=True,
+        )
         summary = {
             "candidate_index": int(index),
             "source_start_index": int(source_index),
@@ -164,11 +182,16 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
         try:
             chart = _make_chart(parameterization, source, source_index,
                                 rotation_degrees=rotation)
-            audit = (dict(audits[index]) if index < len(audits)
-                     else quality(OptCutsResult(
-                         chart.surface_vertices_3d, chart.surface_faces,
-                         chart.uv_vertices_2d, chart.uv_faces,
-                         [], "grid-seam-selection", {})))
+            if source_index not in quality_by_source:
+                quality_by_source[source_index] = (
+                    dict(audits[source_index])
+                    if source_index < len(audits)
+                    else quality(OptCutsResult(
+                        chart.surface_vertices_3d, chart.surface_faces,
+                        chart.uv_vertices_2d, chart.uv_faces,
+                        [], "grid-seam-selection", {}))
+                )
+            audit = quality_by_source[source_index]
             bad = ("flipped_triangles", "degenerate_triangles",
                    "injectivity_overlap_pairs")
             if any(int(audit.get(key, 0)) for key in bad):
@@ -199,8 +222,22 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
                 "status": "scored",
             })
             evaluated.append((chart, domain, summary, audit))
+            print(
+                f"[GRID-SEAM-SEARCH] scored={index+1}/{len(tasks)} "
+                f"tiles={shape['retained_cells']} "
+                f"corners={shape['corners']} "
+                f"reflex={shape['reflex_corners']} "
+                f"duration={time.perf_counter()-iteration_started:.1f}s",
+                flush=True,
+            )
         except (ValueError, RuntimeError, ArithmeticError) as exc:
             summary.update(status="invalid", error=f"{type(exc).__name__}: {exc}")
+            print(
+                f"[GRID-SEAM-SEARCH] invalid={index+1}/{len(tasks)} "
+                f"reason={type(exc).__name__}: {str(exc)[:180]} "
+                f"duration={time.perf_counter()-iteration_started:.1f}s",
+                flush=True,
+            )
         report.append(summary)
     if not evaluated:
         raise GridBoundaryReparameterizationError(
@@ -234,6 +271,12 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
                                     item[2]["candidate_index"]))
     for rank, (_chart, _domain, summary) in enumerate(ranked):
         summary["rank"] = int(rank + 1)
+    print(
+        f"[GRID-SEAM-SEARCH] ranked={len(ranked)}/{len(tasks)} "
+        f"elapsed={time.perf_counter()-started:.1f}s; "
+        "starting bijective boundary fitting",
+        flush=True,
+    )
     return ranked, report
 
 
