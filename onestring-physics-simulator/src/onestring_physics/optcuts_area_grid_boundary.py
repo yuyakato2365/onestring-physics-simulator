@@ -385,7 +385,7 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     # 3D surface remains geometrically identical, only triangulation changes.
     uv=np.asarray(parameterization.uv_vertices_2d,float)
     faces=np.asarray(parameterization.uv_faces,int)
-    mapped=_boundary_target_map(uv,loop,target["grid_outline"])
+    boundary_candidates=_boundary_target_candidates(uv,loop,target["grid_outline"])
     # quality() requires OptCutsResult (not SurfaceParameterization).
     # Evaluate by wrapping the current chart with all corresponding faces.
     # Homotopy is diagnostic and prevents accepting a folded intermediate.
@@ -406,19 +406,24 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     if int(baseline["flipped_triangles"]) or int(baseline["injectivity_overlap_pairs"]):
         raise GridBoundaryReparameterizationError(
             "GRID_BOUNDARY_SOURCE_INVALID: original OptCuts has inverted/overlapping UV")
-    for fraction in (.25,.5,.75,1.):
-        step_target=base[loop]+fraction*(mapped-base[loop])
-        candidate=_harmonic_dirichlet(base,faces,loop,step_target)
-        diag=assess(candidate)
-        if (int(diag["flipped_triangles"]) or int(diag["degenerate_triangles"]) or
-                int(diag["injectivity_overlap_pairs"])):
-            raise GridBoundaryReparameterizationError(
-                f"GRID_BOUNDARY_REPARAMETERIZATION_FOLDOVER: at fraction={fraction:g}; "
-                "fixed-boundary harmonic mapping cannot fit this grid staircase. "
-                "Reduce coverage threshold or refine the boundary mesh."
-            )
-        result=candidate
-    if result is None:raise AssertionError("empty reparameterization")
+    from .optcuts_grid_boundary_untangle import fit_by_continuation,oriented_area_ratio
+    # Keep the SAME selected cell union, change only cyclic vertex matching.
+    phase_errors=[]
+    chosen_phase=None
+    history=[]
+    for _cost,phase,mapped in boundary_candidates[:min(6,len(boundary_candidates))]:
+        try:
+            result,history=fit_by_continuation(
+                base,faces,loop,mapped,_harmonic_dirichlet,assess)
+            chosen_phase=int(phase)
+            break
+        except ValueError as exc:
+            phase_errors.append(f"phase={phase}: {exc}")
+    if result is None:
+        raise GridBoundaryReparameterizationError(
+            "GRID_BOUNDARY_ALL_MONOTONE_CORRESPONDENCES_FAILED: "
+            + " | ".join(phase_errors[-3:])
+        )
     final=assess(result)
     if float(final["distortion_area_mean"])>max(
         1.30*float(baseline["distortion_area_mean"]),
@@ -463,6 +468,10 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         optcuts_area_grid_candidate_cell_count=int(target["mask"].size),
         optcuts_area_grid_boundary_corner_count=int(len(outline)),
         optcuts_area_grid_subdivided_boundary_vertex_count=int(inserted),
+        optcuts_area_grid_boundary_cyclic_phase=int(chosen_phase),
+        optcuts_area_grid_boundary_untangle_history=history,
+        optcuts_area_grid_min_signed_area_ratio=float(np.min(
+            oriented_area_ratio(base,result,faces))),
         optcuts_area_grid_original_mean_sd=float(baseline["distortion_area_mean"]),
         optcuts_area_grid_final_mean_sd=float(final["distortion_area_mean"]),
         optcuts_area_grid_grid_origin=target["origin"].tolist(),
