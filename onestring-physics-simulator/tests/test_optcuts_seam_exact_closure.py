@@ -379,3 +379,84 @@ def test_full_original_uv_grid_index_mismatch_is_never_silently_accepted():
         close_k3d_seam_after_full_vertex_restore(
             m3d,short,chart,params
         )
+
+
+
+def test_source_closed_mesh_without_proven_cut_refuses_fake_success():
+    """Previous 'no_original_cut' shortcut silently left large visual holes."""
+    chart,uv,faces=conforming()
+    # Join the two UV border copies into one topologically continuous
+    # rectangle, but keep a closed-source-style physical correspondence.
+    chart.uv_faces=np.array([
+        [0,1,2],[0,2,3],[1,5,6],[1,6,2]
+    ],int)
+    # Source physical open edges still exist here; coverage will reject
+    # unmatched grid edges rather than pretend that no cut was welded.
+    with pytest.raises(SeamTopologyMismatch,match="SEAM_K3D_GRID_NOT_ON_SOURCE_OPEN_BOUNDARY"):
+        discover_exact_seam_topology(chart,uv,faces)
+
+
+def test_preflight_certified_groups_always_derive_from_original_grid_ids():
+    from onestring_physics.optcuts_seam_exact_closure import (
+        install_optcuts_exact_seam_closure,
+    )
+    chart,uv,faces=conforming()
+    chart.method="optcuts_test"
+    chart.metrics={"optcuts_area_grid_boundary_enabled":True}
+    vertices=np.c_[uv,np.zeros(len(uv))]
+    def basic_lift(_target,mesh,_chart,_params):
+        return SimpleNamespace(
+            vertices=mesh.vertices.copy(),faces=mesh.faces.copy(),
+            metrics={},stage="M3D"
+        ),None
+    owner=SimpleNamespace(
+        _lift_m2d_to_m3d=basic_lift,
+        _optimize_k3d=lambda t,m,c,p:(m,None),
+    )
+    install_optcuts_exact_seam_closure(owner)
+    m2d=SimpleNamespace(vertices=vertices,faces=faces)
+    m3d,_=owner._lift_m2d_to_m3d(None,m2d,chart,None)
+    assert m3d.metrics["seam_exact_preflight_certified"] is True
+    assert {frozenset(x) for x in m3d.metrics["seam_exact_vertex_groups"]}=={
+        frozenset([1,4]),frozenset([2,7])
+    }
+    assert m3d.metrics["seam_exact_preflight_paired_edges"]==1
+
+
+def test_unified_al_keeps_seam_and_smoothmax_after_final_closure():
+    from onestring_physics.optcuts_seam_exact_closure import (
+        close_k3d_seam_after_full_vertex_restore,
+    )
+    from onestring_physics import (
+        optcuts_test_k3d_augmented_lagrangian_patch as al,
+    )
+    chart,uv,faces=conforming()
+    input_v=np.array([
+        [0.,0.,0.],[1.2,0.,0.],[1.15,1.1,0.],[0.,1.,0.],
+        [1.15,0.,0.],[2.5,0.,0.],[2.55,1.2,0.],[1.1,1.1,0.],
+    ],float)
+    groups=[[1,4],[2,7]]
+    solved,al_metrics=al._augmented_lagrangian_planarize(
+        input_v,faces,equality_groups=groups,
+        square_weight=10.,anchor_weight=.15,
+        outer_iterations=3,inner_iterations=50,
+        restoration_sweeps=3,final_polish_sweeps=12
+    )
+    assert al_metrics["k3d_al_source_seam_hard_equality"]
+    # The source is flat so the AL should be exactly coplanar.
+    mesh=SimpleNamespace(
+        vertices=input_v,faces=faces,
+        _seam_original_m2d_uv=uv,
+    )
+    result=SimpleNamespace(
+        vertices=solved.copy(),faces=faces.copy(),
+        metrics=al_metrics.copy()
+    )
+    out=close_k3d_seam_after_full_vertex_restore(
+        mesh,result,chart,SimpleNamespace(w_square=10.)
+    )
+    assert out.metrics["k3d_seam_closed_in_single_AL_optimization"] is True
+    assert out.metrics["k3d_seam_post_projection_skipped"] is True
+    assert out.metrics["seam_exact_paired_edge_gap_max"]==0.
+    assert out.metrics["seam_exact_full_shape_closed"] is False  # open source test chart
+    np.testing.assert_array_equal(out.vertices,solved)
