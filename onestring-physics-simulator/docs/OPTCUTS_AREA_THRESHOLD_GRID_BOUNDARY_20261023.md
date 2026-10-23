@@ -1,16 +1,18 @@
 # Experimental OptCuts: 50%-area Grid footprint -> Omega boundary -> harmonic reparameterization
 
-Branch: `feature/optcuts-area-grid-boundary-20261023`.
+Branch: `fix/optcuts-real-m2d-footprint-20261023` (corrected real-M2D implementation).
 
 ## User's idea (implemented)
 
 1. Generate original, successful official OptCuts UV chart **without** the
    previously unsuccessful post-OptCuts Grid-aware seam-vertex nudging.
    Preserve OptCuts's seam topology and the existing CSF-tail refinement.
-2. Overlay the same fixed axis-aligned lattice used for fabrication:
-   `step_x = (max_u-min_u)/(2*grid.nx)`,
-   `step_y = (max_v-min_v)/(2*grid.ny)`. The production extra margin is
-   retained. **Do not refit this lattice after the boundary is moved.**
+2. **Actually generate the production Ω→M2D lattice first** using the
+   unmodified OptCuts UV via the established `_flatten_to_domain` stage.
+   Take its **actual origin, step, phase, resolution, and extra margins from
+   `domain.uv_vertices`**. Do NOT independently estimate an origin/step
+   from the OptCuts UV bounding box. **Never refit this lattice after moving
+   the Ω boundary.**
 3. Compute each cell's **exact** covered area by clipping the original UV
    triangles to the cell rectangle and summing their intersection areas:
 
@@ -24,15 +26,23 @@ Branch: `feature/optcuts-area-grid-boundary-20261023`.
 5. Preserve the cyclic order of original OptCuts UV boundary vertices and
    associate distinct boundary vertices with all corners of the target
    rectilinear polygon, interpolating other vertices along each grid edge.
+   **If the source Ω has fewer boundary vertices than the target polygon has
+   corners, automatically subdivide its boundary triangles in UV AND the
+   corresponding source 3D surface**, retaining face-by-face correspondence.
 6. Enforce these correspondence targets at the boundary and recompute
    interior UV using a sparse **fixed-boundary harmonic Dirichlet solve**
    with mild regularization to the original low-distortion OptCuts chart.
    Evaluate stages at boundary-displacement fractions 25/50/75/100%;
    all must be nonflipped and nonoverlapping, with the full final target
    realized. Refuse if distortion increases excessively.
-7. Reuse the exact *original fixed grid* and exactly those selected cells
-   when building M2D. Never run strict full-cell clipping again against the
-   old Omega. No UV/M2D refeedback, grid regeneration or silent fallback.
+7. Recompute derived Omega/CSF metadata for the moved UV, then restore
+   **the exact original production lattice** including margins.
+   Construct **the full, uncropped M2D overlay**. Apply the saved 50% mask
+   directly, **BEFORE any full-cell/center boundary cropping**. Do not
+   use the old strict crop first, because discarded boundary-crossing
+   panels cannot be recovered by filtering an already cropped mesh.
+   Continue through the existing CSF Split stage afterwards when enabled.
+   Check the number of saved mask cells against the M2D cell count.
 8. Send the resulting UV into the original paper-aligned M3D/K3D/K2D/T2D
    processing through the proven `optcuts_test2` carrier. The later
    solver formulas remain unchanged.
@@ -63,10 +73,9 @@ the internal C++ OptCuts cut/sew optimizer.
   heuristic, this implementation refuses topological mismatches rather
   than silently throwing panels away.
 - If the grid outline contains *more corners than the original UV boundary
-  has vertices*, the target cannot be represented without subdividing
-  boundary triangles. The current implementation raises
-  `GRID_BOUNDARY_NOT_ENOUGH_VERTICES`; automatic subdivision is **not**
-  implemented yet.
+  has vertices*, boundary triangle edges are now subdivided in parallel in
+  the UV and source 3D meshes. Inverse mapping must use these updated paired
+  faces. Extremely sharp outlines may still fail orientation tests.
 - A nonconvex staircase is **not guaranteed** to admit an orientation-
   preserving harmonic chart with fixed boundary correspondence. The
   implementation fails with explicit
@@ -103,3 +112,44 @@ Main implementation:
 Integration:
 `src/onestring_physics/optcuts_test_boundary_reparameterization_patch.py`,
 `app_optcuts_core_20260916.py`, `app_runtime_base.py`.
+
+
+## Audit correction: why the preceding branch was NOT the user's requested method
+
+The original experimental branch was defective despite passing synthetic tests:
+
+- It independently invented a lattice based on `min(uv)` and
+  `(max(uv)-min(uv))/(2*nx,2*ny)`. In the real production pipeline,
+  lattice origin/margins and possible alignment are established by
+  `_flatten_to_domain`. Therefore the alleged retained panels were not
+  necessarily the real M2D panels.
+- It called `base_m2d`, which may **crop away boundary-intersected cells**,
+  before applying the 50% mask. A mask cannot revive cells already removed.
+- It attempted to fit the boundary **before** constructing the actual grid.
+  This reversed the user's intended dependency.
+- It raised `NOT_ENOUGH_VERTICES` instead of refining boundary triangles
+  in UV and corresponding 3D geometry.
+- It could bypass the usual source M2D Split pipeline.
+
+The corrected pipeline explicitly does the opposite, in the required order:
+`Original OptCuts S→Ω → ACTUAL M2D overlay (unfiltered lattice only)
+→ exact per-cell Ω area coverage at 50%
+→ selected M2D tile boundary
+→ ordered UV/3D boundary subdivision/correspondence
+→ fixed-boundary interior harmonic reparameterization
+→ preserve original lattice
+→ construct full M2D overlay → apply the SAVED area mask
+→ existing Split/M3D/K3D/K2D`.
+
+The Omega UI shows the original boundary, selected real M2D cells, target
+cell-union contour, and fitted UV contour in one overlay plot. It reports
+accepted counts and full-stage mean Symmetric Dirichlet to help diagnose
+actual outcomes. The test
+`test_area_mode_m2d_does_not_call_prior_strict_crop` ensures that a
+pre-crop is never invoked in this mode.
+
+**Known limitations:** the fixed-boundary harmonic mapping can fail on
+strongly non-convex staircases or on a seam topology with multiple charts;
+this is an explicit failure, not successful fabrication. Native OptCuts
+on Bunny/Lilium and a full final K2D/T2D run have not been independently
+validated here.
