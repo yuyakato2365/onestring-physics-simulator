@@ -16,6 +16,8 @@ streamlit.out.log
 streamlit.err.log
 streamlit-*.log
 streamlit.pid
+# Local UV failure snapshots and runtime debug logs; do not delete them.
+logs/
 .streamlit/
 app_backup_before_*.py
 *.backup_before_*
