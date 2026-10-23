@@ -162,18 +162,25 @@ def _monotone_corner_indices_dp(old, old_t, corners, times):
         current = np.full(n, np.inf)
         local = np.sum((old - corners[j])**2, axis=1)
         local += weight * (old_t - times[j])**2
-        best_value = float("inf")
-        best_index = -1
-        # All earlier corners must occupy distinct vertices and all later
-        # corners must retain at least one available vertex.
-        for i in range(j, n - (m - j) + 1):
-            k = i - 1
-            if previous[k] < best_value:
-                best_value = float(previous[k])
-                best_index = k
-            if best_index >= 0 and np.isfinite(best_value):
-                current[i] = best_value + local[i]
-                predecessor[j, i] = best_index
+        # Vectorized prefix-min DP: O(n*m) arithmetic in NumPy rather than
+        # Python loops over all source boundary vertices (important on Bunny).
+        # For each valid corner position i, choose the cheapest predecessor
+        # strictly before i; retain enough vertices for remaining corners.
+        prefix = np.minimum.accumulate(previous)
+        previous_min = np.r_[np.inf, prefix[:-1]]
+        improvement = previous < previous_min
+        argmin_prefix = np.maximum.accumulate(
+            np.where(improvement, np.arange(n), -1)
+        )
+        allowed = np.arange(j, n - (m - j) + 1)
+        predecessor_slots = allowed - 1
+        feasible = (np.isfinite(prefix[predecessor_slots])
+                    & (argmin_prefix[predecessor_slots] >= 0))
+        positions = allowed[feasible]
+        current[positions] = (
+            prefix[predecessor_slots[feasible]] + local[positions]
+        )
+        predecessor[j, positions] = argmin_prefix[predecessor_slots[feasible]]
         previous = current
     k = int(np.argmin(previous))
     if not np.isfinite(previous[k]):
