@@ -129,3 +129,55 @@ A failure after ear-aware repair would justify diagnosing *interior*
 triangles, boundary self-intersections during continuation, and solver
 conditioning, rather than continuing to try structurally impossible
 correspondences.
+
+
+## 2026-10-23 22:15 run: collapse repaired but post-fit SD rejected
+
+The user's newest terminal output confirms the fix reaches an exact Grid
+boundary on the first corrected correspondence:
+
+- 67.5°: 98 raw boundary matches invalid, 38 repaired, 42 accepted
+  preflight options; first corrected numerical fit reached 100%
+  boundary fraction in four continuation steps (10.1 seconds).
+- But the *separate final symmetric-Dirichlet distortion guard* rejected
+  that chart: mean SD rose from **4.1 to 8.663**. The original existing
+  guard is `max(1.3*4.1, 4.1+0.1)≈5.33`.
+- At rotation 0°, first fit also reached 100%, but final mean SD rose
+  from 4.1 to 10.7. The remaining 45°/22.5° results were not included in
+  the pasted terminal fragment.
+
+**Important implementation discovery:** previously, the code stopped the
+correspondence search at the first numerical fit that reached full
+boundary fraction, then applied the mean SD gate *after* the loop. When
+that single fit exceeded the guard it threw to the next rotation, even
+though many eligible corrected corner correspondences remained.
+
+The fix now checks final mean SD **inside the correspondence loop**, and
+tries a different repaired anchor mapping after a quality failure. All
+candidate UVs, original Grid/mask and signed-area constraints remain
+unchanged. The SD limit has NOT been raised or disabled.
+
+New logs:
+
+```
+[GRID-BOUNDARY-FIT] quality_rejected=1/12 GRID_BOUNDARY_DISTORTION_EXCESS ...
+[GRID-BOUNDARY-FIT] correspondence=2/12 ...
+```
+
+If none of the bounded first 12 candidates passes all guards, the error
+`GRID_BOUNDARY_ALL_ACCEPTABLE_CORRESPONDENCES_FAILED` includes the
+number of fully completed boundary mappings, quality rejections, the
+best rejected mean SD, and how many candidates remain untried.
+
+A full-boundary mapping with excessive SD is a meaningful intermediate
+result but must **not** be marked `accepted_exact_grid_outline`; a low
+SD mapping and final non-overlap audit are still required. Existing CI
+tests include both a first-over-distorted/second-accepted case and a
+reject-all case without premature commit.
+
+If every eligible boundary correspondence still gives high SD, the
+remaining limitation is the constrained deformation energy and/or cut
+topology. Research-grade next options then include optimizing symmetric
+Dirichlet energy under fixed Grid boundary with guaranteed positive UV
+areas, or adding real source-surface seams; blindly relaxing the 1.3x
+acceptance threshold would hide the actual distortion.
