@@ -656,26 +656,30 @@ def close_k3d_seam_after_full_vertex_restore(
             "SEAM_K3D_NO_PAIRED_BOUNDARY_VERTICES: "
             "real original OptCuts cut has no coincident Grid samples"
         )
-    # If the real AL solve has already optimized SmoothMax with HARD
-    # shared seam unknowns, do not perturb that converged result by
-    # running a second best-plane consensus and a new square polish.
-    # The old post-hoc projection could undo the AL square improvement.
+    # Arbitrary mixed cut/open Grid edges have linear vertex-to-edge
+    # constraints. They MUST survive the original SmoothMax optimization
+    # and cannot be replaced by the older independent vertex-pair
+    # planarity/averaging projection, which would reopen mixed edges.
+    affine_rows=topo.get("affine_rows",[])
+    from .optcuts_seam_affine_constraints import AffineSeamProjector
+    affine=AffineSeamProjector(len(out.vertices),affine_rows)
+    norm_scale=max(1.,float(np.max(np.abs(out.vertices))))
+    residual_before=float(affine.residual(out.vertices))
     al_shared=bool(out.metrics.get("k3d_al_source_seam_hard_equality",False))
-    al_gap=max_seam_gap(out.vertices,groups)
+    measured=float("inf")
     plane_tol=float(out.metrics.get("k3d_hard_planarity_tolerance",0.))
-    already_feasible=False
-    if al_shared and al_gap<=1e-12 and plane_tol>0:
+    if al_shared:
         from .optcuts_test_k3d_augmented_lagrangian_patch import (
             _robust_constraint_faces,_quad_plane_distances,
         )
         cf,_=_robust_constraint_faces(out.vertices,out.faces)
-        measured=float(np.max(_quad_plane_distances(
-            out.vertices,cf
-        )))
-        already_feasible=bool(
-            np.isfinite(measured) and
-            measured<=max(plane_tol,1e-10)
-        )
+        measured=float(np.max(_quad_plane_distances(out.vertices,cf)))
+    al_gap=max_seam_gap(out.vertices,groups)
+    already_feasible=bool(
+        al_shared and residual_before<=1e-9*norm_scale
+        and al_gap<=1e-9*norm_scale and plane_tol>0
+        and measured<=max(plane_tol,1e-10)
+    )
     if already_feasible:
         result=np.asarray(out.vertices,float).copy()
         from .paper_extrusion import _planarity_error
@@ -693,10 +697,67 @@ def close_k3d_seam_after_full_vertex_restore(
             "k3d_seam_closed_in_single_AL_optimization":True,
         }
         print(
-            "[SEAM-K3D] single_AL_hard_constraint_feasible "
-            "post_projection=SKIPPED preserves_SmoothMax=True",
-            flush=True,
+            "[SEAM-K3D] unified_affine_SmoothMax_AL_feasible "
+            f"affine_rows={len(affine_rows)} "
+            f"max_cut_gap_residual={residual_before:.9g} "
+            "post_projection=SKIPPED",flush=True,
         )
+    elif affine_rows:
+        # A local AL can stop early with incomplete hard planarity. A
+        # nearest-vertex weld must NEVER masquerade as the solution.
+        # Continue within the same hard affine subspace instead.
+        from .optcuts_test_k3d_augmented_lagrangian_patch import (
+            _augmented_lagrangian_planarize,
+            _quad_plane_distances,_robust_constraint_faces,
+        )
+        result,refine_metrics=_augmented_lagrangian_planarize(
+            np.asarray(out.vertices,float),np.asarray(out.faces,int),
+            square_weight=max(0.,float(getattr(params,"w_square",10.))),
+            anchor_weight=float(getattr(params,"k3d_al_anchor_weight",1.)),
+            rho0=float(getattr(params,"k3d_al_rho0",10.)),
+            outer_iterations=max(4,int(getattr(
+                params,"k3d_al_outer_iterations",8
+            ))),
+            inner_iterations=max(60,int(getattr(
+                params,"k3d_al_inner_iterations",70
+            ))),
+            relative_plane_tolerance=float(getattr(
+                params,"k3d_al_relative_planarity_tolerance",1e-6
+            )),
+            restoration_sweeps=int(getattr(
+                params,"k3d_al_restoration_sweeps",8
+            )),
+            final_polish_sweeps=int(getattr(
+                params,"k3d_al_final_polish_sweeps",400
+            )),
+            equality_groups=groups,affine_rows=affine_rows,
+        )
+        projection_gap=affine.residual(result)
+        cf,_=_robust_constraint_faces(result,out.faces)
+        final_plane=float(np.max(_quad_plane_distances(result,cf)))
+        allowed=float(refine_metrics.get("k3d_hard_planarity_tolerance",0.))
+        if (projection_gap>1e-9*norm_scale or
+                final_plane>max(allowed,1e-10)):
+            raise SeamTopologyMismatch(
+                "SEAM_K3D_AFFINE_SMOOTHMAX_PLANARITY_NOT_CONVERGED: "
+                f"source_cut_gap={projection_gap:.9g}, "
+                f"plane_distance={final_plane:.9g}, "
+                f"plane_tol={allowed:.9g}. "
+                "This is a real failure of the joint Seam + SmoothMax + "
+                "planarity optimization, not a boundary classification "
+                "error. Increase AL budget or revise the feasible geometry."
+            )
+        diag={
+            "seam_k3d_gap_before":float(al_gap),
+            "seam_k3d_gap_after":max_seam_gap(result,groups),
+            "seam_k3d_planarity_before":measured,
+            "seam_k3d_planarity_after":final_plane,
+            "k3d_seam_closed_in_single_AL_optimization":False,
+            "k3d_seam_affine_al_continuation":True,
+            "k3d_seam_smoothmax_attempted":True,
+            "k3d_seam_post_projection_skipped":True,
+        }
+        out.metrics.update(refine_metrics)
     else:
         result,diag=fit_k3d_with_exact_pairs(
             out.vertices,out.faces,groups,
@@ -704,6 +765,14 @@ def close_k3d_seam_after_full_vertex_restore(
         )
         diag["k3d_seam_post_projection_skipped"]=False
         diag["k3d_seam_closed_in_single_AL_optimization"]=False
+    exact_gap=affine.residual(result)
+    if exact_gap>1e-9*norm_scale:
+        raise SeamTopologyMismatch(
+            "SEAM_K3D_PARAMETRIC_CUT_GAP_NOT_ZERO: "
+            f"max_constraint_residual={exact_gap:.9g}"
+        )
+    diag["seam_k3d_affine_row_count"]=len(affine_rows)
+    diag["seam_k3d_affine_constraint_residual"]=float(exact_gap)
     out.vertices[:]=result
     out.metrics.update(diag)
     out.metrics["seam_exact_vertex_groups"]=[
@@ -740,7 +809,8 @@ def close_k3d_seam_after_full_vertex_restore(
         topo.get("source_open_grid_edges",0)
     )
     out.metrics["seam_exact_full_shape_closed"]=bool(
-        topo.get("source_open_grid_edges",0)==0
+        topo.get("source_open_grid_edges",0)==0 and
+        topo.get("mixed_seam_open_grid_edges",0)==0
     )
     out.metrics["seam_exact_closure_vertex_space"]="full_original_M2D_grid"
     out.metrics["seam_exact_closure_executed_after_reduction"]=bool(
