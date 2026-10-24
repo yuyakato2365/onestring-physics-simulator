@@ -65,9 +65,12 @@ def optimize_shared(base, target, mesh, parameterization, params):
         ]
         if reduced.metrics.get("seam_exact_affine_rows"):
             from .optcuts_seam_soft_constraints import remap_rows
-            reduced.metrics["seam_exact_affine_rows"]=remap_rows(
-                reduced.metrics["seam_exact_affine_rows"],mapping
+            rows,audit=remap_rows(
+                reduced.metrics["seam_exact_affine_rows"],mapping,
+                return_stats=True
             )
+            reduced.metrics["seam_exact_affine_rows"]=rows
+            reduced.metrics.update(audit)
             reduced.metrics["seam_affine_rows_reindexed_for_reduction"]=True
         reduced.metrics["seam_exact_groups_reindexed_for_reduction"]=True
     if hasattr(mesh,"_seam_original_m2d_uv"):
