@@ -127,6 +127,19 @@ def _cut_uv_segments(parameterization, *, include_open=False):
             "SEAM_SOURCE_UV_BOUNDARY_INCIDENCE_MISMATCH: "
             f"count={len(inconsistent)} sample={inconsistent[:5]}"
         )
+    # Assign both topological UV copies of every physical cut edge.
+    by_edge=defaultdict(list)
+    for i,seg in enumerate(segments):
+        by_edge[seg[2]].append(i)
+    for key,indices in by_edge.items():
+        if len(indices)!=2:
+            raise SeamTopologyMismatch(
+                "SEAM_SOURCE_PHYSICAL_CUT_NOT_TWO_SIDED: "
+                f"edge={key} copies={len(indices)}"
+            )
+        for side,i in enumerate(sorted(indices)):
+            uvline,xyzline,physical,_=segments[i]
+            segments[i]=(uvline,xyzline,physical,side)
     return (segments,open_boundary) if include_open else segments
 
 def _source_seam_sample(uvp,segments,tol):
@@ -290,6 +303,7 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
                 )
     seam_edges=[]
     source_open_grid_edges=0
+    mixed_cut_open_edges=[]
     unclassified=[]
     diagnostics=[]
     cut_lines=[record[0] for record in segments]
@@ -314,8 +328,13 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
             seam_edges.append((a,b))
         elif open_covered>=1.-edge_tol:
             # An actual open input surface stays physically open.
-            # It is NOT a two-sided seam and cannot be closed by welding.
             source_open_grid_edges+=1
+        elif (full_covered>=1.-edge_tol and
+                seam_covered>edge_tol and open_covered>edge_tol):
+            # The physical source cut ends inside this ONE Grid edge.
+            # Retain genuine open remainder, constrain only cut part.
+            mixed_cut_open_edges.append((int(a),int(b),
+                                         seam_covered,open_covered))
         else:
             unclassified.append((a,b))
             midpoint=(uv[a]+uv[b])*.5
@@ -373,14 +392,30 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
             paired.append(copies)
         else:
             unmatched.extend(copies)
+    affine_rows=[]
+    affine_metrics={}
+    if not unclassified:
+        from .optcuts_seam_affine_constraints import (
+            source_cut_affine_rows,
+        )
+        affine_rows,affine_metrics=source_cut_affine_rows(
+            uv,faces,segments,absolute_tolerance=tol
+        )
+    can_stitch=bool(not unclassified and affine_rows)
     return {
-        "status":(
-            "conforming" if not unmatched and not unclassified
-            else "nonconforming"
-        ),
+        "status":("conforming" if can_stitch else "nonconforming"),
         "groups":[sorted(x) for x in groups],
+        "affine_rows":affine_rows,
+        "affine_metrics":affine_metrics,
+        "affine_exact_stitchable":can_stitch,
         "paired_edges":paired,
-        "unmatched_edges":len(unmatched),
+        "unmatched_edges":0 if can_stitch else len(unmatched),
+        "full_grid_edge_unmatched_before_affine":len(unmatched),
+        "mixed_seam_open_grid_edges":len(mixed_cut_open_edges),
+        "mixed_grid_edge_sample":[
+            [i,j,float(c),float(o)] for i,j,c,o
+            in mixed_cut_open_edges[:12]
+        ],
         "unclassified_boundary_edges":len(unclassified),
         "unclassified_boundary_edge_ids_sample":[
             [int(a),int(b)] for a,b in unclassified[:12]
@@ -576,7 +611,8 @@ def close_k3d_seam_after_full_vertex_restore(
                           np.asarray(out.faces,int)):
         raise SeamTopologyMismatch("SEAM_K3D_FACE_TOPOLOGY_CHANGED")
     topo=discover_exact_seam_topology(parameterization,uv,mesh.faces)
-    log={k:v for k,v in topo.items() if k not in ("groups","paired_edges")}
+    log={k:v for k,v in topo.items() if k not in
+         ("groups","paired_edges","affine_rows")}
     out.metrics.update({f"seam_closure_{k}":v for k,v in log.items()})
     if topo["status"] in ("no_boundary","source_open_boundary_only"):
         out.metrics["seam_exact_closure_enabled"]=False
@@ -615,7 +651,7 @@ def close_k3d_seam_after_full_vertex_restore(
             "before M3D; do not apply nearest-neighbor welding."
         )
     groups=topo["groups"]
-    if not groups:
+    if not groups and not topo.get("affine_rows"):
         raise SeamTopologyMismatch(
             "SEAM_K3D_NO_PAIRED_BOUNDARY_VERTICES: "
             "real original OptCuts cut has no coincident Grid samples"
@@ -672,6 +708,13 @@ def close_k3d_seam_after_full_vertex_restore(
     out.metrics.update(diag)
     out.metrics["seam_exact_vertex_groups"]=[
         list(map(int,g)) for g in groups]
+    out.metrics["seam_exact_affine_rows"]=[
+        [[int(i),float(w)] for i,w in row]
+        for row in topo.get("affine_rows",[])
+    ]
+    out.metrics["seam_exact_affine_constraint_count"]=len(
+        topo.get("affine_rows",[])
+    )
     out.metrics["seam_exact_paired_grid_edges"]=len(topo["paired_edges"])
     # Audit actual 3D boundary *segments*, not just independently welded
     # vertices. If both endpoint groups are shared, both entire straight
@@ -738,19 +781,27 @@ def install_optcuts_exact_seam_closure(pipeline):
                 parameterization,uv,np.asarray(mesh.faces,int)
             )
             if (topo["status"]=="conforming" and
-                    topo.get("seam_grid_edges",0)>0 and
-                    topo.get("groups")):
+                    topo.get("affine_rows")):
                 out.metrics["seam_exact_vertex_groups"]=[
                     list(map(int,g)) for g in topo["groups"]
                 ]
                 out.metrics["seam_exact_preflight_certified"]=True
+                out.metrics["seam_exact_affine_rows"]=[
+                    [[int(i),float(w)] for i,w in row]
+                    for row in topo["affine_rows"]
+                ]
                 out.metrics["seam_exact_preflight_paired_edges"]=len(
                     topo["paired_edges"]
+                )
+                out.metrics["seam_exact_preflight_mixed_edges"]=int(
+                    topo["mixed_seam_open_grid_edges"]
                 )
                 print(
                     "[SEAM-K3D-PREFLIGHT] "
                     f"groups={len(topo['groups'])} "
                     f"matched_edges={len(topo['paired_edges'])} "
+                    f"affine_rows={len(topo['affine_rows'])} "
+                    f"mixed_seam_open_edges={topo['mixed_seam_open_grid_edges']} "
                     "AL_hard_equality_ready=True",
                     flush=True,
                 )
