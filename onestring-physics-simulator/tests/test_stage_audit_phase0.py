@@ -128,3 +128,34 @@ def test_large_rank_skip_is_explicit_never_a_success():
     )
     assert not out["rank_evaluated"]
     assert out["rank_skip_reason"]=="above_configured_svd_cap"
+
+
+
+def test_comparator_rejects_different_source_even_when_camera_matches(tmp_path):
+    from importlib.util import spec_from_file_location,module_from_spec
+    script=Path(__file__).resolve().parents[1]/"scripts"/"compare_stage_audits.py"
+    spec=spec_from_file_location("stage_audit_compare_test",script)
+    mod=module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    xyz,faces,surf=synthetic()
+    first=StageAuditWriter(tmp_path,Params(),run_id="previous")
+    second=StageAuditWriter(tmp_path,Params(),run_id="candidate")
+    first.record("S",xyz,surf)
+    altered=xyz.copy()
+    altered[0,2]+=.1
+    second.record("S",altered,surf)
+    first.summary["render_protocol"]={
+        "same_camera":True,"backface_culling":False
+    }
+    second.summary["render_protocol"]={
+        "same_camera":True,"backface_culling":False
+    }
+    first.flush()
+    second.flush()
+    with pytest.raises(ValueError,match="STAGE_AUDIT_DIFFERENT_SOURCE_OR_CAMERA"):
+        mod.validate_runs(first.path,second.path)
+    # Identical source meshes and correct stage provenance allow A/B.
+    second.record("S",xyz,surf)
+    a,b=mod.validate_runs(first.path,second.path)
+    assert a["run_id"]=="previous"
+    assert b["run_id"]=="candidate"
