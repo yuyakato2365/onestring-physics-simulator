@@ -45,7 +45,9 @@ def _best_fit_plane(points):
     return p-np.outer((p-c)@normal,normal)
 
 
-def _solve(n_vertices,constraints,anchor,anchor_weight,*,equality_groups=(),affine_projector=None):
+def _solve(n_vertices,constraints,anchor,anchor_weight,*,
+           equality_groups=(),affine_projector=None,
+           soft_seam_rows=(),soft_seam_weight=0.):
     # Eliminate *exact* equality groups from the unknowns. Penalties
     # or a weld after solving cannot prevent the T3D Eq.(2) projection
     # from reopening a previously closed K3D seam.
@@ -79,6 +81,19 @@ def _solve(n_vertices,constraints,anchor,anchor_weight,*,equality_groups=(),affi
         for i,p in enumerate(anchor):
             for d in range(3):
                 rows.append(r);cols.append(int(inverse[i])*3+d);data.append(sw);rhs.append(sw*float(p[d]));r+=1
+    if soft_seam_rows and soft_seam_weight>0.:
+        # A true least-squares addition, not projection: incompatible
+        # Grid breakpoints cannot represent a curved seam exactly
+        # without collapsing its edges.
+        sw=math.sqrt(float(soft_seam_weight))
+        for seam_row in soft_seam_rows:
+            for d in range(3):
+                for original,w in seam_row:
+                    rows.append(r)
+                    cols.append(int(inverse[int(original)])*3+d)
+                    data.append(sw*float(w))
+                rhs.append(0.)
+                r+=1
     A=sparse.coo_matrix((data,(rows,cols)),shape=(r,reduced_count*3)).tocsr()
     reduced=lsqr(A,np.asarray(rhs),atol=1e-11,btol=1e-11,
                  iter_lim=max(500,4*reduced_count))[0].reshape(reduced_count,3)
@@ -214,8 +229,20 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         (getattr(mesh,"metrics",{}) or {}).get("seam_exact_vertex_groups",[])
     ]
     affine_rows=(getattr(mesh,"metrics",{}) or {}).get("seam_exact_affine_rows",[])
+    stitch_mode=str((getattr(mesh,"metrics",{}) or {}).get(
+        "seam_stitch_mode","hard" if affine_rows else "none"
+    ))
+    soft_rows=affine_rows if stitch_mode=="soft" else []
+    soft_weight=float((getattr(mesh,"metrics",{}) or {}).get(
+        "k3d_seam_soft_weight",30.
+    ))
+    doubled_soft_rows=[
+        [(int(i)+offset,float(w)) for i,w in row]
+        for offset in (0,2*len(top_global)//2)
+        for row in soft_rows
+    ]
     affine_projector=None
-    if affine_rows:
+    if affine_rows and stitch_mode=="hard":
         from .optcuts_seam_affine_constraints import AffineSeamProjector
         rows=[]
         for offset in (0,n_mesh_vertices):
@@ -257,6 +284,13 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     if affine_projector is not None:
         x0=affine_projector.project(x0,strict=True)
         bottom_global=x0[n_mesh_vertices:].copy()
+    elif soft_rows:
+        print(
+            "[PAPER-T3D-SEAM-SOFT] "
+            f"source_rows={len(soft_rows)} weight={soft_weight:.7g} "
+            "top_bottom_soft_fit=True projector=DISABLED",
+            flush=True,
+        )
     coupled_groups=seam_groups+[
         [n_mesh_vertices+v for v in ids] for ids in seam_groups
     ]
@@ -294,7 +328,9 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
             constraints.append((ids,projected,weight))
         new=_solve(len(x),constraints,x0,anchor_weight,
                    equality_groups=coupled_groups,
-                   affine_projector=affine_projector)
+                   affine_projector=affine_projector,
+                   soft_seam_rows=doubled_soft_rows,
+                   soft_seam_weight=soft_weight)
         if not np.isfinite(new).all():
             # Never let a failed T3D local/global step poison K2D/T2D with NaNs.
             # The previous iterate is finite and already represents the paper
@@ -313,11 +349,19 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     top_solved=x[:n_mesh_vertices]
     bottom_solved=x[n_mesh_vertices:]
     seam_top_gap=seam_bottom_gap=0.
-    seam_affine_max_residual=(
-        float(affine_projector.residual(x))
-        if affine_projector is not None else 0.
-    )
-    if seam_affine_max_residual>1e-9*max(
+    if soft_rows:
+        from .optcuts_seam_soft_constraints import residual_stats
+        top_soft=residual_stats(top_solved,soft_rows)
+        bottom_soft=residual_stats(bottom_solved,soft_rows)
+        seam_affine_max_residual=max(
+            top_soft["max"],bottom_soft["max"]
+        )
+    else:
+        seam_affine_max_residual=(
+            float(affine_projector.residual(x))
+            if affine_projector is not None else 0.
+        )
+    if stitch_mode=="hard" and seam_affine_max_residual>1e-9*max(
         1.,float(np.max(np.abs(x)))
     ):
         raise RuntimeError(
@@ -461,6 +505,12 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         "t3d_seam_exact_equality_group_count":len(seam_groups),
         "t3d_seam_affine_row_count":len(affine_rows),
         "t3d_seam_affine_max_residual":seam_affine_max_residual,
+        "t3d_seam_stitch_mode":stitch_mode,
+        "t3d_seam_soft_weight":soft_weight if soft_rows else 0.,
+        "t3d_seam_soft_top_rms":top_soft["rms"] if soft_rows else 0.,
+        "t3d_seam_soft_bottom_rms":bottom_soft["rms"] if soft_rows else 0.,
+        "t3d_seam_soft_top_max":top_soft["max"] if soft_rows else 0.,
+        "t3d_seam_soft_bottom_max":bottom_soft["max"] if soft_rows else 0.,
         "t3d_seam_top_gap_max":seam_top_gap,
         "t3d_seam_bottom_gap_max":seam_bottom_gap,
         "t3d_seam_extrusion_normal_coupled":bool(seam_groups),
