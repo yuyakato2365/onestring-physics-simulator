@@ -152,6 +152,7 @@ def test_t3d_soft_mode_never_projects_incompatible_seam_to_zero():
             "seam_exact_vertex_groups":[],
             "seam_exact_affine_rows":rows,
             "k3d_seam_soft_weight":5.,
+            "k3d_seam_soft_tile_scale":1.0,
             "paper_t3d_planarity_iterations":6,
         },
     )
@@ -170,8 +171,15 @@ def test_t3d_soft_mode_never_projects_incompatible_seam_to_zero():
     assert np.isfinite(assembly.vertices).all()
     assert np.isfinite(mesh.vertices).all()
     assert len(mesh.vertices)==len(xyz)
-    assert assembly.metrics["t3d_seam_soft_top_rms"]>=0.
-    assert assembly.metrics["t3d_seam_soft_bottom_rms"]>=0.
+    # This compares the ACTUAL before/after residual, rather than the
+    # vacuous assertion RMS>=0. T3D must not reopen the physical cut
+    # by more than the review-specified 1.5x threshold.
+    original=residual_stats(xyz,rows)
+    assert assembly.metrics["t3d_seam_soft_top_max"]<=1.5*original["max"]
+    assert assembly.metrics["t3d_seam_soft_bottom_max"]<=1.5*original["max"]
+    assert assembly.metrics["t3d_seam_soft_weight_effective"]==pytest.approx(
+        5./len(rows)
+    )
     # Promoted K3D must be a real quad mesh, not a point-valued seam.
     p=_quad_triangle_area_diagnostics(xyz,mesh.vertices,faces)
     assert p["collapsed_or_inverted_triangle_count"]==0,p
