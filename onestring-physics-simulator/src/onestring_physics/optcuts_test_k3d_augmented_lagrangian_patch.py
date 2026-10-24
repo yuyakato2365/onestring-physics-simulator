@@ -864,6 +864,11 @@ def _augmented_lagrangian_planarize(
             else "none"
         ),
         "k3d_seam_soft_weight":float(soft_weight),
+        "k3d_seam_soft_tile_scale":float(tile_scale),
+        "k3d_seam_soft_weight_effective":float(
+            soft_weight/soft_scale
+        ) if soft_seam_rows else 0.,
+        "k3d_seam_soft_normalization_rows":int(len(soft_seam_rows)),
         "k3d_seam_soft_row_count":int(len(soft_seam_rows)),
         "k3d_seam_soft_residual_rms":float(
             np.sqrt(np.mean(np.linalg.norm(
