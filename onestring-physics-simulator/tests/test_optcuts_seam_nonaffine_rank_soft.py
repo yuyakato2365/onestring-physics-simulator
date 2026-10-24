@@ -136,3 +136,45 @@ def test_soft_rows_survive_extrusion_aware_geometry_reindex():
     assert residual_stats(
         xyz,reduced.metrics["seam_exact_affine_rows"]
     )["rms"]==pytest.approx(residual_stats(xyz,rows)["rms"])
+
+
+
+def test_t3d_soft_mode_never_projects_incompatible_seam_to_zero():
+    """T3D Eq.(2) must use least-squares rows, not the old hard projector."""
+    from types import SimpleNamespace
+    from onestring_physics.paper_extrusion import extrude_paper_face_planarity
+    uv,faces,xyz,seam,rows,_=nonaffine_chart(8)
+    initial=residual_stats(xyz,rows)["rms"]
+    mesh=SimpleNamespace(
+        vertices=xyz.copy(),faces=faces.copy(),stage="K3D",
+        metrics={
+            "seam_stitch_mode":"soft",
+            "seam_exact_vertex_groups":[],
+            "seam_exact_affine_rows":rows,
+            "k3d_seam_soft_weight":5.,
+            "paper_t3d_planarity_iterations":6,
+        },
+    )
+    class Output:
+        def __init__(self,**kwargs):
+            self.__dict__.update(kwargs)
+    pipeline=SimpleNamespace(
+        TileAssembly=Output,StageReport=Output,
+        _tile_face_planarity_by_group=lambda *_:
+            {"top":0.,"bottom":0.,"side":0.},
+        _assembly_counts=lambda *_:{},
+    )
+    assembly,_=extrude_paper_face_planarity(mesh,.02,"T3D",pipeline)
+    assert assembly.metrics["t3d_seam_stitch_mode"]=="soft"
+    assert assembly.metrics["t3d_seam_affine_row_count"]==len(rows)
+    assert np.isfinite(assembly.vertices).all()
+    assert np.isfinite(mesh.vertices).all()
+    assert len(mesh.vertices)==len(xyz)
+    assert assembly.metrics["t3d_seam_soft_top_rms"]>=0.
+    assert assembly.metrics["t3d_seam_soft_bottom_rms"]>=0.
+    # Promoted K3D must be a real quad mesh, not a point-valued seam.
+    p=_quad_triangle_area_diagnostics(xyz,mesh.vertices,faces)
+    assert p["collapsed_or_inverted_triangle_count"]==0,p
+    assert np.linalg.norm(
+        mesh.vertices[seam[1]]-mesh.vertices[seam[0]]
+    )>.1
