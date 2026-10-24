@@ -410,10 +410,13 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
     # source-cut/original-open edge. Preserve source cut provenance in
     # both modes; do not confuse valid source boundary coverage with
     # nondegenerate *hard* solvability.
+    # Fail CLOSED: a skipped SVD is not evidence that hard constraints
+    # leave a non-degenerate source seam feasible. The previous
+    # not rank_evaluated branch silently approved dangerous hard welding.
     rank_allows_hard=bool(
-        not rank_audit["rank_evaluated"]
-        or rank_audit["seam_vertices"]<6
-        or rank_audit["seam_nullity"]>=3
+        rank_audit["rank_evaluated"]
+        and (rank_audit["seam_vertices"]<6
+             or rank_audit["seam_nullity"]>=3)
     )
     fully_matching=bool(
         can_stitch and len(unmatched)==0
