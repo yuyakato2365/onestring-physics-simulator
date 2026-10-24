@@ -313,6 +313,17 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     top_solved=x[:n_mesh_vertices]
     bottom_solved=x[n_mesh_vertices:]
     seam_top_gap=seam_bottom_gap=0.
+    seam_affine_max_residual=(
+        float(affine_projector.residual(x))
+        if affine_projector is not None else 0.
+    )
+    if seam_affine_max_residual>1e-9*max(
+        1.,float(np.max(np.abs(x)))
+    ):
+        raise RuntimeError(
+            "T3D_SEAM_AFFINE_HARD_CONSTRAINT_LOST: "
+            f"residual={seam_affine_max_residual:.9g}"
+        )
     if seam_groups:
         from .optcuts_seam_exact_closure import max_seam_gap
         seam_top_gap=max_seam_gap(top_solved,seam_groups)
@@ -448,6 +459,8 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         "paper_t3d_rest_weight":anchor_weight,
         "paper_t3d_shared_vertex_separation_max":edge_copy_separation,
         "t3d_seam_exact_equality_group_count":len(seam_groups),
+        "t3d_seam_affine_row_count":len(affine_rows),
+        "t3d_seam_affine_max_residual":seam_affine_max_residual,
         "t3d_seam_top_gap_max":seam_top_gap,
         "t3d_seam_bottom_gap_max":seam_bottom_gap,
         "t3d_seam_extrusion_normal_coupled":bool(seam_groups),
