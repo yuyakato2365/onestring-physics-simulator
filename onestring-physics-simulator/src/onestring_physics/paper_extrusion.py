@@ -213,6 +213,29 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         [int(v) for v in ids] for ids in
         (getattr(mesh,"metrics",{}) or {}).get("seam_exact_vertex_groups",[])
     ]
+    affine_rows=(getattr(mesh,"metrics",{}) or {}).get("seam_exact_affine_rows",[])
+    affine_projector=None
+    if affine_rows:
+        from .optcuts_seam_affine_constraints import AffineSeamProjector
+        rows=[]
+        for offset in (0,n_mesh_vertices):
+            rows.extend(
+                [[(offset+int(i),float(w)) for i,w in row]
+                 for row in affine_rows]
+            )
+            rows.extend(
+                [[(offset+int(group[0]),1.),(offset+int(v),-1.)]
+                 for group in seam_groups if len(group)>1 for v in group[1:]]
+            )
+        affine_projector=AffineSeamProjector(2*n_mesh_vertices,rows)
+        single=AffineSeamProjector(n_mesh_vertices,affine_rows)
+        if single.residual(top_global)>1e-9*max(
+            1.,float(np.max(np.abs(top_global)))
+        ):
+            raise RuntimeError(
+                "T3D_SEAM_INPUT_K3D_AFFINE_NOT_CLOSED: "
+                f"residual={single.residual(top_global):.9g}"
+            )
     if seam_groups:
         from .optcuts_seam_exact_closure import max_seam_gap
         if max_seam_gap(top_global,seam_groups)>1e-10:
@@ -231,6 +254,9 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     # Eq.(2) is solved on shared top/bottom mesh vertices.  A mesh edge has one
     # geometric contact quad, even when two tiles are incident to that edge.
     x0=np.vstack([top_global,bottom_global])
+    if affine_projector is not None:
+        x0=affine_projector.project(x0,strict=True)
+        bottom_global=x0[n_mesh_vertices:].copy()
     coupled_groups=seam_groups+[
         [n_mesh_vertices+v for v in ids] for ids in seam_groups
     ]
@@ -267,7 +293,8 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
             projected=_best_fit_plane(x[ids_arr])
             constraints.append((ids,projected,weight))
         new=_solve(len(x),constraints,x0,anchor_weight,
-                   equality_groups=coupled_groups)
+                   equality_groups=coupled_groups,
+                   affine_projector=affine_projector)
         if not np.isfinite(new).all():
             # Never let a failed T3D local/global step poison K2D/T2D with NaNs.
             # The previous iterate is finite and already represents the paper
