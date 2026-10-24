@@ -164,3 +164,67 @@ def test_renumbered_geometry_view_maps_seam_groups_for_al_not_stale_original():
     ]
     assert reduced.metrics["seam_exact_groups_reindexed_for_reduction"]
     assert mesh.metrics["seam_exact_vertex_groups"]==groups
+
+
+
+def test_smoothmax_false_global_minimum_at_fully_collapsed_quad():
+    """Equidistant side-lengths alone incorrectly consider point-collapse square."""
+    v,f,groups=skewed_pair()
+    scales=al._face_scales(v,f)
+    collapsed=v.copy()
+    for face in f:
+        collapsed[face]=np.mean(v[face],axis=0)
+    loss,_,diag=al._square_energy_and_gradient(
+        collapsed,f,scales,10.
+    )
+    assert loss<1e-17
+    audit=al._quad_triangle_area_diagnostics(v,collapsed,f)
+    assert audit["collapsed_or_inverted_triangle_count"]>0
+    area_loss,grad=al._quad_area_barrier_energy_gradient(
+        collapsed,v,f,scales,weight=100.
+    )
+    assert area_loss>0
+    assert np.isfinite(grad).all()
+
+
+def test_seam_anti_collapse_signed_triangle_area_analytic_gradient():
+    v,f,_=skewed_pair()
+    scales=al._face_scales(v,f)
+    warped=v.copy()
+    warped[2]=.92*v[1]+.08*v[2]
+    warped[7]=.92*v[4]+.08*v[7]
+    score,grad=al._quad_area_barrier_energy_gradient(
+        warped,v,f,scales,weight=100.
+    )
+    assert score>0
+    for vertex,axis in [(2,0),(2,1),(2,2),(7,1)]:
+        plus=warped.copy();minus=warped.copy()
+        plus[vertex,axis]+=1e-6
+        minus[vertex,axis]-=1e-6
+        ep=al._quad_area_barrier_energy_gradient(
+            plus,v,f,scales,weight=100.
+        )[0]
+        em=al._quad_area_barrier_energy_gradient(
+            minus,v,f,scales,weight=100.
+        )[0]
+        assert grad[vertex,axis]==pytest.approx(
+            (ep-em)/2e-6,rel=4e-5,abs=1e-5
+        )
+
+
+def test_affine_smoothmax_k3d_shape_guard_is_default_for_real_seams():
+    v,f,groups=skewed_pair()
+    deformed=v.copy()
+    deformed[4]+=[-.04,.02,.01]
+    result,metrics=al._augmented_lagrangian_planarize(
+        deformed,f,equality_groups=groups,square_weight=10.,
+        outer_iterations=2,inner_iterations=40,
+        restoration_sweeps=4,final_polish_sweeps=6,
+    )
+    assert metrics["k3d_seam_shape_guard_enabled"]
+    assert metrics["k3d_seam_area_guard_weight"]>=50.
+    assert metrics["k3d_seam_shape_guard_weight"]>=8.
+    assert metrics["k3d_seam_invalid_triangle_count"]==0
+    assert metrics["k3d_seam_min_oriented_triangle_area_ratio"]>=.02
+    assert max_seam_gap(result,groups)==0.
+    assert metrics["k3d_smoothmax_enabled"]
