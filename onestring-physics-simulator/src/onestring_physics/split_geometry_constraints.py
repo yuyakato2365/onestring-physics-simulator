@@ -63,6 +63,12 @@ def optimize_shared(base, target, mesh, parameterization, params):
             for group in source_groups
             if len({int(mapping[int(v)]) for v in group})>1
         ]
+        if reduced.metrics.get("seam_exact_affine_rows"):
+            from .optcuts_seam_soft_constraints import remap_rows
+            reduced.metrics["seam_exact_affine_rows"]=remap_rows(
+                reduced.metrics["seam_exact_affine_rows"],mapping
+            )
+            reduced.metrics["seam_affine_rows_reindexed_for_reduction"]=True
         reduced.metrics["seam_exact_groups_reindexed_for_reduction"]=True
     if hasattr(mesh,"_seam_original_m2d_uv"):
         # This reduction renumbers source grid vertices. Original UV seam
