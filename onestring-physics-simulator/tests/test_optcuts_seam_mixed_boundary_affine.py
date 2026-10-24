@@ -67,7 +67,8 @@ def test_mixed_cut_open_grid_edge_not_misclassified():
     assert result["status"]=="conforming"
     assert result["unclassified_boundary_edges"]==0
     assert result["mixed_seam_open_grid_edges"]==1
-    assert result["affine_exact_stitchable"]
+    assert not result["affine_exact_stitchable"]
+    assert result["seam_stitch_mode"]=="soft"
     assert result["affine_metrics"]["source_cut_physical_edge_count"]==1
     assert result["affine_metrics"]["source_cut_constraint_row_count"]>=2
     assert len(result["affine_rows"])>=2
