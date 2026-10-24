@@ -121,8 +121,14 @@ def seam_matrix_rank_diagnostics(rows,n_vertices,max_seam_vertices=4000):
         data["rank_skip_reason"]="above_configured_svd_cap"
         data["rank_cap_vertices"]=int(max_seam_vertices)
         return data
-    C=row_matrix(int(n_vertices),rows)[:,ids].toarray()
-    singular=np.linalg.svd(C,compute_uv=False)
+    try:
+        C=row_matrix(int(n_vertices),rows)[:,ids].toarray()
+        singular=np.linalg.svd(C,compute_uv=False)
+    except (MemoryError,np.linalg.LinAlgError) as exc:
+        # If rank cannot be established, production mode-selection MUST
+        # fail closed to soft. No false rank estimate or hard projection.
+        data["rank_skip_reason"]=type(exc).__name__
+        return data
     cutoff=max(C.shape)*np.finfo(float).eps*(
         float(singular.max()) if len(singular) else 0.
     )*10.
