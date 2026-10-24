@@ -370,10 +370,35 @@ def build_onestring_design(
     reports: dict[str, StageReport] = {}
 
     target_surface = _build_surface_mesh(target, grid, params.surface_mesh_subdivisions)
+    # Phase-0 stage audit is entirely opt-in. It never changes the source
+    # mesh, grid origin, pitch, mask, Omega or optimization parameters.
+    import os as _audit_os
+    _audit_dir=_audit_os.environ.get("ONESTRING_STAGE_AUDIT_DIR","").strip()
+    _audit=None
+    if _audit_dir:
+        from .stage_audit_bundle import StageAuditWriter
+        _audit=StageAuditWriter(
+            _audit_dir,params,
+            runtime_functions={
+                "_build_surface_parameterization":_build_surface_parameterization,
+                "_flatten_to_domain":_flatten_to_domain,
+                "_build_m2d":_build_m2d,
+                "_lift_m2d_to_m3d":_lift_m2d_to_m3d,
+                "_optimize_k3d":_optimize_k3d,
+                "_extrude_tiles":_extrude_tiles,
+            },
+        )
+        _audit.record("S",target_surface.vertices,target_surface.faces)
+        print(
+            "[STAGE-AUDIT] run_id="+_audit.run_id+
+            " path="+str(_audit.path),flush=True,
+        )
     _emit_progress(progress_callback, "S: target surface mesh", 0.08, f"{len(target_surface.vertices)} vertices")
     tick = time.perf_counter()
     parameterization = _build_surface_parameterization(target_surface, target, grid, params)
     runtime["parameterization"] = time.perf_counter()-tick
+    if _audit is not None:
+        _audit.record_uv(parameterization)
     tick = time.perf_counter()
     if experimental:
         experiment.prepare_parameterization(parameterization, params)
@@ -383,20 +408,31 @@ def build_onestring_design(
         raise NotImplementedError("Extrusion-aware Split currently requires the common CSF candidate-selection route")
     _emit_progress(progress_callback, "Ω domain", 0.22, "Flattened domain ready")
     mesh_2d_initial = _build_m2d(grid, domain, params)
+    if _audit is not None:
+        _audit.record_quad("M2D",mesh_2d_initial)
     _emit_progress(progress_callback, "Ω -> M2D", 0.30, f"kept {len(mesh_2d_initial.faces)} quads")
     runtime["grid"] = time.perf_counter()-tick
     active_grid = mesh_2d_initial.grid
     mesh_3d_initial, reports["M2D -> M3D"] = _lift_m2d_to_m3d(target, mesh_2d_initial, parameterization, params)
     from .split_geometry_constraints import propagate, optimize_shared
     propagate(mesh_2d_initial, mesh_3d_initial)
+    if _audit is not None:
+        _audit.record_quad("M3D",mesh_3d_initial)
     _emit_progress(progress_callback, "M2D -> M3D", 0.38, "Inverse map / surface lift done")
     tick = time.perf_counter()
-    if experimental:
-        import sys
-        mesh_3d_optimized, reports["M3D -> K3D"] = experiment.optimize_assembled(
-            _optimize_k3d, target, mesh_2d_initial, mesh_3d_initial, parameterization, params, sys.modules[__name__])
-    else:
-        mesh_3d_optimized, reports["M3D -> K3D"] = optimize_shared(_optimize_k3d, target, mesh_3d_initial, parameterization, params)
+    try:
+        if experimental:
+            import sys
+            mesh_3d_optimized, reports["M3D -> K3D"] = experiment.optimize_assembled(
+                _optimize_k3d, target, mesh_2d_initial, mesh_3d_initial, parameterization, params, sys.modules[__name__])
+        else:
+            mesh_3d_optimized, reports["M3D -> K3D"] = optimize_shared(_optimize_k3d, target, mesh_3d_initial, parameterization, params)
+    except Exception as _audit_exc:
+        if _audit is not None:
+            _audit.fail("K3D",_audit_exc)
+        raise
+    if _audit is not None:
+        _audit.record_quad("K3D_before_T3D",mesh_3d_optimized)
     runtime["K3D"] = time.perf_counter()-tick
     if experimental:
         mapping = np.asarray(mesh_3d_optimized.metrics.get("assembled_geometry_map", np.arange(len(mesh_3d_optimized.vertices))), int)
@@ -405,7 +441,16 @@ def build_onestring_design(
             experiment.evaluate_extrusion(view.vertices, view.faces, params.thickness))
     _emit_progress(progress_callback, "M3D -> K3D", 0.50, str(mesh_3d_optimized.metrics.get("actual_backend", "cpu")))
     tick = time.perf_counter()
-    tiles_3d, reports["K3D -> T3D"] = _extrude_tiles(mesh_3d_optimized, params.thickness, "T3D")
+    try:
+        tiles_3d, reports["K3D -> T3D"] = _extrude_tiles(mesh_3d_optimized, params.thickness, "T3D")
+    except Exception as _audit_exc:
+        if _audit is not None:
+            _audit.fail("T3D",_audit_exc)
+        raise
+    if _audit is not None:
+        _audit.record_quad("K3D",mesh_3d_optimized)
+        _audit.record_t3d(tiles_3d)
+        _audit.finish()
     runtime["T3D"] = time.perf_counter()-tick
     _emit_progress(progress_callback, "K3D -> T3D", 0.56, "Extruded assembled tiles")
     tick = time.perf_counter()
