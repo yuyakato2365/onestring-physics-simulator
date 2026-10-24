@@ -17,9 +17,14 @@ import numpy as np
 
 def _jsonable(value):
     if isinstance(value, np.generic):
-        return value.item()
+        return _jsonable(value.item())
     if isinstance(value, np.ndarray):
-        return value.tolist()
+        return _jsonable(value.tolist())
+    if isinstance(value,float) and not np.isfinite(value):
+        # Nonfinite metrics are EVIDENCE. Keep them explicitly as
+        # strings, rather than failing to write a crash bundle.
+        return ("NaN" if np.isnan(value) else
+                "Infinity" if value>0 else "-Infinity")
     if dataclasses.is_dataclass(value):
         return _jsonable(dataclasses.asdict(value))
     if isinstance(value, dict):
