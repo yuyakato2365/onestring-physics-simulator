@@ -45,7 +45,7 @@ def _best_fit_plane(points):
     return p-np.outer((p-c)@normal,normal)
 
 
-def _solve(n_vertices,constraints,anchor,anchor_weight,*,equality_groups=()):
+def _solve(n_vertices,constraints,anchor,anchor_weight,*,equality_groups=(),affine_projector=None):
     # Eliminate *exact* equality groups from the unknowns. Penalties
     # or a weld after solving cannot prevent the T3D Eq.(2) projection
     # from reopening a previously closed K3D seam.
@@ -82,7 +82,8 @@ def _solve(n_vertices,constraints,anchor,anchor_weight,*,equality_groups=()):
     A=sparse.coo_matrix((data,(rows,cols)),shape=(r,reduced_count*3)).tocsr()
     reduced=lsqr(A,np.asarray(rhs),atol=1e-11,btol=1e-11,
                  iter_lim=max(500,4*reduced_count))[0].reshape(reduced_count,3)
-    return reduced[inverse]
+    solved=reduced[inverse]
+    return affine_projector.project(solved,strict=True) if affine_projector is not None else solved
 
 
 def _planarity_error(x,face_sets):
@@ -155,6 +156,19 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         source_seam_groups=(getattr(mesh,"metrics",{}) or {}).get(
             "seam_exact_vertex_groups",[]
         )
+        original_affine=(getattr(mesh,"metrics",{}) or {}).get("seam_exact_affine_rows",[])
+        if original_affine:
+            transformed=[]
+            for row in original_affine:
+                merged={}
+                for v,w in row:
+                    j=int(mapping[int(v)])
+                    merged[j]=merged.get(j,0.)+float(w)
+                normalized=[[i,w] for i,w in sorted(merged.items())
+                            if abs(w)>1e-12]
+                if normalized:transformed.append(normalized)
+            view.metrics["seam_exact_affine_rows"]=transformed
+            view.metrics["seam_exact_affine_rows_reindexed"]=True
         if source_seam_groups:
             reduced_groups=[]
             for group in source_seam_groups:
@@ -172,6 +186,9 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
             assembly.metrics["seam_exact_original_vertex_group_count"]=len(
                 source_seam_groups
             )
+        if original_affine:
+            mesh.metrics["seam_exact_affine_rows"]=original_affine
+            assembly.metrics["seam_exact_original_affine_row_count"]=len(original_affine)
         assembly.metrics["assembled_geometry_map"] = mapping.tolist()
         # Faces and vertex IDs on the caller are untouched; only geometry moved.
         return assembly, report
