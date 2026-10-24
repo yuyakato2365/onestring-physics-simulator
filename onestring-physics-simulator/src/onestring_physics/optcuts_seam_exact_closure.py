@@ -675,10 +675,19 @@ def close_k3d_seam_after_full_vertex_restore(
         cf,_=_robust_constraint_faces(out.vertices,out.faces)
         measured=float(np.max(_quad_plane_distances(out.vertices,cf)))
     al_gap=max_seam_gap(out.vertices,groups)
+    from .optcuts_test_k3d_augmented_lagrangian_patch import (
+        _quad_triangle_area_diagnostics,
+    )
+    checked_geometry=_quad_triangle_area_diagnostics(
+        np.asarray(mesh.vertices,float),
+        np.asarray(out.vertices,float),
+        np.asarray(out.faces,int)
+    )
     already_feasible=bool(
         al_shared and residual_before<=1e-9*norm_scale
         and al_gap<=1e-9*norm_scale and plane_tol>0
         and measured<=max(plane_tol,1e-10)
+        and checked_geometry["collapsed_or_inverted_triangle_count"]==0
     )
     if already_feasible:
         result=np.asarray(out.vertices,float).copy()
@@ -721,7 +730,8 @@ def close_k3d_seam_after_full_vertex_restore(
         # Never restart continuation from a collapsed result: this
         # would recompute face scales / the preservation reference
         # from near-zero panels, making SmoothMax collapse self-validating.
-        if before_guard["collapsed_or_inverted_triangle_count"]:
+        if (before_guard["collapsed_or_inverted_triangle_count"]
+                or before_guard["min_oriented_area_ratio"]<.08):
             restart=baseline.copy()
             restart_source="original_noncollapsed_M3D"
             print(
