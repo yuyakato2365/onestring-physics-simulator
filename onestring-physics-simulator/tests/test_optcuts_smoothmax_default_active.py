@@ -191,8 +191,8 @@ def test_seam_anti_collapse_signed_triangle_area_analytic_gradient():
     v,f,_=skewed_pair()
     scales=al._face_scales(v,f)
     warped=v.copy()
-    warped[2]=.92*v[1]+.08*v[2]
-    warped[7]=.92*v[4]+.08*v[7]
+    warped[2]=.99*v[1]+.01*v[2]
+    warped[7]=.99*v[4]+.01*v[7]
     score,grad=al._quad_area_barrier_energy_gradient(
         warped,v,f,scales,weight=100.
     )
