@@ -193,9 +193,11 @@ def geometry_view(mesh, mapping):
         if view.metrics.get("seam_exact_affine_rows"):
             from .optcuts_seam_soft_constraints import remap_rows
             source_rows=view.metrics["seam_exact_affine_rows"]
-            view.metrics["seam_exact_affine_rows"]=remap_rows(
-                source_rows,mapping
+            rows,audit=remap_rows(
+                source_rows,mapping,return_stats=True
             )
+            view.metrics["seam_exact_affine_rows"]=rows
+            view.metrics.update(audit)
             view.metrics["seam_affine_rows_reindexed_for_reduction"]=True
         view.metrics["seam_exact_groups_reindexed_for_reduction"]=True
         view.metrics["seam_exact_groups_removed_by_reduction"]=int(
