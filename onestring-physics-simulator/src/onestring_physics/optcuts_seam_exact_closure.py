@@ -402,12 +402,29 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
             uv,faces,segments,absolute_tolerance=tol
         )
     can_stitch=bool(not unclassified and affine_rows)
+    from .optcuts_seam_soft_constraints import seam_matrix_rank_diagnostics
+    rank_audit=seam_matrix_rank_diagnostics(affine_rows,len(uv))
+    # Strict source-edge equations may geometrically force a collapse
+    # when independent Grid partitions assign different breakpoints.
+    # Hard weld is safe only with fully matching Grid edges and NO mixed
+    # source-cut/original-open edge. Preserve source cut provenance in
+    # both modes; do not confuse valid source boundary coverage with
+    # nondegenerate *hard* solvability.
+    fully_matching=bool(
+        can_stitch and len(unmatched)==0
+        and len(mixed_cut_open_edges)==0
+        and affine_metrics.get("source_cut_different_grid_partition_count",1)==0
+        and len(paired)>0
+    )
+    mode="hard" if fully_matching else "soft" if can_stitch else "unavailable"
     return {
         "status":("conforming" if can_stitch else "nonconforming"),
         "groups":[sorted(x) for x in groups],
         "affine_rows":affine_rows,
         "affine_metrics":affine_metrics,
-        "affine_exact_stitchable":can_stitch,
+        "affine_exact_stitchable":bool(fully_matching),
+        "seam_stitch_mode":mode,
+        "affine_rank_diagnostics":rank_audit,
         "paired_edges":paired,
         "unmatched_edges":0 if can_stitch else len(unmatched),
         "full_grid_edge_unmatched_before_affine":len(unmatched),
@@ -650,6 +667,35 @@ def close_k3d_seam_after_full_vertex_restore(
             "on both sides. Remesh/realign the Grid seam subdivisions "
             "before M3D; do not apply nearest-neighbor welding."
         )
+    if topo.get("seam_stitch_mode")=="soft":
+        from .optcuts_seam_soft_constraints import residual_stats
+        seam_rows=topo.get("affine_rows",[])
+        stats=residual_stats(out.vertices,seam_rows)
+        # The objective was already applied inside K3D Augmented
+        # Lagrangian. Do not project, weld, or restart the optimizer:
+        # for incompatible Grid samples ker(C) may only contain a
+        # zero-length Seam, making exact closure structurally impossible.
+        out.metrics["seam_exact_closure_enabled"]=False
+        out.metrics["seam_exact_closure_reason"]="incompatible_grid_partition_soft_fit"
+        out.metrics["seam_stitch_mode"]="soft"
+        out.metrics["seam_soft_row_count"]=len(seam_rows)
+        out.metrics["seam_soft_gap_rms"]=stats["rms"]
+        out.metrics["seam_soft_gap_max"]=stats["max"]
+        out.metrics["seam_exact_affine_rows"]=[
+            [[int(i),float(w)] for i,w in row]
+            for row in seam_rows
+        ]
+        out.metrics["seam_exact_vertex_groups"]=[]
+        out.metrics["seam_exact_full_shape_closed"]=False
+        print(
+            "[SEAM-K3D-SOFT] "
+            f"rows={stats['row_count']} "
+            f"rms={stats['rms']:.8g} max={stats['max']:.8g} "
+            f"nullity={topo['affine_rank_diagnostics'].get('seam_nullity')} "
+            "no hard projection; physical original-open regions retained",
+            flush=True,
+        )
+        return out
     groups=topo["groups"]
     if not groups and not topo.get("affine_rows"):
         raise SeamTopologyMismatch(
@@ -909,8 +955,12 @@ def install_optcuts_exact_seam_closure(pipeline):
             )
             if (topo["status"]=="conforming" and
                     topo.get("affine_rows")):
+                stitch_mode=topo.get("seam_stitch_mode","soft")
+                out.metrics["seam_stitch_mode"]=stitch_mode
                 out.metrics["seam_exact_vertex_groups"]=[
-                    list(map(int,g)) for g in topo["groups"]
+                    list(map(int,g)) for g in (
+                        topo["groups"] if stitch_mode=="hard" else []
+                    )
                 ]
                 out.metrics["seam_exact_preflight_certified"]=True
                 out.metrics["seam_exact_affine_rows"]=[
@@ -929,7 +979,10 @@ def install_optcuts_exact_seam_closure(pipeline):
                     f"matched_edges={len(topo['paired_edges'])} "
                     f"affine_rows={len(topo['affine_rows'])} "
                     f"mixed_seam_open_edges={topo['mixed_seam_open_grid_edges']} "
-                    "AL_hard_equality_ready=True",
+                    f"mode={stitch_mode} "
+                    f"rank={topo['affine_rank_diagnostics'].get('seam_rank')} "
+                    f"nullity={topo['affine_rank_diagnostics'].get('seam_nullity')} "
+                    f"AL_hard_equality_ready={stitch_mode=='hard'}",
                     flush=True,
                 )
             else:
