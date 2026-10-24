@@ -207,6 +207,89 @@ def _quad_plane_distances(vertices: np.ndarray, constraint_faces: np.ndarray) ->
     return out
 
 
+def _quad_triangle_area_diagnostics(
+    reference: np.ndarray, vertices: np.ndarray, faces: np.ndarray,
+    *, min_reference_area_ratio: float = 1e-7,
+) -> dict:
+    """Track actual source-referenced triangle collapse, not planarity only.
+
+    The classic plane-distance criterion is +inf when its normal has
+    zero magnitude: a degenerate *planar* quad is not valid K3D.
+    Report both unsigned area-ratio collapse and oriented inversion.
+    """
+    ref=np.asarray(reference,float)
+    v=np.asarray(vertices,float)
+    f=np.asarray(faces,int)[:,:4]
+    tri=np.concatenate([f[:,[0,1,2]],f[:,[0,2,3]]],axis=0)
+    a=ref[tri]
+    base=np.cross(a[:,1]-a[:,0],a[:,2]-a[:,0])
+    area=np.linalg.norm(base,axis=1)
+    scale=_face_scales(ref,f)
+    reference_scale=np.concatenate([scale,scale])
+    considered=area>np.maximum(
+        min_reference_area_ratio*reference_scale**2,1e-16
+    )
+    q=v[tri]
+    cross=np.cross(q[:,1]-q[:,0],q[:,2]-q[:,0])
+    unsigned=np.linalg.norm(cross,axis=1)/np.maximum(area,1e-20)
+    orientation=np.einsum("ij,ij->i",cross,base)/np.maximum(area**2,1e-40)
+    signed=np.where(considered,orientation,np.inf)
+    magnitudes=np.where(considered,unsigned,np.inf)
+    invalid=(considered & (
+        ~np.isfinite(unsigned) | (unsigned<0.02) |
+        ~np.isfinite(orientation) | (orientation<0.01)
+    ))
+    return {
+        "valid_source_triangles":int(np.sum(considered)),
+        "min_unsigned_area_ratio":float(np.min(magnitudes,initial=np.inf)),
+        "min_oriented_area_ratio":float(np.min(signed,initial=np.inf)),
+        "collapsed_or_inverted_triangle_count":int(np.sum(invalid)),
+        "collapsed_or_inverted_face_ids":sorted(
+            set((np.flatnonzero(invalid)%len(f)).tolist())
+        )[:24],
+    }
+
+
+def _quad_area_barrier_energy_gradient(
+    vertices: np.ndarray, reference: np.ndarray, faces: np.ndarray,
+    scales: np.ndarray, *, weight: float, minimum_ratio: float = 0.04,
+) -> tuple[float,np.ndarray]:
+    """Differentiable penalty against collapse/inversion of quad triangles.
+
+    Signed projected double-areas are evaluated relative to each
+    reference M3D triangle normal. This penalty is an ADDITION to
+    SmoothMax and not a substitute for a final geometric validity test.
+    """
+    x=np.asarray(vertices,float)
+    base=np.asarray(reference,float)
+    f=np.asarray(faces,int)[:,:4]
+    triangles=np.concatenate((f[:,[0,1,2]],f[:,[0,2,3]]),axis=0)
+    b=base[triangles]
+    n=np.cross(b[:,1]-b[:,0],b[:,2]-b[:,0])
+    nn=np.linalg.norm(n,axis=1)
+    unit=n/np.maximum(nn[:,None],1e-20)
+    unit_scale=np.concatenate((np.asarray(scales,float),)*2)
+    valid=nn>np.maximum(unit_scale**2*1e-7,1e-16)
+    q=x[triangles]
+    a=q[:,1]-q[:,0]
+    c=q[:,2]-q[:,0]
+    oriented=np.einsum("ij,ij->i",np.cross(a,c),unit)
+    safe_area=np.maximum(nn,1e-20)
+    deficit=np.where(valid,np.minimum(oriented/safe_area-minimum_ratio,0.),0.)
+    ntri=max(int(np.sum(valid)),1)
+    energy=.5*float(weight)*float(np.dot(deficit,deficit))/ntri
+    coeff=float(weight)*deficit/(ntri*safe_area)
+    db=np.cross(c,unit)
+    dc=np.cross(unit,a)
+    grad=np.zeros_like(x)
+    delta_b=coeff[:,None]*db
+    delta_c=coeff[:,None]*dc
+    np.add.at(grad,triangles[:,0],-delta_b-delta_c)
+    np.add.at(grad,triangles[:,1],delta_b)
+    np.add.at(grad,triangles[:,2],delta_c)
+    return energy,grad
+
+
 def _face_scales(reference: np.ndarray, faces: np.ndarray) -> np.ndarray:
     q = np.asarray(reference, dtype=float)[np.asarray(faces, dtype=int)[:, :4]]
     vals: list[float] = []
@@ -438,6 +521,20 @@ def _augmented_lagrangian_planarize(
 
     shape_mode = _shape_preserving_enabled()
     shape_weight = max(0.0, _safe_float_env("ONESTRING_K3D_SHAPE_PRESERVATION_WEIGHT", 100.0)) if shape_mode else 0.0
+    # Seam welding plus a relative-only square penalty has a collapsed
+    # quad as a false zero-energy minimum. In seam-affine AL, preserve
+    # 3D source edge/diagonal dimensions and oriented triangle areas
+    # even when the optional shape-preserving UI version is OFF.
+    seam_geometry_guard=bool(affine_rows or equality_groups)
+    if seam_geometry_guard:
+        shape_weight=max(
+            shape_weight,
+            max(8.,3.*float(max(square_weight,0.)))
+        )
+    area_guard_weight=(
+        max(50.,10.*float(max(square_weight,0.)))
+        if seam_geometry_guard else 0.
+    )
     # The global smooth-maximum square penalty is part of EVERY active
     # optcuts_test hard-planarity solve. Shape-preserving reference metrics
     # remain a separate optional term; they must not gate E_Square.
@@ -546,7 +643,7 @@ def _augmented_lagrangian_planarize(
         delta = verts - ref
         energy = 0.5 * w_anchor * float(np.sum(delta * delta))
         grad_total = w_anchor * delta
-        if shape_mode and shape_weight > 0.0:
+        if shape_weight > 0.0:
             shape_energy, shape_grad, _ = _shape_metric_energy_and_gradient(
                 verts, f4, scales, reference_lengths, shape_weight
             )
@@ -558,6 +655,12 @@ def _augmented_lagrangian_planarize(
             )
             energy += square_energy
             grad_total += square_grad
+        if area_guard_weight>0.:
+            area_energy,area_grad=_quad_area_barrier_energy_gradient(
+                verts,ref,f4,scales,weight=area_guard_weight
+            )
+            energy+=area_energy
+            grad_total+=area_grad
         constraints, local_grad = _quad_constraint_values_and_gradient(verts, constraint_faces, scales)
         coeff = lambdas + rho * constraints
         energy += float(np.dot(lambdas, constraints) + 0.5 * rho * np.dot(constraints, constraints))
@@ -659,6 +762,15 @@ def _augmented_lagrangian_planarize(
     shape_max = float(np.max(np.abs(final_shape_residuals))) if final_shape_residuals.size else 0.0
     _, _, square_diag = _square_energy_and_gradient(x, f4, scales, 1.0)
 
+    geometry_validity=_quad_triangle_area_diagnostics(ref,x,f4)
+    print(
+        "[OPTCUTS-TEST-K3D-GEOMETRY] "
+        f"min_signed_area_ratio={geometry_validity['min_oriented_area_ratio']:.7g} "
+        f"min_unsigned_area_ratio={geometry_validity['min_unsigned_area_ratio']:.7g} "
+        f"invalid_triangles={geometry_validity['collapsed_or_inverted_triangle_count']} "
+        f"face_ids={geometry_validity['collapsed_or_inverted_face_ids']}",
+        flush=True,
+    )
     print(
         "[OPTCUTS-TEST-K3D-AL-FINAL] "
         f"mode={'shape-preserving' if shape_mode else 'legacy'} pre_polish={pre_polish_max:.6g} "
@@ -671,6 +783,21 @@ def _augmented_lagrangian_planarize(
 
     return x, {
         "k3d_augmented_lagrangian_applied": True,
+        "k3d_seam_shape_guard_enabled":bool(seam_geometry_guard),
+        "k3d_seam_shape_guard_weight":float(shape_weight),
+        "k3d_seam_area_guard_weight":float(area_guard_weight),
+        "k3d_seam_min_oriented_triangle_area_ratio":float(
+            geometry_validity["min_oriented_area_ratio"]
+        ),
+        "k3d_seam_min_unsigned_triangle_area_ratio":float(
+            geometry_validity["min_unsigned_area_ratio"]
+        ),
+        "k3d_seam_invalid_triangle_count":int(
+            geometry_validity["collapsed_or_inverted_triangle_count"]
+        ),
+        "k3d_seam_invalid_face_ids":list(
+            geometry_validity["collapsed_or_inverted_face_ids"]
+        ),
         "k3d_al_source_seam_hard_equality":bool(
             has_equalities or affine_projector is not None
         ),
