@@ -710,8 +710,32 @@ def close_k3d_seam_after_full_vertex_restore(
             _augmented_lagrangian_planarize,
             _quad_plane_distances,_robust_constraint_faces,
         )
+        from .optcuts_test_k3d_augmented_lagrangian_patch import (
+            _quad_triangle_area_diagnostics,
+        )
+        baseline=np.asarray(mesh.vertices,float)
+        prior=np.asarray(out.vertices,float)
+        before_guard=_quad_triangle_area_diagnostics(
+            baseline,prior,np.asarray(out.faces,int)
+        )
+        # Never restart continuation from a collapsed result: this
+        # would recompute face scales / the preservation reference
+        # from near-zero panels, making SmoothMax collapse self-validating.
+        if before_guard["collapsed_or_inverted_triangle_count"]:
+            restart=baseline.copy()
+            restart_source="original_noncollapsed_M3D"
+            print(
+                "[SEAM-K3D-RECOVER] invalid_post_AL_geometry "
+                f"collapsed_triangles={before_guard['collapsed_or_inverted_triangle_count']} "
+                f"affected_faces={before_guard['collapsed_or_inverted_face_ids']} "
+                "restart_from=M3D (not corrupted K3D)",
+                flush=True,
+            )
+        else:
+            restart=prior.copy()
+            restart_source="optimized_K3D"
         result,refine_metrics=_augmented_lagrangian_planarize(
-            np.asarray(out.vertices,float),np.asarray(out.faces,int),
+            restart,np.asarray(out.faces,int),
             square_weight=max(0.,float(getattr(params,"w_square",10.))),
             anchor_weight=float(getattr(params,"k3d_al_anchor_weight",1.)),
             rho0=float(getattr(params,"k3d_al_rho0",10.)),
@@ -733,19 +757,42 @@ def close_k3d_seam_after_full_vertex_restore(
             equality_groups=groups,affine_rows=affine_rows,
         )
         projection_gap=affine.residual(result)
+        # A vanishing reference-plane normal makes the historical
+        # plane-distance diagnostic +inf. Never misreport it as an
+        # excessively large but otherwise valid planar quad.
+        source_guard=_quad_triangle_area_diagnostics(
+            baseline,result,np.asarray(out.faces,int)
+        )
+        bad_count=int(source_guard["collapsed_or_inverted_triangle_count"])
         cf,_=_robust_constraint_faces(result,out.faces)
         final_plane=float(np.max(_quad_plane_distances(result,cf)))
         allowed=float(refine_metrics.get("k3d_hard_planarity_tolerance",0.))
+        if (bad_count or not np.isfinite(final_plane)):
+            raise SeamTopologyMismatch(
+                "SEAM_K3D_COLLAPSED_QUADS_IN_JOINT_OPTIMIZATION: "
+                f"invalid_reference_triangles={bad_count}, "
+                f"affected_quad_ids={source_guard['collapsed_or_inverted_face_ids']}, "
+                f"min_signed_area_ratio={source_guard['min_oriented_area_ratio']:.9g}, "
+                f"source_cut_gap={projection_gap:.9g}, "
+                f"plane_distance={final_plane}, "
+                f"restart_from={restart_source}. "
+                "A zero-area quad has undefined plane normal. "
+                "SmoothMax edge-length equality does not prevent a "
+                "collapsed quad; exact source Seam plus local shape "
+                "preservation may require revising panel topology."
+            )
         if (projection_gap>1e-9*norm_scale or
                 final_plane>max(allowed,1e-10)):
             raise SeamTopologyMismatch(
                 "SEAM_K3D_AFFINE_SMOOTHMAX_PLANARITY_NOT_CONVERGED: "
                 f"source_cut_gap={projection_gap:.9g}, "
                 f"plane_distance={final_plane:.9g}, "
-                f"plane_tol={allowed:.9g}. "
-                "This is a real failure of the joint Seam + SmoothMax + "
-                "planarity optimization, not a boundary classification "
-                "error. Increase AL budget or revise the feasible geometry."
+                f"plane_tol={allowed:.9g}, "
+                f"restart_from={restart_source}, "
+                f"min_signed_area_ratio={source_guard['min_oriented_area_ratio']:.9g}. "
+                "Non-degenerate K3D still violates hard planarity under "
+                "the present exact source-Seam and shape constraints. "
+                "Do not relax the hard requirements without investigation."
             )
         diag={
             "seam_k3d_gap_before":float(al_gap),
