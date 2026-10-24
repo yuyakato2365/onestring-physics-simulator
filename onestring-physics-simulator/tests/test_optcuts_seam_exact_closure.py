@@ -468,3 +468,29 @@ def test_unified_al_keeps_seam_and_smoothmax_after_final_closure():
     assert out.metrics["seam_exact_paired_edge_gap_max"]==0.
     assert out.metrics["seam_exact_full_shape_closed"] is False  # open source test chart
     np.testing.assert_array_equal(out.vertices,solved)
+
+
+
+def test_uncertified_seam_rank_can_never_select_hard_even_if_grid_matches(monkeypatch):
+    from onestring_physics import optcuts_seam_soft_constraints as soft
+    chart,uv,faces=conforming()
+    from onestring_physics.optcuts_seam_exact_closure import (
+        discover_exact_seam_topology,
+    )
+    baseline=discover_exact_seam_topology(chart,uv,faces)
+    assert baseline["affine_rank_diagnostics"]["rank_evaluated"]
+    assert baseline["seam_stitch_mode"]=="hard"
+    monkeypatch.setattr(
+        soft,"seam_matrix_rank_diagnostics",
+        lambda _rows,_count:{
+            "rank_evaluated":False,
+            "seam_vertices":5000,
+            "seam_nullity":None,
+            "seam_rank":None,
+            "rank_skip_reason":"above_configured_svd_cap",
+        },
+    )
+    audited=discover_exact_seam_topology(chart,uv,faces)
+    assert audited["seam_stitch_mode"]=="soft"
+    assert not audited["affine_exact_stitchable"]
+    assert audited["affine_rank_diagnostics"]["rank_skip_reason"]=="above_configured_svd_cap"
