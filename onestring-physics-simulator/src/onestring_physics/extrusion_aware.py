@@ -190,6 +190,13 @@ def geometry_view(mesh, mapping):
             for group in original_groups
             if len({int(mapping[int(v)]) for v in group})>1
         ]
+        if view.metrics.get("seam_exact_affine_rows"):
+            from .optcuts_seam_soft_constraints import remap_rows
+            source_rows=view.metrics["seam_exact_affine_rows"]
+            view.metrics["seam_exact_affine_rows"]=remap_rows(
+                source_rows,mapping
+            )
+            view.metrics["seam_affine_rows_reindexed_for_reduction"]=True
         view.metrics["seam_exact_groups_reindexed_for_reduction"]=True
         view.metrics["seam_exact_groups_removed_by_reduction"]=int(
             len(original_groups)-len(
