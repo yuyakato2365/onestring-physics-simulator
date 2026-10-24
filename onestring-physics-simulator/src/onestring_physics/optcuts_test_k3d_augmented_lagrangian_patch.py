@@ -339,6 +339,7 @@ def _consensus_planarity_restore(
     tolerance: float | None = None,
     constraint_faces: np.ndarray | None = None,
     equality_inverse: np.ndarray | None = None,
+    affine_projector=None,
 ) -> tuple[np.ndarray, int, float]:
     """Nearest-plane consensus feasibility restoration."""
     x = np.asarray(vertices, dtype=float).copy()
@@ -384,6 +385,8 @@ def _consensus_planarity_restore(
             np.add.at(total,labels,x)
             count=np.bincount(labels,minlength=n)
             x=total[labels]/count[labels,None]
+        if affine_projector is not None:
+            x=affine_projector.project(x,strict=True)
         used = sweep + 1
         if tolerance is not None and constraint_faces is not None:
             distances = _quad_plane_distances(x, constraint_faces)
@@ -409,6 +412,7 @@ def _augmented_lagrangian_planarize(
     restoration_sweeps: int = 8,
     final_polish_sweeps: int = 400,
     equality_groups: tuple | list = (),
+    affine_rows: tuple | list = (),
 ) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
     ref = np.asarray(reference, dtype=float)
     f = np.asarray(faces, dtype=int)
@@ -472,6 +476,29 @@ def _augmented_lagrangian_planarize(
     _,equality_inverse=np.unique(roots,return_inverse=True)
     unique_count=int(equality_inverse.max())+1
     has_equalities=unique_count<len(ref)
+    # A vertex-to-EDGE or edge-to-edge constraint cannot be expressed by
+    # integer-vertex quotienting. A constant orthogonal affine nullspace
+    # projector handles arbitrary seam edge subdivisions, including
+    # seam-to-open transitions MID Grid edge.
+    affine_projector=None
+    if affine_rows:
+        from .optcuts_seam_affine_constraints import (
+            AffineSeamProjector,
+        )
+        combined=list(affine_rows)+[
+            [(int(g[0]),1.),(int(v),-1.)]
+            for g in (equality_groups or ()) if len(g)>1
+            for v in g[1:]
+        ]
+        affine_projector=AffineSeamProjector(len(ref),combined)
+        has_equalities=False
+        print(
+            "[K3D-SEAM-AFFINE] enabled=True "
+            f"physical_constraints={len(affine_rows)} "
+            f"equivalence_groups={len(equality_groups or ())} "
+            f"constraint_rows={affine_projector.count}",
+            flush=True,
+        )
     counts=np.bincount(equality_inverse,minlength=unique_count)
     def flatten_equal(verts):
         total=np.zeros((unique_count,3),float)
@@ -486,6 +513,8 @@ def _augmented_lagrangian_planarize(
     # Initial feasible pair positions are identical, bitwise, and stay
     # identical throughout ALL AL and consensus steps.
     x=expand_equal(flatten_equal(ref)) if has_equalities else ref.copy()
+    if affine_projector is not None:
+        x=affine_projector.project(ref,strict=True)
     if has_equalities:
         print(
             "[K3D-SEAM-AL] hard_shared_unknowns=True "
@@ -508,7 +537,12 @@ def _augmented_lagrangian_planarize(
     last_inner_message = ""
 
     def objective_and_grad(flat: np.ndarray) -> tuple[float, np.ndarray]:
-        verts = expand_equal(flat) if has_equalities else np.asarray(flat, dtype=float).reshape(ref.shape)
+        verts = (
+            affine_projector.project(np.asarray(flat,float).reshape(ref.shape))
+            if affine_projector is not None
+            else expand_equal(flat) if has_equalities
+            else np.asarray(flat,dtype=float).reshape(ref.shape)
+        )
         delta = verts - ref
         energy = 0.5 * w_anchor * float(np.sum(delta * delta))
         grad_total = w_anchor * delta
@@ -530,7 +564,9 @@ def _augmented_lagrangian_planarize(
         contribution = coeff[:, None, None] * local_grad
         for corner in range(4):
             np.add.at(grad_total, constraint_faces[:, corner], contribution[:, corner])
-        return energy, reduce_gradient(grad_total) if has_equalities else grad_total.ravel()
+        if affine_projector is not None:
+            return energy,affine_projector.project(grad_total).ravel()
+        return energy,reduce_gradient(grad_total) if has_equalities else grad_total.ravel()
 
     restore_relaxation = 0.35 if shape_mode else 1.0
 
@@ -546,7 +582,12 @@ def _augmented_lagrangian_planarize(
         inner_total += int(getattr(result, "nit", 0))
         last_inner_success = bool(getattr(result, "success", False))
         last_inner_message = str(getattr(result, "message", ""))
-        x = expand_equal(result.x) if has_equalities else np.asarray(result.x, dtype=float).reshape(ref.shape)
+        x = (
+            affine_projector.project(np.asarray(result.x,float).reshape(ref.shape),strict=True)
+            if affine_projector is not None else
+            expand_equal(result.x) if has_equalities
+            else np.asarray(result.x,dtype=float).reshape(ref.shape)
+        )
         before_restore = _quad_plane_distances(x, constraint_faces)
         max_before_restore = float(np.max(before_restore)) if len(before_restore) else 0.0
         x, used, _ = _consensus_planarity_restore(
@@ -557,6 +598,7 @@ def _augmented_lagrangian_planarize(
             tolerance=plane_tol,
             constraint_faces=constraint_faces,
             equality_inverse=equality_inverse if has_equalities else None,
+            affine_projector=affine_projector,
         )
         restoration_total += int(used)
         constraints, _ = _quad_constraint_values_and_gradient(x, constraint_faces, scales)
@@ -594,6 +636,7 @@ def _augmented_lagrangian_planarize(
             tolerance=plane_tol,
             constraint_faces=constraint_faces,
             equality_inverse=equality_inverse if has_equalities else None,
+            affine_projector=affine_projector,
         )
         restoration_total += int(polish_used)
 
@@ -604,6 +647,8 @@ def _augmented_lagrangian_planarize(
                 "K3D_SEAM_AL_HARD_EQUALITY_LOST_IN_RESTORATION"
             )
         x=exact
+    if affine_projector is not None:
+        x=affine_projector.project(x,strict=True)
     after_dist = _quad_plane_distances(x, constraint_faces)
     max_after = float(np.max(after_dist)) if len(after_dist) else 0.0
     rms_after = float(np.sqrt(np.mean(after_dist * after_dist))) if len(after_dist) else 0.0
@@ -626,7 +671,16 @@ def _augmented_lagrangian_planarize(
 
     return x, {
         "k3d_augmented_lagrangian_applied": True,
-        "k3d_al_source_seam_hard_equality":bool(has_equalities),
+        "k3d_al_source_seam_hard_equality":bool(
+            has_equalities or affine_projector is not None
+        ),
+        "k3d_al_source_seam_affine_constraint_count":int(
+            affine_projector.count if affine_projector is not None else 0
+        ),
+        "k3d_al_source_seam_affine_max_residual":float(
+            affine_projector.residual(x)
+            if affine_projector is not None else 0.
+        ),
         "k3d_al_source_seam_group_count":int(len(equality_groups or ())),
         "k3d_al_source_seam_reduced_unknowns":int(unique_count),
         "k3d_al_source_seam_max_gap":float(
@@ -705,6 +759,9 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
             final_polish_sweeps=int(getattr(params, "k3d_al_final_polish_sweeps", 400)),
             equality_groups=(
                 getattr(mesh,"metrics",{}).get("seam_exact_vertex_groups",[])
+            ),
+            affine_rows=(
+                getattr(mesh,"metrics",{}).get("seam_exact_affine_rows",[])
             ),
         )
         k3d.vertices[:] = solved
