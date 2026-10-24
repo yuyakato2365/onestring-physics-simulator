@@ -153,3 +153,32 @@ def test_paper_t3d_preserves_both_partial_cut_seam_and_original_open_end():
     np.testing.assert_allclose(.6*top[0,1]+.4*top[0,2],top[1,0],atol=1e-9)
     np.testing.assert_allclose(.6*bot[0,1]+.4*bot[0,2],bot[1,0],atol=1e-9)
     assert not np.isnan(assembly.vertices).any()
+
+
+
+@pytest.mark.parametrize("open_fraction",[
+    .35554409,  # Bunny 425-426: 64.445591% physical cut
+    .05102818,  # Bunny 772-815: 94.897182% physical cut
+])
+def test_actual_bunny_mixed_edge_cut_fractions(open_fraction):
+    chart,uv,faces=mixed_chart()
+    # Relocate the original *physical seam endpoint* without modifying
+    # the 4-corner left M2D Grid edge. Both the UV source and the
+    # right quad start at the new original seam endpoint.
+    chart.surface_vertices_3d[[2,5],1]=open_fraction
+    chart.uv_vertices_2d[[2,5,7],1]=open_fraction
+    uv[[4,5],1]=open_fraction
+    topo=discover_exact_seam_topology(chart,uv,faces)
+    assert topo["status"]=="conforming"
+    assert topo["mixed_seam_open_grid_edges"]==1
+    mixed=topo["mixed_grid_edge_sample"][0]
+    assert mixed[:2]==[1,2]
+    assert mixed[2]==pytest.approx(1.-open_fraction,abs=1e-7)
+    assert mixed[3]==pytest.approx(open_fraction,abs=1e-7)
+    projector=AffineSeamProjector(8,topo["affine_rows"])
+    pts=projector.project(np.c_[uv,np.zeros(len(uv))],strict=True)
+    assert projector.residual(pts)<=1e-10
+    np.testing.assert_allclose(
+        (1.-open_fraction)*pts[1]+open_fraction*pts[2],
+        pts[4],atol=1e-10
+    )
