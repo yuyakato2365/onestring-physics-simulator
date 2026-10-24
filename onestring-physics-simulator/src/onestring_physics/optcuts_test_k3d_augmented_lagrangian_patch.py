@@ -526,6 +526,8 @@ def _augmented_lagrangian_planarize(
     final_polish_sweeps: int = 400,
     equality_groups: tuple | list = (),
     affine_rows: tuple | list = (),
+    soft_seam_rows: tuple | list = (),
+    soft_seam_weight: float = 30.,
 ) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
     ref = np.asarray(reference, dtype=float)
     f = np.asarray(faces, dtype=int)
@@ -555,7 +557,7 @@ def _augmented_lagrangian_planarize(
     # quad as a false zero-energy minimum. In seam-affine AL, preserve
     # 3D source edge/diagonal dimensions and oriented triangle areas
     # even when the optional shape-preserving UI version is OFF.
-    seam_geometry_guard=bool(affine_rows or equality_groups)
+    seam_geometry_guard=bool(affine_rows or equality_groups or soft_seam_rows)
     if seam_geometry_guard:
         shape_weight=max(
             shape_weight,
@@ -579,6 +581,20 @@ def _augmented_lagrangian_planarize(
         f"shape_preserving={shape_mode}",flush=True,
     )
     reference_lengths = _metric_reference(ref, f4, scales)
+    soft_weight=max(float(soft_seam_weight),0.)
+    soft_seam_matrix=None
+    if soft_seam_rows:
+        from .optcuts_seam_soft_constraints import row_matrix
+        soft_seam_matrix=row_matrix(len(ref),soft_seam_rows)
+    soft_scale=max(tile_scale**2,1e-18)*max(len(soft_seam_rows),1)
+    if soft_seam_rows:
+        print(
+            "[K3D-SEAM-SOFT] "
+            f"rows={len(soft_seam_rows)} w={soft_weight:.7g} "
+            f"cell_scale={tile_scale:.7g} "
+            "projector=DISABLED exact_seam=False",
+            flush=True,
+        )
 
     # HARD source-Seam equalities: quotient optimizer unknowns by proven
     # pairs, rather than optimizing independently then approximating with
@@ -685,6 +701,12 @@ def _augmented_lagrangian_planarize(
             )
             energy += square_energy
             grad_total += square_grad
+        if soft_seam_matrix is not None and soft_weight>0:
+            source_gap=soft_seam_matrix@verts
+            energy+=.5*soft_weight*float(np.sum(source_gap*source_gap))/soft_scale
+            grad_total+=(soft_weight/soft_scale)*(
+                soft_seam_matrix.T@source_gap
+            )
         if area_guard_weight>0.:
             area_energy,area_grad=_quad_area_barrier_energy_gradient(
                 verts,ref,f4,scales,weight=area_guard_weight
@@ -836,6 +858,18 @@ def _augmented_lagrangian_planarize(
         "k3d_al_source_seam_affine_constraint_count":int(
             affine_projector.count if affine_projector is not None else 0
         ),
+        "k3d_seam_stitch_mode":(
+            "soft" if soft_seam_rows else
+            "hard" if (affine_projector is not None or has_equalities)
+            else "none"
+        ),
+        "k3d_seam_soft_weight":float(soft_weight),
+        "k3d_seam_soft_row_count":int(len(soft_seam_rows)),
+        "k3d_seam_soft_residual_rms":float(
+            np.sqrt(np.mean(np.linalg.norm(
+                soft_seam_matrix@x,axis=1
+            )**2)) if soft_seam_matrix is not None else 0.
+        ),
         "k3d_al_source_seam_affine_max_residual":float(
             affine_projector.residual(x)
             if affine_projector is not None else 0.
@@ -921,7 +955,18 @@ def install_optcuts_test_k3d_augmented_lagrangian_patch(pipeline: Any) -> None:
             ),
             affine_rows=(
                 getattr(mesh,"metrics",{}).get("seam_exact_affine_rows",[])
+                if getattr(mesh,"metrics",{}).get("seam_stitch_mode")=="hard"
+                else []
             ),
+            soft_seam_rows=(
+                getattr(mesh,"metrics",{}).get("seam_exact_affine_rows",[])
+                if getattr(mesh,"metrics",{}).get("seam_stitch_mode")=="soft"
+                else []
+            ),
+            soft_seam_weight=float(getattr(
+                params,"k3d_seam_soft_weight",
+                _safe_float_env("ONESTRING_K3D_SEAM_SOFT_WEIGHT",30.)
+            )),
         )
         k3d.vertices[:] = solved
         try:
