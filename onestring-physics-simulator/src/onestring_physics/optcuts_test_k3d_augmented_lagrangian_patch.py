@@ -423,6 +423,7 @@ def _consensus_planarity_restore(
     constraint_faces: np.ndarray | None = None,
     equality_inverse: np.ndarray | None = None,
     affine_projector=None,
+    source_geometry_guard=None,
 ) -> tuple[np.ndarray, int, float]:
     """Nearest-plane consensus feasibility restoration."""
     x = np.asarray(vertices, dtype=float).copy()
@@ -458,6 +459,7 @@ def _consensus_planarity_restore(
             np.add.at(accum, f4[:, corner], projected[:, corner])
         consensus = x.copy()
         consensus[active] = accum[active] / counts[active, None]
+        previous=x.copy()
         x[active] = (1.0 - alpha) * x[active] + alpha * consensus[active]
         if equality_inverse is not None:
             # AL's subsequent planarity-consensus step must not reopen
@@ -470,6 +472,34 @@ def _consensus_planarity_restore(
             x=total[labels]/count[labels,None]
         if affine_projector is not None:
             x=affine_projector.project(x,strict=True)
+        if source_geometry_guard is not None:
+            # A face-normal consensus projection may make a quad
+            # collinear while satisfying scalar-triple planarity.
+            # Preserve existing signed source-triangle areas via a
+            # backtracking step INSIDE the exact linear seam subspace.
+            source,source_faces=source_geometry_guard
+            min_old=_quad_triangle_area_diagnostics(
+                source,previous,source_faces
+            )["min_oriented_area_ratio"]
+            min_new=_quad_triangle_area_diagnostics(
+                source,x,source_faces
+            )["min_oriented_area_ratio"]
+            floor=min(0.02,min_old)
+            if min_new<floor-1e-10:
+                proposal=x.copy()
+                accepted=False
+                for alpha_step in (.5,.25,.125,.0625,.03125,
+                                   .015625,.0078125):
+                    candidate=previous+alpha_step*(proposal-previous)
+                    v=_quad_triangle_area_diagnostics(
+                        source,candidate,source_faces
+                    )["min_oriented_area_ratio"]
+                    if v>=floor-1e-10:
+                        x=candidate
+                        accepted=True
+                        break
+                if not accepted:
+                    x=previous
         used = sweep + 1
         if tolerance is not None and constraint_faces is not None:
             distances = _quad_plane_distances(x, constraint_faces)
@@ -702,6 +732,7 @@ def _augmented_lagrangian_planarize(
             constraint_faces=constraint_faces,
             equality_inverse=equality_inverse if has_equalities else None,
             affine_projector=affine_projector,
+            source_geometry_guard=(ref,f4) if seam_geometry_guard else None,
         )
         restoration_total += int(used)
         constraints, _ = _quad_constraint_values_and_gradient(x, constraint_faces, scales)
@@ -740,6 +771,7 @@ def _augmented_lagrangian_planarize(
             constraint_faces=constraint_faces,
             equality_inverse=equality_inverse if has_equalities else None,
             affine_projector=affine_projector,
+            source_geometry_guard=(ref,f4) if seam_geometry_guard else None,
         )
         restoration_total += int(polish_used)
 
