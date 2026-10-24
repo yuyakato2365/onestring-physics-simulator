@@ -410,11 +410,17 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
     # source-cut/original-open edge. Preserve source cut provenance in
     # both modes; do not confuse valid source boundary coverage with
     # nondegenerate *hard* solvability.
+    rank_allows_hard=bool(
+        not rank_audit["rank_evaluated"]
+        or rank_audit["seam_vertices"]<6
+        or rank_audit["seam_nullity"]>=3
+    )
     fully_matching=bool(
         can_stitch and len(unmatched)==0
         and len(mixed_cut_open_edges)==0
         and affine_metrics.get("source_cut_different_grid_partition_count",1)==0
         and len(paired)>0
+        and rank_allows_hard
     )
     mode="hard" if fully_matching else "soft" if can_stitch else "unavailable"
     return {
