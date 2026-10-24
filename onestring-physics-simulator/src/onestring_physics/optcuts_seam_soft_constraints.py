@@ -27,18 +27,46 @@ def row_matrix(n_vertices, rows):
     ).tocsr()
 
 
-def remap_rows(rows,mapping):
-    """Translate ORIGINAL Grid vertex IDs into a reduced geometry view."""
+def remap_rows(rows,mapping,*,return_stats=False,maximum_dropped_fraction=.05):
+    """Remap seam rows and explicitly audit any vanished constraints.
+
+    A row that becomes identically zero after vertex merging is a LOST
+    source-Seam constraint, not a harmless optimization. Fail if more
+    than five percent vanish. Legacy callers can still receive rows only.
+    """
     mapping=np.asarray(mapping,int)
     out=[]
     for row in rows:
         coeff=defaultdict(float)
         for i,w in row:
-            coeff[int(mapping[int(i)])]+=float(w)
+            src=int(i)
+            if src<0 or src>=len(mapping):
+                raise ValueError(
+                    "SEAM_SOFT_REMAP_SOURCE_VERTEX_OUT_OF_RANGE: "
+                    f"{src}/{len(mapping)}"
+                )
+            target=int(mapping[src])
+            if target<0:
+                raise ValueError("SEAM_SOFT_REMAP_NEGATIVE_VERTEX_ID")
+            coeff[target]+=float(w)
         vals=[[i,float(w)] for i,w in sorted(coeff.items())
               if abs(w)>1e-12]
         if vals:out.append(vals)
-    return out
+    lost=len(rows)-len(out)
+    fraction=float(lost/max(len(rows),1))
+    stats={
+        "seam_rows_before_reduction":int(len(rows)),
+        "seam_rows_after_reduction":int(len(out)),
+        "seam_rows_dropped_by_reduction":int(lost),
+        "seam_rows_dropped_fraction":float(fraction),
+    }
+    if fraction>float(maximum_dropped_fraction)+1e-12:
+        raise ValueError(
+            "SEAM_SOFT_REMAP_CONSTRAINT_LOSS_EXCESS: "
+            f"dropped={lost}/{len(rows)} ({fraction:.4%}); "
+            "vertex reduction erased source Seam constraints"
+        )
+    return (out,stats) if return_stats else out
 
 
 def residual_stats(vertices,rows):
@@ -69,7 +97,7 @@ def soft_seam_energy_gradient(vertices,rows,weight,scale=1.):
     return energy,grad
 
 
-def seam_matrix_rank_diagnostics(rows,n_vertices,max_seam_vertices=200):
+def seam_matrix_rank_diagnostics(rows,n_vertices,max_seam_vertices=4000):
     """Small/medium deterministic dense SVD audit; large inputs safe-skip.
 
     Rank on *participating* vertices gives the physical one-coordinate
@@ -83,8 +111,15 @@ def seam_matrix_rank_diagnostics(rows,n_vertices,max_seam_vertices=200):
         "seam_rank":None,
         "seam_nullity":None,
         "rank_evaluated":False,
+        "rank_cap_vertices":int(max_seam_vertices),
+        "rank_skip_reason":None,
     }
-    if not ids or len(ids)>int(max_seam_vertices):
+    if not ids:
+        data["rank_skip_reason"]="no_seam_vertices"
+        return data
+    if len(ids)>int(max_seam_vertices):
+        data["rank_skip_reason"]="above_configured_svd_cap"
+        data["rank_cap_vertices"]=int(max_seam_vertices)
         return data
     C=row_matrix(int(n_vertices),rows)[:,ids].toarray()
     singular=np.linalg.svd(C,compute_uv=False)
