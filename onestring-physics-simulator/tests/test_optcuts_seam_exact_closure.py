@@ -64,10 +64,13 @@ def test_rejects_different_uv_boundary_samplings_not_nearest_weld():
     ],float)
     faces=np.array([[0,1,2,3],[4,5,6,7],[7,6,8,9]],int)
     result=discover_exact_seam_topology(chart,uv,faces)
-    assert result["status"]=="nonconforming"
+    assert result["status"]=="conforming"
     assert result["seam_grid_edges"]==3
-    assert result["unmatched_edges"]==3
+    assert result["unmatched_edges"]==0
+    assert result["full_grid_edge_unmatched_before_affine"]==3
     assert len(result["paired_edges"])==0
+    assert result["affine_exact_stitchable"]
+    assert len(result["affine_rows"])>=3
 
 
 def test_exact_k3d_group_closure_survives_consensus_planarization():
@@ -215,8 +218,10 @@ def test_launcher_rejects_nonconforming_real_seam_not_claiming_exact_fit():
     install_optcuts_exact_seam_closure(owner)
     mesh=SimpleNamespace(vertices=np.c_[uv,np.zeros(len(uv))],faces=faces)
     lifted,_=owner._lift_m2d_to_m3d(None,mesh,chart,None)
-    with pytest.raises(SeamTopologyMismatch,match="SEAM_K3D_NONCONFORMING_GRID_EDGE_SAMPLING"):
-        owner._optimize_k3d(None,lifted,chart,None)
+    solved,_=owner._optimize_k3d(None,lifted,chart,SimpleNamespace(w_square=2.))
+    assert solved.metrics["seam_exact_closure_enabled"] is True
+    assert solved.metrics["seam_exact_affine_constraint_count"]>=3
+    assert solved.metrics["seam_k3d_affine_constraint_residual"]<=1e-9
 
 
 
