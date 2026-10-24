@@ -182,16 +182,12 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         )
         original_affine=(getattr(mesh,"metrics",{}) or {}).get("seam_exact_affine_rows",[])
         if original_affine:
-            transformed=[]
-            for row in original_affine:
-                merged={}
-                for v,w in row:
-                    j=int(mapping[int(v)])
-                    merged[j]=merged.get(j,0.)+float(w)
-                normalized=[[i,w] for i,w in sorted(merged.items())
-                            if abs(w)>1e-12]
-                if normalized:transformed.append(normalized)
+            from .optcuts_seam_soft_constraints import remap_rows
+            transformed,audit=remap_rows(
+                original_affine,mapping,return_stats=True
+            )
             view.metrics["seam_exact_affine_rows"]=transformed
+            view.metrics.update(audit)
             view.metrics["seam_exact_affine_rows_reindexed"]=True
         if source_seam_groups:
             reduced_groups=[]
