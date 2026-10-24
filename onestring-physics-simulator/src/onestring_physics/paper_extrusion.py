@@ -47,7 +47,9 @@ def _best_fit_plane(points):
 
 def _solve(n_vertices,constraints,anchor,anchor_weight,*,
            equality_groups=(),affine_projector=None,
-           soft_seam_rows=(),soft_seam_weight=0.):
+           soft_seam_rows=(),soft_seam_weight=0.,
+           soft_seam_cell_scale=1.,
+           soft_seam_normalization_rows=None):
     # Eliminate *exact* equality groups from the unknowns. Penalties
     # or a weld after solving cannot prevent the T3D Eq.(2) projection
     # from reopening a previously closed K3D seam.
@@ -85,7 +87,14 @@ def _solve(n_vertices,constraints,anchor,anchor_weight,*,
         # A true least-squares addition, not projection: incompatible
         # Grid breakpoints cannot represent a curved seam exactly
         # without collapsing its edges.
-        sw=math.sqrt(float(soft_seam_weight))
+        per_layer_rows=int(
+            len(soft_seam_rows) if soft_seam_normalization_rows is None
+            else soft_seam_normalization_rows
+        )
+        denom=max(float(soft_seam_cell_scale)**2,1e-18)*max(
+            per_layer_rows,1
+        )
+        sw=math.sqrt(float(soft_seam_weight)/denom)
         for seam_row in soft_seam_rows:
             for d in range(3):
                 for original,w in seam_row:
@@ -236,6 +245,23 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     soft_weight=float((getattr(mesh,"metrics",{}) or {}).get(
         "k3d_seam_soft_weight",30.
     ))
+    if soft_rows and "k3d_seam_soft_tile_scale" not in (
+        getattr(mesh,"metrics",{}) or {}
+    ):
+        raise RuntimeError(
+            "T3D_SEAM_SOFT_K3D_NORMALIZATION_MISSING: "
+            "required original K3D tile scale absent; never silently "
+            "replace with a different scale or normalization"
+        )
+    cell_scale=float((getattr(mesh,"metrics",{}) or {}).get(
+        "k3d_seam_soft_tile_scale",1.
+    ))
+    if soft_rows and (cell_scale<=0 or not np.isfinite(cell_scale)):
+        raise RuntimeError("T3D_SEAM_SOFT_INVALID_K3D_TILE_SCALE")
+    effective_seam_weight=(
+        soft_weight/(max(cell_scale**2,1e-18)*len(soft_rows))
+        if soft_rows else 0.
+    )
     doubled_soft_rows=[
         [(int(i)+offset,float(w)) for i,w in row]
         for offset in (0,2*len(top_global)//2)
@@ -330,7 +356,9 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
                    equality_groups=coupled_groups,
                    affine_projector=affine_projector,
                    soft_seam_rows=doubled_soft_rows,
-                   soft_seam_weight=soft_weight)
+                   soft_seam_weight=soft_weight,
+                   soft_seam_cell_scale=cell_scale,
+                   soft_seam_normalization_rows=len(soft_rows))
         if not np.isfinite(new).all():
             # Never let a failed T3D local/global step poison K2D/T2D with NaNs.
             # The previous iterate is finite and already represents the paper
@@ -507,6 +535,9 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         "t3d_seam_affine_max_residual":seam_affine_max_residual,
         "t3d_seam_stitch_mode":stitch_mode,
         "t3d_seam_soft_weight":soft_weight if soft_rows else 0.,
+        "t3d_seam_soft_tile_scale":cell_scale if soft_rows else 0.,
+        "t3d_seam_soft_weight_effective":effective_seam_weight,
+        "t3d_seam_soft_normalization_rows":len(soft_rows),
         "t3d_seam_soft_top_rms":top_soft["rms"] if soft_rows else 0.,
         "t3d_seam_soft_bottom_rms":bottom_soft["rms"] if soft_rows else 0.,
         "t3d_seam_soft_top_max":top_soft["max"] if soft_rows else 0.,
