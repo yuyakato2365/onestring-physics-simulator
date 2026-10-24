@@ -69,7 +69,8 @@ def test_rejects_different_uv_boundary_samplings_not_nearest_weld():
     assert result["unmatched_edges"]==0
     assert result["full_grid_edge_unmatched_before_affine"]==3
     assert len(result["paired_edges"])==0
-    assert result["affine_exact_stitchable"]
+    assert not result["affine_exact_stitchable"]
+    assert result["seam_stitch_mode"]=="soft"
     assert len(result["affine_rows"])>=3
 
 
@@ -219,9 +220,11 @@ def test_launcher_rejects_nonconforming_real_seam_not_claiming_exact_fit():
     mesh=SimpleNamespace(vertices=np.c_[uv,np.zeros(len(uv))],faces=faces)
     lifted,_=owner._lift_m2d_to_m3d(None,mesh,chart,None)
     solved,_=owner._optimize_k3d(None,lifted,chart,SimpleNamespace(w_square=2.))
-    assert solved.metrics["seam_exact_closure_enabled"] is True
-    assert solved.metrics["seam_exact_affine_constraint_count"]>=3
-    assert solved.metrics["seam_k3d_affine_constraint_residual"]<=1e-9
+    assert solved.metrics["seam_exact_closure_enabled"] is False
+    assert solved.metrics["seam_stitch_mode"]=="soft"
+    assert solved.metrics["seam_soft_row_count"]>=3
+    assert solved.metrics["seam_soft_gap_max"]>0.
+    assert not solved.metrics.get("k3d_al_source_seam_hard_equality",False)
 
 
 
