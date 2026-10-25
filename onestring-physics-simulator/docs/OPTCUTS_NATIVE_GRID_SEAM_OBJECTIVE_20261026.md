@@ -8,7 +8,14 @@ Builds an isolated `third_party/OptCuts_grid_seam_onestring` tree from upstream 
 
 edge_axis_cost = physical_edge_length / virtualRadius * sin^2(2*theta) = physical_edge_length / virtualRadius * 4*du^2*dv^2/(du^2+dv^2)^2.
 
-**Revised after a real 600-second Bunny timeout:** each proposed split now subtracts lambda_t*beta*edge_axis_cost from the ORIGINAL OptCuts score; each merge adds lambda_t*beta*edge_axis_cost. Here lambda_t=1-lambda_init, normally 0.001 when lambda_init=0.999. We do NOT add beta independently: independent beta=0.10 can be 100x stronger than the 0.001 seam-weight scale. For beta>0, only split/merge candidates with strictly positive ORIGINAL OptCuts objective decrease are eligible. The unmodified global OptCuts energy is therefore not knowingly increased by a new grid reward. Beta=0 keeps the original split/merge scores unchanged. This is a candidate-scoring heuristic, not a globally optimized new energy; it still requires geometric and actual Bunny convergence validation.
+**Current V3 behavior:** the native scoring is a *sign-preserving grid-aware
+candidate-ranking heuristic*, not a separate global energy. The original
+candidate decrease S is retained for S <= 0. For S > 0, Grid alignment
+adjustment is bounded to min(lambda_t * beta * edge_axis_cost, 0.25*S),
+subtracted on splits and added on merges. This preserves the sign of the
+original move and all lambda-controller inputs. Previous V1/V2 formulas
+and their hard move exclusions are no longer used. Full details follow
+in the V3 repair section below.
 
 The authors' UV quality and inversion checks are retained. This is a *local direction surrogate for staircase cost*, NOT an exact grid cell-mask penalty inside C++; true 50% area-selected mask corners, reflex counts and perimeter are still evaluated against the original production M2D grid in Python.
 
