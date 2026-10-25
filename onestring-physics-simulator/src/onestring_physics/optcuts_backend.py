@@ -60,7 +60,7 @@ class OptCutsConfig:
     grid_aware_strength: float = 3.0
     # NEW: native C++ seam split/merge objective (distinct experimental fork).
     grid_seam_native_enabled: bool = False
-    grid_seam_native_weight: float = 1.0
+    grid_seam_native_weight: float = 0.10
     grid_seam_native_angle_degrees: float = 0.0
 
 
