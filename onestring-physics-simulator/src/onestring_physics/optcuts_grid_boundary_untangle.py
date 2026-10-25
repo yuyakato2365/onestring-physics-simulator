@@ -128,7 +128,10 @@ def native_linear_path_boundary_preflight(
     return None
 
 
-def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess,*,on_failure=None):
+def fit_by_continuation(
+    base,faces,loop,mapped,harmonic_dirichlet,assess,*,
+    on_failure=None,strict_linear_boundary_path=False,
+):
     """Refit at adaptive boundary positions; never suppress an invalid result."""
     progress=0.
     step=.25
@@ -157,6 +160,34 @@ def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess,*,on_fa
         if step<1./2048.:break
         fraction=min(1.,progress+step)
         target=base[loop]+fraction*(mapped-base[loop])
+        if strict_linear_boundary_path:
+            # A witnessed proper boundary crossing makes a globally
+            # injective mapping at THIS fraction impossible, regardless
+            # of how much interior optimization is attempted. With a
+            # fixed linear homotopy, do not backtrack and repeatedly
+            # re-solve the same impossible path. This does not rule out
+            # other nonlinear boundary paths or assignments.
+            from .optcuts_grid_failure_diagnostics import (
+                proper_boundary_crossings,
+            )
+            witness=proper_boundary_crossings(target,limit=6)
+            if int(witness.get("count") or 0)>0:
+                print(
+                    "[GRID-NATIVE-HOMOTOPY-BLOCKED] "
+                    f"fraction={fraction:.8g} "
+                    f"boundary_crossings={witness['count']} "
+                    f"examples={witness.get('examples',[])} "
+                    f"elapsed={time.monotonic()-started:.1f}s",
+                    flush=True,
+                )
+                raise ValueError(
+                    "GRID_NATIVE_LINEAR_HOMOTOPY_SELF_INTERSECTION: "
+                    f"fraction={fraction:.8g}; "
+                    f"crossing_count={witness['count']}; "
+                    f"edge_pairs={witness.get('examples',[])}; "
+                    "the current linear boundary continuation cannot "
+                    "be globally injective at this fraction"
+                )
         harmonic=harmonic_dirichlet(base,faces,loop,target)
         ratio=float(np.min(oriented_area_ratio(base,harmonic,faces)))
         row={"fraction":float(fraction),"harmonic_min_area_ratio":ratio}
