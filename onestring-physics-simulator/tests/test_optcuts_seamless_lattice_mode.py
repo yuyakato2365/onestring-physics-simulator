@@ -103,3 +103,67 @@ def test_installer_only_changes_explicit_new_mode(monkeypatch):
     np.testing.assert_array_equal(old.uv_vertices_2d,base_chart.uv_vertices_2d)
     assert not hasattr(old,"seamless_lattice_mode_enabled")
     assert owner._onestring_seamless_lattice_mode_installed
+
+
+
+def test_m2d_audit_reports_coverage_not_false_exact_closure():
+    # Four 1x1 cells cover a 2x2 source chart. The audit must accurately
+    # report a cropped cell layout and NEVER claim watertight 3D coverage.
+    x,y=np.meshgrid(np.arange(3),np.arange(3),indexing="xy")
+    grid_uv=np.stack((x,y),axis=-1).reshape(-1,2).astype(float)
+    grid_vertices=np.c_[grid_uv,np.zeros(len(grid_uv))]
+    all_faces=np.asarray([
+        [j*3+i,j*3+i+1,(j+1)*3+i+1,(j+1)*3+i]
+        for j in range(2) for i in range(2)
+    ],int)
+    chart=SimpleNamespace(
+        uv_vertices_2d=np.array([
+            [0.,0.],[2.,0.],[2.,2.],[0.,2.]
+        ]),
+        uv_faces=np.array([[0,1,2],[0,2,3]],int),
+    )
+    domain=SimpleNamespace(
+        parameterization=chart,uv_vertices=grid_uv,
+        overlay_nx=2,overlay_ny=2,
+    )
+    mesh=SimpleNamespace(
+        vertices=grid_vertices,faces=all_faces.copy(),metrics={}
+    )
+    m._audit_actual_seamless_m2d(mesh,domain,None)
+    assert mesh.metrics["seamless_lattice_m2d_source_uv_area_coverage"]==pytest.approx(1.)
+    assert mesh.metrics["seamless_lattice_m2d_source_uv_coverage_pass_98pct"]
+    assert mesh.metrics["seamless_lattice_m2d_3d_area_coverage_verified"] is False
+    mesh.faces=all_faces[:1].copy()
+    m._audit_actual_seamless_m2d(mesh,domain,None)
+    assert mesh.metrics["seamless_lattice_m2d_source_uv_area_coverage"]==pytest.approx(.25)
+    assert not mesh.metrics["seamless_lattice_m2d_source_uv_coverage_pass_98pct"]
+
+
+def test_new_mode_pipeline_builder_called_only_when_requested(monkeypatch):
+    base_chart,chains=_two_uv_charts()
+    monkeypatch.setattr(m,"source_chains",lambda _:chains)
+    from onestring_physics import optcuts_backend
+    monkeypatch.setattr(optcuts_backend,"_boundary_loops",
+        lambda faces:[[0,1,2,3]])
+    chart=SimpleNamespace(
+        method="optcuts_test",
+        uv_vertices_2d=base_chart.uv_vertices_2d.copy(),
+        uv_faces=base_chart.uv_faces.copy(),
+        metrics={},
+        triangle_acceleration="old",
+    )
+    def constructor(*args):return chart
+    obj=SimpleNamespace(_build_surface_parameterization=constructor,
+                        _build_m2d=lambda *args:"passthrough")
+    m.install_seamless_lattice_mode_patch(obj)
+    p=SimpleNamespace(
+        tile_size=1.,optcuts_seamless_lattice_enabled=True
+    )
+    out=obj._build_surface_parameterization(
+        None,None,SimpleNamespace(tile_size=1.),p
+    )
+    assert out.metrics["requested_omega_parameterization_mode"]=="optcuts_seamless_lattice"
+    assert out.metrics["seamless_lattice_source_relative_area_min"]>0
+    assert out.triangle_acceleration is None
+    assert out.omega_boundary.shape==(5,2)
+    assert obj._build_m2d(None,None,None)=="passthrough"
