@@ -367,6 +367,30 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
                     "uv_boundary_correspondence_or_source_topology"
                 ),
             })
+    # A uniform 1e-7*surface_span quantization can map two DIFFERENT
+    # physical points on a very short source seam segment to the same
+    # integer key. In native Grid-Seam mode, derive a safer quantization
+    # resolution from the actual 3D lengths of those already-classified
+    # M2D seam edges. This changes only the grouping tolerance, NEVER
+    # their geometry, and leaves the 10/23 baseline behavior unchanged.
+    if bool(parameterization.metrics.get("optcuts_grid_seam_native_enabled",False)):
+        source_resolution=max(1e-12*xyzspan,1e-14)
+        seam_lengths=[
+            float(np.linalg.norm(sampled[a]-sampled[b]))
+            for a,b in seam_edges
+        ]
+        valid_lengths=[d for d in seam_lengths if d>source_resolution]
+        if valid_lengths:
+            old_qtol=qtol
+            qtol=min(qtol,min(valid_lengths)*.25)
+            print(
+                "[GRID-NATIVE-SEAM-SAMPLE-PRECISION] "
+                f"original_quantization={old_qtol:.9g} "
+                f"adaptive_quantization={qtol:.9g} "
+                f"shortest_resolved_source_seam_edge={min(valid_lengths):.9g} "
+                f"source_resolution={source_resolution:.9g}",
+                flush=True,
+            )
     # Fail closed if even one cell boundary is not proven to correspond
     # to a real source cut (two-sided) or true source open boundary.
     # In particular, don't weld an edge that only PARTLY lies on a cut.
