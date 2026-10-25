@@ -64,50 +64,86 @@ def refine_positive_uv(A, target, roots, *, component, matrices, offsets,
         return int(np.count_nonzero(bad)), float(np.min(ratios)), ratios
 
     history = []
-    for penalty in penalties:
-        def energy_and_gradient(x):
-            residual = A @ x - target
-            energy = float(np.dot(residual, residual))
-            grad = 2. * np.asarray(A.T @ residual).reshape(-1)
-            uv = positions(x)
-            triangles = uv[faces]
-            a, b, c = triangles[:, 0], triangles[:, 1], triangles[:, 2]
-            signed_new = ((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1])
-                          - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]))
-            deficit = np.minimum(orientations * signed_new - bounds, 0.)
-            if np.any(deficit):
-                energy += float(penalty * np.dot(weights, deficit * deficit))
-                dE_darea = 2. * penalty * weights * deficit * orientations
-                grads = np.zeros_like(uv)
-                corner0 = np.stack((b[:, 1] - c[:, 1], c[:, 0] - b[:, 0]), axis=1)
-                corner1 = np.stack((c[:, 1] - a[:, 1], a[:, 0] - c[:, 0]), axis=1)
-                corner2 = np.stack((a[:, 1] - b[:, 1], b[:, 0] - a[:, 0]), axis=1)
-                for k, corner in enumerate((corner0, corner1, corner2)):
-                    np.add.at(grads, faces[:, k], dE_darea[:, None] * corner)
-                root_grads = np.einsum(
-                    'nji,nj->ni', free_matrices,
-                    grads[free_vertices], optimize=True)
-                reduced = np.zeros((len(x) // 2, 2), float)
-                np.add.at(reduced, free_roots, root_grads)
-                grad += reduced.reshape(-1)
-            return energy, grad
+    # Stage 1 retains the historical area-weighted recovery for large folds.
+    # Stage 2 penalizes *relative* signed area, so small source triangles do
+    # not become nearly free to collapse. Both stages use only reduced root
+    # variables: the exact C4/integer-shift seam equations remain intact.
+    stages = (
+        ("absolute_area", tuple(penalties), int(maxiter)),
+        ("relative_area", (16., 256., 4096., 65536., 1048576.),
+         max(200, int(maxiter))),
+    )
 
-        result = minimize(energy_and_gradient, roots, method='L-BFGS-B',
-                          jac=True, options={'maxiter': maxiter, 'ftol': 1e-12,
-                                             'gtol': 1e-8, 'maxls': 40})
-        if not np.all(np.isfinite(result.x)):
-            history.append({'penalty': float(penalty), 'status': 'nonfinite'})
-            break
-        roots = np.asarray(result.x, float)
-        count, minimum, _ = score(roots)
-        history.append({'penalty': float(penalty), 'bad_faces': count,
-                        'min_ratio': minimum, 'iterations': int(result.nit),
-                        'optimizer_success': bool(result.success)})
+    def energy_and_gradient(x, penalty, phase):
+        residual = A @ x - target
+        energy = float(np.dot(residual, residual))
+        grad = 2. * np.asarray(A.T @ residual).reshape(-1)
+        uv = positions(x)
+        triangles = uv[faces]
+        a, b, c = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+        signed_new = ((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1])
+                      - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]))
+        if phase == "absolute_area":
+            violation = np.minimum(orientations * signed_new - bounds, 0.)
+            energy += float(penalty * np.dot(weights, violation * violation))
+            area_coeff = 2. * penalty * weights * violation * orientations
+        else:
+            # A ratio-based loss gives equally important geometric
+            # protection to tiny and large triangles. The old loss was
+            # proportional to reference area for a given relative fold.
+            violation = np.minimum(signed_new / signed_old - target_ratio, 0.)
+            energy += float(penalty * np.dot(violation, violation))
+            area_coeff = 2. * penalty * violation / signed_old
+
+        active = np.flatnonzero(violation < 0.)
+        if len(active):
+            i = faces[active]
+            aa, bb, cc = a[active], b[active], c[active]
+            weight = area_coeff[active, None]
+            grads = np.zeros_like(uv)
+            corner0 = np.stack((bb[:, 1] - cc[:, 1], cc[:, 0] - bb[:, 0]), axis=1)
+            corner1 = np.stack((cc[:, 1] - aa[:, 1], aa[:, 0] - cc[:, 0]), axis=1)
+            corner2 = np.stack((aa[:, 1] - bb[:, 1], bb[:, 0] - aa[:, 0]), axis=1)
+            for k, corner in enumerate((corner0, corner1, corner2)):
+                np.add.at(grads, i[:, k], weight * corner)
+            root_grads = np.einsum(
+                'nji,nj->ni', free_matrices,
+                grads[free_vertices], optimize=True)
+            reduced = np.zeros((len(x) // 2, 2), float)
+            np.add.at(reduced, free_roots, root_grads)
+            grad += reduced.reshape(-1)
+        return energy, grad
+
+    for phase, schedule, stage_maxiter in stages:
+        count, _, _ = score(roots)
         if count == 0:
             break
-    bad_count, min_ratio, _ = score(roots)
-    return roots, {'refinement_attempted': True,
-                   'refinement_bad_faces': bad_count,
-                   'refinement_min_signed_ratio': min_ratio,
-                   'refinement_iterations': int(sum(i.get('iterations', 0) for i in history)),
-                   'refinement_history': history}
+        for penalty in schedule:
+            result = minimize(
+                lambda x: energy_and_gradient(x, penalty, phase),
+                roots, method='L-BFGS-B', jac=True,
+                options={'maxiter': stage_maxiter, 'ftol': 1e-13,
+                         'gtol': 1e-9, 'maxls': 50})
+            if not np.all(np.isfinite(result.x)):
+                history.append({'stage': phase, 'penalty': float(penalty),
+                                'status': 'nonfinite'})
+                break
+            roots = np.asarray(result.x, float)
+            count, minimum, _ = score(roots)
+            history.append({'stage': phase, 'penalty': float(penalty),
+                            'bad_faces': count, 'min_ratio': minimum,
+                            'iterations': int(result.nit),
+                            'optimizer_success': bool(result.success)})
+            if count == 0:
+                break
+    bad_count, min_ratio, ratios = score(roots)
+    return roots, {
+        'refinement_attempted': True,
+        'refinement_bad_faces': bad_count,
+        'refinement_min_signed_ratio': min_ratio,
+        'refinement_iterations': int(sum(i.get('iterations', 0) for i in history)),
+        'refinement_history': history,
+        'refinement_active_small_triangle_count': int(np.count_nonzero(
+            (ratios <= accepted_ratio)
+            & (np.abs(signed_old) < np.median(np.abs(signed_old))))),
+    }
