@@ -174,8 +174,16 @@ def solve_seamless_lattice_uv(chart,h,*,edge_weight=.3):
     chains=source_chains(chart)
     if not chains:
         raise SeamlessLatticeError("SEAMLESS_NO_PHYSICAL_OPT CUT_CHAIN".replace(" ","_"))
-    transitions=best_integer_transitions(old,chains,h)
-    comp,mat,offset,fixed=_global_lattice_constraints(len(old),transitions,h)
+    # Source-chain transforms must be selected jointly. The former
+    # independent rounding of every chain had no holonomy preflight:
+    # two individually good integer shifts can sum to a NONZERO loop.
+    from .optcuts_seamless_joint_transitions import select_joint_transitions
+    transitions,joint_report=select_joint_transitions(old,chains,h)
+    # Re-check the complete (uncompressed) source UV graph before solving.
+    # This independent audit also catches accidental solver regressions.
+    comp,mat,offset,fixed=_global_lattice_constraints(
+        len(old),transitions,h
+    )
     free=sorted(set(comp.tolist())-set(fixed))
     columns={g:2*i for i,g in enumerate(free)}
     if not free:raise SeamlessLatticeError("SEAMLESS_NO_FREE_UV_VARIABLES")
@@ -242,6 +250,7 @@ def solve_seamless_lattice_uv(chart,h,*,edge_weight=.3):
         )
     return new,{
         "seamless_lattice_mode_enabled":True,
+        **joint_report,
         "seamless_lattice_source_chain_count":len(transitions),
         "seamless_lattice_transition_residual_max":float(residual),
         "seamless_lattice_transitions":[{
