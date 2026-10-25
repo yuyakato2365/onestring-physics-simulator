@@ -444,10 +444,15 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             optcuts_area_grid_seam_selected_score=float(
                 selected_report["score"]),
             optcuts_area_grid_seam_selection_model=(
-                "official OptCuts initial cuts plus rigid pre-grid "
-                "UV orientation variants ranked on each original production "
-                "M2D grid by corners, concavity, perimeter and UV quality; "
-                "NO new cut topology from rotations; exact fit required"
+                ("native C++ Grid-Seam split/merge objective changes Cut topology; "
+                 "actual M2D lattice evaluates staircase footprint, followed by "
+                 "postfit UV-to-3D local squareness proxy among up to 3 "
+                 "successful candidates; exact geometry checks required")
+                if native_grid else
+                ("official OptCuts initial cuts plus rigid pre-grid "
+                 "UV orientation variants ranked on each original production "
+                 "M2D grid by corners, concavity, perimeter and UV quality; "
+                 "NO new cut topology from rotations; exact fit required")
             ),
             optcuts_area_grid_multistart_downstream_swap_enabled=False,
             optcuts_split_count_selection_pending=False,
