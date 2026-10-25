@@ -217,6 +217,7 @@ def select_joint_transitions(uv,chains,h,*,beam_width=24,
     # States: (cost, chosen mapping, union). Fixed beam width controls runtime.
     beam=[(0.,{},init)]
     rejected=Counter()
+    rejection_examples=[]
     explored=0
     for depth,ci in enumerate(order):
         next_states=[]
@@ -230,6 +231,14 @@ def select_joint_transitions(uv,chains,h,*,beam_width=24,
                     _add_chain(trial,packed)
                 except _Inconsistent as exc:
                     rejected[exc.reason]+=1
+                    if len(rejection_examples)<6:
+                        rejection_examples.append({
+                            "source_chain":list(c["physical"][:12]),
+                            "k":int(c["k"]),
+                            "steps":list(c["steps"]),
+                            "reason":exc.reason,
+                            "detail":exc.detail,
+                        })
                     continue
                 explored+=1
                 newsel={**selection,ci:c}
@@ -245,7 +254,8 @@ def select_joint_transitions(uv,chains,h,*,beam_width=24,
                 f"source_chain={source[:15]} "
                 f"beam_width={beam_width} "
                 f"candidates={len(options[ci])} "
-                f"rejected={dict(rejected)}. "
+                f"rejected={dict(rejected)} "
+                f"first_conflicts={rejection_examples[:4]}. "
                 "Global transition choices conflict; new cone/cut "
                 "topology or wider discrete search may be required. "
                 "No local seam constraints were discarded."
@@ -258,6 +268,7 @@ def select_joint_transitions(uv,chains,h,*,beam_width=24,
         "seamless_lattice_joint_selection_enabled":True,
         "seamless_lattice_joint_candidate_states_explored":int(explored),
         "seamless_lattice_joint_rejected_by_reason":dict(rejected),
+        "seamless_lattice_joint_rejection_examples":rejection_examples,
         "seamless_lattice_joint_beam_width":int(beam_width),
         "seamless_lattice_joint_objective":float(cost),
         "seamless_lattice_joint_chain_count":len(chains),
