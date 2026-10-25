@@ -187,7 +187,9 @@ def _add_chain(union,transition):
 
 
 def select_joint_transitions(uv,chains,h,*,beam_width=24,
-                             candidates_per_chain=24):
+                             candidates_per_chain=24,
+                             return_alternatives=False,
+                             max_alternatives=6):
     """Bounded, globally screened search for compatible chain assignments.
 
     The full graph is checked after EVERY candidate, not after a greedy
@@ -264,7 +266,7 @@ def select_joint_transitions(uv,chains,h,*,beam_width=24,
         beam=next_states[:max(1,int(beam_width))]
     cost,selected,_=beam[0]
     result=[selected[i] for i in range(len(chains))]
-    return result,{
+    report={
         "seamless_lattice_joint_selection_enabled":True,
         "seamless_lattice_joint_candidate_states_explored":int(explored),
         "seamless_lattice_joint_rejected_by_reason":dict(rejected),
@@ -274,6 +276,25 @@ def select_joint_transitions(uv,chains,h,*,beam_width=24,
         "seamless_lattice_joint_chain_count":len(chains),
         "seamless_lattice_joint_naive_local_independent":False,
     }
+    if return_alternatives:
+        # Keep geometrically distinct final assignments for downstream
+        # foldover screening; discrete correspondence RMS alone is
+        # insufficient to choose a valid UV atlas.
+        choices=[]
+        signatures=set()
+        for candidate_cost,candidate_selection,_ in beam:
+            ordered=[candidate_selection[i] for i in range(len(chains))]
+            signature=tuple((int(t["k"]),tuple(t["steps"]))
+                            for t in ordered)
+            if signature in signatures:
+                continue
+            signatures.add(signature)
+            choices.append((ordered,float(candidate_cost)))
+            if len(choices)>=max(1,int(max_alternatives)):
+                break
+        report["seamless_lattice_joint_alternatives_available"]=len(choices)
+        return choices,report
+    return result,report
 
 
 __all__=["select_joint_transitions","LatticeUnion","candidate_transitions"]
