@@ -203,3 +203,44 @@ def test_phase_mode_evaluates_multiple_shifted_original_lattices():
     for _chart,domain,row in ranked:
         np.testing.assert_allclose(domain.uv_vertices[0],
                                    row["real_grid_origin"])
+
+
+def test_combined_phase_tail_corner_remesh_runs_on_one_shared_uv_chart():
+    from onestring_physics.optcuts_grid_aware_seam_selection import (
+        rank_grid_aware_seam_candidates,
+    )
+    from onestring_physics.optcuts_area_grid_boundary import (
+        apply_area_grid_boundary,
+    )
+    chart=_square_chart()
+    chart._onestring_optcuts_candidates=[]
+    chart._onestring_optcuts_candidate_qualities=[]
+    grid=SimpleNamespace(nx=2,ny=2)
+    params=SimpleNamespace(
+        optcuts_area_grid_coverage_threshold=.5,omega_overlay_margin=1,
+        optcuts_area_grid_orientation_search_enabled=False,
+        optcuts_area_grid_phase_search_enabled=True,
+        optcuts_area_grid_tail_sd_enabled=True,
+        optcuts_area_grid_adaptive_remesh_enabled=True)
+    def production_grid(chart,grid,params):
+        a=np.arange(9)*.1875-.25
+        xx,yy=np.meshgrid(a,a,indexing="xy")
+        return SimpleNamespace(
+            uv_vertices=np.stack((xx,yy),axis=-1).reshape(-1,2),
+            overlay_nx=8,overlay_ny=8,overlay_margin_tiles=1)
+    ranked,report=rank_grid_aware_seam_candidates(
+        chart,grid,params,production_grid)
+    assert len(report)==4
+    source,domain,row=ranked[0]
+    expected_origin=np.asarray(row["real_grid_origin"])
+    output=apply_area_grid_boundary(source,grid,params,domain=domain)
+    m=output.metrics
+    assert m["optcuts_area_grid_boundary_status"]=="accepted_exact_grid_outline"
+    assert m["optcuts_area_grid_phase_search_enabled"]
+    assert m["optcuts_area_grid_tail_sd_enabled"]
+    assert m["optcuts_area_grid_adaptive_remesh_enabled"]
+    assert m["optcuts_area_grid_remesh_diagnostic"]["subdivided_triangles"]>0
+    assert m["optcuts_area_grid_sd_refinement_attempts"]>=1
+    np.testing.assert_allclose(m["optcuts_area_grid_grid_origin"],expected_origin)
+    assert m["optcuts_area_grid_min_signed_area_ratio"]>=.005
+    assert len(output.uv_faces)==len(output.surface_faces)
