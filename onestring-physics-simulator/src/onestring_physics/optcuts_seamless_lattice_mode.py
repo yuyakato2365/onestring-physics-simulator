@@ -54,11 +54,48 @@ def best_integer_transitions(uv,chains,h):
     for chain,a,b in chains:
         lhs,rhs=uv[list(a)],uv[list(b)]
         candidates=[]
+        tip_pairs=[idx for idx,(ai,bi) in enumerate(zip(a,b))
+                   if int(ai)==int(bi)]
         for k,R in enumerate(ROT):
-            steps=np.rint(np.mean(rhs-lhs@R.T,axis=0)/h).astype(int)
-            difference=rhs-(lhs@R.T+h*steps)
-            rms=float(np.sqrt(np.mean(np.sum(difference*difference,axis=1))))
-            candidates.append((rms,k,tuple(map(int,steps))))
+            if tip_pairs:
+                # An uncut terminal is one *shared* UV vertex. It must
+                # remain a fixed point of its own transition (a cone).
+                # For a quarter turn, the fixed point must be on the
+                # integer lattice; search nearby original tip positions.
+                if k==0:
+                    candidate_steps=[np.array([0,0],int)]
+                else:
+                    pivots=[]
+                    for idx in tip_pairs:
+                        origin=np.rint(lhs[idx]/h).astype(int)
+                        for dx in (-1,0,1):
+                            for dy in (-1,0,1):
+                                pivot=origin+np.array([dx,dy],int)
+                                pivots.append((np.eye(2,dtype=int)-R)@pivot)
+                    candidate_steps=pivots
+            else:
+                candidate_steps=[np.rint(np.mean(
+                    rhs-lhs@R.T,axis=0
+                )/h).astype(int)]
+            for steps in candidate_steps:
+                if tip_pairs and max(
+                    float(np.linalg.norm(lhs[idx]@R.T+h*steps-rhs[idx]))
+                    for idx in tip_pairs
+                )>max(h*1.5,1e-9):
+                    # Far from the original tips is allowed only through
+                    # a new physical cone/cut planning step, not by
+                    # implicitly dragging a source junction across Omega.
+                    continue
+                difference=rhs-(lhs@R.T+h*steps)
+                rms=float(np.sqrt(np.mean(np.sum(
+                    difference*difference,axis=1
+                ))))
+                candidates.append((rms,k,tuple(map(int,steps))))
+        if not candidates:
+            raise SeamlessLatticeError(
+                "SEAMLESS_NO_FEASIBLE_INTEGER_TIP_TRANSITION: "
+                f"source_chain={chain[:12]}"
+            )
         cost,k,steps=min(candidates,key=lambda x:(x[0],x[1]))
         result.append({"physical":chain,"a":a,"b":b,
                        "k":k,"steps":steps,"rms":cost})
