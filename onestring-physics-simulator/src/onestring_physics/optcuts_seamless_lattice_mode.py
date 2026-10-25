@@ -222,10 +222,71 @@ def solve_seamless_lattice_uv(chart,h,*,edge_weight=.3):
     }
 
 
+def _audit_actual_seamless_m2d(mesh,domain,params):
+    """Measure 2D Omega area captured by actual (unchanged) M2D cells.
+
+    A lattice UV transition DOES NOT automatically create 3D coverage:
+    the existing strict full-cell crop may miss seam-crossing cells.
+    Report this, never label it an exact watertight Seam closure.
+    """
+    chart=getattr(domain,"parameterization",None)
+    if chart is None:
+        raise SeamlessLatticeError("SEAMLESS_M2D_MISSING_OMEGA_CHART")
+    from .optcuts_area_grid_boundary import _intersection_ratios
+    v=np.asarray(domain.uv_vertices,float)[:,:2]
+    nx=int(domain.overlay_nx);ny=int(domain.overlay_ny)
+    if len(v)!=(nx+1)*(ny+1):
+        raise SeamlessLatticeError("SEAMLESS_M2D_OVERLAY_VERTEX_COUNT_MISMATCH")
+    origin=v[0].copy()
+    step=np.asarray([v[1,0]-v[0,0],
+         v[nx+1,1]-v[0,1]],float)
+    if np.any(step<=0):
+        raise SeamlessLatticeError("SEAMLESS_M2D_INVALID_GRID_STEP")
+    coverage=_intersection_ratios(
+        np.asarray(chart.uv_vertices_2d,float),
+        np.asarray(chart.uv_faces,int),
+        origin,step,nx,ny,
+    )
+    occupied=np.zeros((ny,nx),bool)
+    all_v=np.asarray(mesh.vertices,float)
+    faces=np.asarray(mesh.faces,int)
+    for f in faces:
+        center=np.mean(all_v[f,:2],axis=0)
+        ij=np.floor((center-origin)/step+1e-8).astype(int)
+        i,j=int(ij[0]),int(ij[1])
+        if i<0 or i>=nx or j<0 or j>=ny:
+            raise SeamlessLatticeError(
+                "SEAMLESS_M2D_CELL_OUTSIDE_ORIGINAL_GRID"
+            )
+        occupied[j,i]=True
+    denominator=max(float(np.sum(coverage)),1e-20)
+    ratio=float(np.sum(coverage[occupied])/denominator)
+    mesh.metrics["seamless_lattice_m2d_source_uv_area_coverage"]=ratio
+    mesh.metrics["seamless_lattice_m2d_source_uv_uncovered_area_fraction"]=float(
+        1.-ratio
+    )
+    mesh.metrics["seamless_lattice_m2d_source_uv_coverage_pass_98pct"]=bool(
+        ratio>=.98
+    )
+    mesh.metrics["seamless_lattice_m2d_3d_area_coverage_verified"]=False
+    mesh.metrics["seamless_lattice_m2d_selected_cell_count"]=int(
+        np.sum(occupied)
+    )
+    print(
+        "[OMEGA-SEAMLESS-M2D-AUDIT] "
+        f"strict_full_cells={int(np.sum(occupied))} "
+        f"source_uv_area_coverage={ratio:.3%} "
+        "3D_coverage=UNMEASURED exact_seam=UNPROVEN",
+        flush=True,
+    )
+    return mesh
+
+
 def install_seamless_lattice_mode_patch(pipeline:Any):
     if getattr(pipeline,"_onestring_seamless_lattice_mode_installed",False):
         return
     base=pipeline._build_surface_parameterization
+    base_m2d=pipeline._build_m2d
     def seamless_builder(surface,target,grid,params):
         chart=base(surface,target,grid,params)
         if not bool(getattr(params,"optcuts_seamless_lattice_enabled",False)):
@@ -255,10 +316,17 @@ def install_seamless_lattice_mode_patch(pipeline:Any):
             flush=True,
         )
         return chart
+    def seamless_m2d(grid,domain,params=None):
+        mesh=base_m2d(grid,domain,params)
+        if bool(getattr(params,"optcuts_seamless_lattice_enabled",False)):
+            return _audit_actual_seamless_m2d(mesh,domain,params)
+        return mesh
     pipeline._build_surface_parameterization=seamless_builder
+    pipeline._build_m2d=seamless_m2d
     original=getattr(pipeline,"_original",None)
     if original is not None:
         original._build_surface_parameterization=seamless_builder
+        original._build_m2d=seamless_m2d
     for fn in (
         getattr(pipeline,"build_onestring_design",None),
         getattr(pipeline,"_ORIGINAL_BUILD_ONESTRING_DESIGN",None),
@@ -268,4 +336,5 @@ def install_seamless_lattice_mode_patch(pipeline:Any):
         glb=getattr(fn,"__globals__",None)
         if isinstance(glb,dict):
             glb["_build_surface_parameterization"]=seamless_builder
+            glb["_build_m2d"]=seamless_m2d
     pipeline._onestring_seamless_lattice_mode_installed=True
