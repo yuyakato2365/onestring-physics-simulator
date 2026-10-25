@@ -58,6 +58,10 @@ class OptCutsConfig:
     grid_aware_nx: int = 20
     grid_aware_ny: int = 20
     grid_aware_strength: float = 3.0
+    # NEW: native C++ seam split/merge objective (distinct experimental fork).
+    grid_seam_native_enabled: bool = False
+    grid_seam_native_weight: float = 1.0
+    grid_seam_native_angle_degrees: float = 0.0
 
 
 @dataclass
@@ -387,7 +391,14 @@ def _run_official_optcuts_once(
     if int(cfg.initial_cut_option) not in {0, 1}:
         raise ValueError("OptCuts initial_cut_option must be 0 or 1")
 
-    executable = resolve_optcuts_executable(cfg.executable)
+    if cfg.grid_seam_native_enabled:
+        from .optcuts_grid_seam_native import resolve_grid_seam_binary
+        if not np.isfinite(cfg.grid_seam_native_weight) or not (
+                0. <= cfg.grid_seam_native_weight <= 100.):
+            raise ValueError("GRID_SEAM_NATIVE_WEIGHT_OUT_OF_RANGE")
+        executable = resolve_grid_seam_binary(_project_root())
+    else:
+        executable = resolve_optcuts_executable(cfg.executable)
     root = _infer_optcuts_root(executable)
     tag = f"onestring_{uuid.uuid4().hex[:12]}"
     started = time.time()
@@ -417,6 +428,12 @@ def _run_official_optcuts_once(
                 text=True,
                 timeout=float(cfg.timeout_seconds),
                 check=False,
+                env=(dict(os.environ,
+                    ONESTRING_OPTCUTS_GRID_SEAM_WEIGHT=str(float(
+                        cfg.grid_seam_native_weight)),
+                    ONESTRING_OPTCUTS_GRID_SEAM_ANGLE_DEGREES=str(float(
+                        cfg.grid_seam_native_angle_degrees))
+                ) if cfg.grid_seam_native_enabled else None),
             )
         except subprocess.TimeoutExpired as exc:
             raise OptCutsError(
@@ -628,6 +645,13 @@ def run_official_optcuts(surface_vertices, surface_faces, config=None):
     from .optcuts_quality_audit import quality, pareto_improves
     cfg = config or OptCutsConfig()
     baseline = _run_official_optcuts_once(surface_vertices, surface_faces, cfg)
+    if cfg.grid_seam_native_enabled:
+        baseline.metrics.update(
+            optcuts_native_grid_seam_enabled=True,
+            optcuts_native_grid_seam_weight=float(cfg.grid_seam_native_weight),
+            optcuts_native_grid_seam_angle=float(cfg.grid_seam_native_angle_degrees),
+            optcuts_native_grid_seam_model="C++ split/merge local UV seam axis cost",
+        )
     baseline = _refine_uv_for_csf_tail(baseline, cfg)
     baseline = _refine_uv_for_grid_aware(baseline, cfg)
     baseline_quality = quality(baseline)
@@ -642,6 +666,11 @@ def run_official_optcuts(surface_vertices, surface_faces, config=None):
         return baseline
     try:
         candidate=_run_official_optcuts_once(surface_vertices,surface_faces,replace(cfg,initial_cut_option=1-cfg.initial_cut_option,try_alternative_initial_cut=False))
+        if cfg.grid_seam_native_enabled:
+            candidate.metrics.update(
+                optcuts_native_grid_seam_enabled=True,
+                optcuts_native_grid_seam_weight=float(cfg.grid_seam_native_weight),
+                optcuts_native_grid_seam_angle=float(cfg.grid_seam_native_angle_degrees))
         candidate=_refine_uv_for_csf_tail(candidate,cfg)
         candidate=_refine_uv_for_grid_aware(candidate,cfg)
         candidate_quality=quality(candidate)
