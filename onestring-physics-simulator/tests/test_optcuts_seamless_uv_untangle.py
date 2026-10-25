@@ -128,7 +128,8 @@ def test_relative_area_stage_repairs_tiny_triangle_without_ignoring_it():
         matrices=np.tile(np.eye(2, dtype=int), (3, 1, 1)),
         offsets=np.zeros((3, 2)), fixed={},
         columns={i: 2*i for i in range(3)},
-        faces=faces, reference_uv=original, h=1.)
+        faces=faces, reference_uv=original, h=1.,
+        penalties=(1.e-14,))  # Force the independent ratio stage to run.
     final = roots.reshape((-1, 2))
     assert report["refinement_bad_faces"] == 0
     assert (signed_areas(final, faces) / signed_areas(original, faces)).min() > 1.e-3
