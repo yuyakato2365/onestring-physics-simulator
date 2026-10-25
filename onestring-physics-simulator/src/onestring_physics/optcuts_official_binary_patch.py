@@ -142,7 +142,8 @@ def resolve_official_optcuts_executable(requested: str | None = None) -> Path:
 
     raise OptCutsUnavailableError(
         "A clean Official OptCuts executable was not found. "
-        "Build it once with `python3 scripts/setup_optcuts_official.py`, "\n        "or set ONESTRING_OPTCUTS_OFFICIAL_EXECUTABLE to an existing clean binary.\n"
+        "Build it once with `python3 scripts/setup_optcuts_official.py`, "
+        "or set ONESTRING_OPTCUTS_OFFICIAL_EXECUTABLE to an existing clean binary.\n"
         f"Tried:\n  - {shown}{legacy_note}"
     )
 
