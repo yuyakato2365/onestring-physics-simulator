@@ -159,3 +159,32 @@ def test_native_cpp_grid_term_is_independent_of_original_length_lambda():
     patched=transform(sample)
     assert "- lambda_t * seInc - onestringGridWeight() * gridCost" in patched
     assert "lambda_t * seDec + onestringGridWeight() * gridRemoved" in patched
+
+
+def test_native_subprocess_heartbeat_reports_progress_without_losing_output(capsys, tmp_path):
+    import sys
+    from onestring_physics.optcuts_grid_seam_native import run_native_with_heartbeat
+    completed = run_native_with_heartbeat(
+        [sys.executable, "-c",
+         "import time; print('native-start', flush=True); "
+         "time.sleep(.13); print('native-finished', flush=True)"],
+        cwd=str(tmp_path), env=dict(os.environ),
+        timeout=3.0, heartbeat_seconds=.025)
+    assert completed.returncode == 0
+    assert "native-start" in completed.stdout
+    assert "native-finished" in completed.stdout
+    rendered = capsys.readouterr().out
+    assert "[GRID-CUT-NATIVE-RUN] started" in rendered
+    assert "[GRID-CUT-NATIVE-RUN] still_running" in rendered
+    assert "[GRID-CUT-NATIVE-RUN] finished" in rendered
+
+
+def test_native_subprocess_timeout_terminates_child(tmp_path, capsys):
+    import sys
+    from onestring_physics.optcuts_grid_seam_native import run_native_with_heartbeat
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_native_with_heartbeat(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            cwd=str(tmp_path), env=dict(os.environ),
+            timeout=.07, heartbeat_seconds=.015)
+    assert "timed_out" in capsys.readouterr().out
