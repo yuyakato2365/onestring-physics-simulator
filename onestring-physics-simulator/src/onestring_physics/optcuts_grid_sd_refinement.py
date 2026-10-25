@@ -77,8 +77,35 @@ class SymmetricDirichletProblem:
         det=a[:,0]*b[:,1]-a[:,1]*b[:,0]
         return self.orientation*det/self.original_det
 
-    def energy_gradient(self, uv):
-        """Return area-weighted SD, gradient wrt each *UV* vertex."""
+    def per_triangle_sd(self, uv):
+        """Exact 3D-to-UV symmetric-Dirichlet energy for each triangle."""
+        pts=np.asarray(uv,float)[self.faces]
+        a=pts[:,1]-pts[:,0]
+        b=pts[:,2]-pts[:,0]
+        det=a[:,0]*b[:,1]-a[:,1]*b[:,0]
+        if np.any(np.abs(det)<1e-20):
+            return np.full(len(self.faces),np.inf)
+        f2=(self.g11*np.sum(a*a,axis=1)
+            +2*self.g12*np.sum(a*b,axis=1)
+            +self.g22*np.sum(b*b,axis=1))
+        return f2*(1+(self.det_source/det)**2)
+
+    def tail_threshold(self, uv, quantile=.95):
+        sd=self.per_triangle_sd(uv)
+        order=np.argsort(sd)
+        total=np.cumsum(self.weight[order])
+        return float(sd[order[min(len(order)-1,
+            int(np.searchsorted(total, quantile)))]] )
+
+    def tail_score(self, uv, threshold, strength=.50):
+        sd=self.per_triangle_sd(uv)
+        temperature=max(.25,.05*float(threshold))
+        return float(np.dot(self.weight,sd)
+            + strength*np.dot(self.weight,temperature*np.logaddexp(
+                0.,(sd-threshold)/temperature)))
+
+    def energy_gradient(self, uv, *, tail_threshold=None, tail_strength=.50):
+        """Return area-weighted SD (+ optional soft tail) and UV gradient."""
         points=np.asarray(uv,float)
         p=points[self.faces]
         a=p[:,1]-p[:,0]
@@ -108,12 +135,23 @@ class SymmetricDirichletProblem:
         dD=(-2*f2*invdet2/denom)*active
         grad_a+=dD[:,None]*np.stack([b[:,1],-b[:,0]],axis=1)
         grad_b+=dD[:,None]*np.stack([-a[:,1],a[:,0]],axis=1)
+        # Smooth positive-excess loss above a *fixed source-candidate*
+        # 95th-percentile SD. Unlike mean SD it specifically targets the
+        # high-distortion tail; fully differentiable with analytic gradient.
+        additional_loss=0.
+        scales=np.ones_like(sd)
+        if tail_threshold is not None:
+            temperature=max(.25,.05*float(tail_threshold))
+            z=np.clip((sd-float(tail_threshold))/temperature,-60.,60.)
+            additional_loss=float(tail_strength*np.dot(
+                self.weight,temperature*np.logaddexp(0.,z)))
+            scales += tail_strength/(1.+np.exp(-z))
         grad=np.zeros_like(points)
-        wa=self.weight[:,None]
+        wa=(self.weight*scales)[:,None]
         np.add.at(grad,self.faces[:,0],-wa*(grad_a+grad_b))
         np.add.at(grad,self.faces[:,1],wa*grad_a)
         np.add.at(grad,self.faces[:,2],wa*grad_b)
-        energy=float(np.dot(sd,self.weight))
+        energy=float(np.dot(sd,self.weight))+additional_loss
         # Strict global positivity is checked outside the minimizer.
         # This smooth continuation barrier helps L-BFGS-B return feasible
         # trials when a step crosses the >0.005 area threshold.
@@ -233,6 +271,7 @@ def refine_exact_grid_uv(
     full_grid_uv, boundary_loop, grid_outline, *,
     assess, mean_sd_limit, min_area_ratio=.005,
     interior_maxiter=85, sliding_maxiter=100, progress=True,
+    tail_aware=False,
 ):
     """Find a lower-area-mean-SD candidate without changing the Grid mask.
 
@@ -284,9 +323,13 @@ def refine_exact_grid_uv(
             f"GRID_SD_ENERGY_AUDIT_MISMATCH: analytic={exact:.9g} "
             f"quality={sd_before:.9g}"
         )
+    tail_threshold=(problem.tail_threshold(start) if tail_aware else None)
     best=start.copy()
     best_quality=source_quality
     best_sd=sd_before
+    best_score=(problem.tail_score(best,tail_threshold)
+                if tail_aware else sd_before)
+    tail_p95_before=float(problem.tail_threshold(start))
     phases=[]
     started=time.monotonic()
     cell_size=max(float(np.max(np.linalg.norm(
@@ -294,7 +337,7 @@ def refine_exact_grid_uv(
     tol=cell_size*1e-7+1e-10
 
     def audit(candidate, label):
-        nonlocal best,best_sd,best_quality
+        nonlocal best,best_sd,best_quality,best_score
         if not np.isfinite(candidate).all():
             return "nonfinite"
         min_ratio=float(np.min(problem.area_ratios(candidate)))
@@ -314,7 +357,13 @@ def refine_exact_grid_uv(
         sd=float(result["distortion_area_mean"])
         if not np.isfinite(sd):
             return "nonfinite_sd"
-        if sd < best_sd-1e-7:
+        score=(problem.tail_score(candidate,tail_threshold)
+               if tail_aware else sd)
+        # Tail experiments may trade up to 2% mean SD for substantial tail
+        # improvement, but cannot exceed the original strict mean SD gate.
+        admissible=(sd<=mean_sd_limit and sd<=sd_before*1.02) if tail_aware else True
+        if admissible and score < best_score-1e-7:
+            best_score=score
             best=candidate.copy()
             best_sd=sd
             best_quality=result
@@ -329,7 +378,7 @@ def refine_exact_grid_uv(
             return "improved"
         return "no_improvement"
 
-    if sd_before<=mean_sd_limit:
+    if sd_before<=mean_sd_limit and not tail_aware:
         return best,{
             "status":"already_within_limit",
             "mean_sd_before":sd_before,
@@ -366,7 +415,8 @@ def refine_exact_grid_uv(
             return uv
         def objective(x):
             uv=unpack(x)
-            loss,gradient=problem.energy_gradient(uv)
+            loss,gradient=problem.energy_gradient(
+                uv,tail_threshold=tail_threshold)
             # Retain only orientation-safe, locally feasible iterates.
             # Full global overlap audit remains mandatory at completion.
             if np.min(problem.area_ratios(uv))>=min_area_ratio:
@@ -426,7 +476,7 @@ def refine_exact_grid_uv(
 
     if len(interior):
         solve("interior",False,interior_maxiter)
-    if best_sd>mean_sd_limit:
+    if best_sd>mean_sd_limit or tail_aware:
         try:
             solve("grid_edge_slide",True,sliding_maxiter)
         except ValueError as exc:
@@ -447,5 +497,12 @@ def refine_exact_grid_uv(
         "improvement":sd_before-best_sd,
         "phases":phases,
         "min_area_ratio":float(np.min(problem.area_ratios(best))),
+        "tail_aware":bool(tail_aware),
+        "tail_p95_before":tail_p95_before,
+        "tail_p95_after":float(problem.tail_threshold(best)),
+        "tail_score_before":float(problem.tail_score(start,tail_threshold)
+            if tail_aware else sd_before),
+        "tail_score_after":float(problem.tail_score(best,tail_threshold)
+            if tail_aware else best_sd),
         "elapsed_seconds":time.monotonic()-started,
     }
