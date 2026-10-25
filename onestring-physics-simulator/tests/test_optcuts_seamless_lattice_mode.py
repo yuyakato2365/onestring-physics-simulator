@@ -170,3 +170,28 @@ def test_new_mode_pipeline_builder_called_only_when_requested(monkeypatch):
     assert out.triangle_acceleration is None
     assert out.omega_boundary.shape==(5,2)
     assert obj._build_m2d(None,None,None)=="passthrough"
+
+
+
+def test_shared_uv_cut_tip_chooses_lattice_cone_fixed_point():
+    # The 3D cut terminates at physical vertex 0, represented by the
+    # SAME UV id on both sides. Two parallel shifted UV seam lines
+    # would falsely demand two positions for vertex 0 (JUNCTION_CONFLICT).
+    # A 90-degree transition has a legal fixed point at (1,1).
+    uv=np.array([[1.,1.],[2.,1.],[3.,2.]],float)
+    chains=[((10,11),(0,1),(0,2))]
+    transitions=m.best_integer_transitions(uv,chains,1.)
+    assert transitions[0]["k"]==1
+    assert transitions[0]["steps"]==(2,0)
+    components,mat,offset,fixed=m._global_lattice_constraints(
+        len(uv),transitions,1.
+    )
+    root=int(components[0])
+    np.testing.assert_array_equal(fixed[root],[1.,1.])
+
+
+def test_invalid_cut_tip_cone_does_not_silently_approximate():
+    # A shared tip cannot satisfy a non-zero pure translation.
+    bad=[{"a":(0,),"b":(0,),"k":0,"steps":(1,0)}]
+    with pytest.raises(m.SeamlessLatticeError,match="INCONSISTENT_TRANSLATIONAL_HOLONOMY"):
+        m._global_lattice_constraints(1,bad,1.)
