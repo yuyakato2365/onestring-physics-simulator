@@ -382,7 +382,25 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
     for a,b in seam_edges:
         ka,kb=vertex_keys[a],vertex_keys[b]
         if ka==kb:
-            raise SeamTopologyMismatch("SEAM_DEGENERATE_GRID_BOUNDARY_EDGE")
+            pa=np.asarray(sampled[a],float)
+            pb=np.asarray(sampled[b],float)
+            actual_distance=float(np.linalg.norm(pa-pb))
+            uv_distance=float(np.linalg.norm(uv[a]-uv[b]))
+            reason=("same_source_position" if actual_distance<=max(
+                    1.e-10*xyzspan,1.e-12)
+                else "physical_samples_collide_under_seam_quantization")
+            raise SeamTopologyMismatch(
+                "SEAM_DEGENERATE_GRID_BOUNDARY_EDGE: "
+                f"grid_vertices=({int(a)},{int(b)}); "
+                f"uv_endpoints={np.round(uv[[a,b]],9).tolist()}; "
+                f"uv_edge_length={uv_distance:.9g}; "
+                f"sampled_source_xyz={np.round([pa,pb],12).tolist()}; "
+                f"source_edge_length={actual_distance:.9g}; "
+                f"physical_key={ka}; source_key_tolerance={qtol:.9g}; "
+                f"reason={reason}. This is a source-seam provenance "
+                "degeneracy or quantization collision, not an M2D zero "
+                "length edge. Do not silently weld distinct grid vertices."
+            )
         edge_keys[tuple(sorted((ka,kb)))].append((a,b))
     paired=[]
     unmatched=[]
