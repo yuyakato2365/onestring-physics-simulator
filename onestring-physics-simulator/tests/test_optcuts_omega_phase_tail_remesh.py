@@ -112,3 +112,94 @@ def test_four_modes_are_distinct_and_independently_cached():
     assert '"phase_search": value in {' in launcher
     assert '"tail_sd": value in {' in launcher
     assert '"adaptive_remesh": value in {' in launcher
+
+
+def _square_chart(n=4):
+    x,y=np.meshgrid(np.linspace(0.,1.,n+1),
+                    np.linspace(0.,1.,n+1),indexing="ij")
+    uv=np.stack((x.ravel(),y.ravel()),axis=1)
+    f=[]
+    for i in range(n):
+        for j in range(n):
+            a=i*(n+1)+j
+            b=(i+1)*(n+1)+j
+            f.extend([[a,b,b+1],[a,b+1,a+1]])
+    faces=np.asarray(f,int)
+    loop=([i*(n+1) for i in range(n)]
+          +[n*(n+1)+j for j in range(n)]
+          +[i*(n+1)+n for i in range(n,0,-1)]
+          +[j for j in range(n,0,-1)])
+    return SimpleNamespace(
+        uv_vertices_2d=uv.copy(),uv_faces=faces.copy(),
+        surface_vertices_3d=np.c_[uv,np.zeros(len(uv))],
+        surface_faces=faces.copy(),
+        omega_boundary=uv[np.r_[loop,loop[0]]].copy(),
+        triangle_acceleration=None,metrics={})
+
+
+def test_corner_remesh_mode_integrates_into_actual_area_grid_fitting():
+    from onestring_physics.optcuts_area_grid_boundary import apply_area_grid_boundary
+    chart=_square_chart()
+    source_count=len(chart.uv_faces)
+    params=SimpleNamespace(
+        optcuts_area_grid_coverage_threshold=.5,omega_overlay_margin=1,
+        optcuts_area_grid_adaptive_remesh_enabled=True,
+        optcuts_area_grid_tail_sd_enabled=False)
+    chart=apply_area_grid_boundary(chart,SimpleNamespace(nx=2,ny=2),params)
+    metrics=chart.metrics
+    assert metrics["optcuts_area_grid_adaptive_remesh_enabled"] is True
+    assert metrics["optcuts_area_grid_boundary_status"]=="accepted_exact_grid_outline"
+    assert metrics["optcuts_area_grid_remesh_diagnostic"]["subdivided_triangles"]>0
+    assert len(chart.uv_faces)>source_count
+    assert len(chart.uv_faces)==len(chart.surface_faces)
+    assert metrics["optcuts_area_grid_min_signed_area_ratio"]>=.005
+
+
+def test_tail_mode_calls_refinement_even_if_average_sd_passes(monkeypatch):
+    from onestring_physics import optcuts_grid_sd_refinement as sd
+    from onestring_physics.optcuts_area_grid_boundary import apply_area_grid_boundary
+    chart=_square_chart()
+    calls=[]
+    real_refine=sd.refine_exact_grid_uv
+    def monitored(*a,**k):
+        calls.append(k.get("tail_aware"))
+        return real_refine(*a,**k)
+    monkeypatch.setattr(sd,"refine_exact_grid_uv",monitored)
+    params=SimpleNamespace(
+        optcuts_area_grid_coverage_threshold=.5,omega_overlay_margin=1,
+        optcuts_area_grid_tail_sd_enabled=True)
+    out=apply_area_grid_boundary(chart,SimpleNamespace(nx=2,ny=2),params)
+    assert calls==[True]
+    assert out.metrics["optcuts_area_grid_sd_refinement_attempts"]==1
+    assert out.metrics["optcuts_area_grid_boundary_status"]=="accepted_exact_grid_outline"
+
+
+def test_phase_mode_evaluates_multiple_shifted_original_lattices():
+    from onestring_physics.optcuts_grid_aware_seam_selection import (
+        rank_grid_aware_seam_candidates,
+    )
+    chart=_square_chart()
+    chart._onestring_optcuts_candidates=[]
+    chart._onestring_optcuts_candidate_qualities=[]
+    def chart_domain(chart,grid,_params):
+        uv=chart.uv_vertices_2d
+        start=np.min(uv,axis=0)-.25
+        x=start[0]+np.arange(9)*.1875
+        y=start[1]+np.arange(9)*.1875
+        xx,yy=np.meshgrid(x,y,indexing="xy")
+        return SimpleNamespace(uv_vertices=np.stack(
+            (xx,yy),axis=-1).reshape((-1,2)),overlay_nx=8,
+            overlay_ny=8,overlay_margin_tiles=1)
+    params=SimpleNamespace(
+        optcuts_area_grid_coverage_threshold=.5,
+        optcuts_area_grid_orientation_search_enabled=False,
+        optcuts_area_grid_phase_search_enabled=True)
+    ranked,report=rank_grid_aware_seam_candidates(
+        chart,SimpleNamespace(nx=2,ny=2),params,chart_domain)
+    assert len(report)==4
+    assert len(ranked)>=1
+    assert {(r["grid_phase_u"],r["grid_phase_v"]) for r in report}=={
+        (0.,0.),(.5,0.),(0.,.5),(.5,.5)}
+    for _chart,domain,row in ranked:
+        np.testing.assert_allclose(domain.uv_vertices[0],
+                                   row["real_grid_origin"])
