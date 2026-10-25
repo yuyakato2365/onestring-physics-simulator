@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/optcuts-real-m2d-footprint-20261023
+      - feature/optcuts-seamless-lattice-omega-20261025
     paths:
       - "onestring-physics-simulator/src/onestring_physics/optcuts_area_grid_boundary.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_boundary_untangle.py"
