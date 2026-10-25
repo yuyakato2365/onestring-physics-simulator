@@ -227,7 +227,9 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 # Expose the user-visible Omega choice without altering the
                 # stable internal optcuts_test carrier and its K3D/K2D patches.
                 "requested_omega_parameterization_mode": (
-                    ("optcuts_area_grid_combined"
+                    ("optcuts_grid_seam_native"
+                     if bool(getattr(params,"optcuts_grid_seam_native_enabled",False))
+                     else "optcuts_area_grid_combined"
                      if all(bool(getattr(params,f,False)) for f in (
                          "optcuts_area_grid_phase_search_enabled",
                          "optcuts_area_grid_tail_sd_enabled",
@@ -250,10 +252,15 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 "optcuts_area_grid_boundary_selected_as_omega_mode": bool(
                     getattr(params,"optcuts_area_grid_boundary_enabled",False)
                 ),
+                "optcuts_grid_seam_native_enabled": bool(getattr(
+                    params,"optcuts_grid_seam_native_enabled",False)),
                 "optcuts_test_enabled": True,
                 "optcuts_test_model": (
-                    "official OptCuts Omega/cut topology kept fixed -> regular quad grid -> "
-                    "strict full-cell crop; no M2D-to-Omega feedback"
+                    ("patched native OptCuts Grid-Seam C++ cut topology -> "
+                     "actual production grid mask -> exact-boundary UV fit")
+                    if bool(getattr(params,"optcuts_grid_seam_native_enabled",False))
+                    else ("official OptCuts Omega/cut topology kept fixed -> regular quad grid -> "
+                          "strict full-cell crop; no M2D-to-Omega feedback")
                 ),
                 "optcuts_test_paper_one_way_omega_to_m2d": True,
                 "optcuts_test_grid_outline_reparameterization": bool(
