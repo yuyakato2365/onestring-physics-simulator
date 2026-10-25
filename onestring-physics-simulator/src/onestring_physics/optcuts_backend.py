@@ -422,6 +422,16 @@ def _run_official_optcuts_once(
         ]
         try:
             if cfg.grid_seam_native_enabled:
+                print(
+                    "[GRID-CUT-NATIVE-CONFIG] "
+                    f"lambda_init={cfg.lambda_init:g} "
+                    f"original_seam_weight={1.-cfg.lambda_init:.6g} "
+                    f"grid_relative_beta={cfg.grid_seam_native_weight:g} "
+                    f"distortion_bound={cfg.distortion_bound:g} "
+                    f"timeout={cfg.timeout_seconds:g}s "
+                    "monotone_original_objective=True",
+                    flush=True,
+                )
                 from .optcuts_grid_seam_native import run_native_with_heartbeat
                 completed = run_native_with_heartbeat(
                     command,
@@ -445,9 +455,18 @@ def _run_official_optcuts_once(
                     check=False,
                 )
         except subprocess.TimeoutExpired as exc:
+            def _output_tail(data):
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", errors="replace")
+                return "\n".join(str(data or "").splitlines()[-25:])
+            tail = _output_tail(getattr(exc, "stdout", None)) + "\n" + (
+                _output_tail(getattr(exc, "stderr", None)))
+            if cfg.grid_seam_native_enabled:
+                print("[GRID-CUT-NATIVE-TIMEOUT-TAIL]\n" + tail, flush=True)
             raise OptCutsError(
                 f"{'Grid-Seam native' if cfg.grid_seam_native_enabled else 'Official'} "
-                f"OptCuts timed out after {cfg.timeout_seconds:g} s"
+                f"OptCuts timed out after {cfg.timeout_seconds:g} s. "
+                f"Captured last C++ output:\n{tail}"
             ) from exc
         except OSError as exc:
             raise OptCutsUnavailableError(f"Failed to execute {executable}: {exc}") from exc
