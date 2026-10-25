@@ -11,6 +11,7 @@ on:
       - "onestring-physics-simulator/src/onestring_physics/optcuts_backend.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_pipeline_patch.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_seam_native.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_square_proxy.py"
       - "onestring-physics-simulator/scripts/setup_optcuts_grid_seam.py"
       - "onestring-physics-simulator/tests/test_optcuts_grid_seam_native.py"
       - "onestring-physics-simulator/tests/test_optcuts_official_binary_separation.py"
@@ -72,7 +73,7 @@ jobs:
           python -m pip install "matplotlib>=3.8" "imageio-ffmpeg>=0.5"
       - name: Check syntax
         run: |
-          python -m py_compile src/onestring_physics/optcuts_backend.py src/onestring_physics/optcuts_pipeline_patch.py src/onestring_physics/optcuts_grid_seam_native.py scripts/setup_optcuts_grid_seam.py tests/test_optcuts_grid_seam_native.py
+          python -m py_compile src/onestring_physics/optcuts_backend.py src/onestring_physics/optcuts_pipeline_patch.py src/onestring_physics/optcuts_grid_seam_native.py src/onestring_physics/optcuts_grid_square_proxy.py scripts/setup_optcuts_grid_seam.py tests/test_optcuts_grid_seam_native.py
           python -m py_compile src/onestring_physics/optcuts_grid_corner_remesh.py src/onestring_physics/optcuts_grid_aware_seam_selection.py src/onestring_physics/optcuts_grid_sd_refinement.py src/onestring_physics/optcuts_area_grid_boundary.py src/onestring_physics/optcuts_test_boundary_reparameterization_patch.py app_optcuts_core_20260916.py app_runtime_base.py src/onestring_physics/onestring_pipeline.py tests/test_optcuts_omega_phase_tail_remesh.py
           python -m py_compile src/onestring_physics/optcuts_official_binary_patch.py tests/test_optcuts_official_binary_separation.py
           python -m py_compile src/onestring_physics/stage_audit_bundle.py src/onestring_physics/legacy_pipeline_base.py scripts/render_stage_audit.py tests/test_stage_audit_phase0.py
