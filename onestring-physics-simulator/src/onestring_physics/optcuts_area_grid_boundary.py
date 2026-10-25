@@ -677,7 +677,8 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         try:
             trial_uv,trial_history=fit_by_continuation(
                 base,faces,loop,mapped,_harmonic_dirichlet,assess,
-                on_failure=diagnose_failed_continuation)
+                on_failure=diagnose_failed_continuation,
+                strict_linear_boundary_path=native_grid)
         except ValueError as exc:
             phase_errors.append(f"phase={phase}, fit={method}: {exc}")
             print(
