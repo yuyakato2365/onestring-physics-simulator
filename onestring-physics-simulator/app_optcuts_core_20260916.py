@@ -199,7 +199,7 @@ def _install_optcuts_selector() -> None:
         )
 
         if value in {"optcuts", "optcuts_test", "optcuts_test2",
-                      "optcuts_grid_aware","optcuts_area_grid_boundary"}:
+                      "optcuts_grid_aware","optcuts_area_grid_boundary","optcuts_seamless_lattice"}:
             use_bijectivity = st.checkbox(
                 "OptCuts enforce bijectivity",
                 value=os.environ.get("ONESTRING_OPTCUTS_USE_BIJECTIVITY", "1").lower()
@@ -219,7 +219,7 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = "0"
 
             if value in {"optcuts_test", "optcuts_test2",
-                          "optcuts_grid_aware","optcuts_area_grid_boundary"}:
+                          "optcuts_grid_aware","optcuts_area_grid_boundary","optcuts_seamless_lattice"}:
                 st.markdown("**K3D hard-planarity (Augmented Lagrangian)**")
                 anchor_weight = st.number_input(
                     "K3D AL anchor weight (w_a)",
