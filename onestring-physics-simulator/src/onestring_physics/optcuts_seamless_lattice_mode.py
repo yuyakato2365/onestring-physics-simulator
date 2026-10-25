@@ -42,6 +42,27 @@ def source_chains(chart):
         a,b=_uv_copy_chains_for_physical_chain(chain,lookup)
         if len(a)!=len(chain) or len(b)!=len(chain):
             raise SeamlessLatticeError("SEAMLESS_SOURCE_CHAIN_COPY_MISMATCH")
+        # The shared OptCuts chain helper has a heuristic junction
+        # fallback. It can join UV IDs from different cut sides when
+        # a physical source vertex has >2 chart copies. Validate EACH
+        # original physical edge, not just endpoint correspondence.
+        for i,(s0,s1) in enumerate(zip(chain[:-1],chain[1:])):
+            rec=lookup[(min(int(s0),int(s1)),
+                        max(int(s0),int(s1)))]
+            edge_copies={
+                (int(d[int(s0)]),int(d[int(s1)]))
+                for d in rec["copies"]
+            }
+            for side_name,side in (("A",a),("B",b)):
+                pair=(int(side[i]),int(side[i+1]))
+                if pair not in edge_copies:
+                    raise SeamlessLatticeError(
+                        "SEAMLESS_SOURCE_UV_COPY_CHAIN_DISCONTINUITY: "
+                        f"physical_edge=({s0},{s1}) side={side_name} "
+                        f"uv_edge={pair} valid_uv_edges={sorted(edge_copies)}; "
+                        "cannot impose rigid lattice constraints across "
+                        "an incorrectly paired physical source cut"
+                    )
         result.append((tuple(chain),tuple(a),tuple(b)))
     return result
 
