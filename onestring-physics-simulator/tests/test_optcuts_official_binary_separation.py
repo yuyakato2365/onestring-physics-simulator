@@ -60,8 +60,8 @@ def test_existing_official_binary_in_sibling_worktree_is_discovered(monkeypatch,
         assert command[-3:] == ["worktree", "list", "--porcelain"]
         return SimpleNamespace(
             returncode=0,
-            stdout=f"worktree {tmp_path / 'current'}\\nHEAD abc\\n\\n"
-                   f"worktree {sibling}\\nHEAD def\\n",
+            stdout=f"worktree {tmp_path / 'current'}\nHEAD abc\n\n"
+                   f"worktree {sibling}\nHEAD def\n",
         )
     monkeypatch.setattr(official.subprocess, "run", fake_run)
     assert official.resolve_official_optcuts_executable() == binary.resolve()
