@@ -508,6 +508,19 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     faces=np.asarray(parameterization.uv_faces,int)
     boundary_candidates=_boundary_target_candidates(
         uv,loop,target["grid_outline"],faces=faces)
+    remesh_diagnostic=None
+    if bool(getattr(params,"optcuts_area_grid_adaptive_remesh_enabled",False)):
+        # Crucially, test all candidate fixed-boundary ears on the ORIGINAL
+        # triangles before barycentric subdivision can add internal vertices.
+        # This does not erase evidence of an impossible source corner map.
+        from .optcuts_grid_corner_remesh import (
+            subdivide_grid_corner_neighborhood,
+        )
+        remesh_diagnostic=subdivide_grid_corner_neighborhood(
+            parameterization,loop,boundary_candidates[0][2],
+            target["grid_outline"])
+        uv=np.asarray(parameterization.uv_vertices_2d,float)
+        faces=np.asarray(parameterization.uv_faces,int)
     # quality() requires OptCutsResult (not SurfaceParameterization).
     # Evaluate by wrapping the current chart with all corresponding faces.
     # Homotopy is diagnostic and prevents accepting a folded intermediate.
@@ -639,7 +652,10 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         trial_quality=assess(trial_uv)
         trial_sd=float(trial_quality["distortion_area_mean"])
         refinement=None
-        if (trial_sd>max_mean_sd and os.environ.get(
+        # The tail experiment always optimizes the locally worst triangles,
+        # even when the original average SD already passes the quality gate.
+        tail_mode=bool(getattr(params,"optcuts_area_grid_tail_sd_enabled",False))
+        if ((trial_sd>max_mean_sd or tail_mode) and os.environ.get(
             "ONESTRING_GRID_SD_REFINEMENT","1"
         ).strip().lower() not in {"0","off","false","no"}):
             # Harmonic mapping optimizes a Laplacian; the untangler only
@@ -657,6 +673,7 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
                     faces,base,trial_uv,loop,outline,
                     assess=assess,mean_sd_limit=max_mean_sd,
                     min_area_ratio=.005,
+                    tail_aware=tail_mode,
                 )
                 refined_quality=assess(refined_uv)
                 refined_sd=float(refined_quality["distortion_area_mean"])
@@ -772,6 +789,13 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
     parameterization.metrics.update(
         optcuts_area_grid_boundary_enabled=True,
         optcuts_area_grid_boundary_status="accepted_exact_grid_outline",
+        optcuts_area_grid_phase_search_enabled=bool(getattr(
+            params,"optcuts_area_grid_phase_search_enabled",False)),
+        optcuts_area_grid_tail_sd_enabled=bool(getattr(
+            params,"optcuts_area_grid_tail_sd_enabled",False)),
+        optcuts_area_grid_adaptive_remesh_enabled=bool(getattr(
+            params,"optcuts_area_grid_adaptive_remesh_enabled",False)),
+        optcuts_area_grid_remesh_diagnostic=remesh_diagnostic,
         optcuts_area_grid_coverage_threshold=thresh,
         optcuts_area_grid_cell_count=count,
         optcuts_area_grid_candidate_cell_count=int(target["mask"].size),
