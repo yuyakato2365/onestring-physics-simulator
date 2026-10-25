@@ -317,3 +317,54 @@ int main() {
     assert negative==pytest.approx(-.01)
     assert positive==pytest.approx(.0009)
     assert merged==pytest.approx(.0011)
+
+
+def test_native_linear_boundary_homotopy_detects_real_intermediate_crossing():
+    """Both endpoints are simple CCW polygons, but interpolating crosses."""
+    from onestring_physics.optcuts_grid_boundary_untangle import (
+        native_linear_path_boundary_preflight,
+    )
+    from onestring_physics.optcuts_grid_failure_diagnostics import (
+        proper_boundary_crossings,
+    )
+    src=np.array([
+        [0.2131048215852692,1.3569212955720948],
+        [-0.15663754381191192,0.48037246784793397],
+        [-0.9336890110937098,-0.93480980103178],
+        [0.20842385082511444,-1.2802142794901135],
+        [0.7729964013237572,-0.5825586978812494]])
+    dst=np.array([
+        [-0.03222832553039152,1.0530042762788165],
+        [-0.2656836287591267,1.4717110134675664],
+        [-0.42280460191726144,1.2215609301148138],
+        [-1.0560189834302436,0.3796184000073182],
+        [-1.488352189615069,-0.042545047336794886]])
+    assert proper_boundary_crossings(src)["count"]==0
+    assert proper_boundary_crossings(dst)["count"]==0
+    src_saved=src.copy()
+    dst_saved=dst.copy()
+    witness=native_linear_path_boundary_preflight(src,dst)
+    assert witness is not None
+    assert witness["count"] >= 1
+    assert 0 < witness["fraction"] < 1
+    np.testing.assert_array_equal(src,src_saved)
+    np.testing.assert_array_equal(dst,dst_saved)
+
+
+def test_native_linear_boundary_homotopy_preserves_safe_unchanged_mask():
+    from onestring_physics.optcuts_grid_boundary_untangle import (
+        native_linear_path_boundary_preflight,
+    )
+    src=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+    dst=np.array([[0.,0.],[2.,0.],[2.,2.],[0.,2.]])
+    assert native_linear_path_boundary_preflight(src,dst) is None
+    with pytest.raises(ValueError,match="INVALID_INPUT"):
+        native_linear_path_boundary_preflight(src,dst[:3])
+
+
+def test_native_homotopy_guard_excludes_no_non_native_legacy_mode():
+    root=Path(__file__).resolve().parents[1]
+    source=(root/"src/onestring_physics/optcuts_area_grid_boundary.py").read_text()
+    assert 'native_grid=bool(getattr(params,"optcuts_grid_seam_native_enabled",False))' in source
+    assert 'if native_grid:' in source
+    assert 'GRID_NATIVE_NO_LINEAR_HOMOTOPY_CANDIDATES' in source
