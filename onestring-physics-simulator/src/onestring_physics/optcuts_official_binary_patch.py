@@ -15,6 +15,7 @@ This patch makes that mix-up impossible instead of silently accepting it.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -39,30 +40,71 @@ def _is_under(path: Path, root: Path) -> bool:
         return False
 
 
+def _is_grid_optcuts_path(path: Path) -> bool:
+    """Reject the Grid-OptCuts fork in this or ANY sibling worktree."""
+    try:
+        absolute = path.expanduser().resolve()
+    except OSError:
+        absolute = path.expanduser()
+    return any(
+        parent.name == "OptCuts" and parent.parent.name == "third_party"
+        for parent in (absolute, *absolute.parents)
+    )
+
+
+def _worktree_official_roots() -> list[Path]:
+    """Discover already-built official binaries in other Git worktrees.
+
+    Git worktrees do not share ignored build artifacts. Only named
+    third_party/OptCuts_official directories are considered; never silently
+    substitute the modified Grid-OptCuts executable.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(_project_root()), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    roots = []
+    current = _official_optcuts_root()
+    for line in result.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        worktree = Path(line[len("worktree "):].strip()).expanduser()
+        for project in (worktree, worktree / "onestring-physics-simulator"):
+            root = project / "third_party" / "OptCuts_official"
+            if root.is_dir() and root.resolve() != current:
+                roots.append(root)
+    return roots
+
+
 def official_executable_candidates(requested: str | None = None) -> list[Path]:
     """Return only candidates that are valid for the ordinary ``optcuts`` mode."""
     candidates: list[Path] = []
 
     explicit_official = os.environ.get("ONESTRING_OPTCUTS_OFFICIAL_EXECUTABLE", "").strip()
-    if explicit_official:
+    if explicit_official and not _is_grid_optcuts_path(Path(explicit_official)):
         candidates.append(Path(explicit_official).expanduser())
 
     # Keep support for an explicitly supplied external authors' binary, but never
     # accept the in-repository Grid-OptCuts build through the legacy field.
     if requested:
         p = Path(requested).expanduser()
-        if not _is_under(p, _grid_optcuts_root()):
+        if not _is_grid_optcuts_path(p):
             candidates.append(p)
 
-    root = _official_optcuts_root()
-    candidates.extend(
-        [
-            root / "build" / "OptCuts_bin",
-            root / "build" / "OptCuts_bin.exe",
-            root / "build" / "Release" / "OptCuts_bin.exe",
-            root / "build" / "Release" / "OptCuts_bin",
-        ]
-    )
+    for root in (_official_optcuts_root(), *_worktree_official_roots()):
+        candidates.extend(
+            [
+                root / "build" / "OptCuts_bin",
+                root / "build" / "OptCuts_bin.exe",
+                root / "build" / "Release" / "OptCuts_bin.exe",
+                root / "build" / "Release" / "OptCuts_bin",
+            ]
+        )
 
     unique: list[Path] = []
     seen: set[str] = set()
@@ -82,7 +124,7 @@ def resolve_official_optcuts_executable(requested: str | None = None) -> Path:
         except Exception:
             resolved = path
         if resolved.is_file():
-            if _is_under(resolved, _grid_optcuts_root()):
+            if _is_grid_optcuts_path(resolved):
                 # This should already have been filtered, but keep the runtime
                 # invariant explicit in case the candidate logic changes later.
                 continue
@@ -90,7 +132,7 @@ def resolve_official_optcuts_executable(requested: str | None = None) -> Path:
 
     legacy = Path(requested).expanduser() if requested else None
     legacy_note = ""
-    if legacy is not None and _is_under(legacy, _grid_optcuts_root()):
+    if legacy is not None and _is_grid_optcuts_path(legacy):
         legacy_note = (
             "\nThe configured executable points to third_party/OptCuts, which is the "
             "Grid-OptCuts build and is intentionally rejected for ordinary optcuts."
@@ -100,7 +142,7 @@ def resolve_official_optcuts_executable(requested: str | None = None) -> Path:
 
     raise OptCutsUnavailableError(
         "A clean Official OptCuts executable was not found. "
-        "Build it once with `python3 scripts/setup_optcuts_official.py`.\n"
+        "Build it once with `python3 scripts/setup_optcuts_official.py`, "\n        "or set ONESTRING_OPTCUTS_OFFICIAL_EXECUTABLE to an existing clean binary.\n"
         f"Tried:\n  - {shown}{legacy_note}"
     )
 
