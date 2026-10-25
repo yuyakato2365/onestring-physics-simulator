@@ -36,7 +36,7 @@ static double onestringGridAngle() {
         ? value * (3.14159265358979323846 / 180.0) : 0.0;
 }
 // Axis misalignment: sin^2(2 theta), i.e. 0 for 0/90 deg, 1 for 45 deg.
-// Scaled by original 3D edge length / surface virtual radius so its magnitude
+// Independent additive beta (not multiplied by the authors\' lambda)\n// so users can tune the grid-seam term without coupling it to SD/length weights.\n// Scaled by original 3D edge length / surface virtual radius so its magnitude
 // is comparable with the original cohesive-seam cost.
 static double onestringGridEdgeCost(
     const Eigen::RowVector2d& a, const Eigen::RowVector2d& b,
@@ -82,7 +82,7 @@ def patch_trimesh_source(source: str) -> str:
         '                        V.row(vI), V.row(nbVI),\n'
         '                        (V_rest.row(vI) - V_rest.row(nbVI)).norm(), virtualRadius);\n'
         '                    const double curEwDec = (1.0 - lambda_t) * SDDec\n'
-        '                        - lambda_t * (seInc + onestringGridWeight() * gridCost);\n'
+        '                        - lambda_t * seInc - onestringGridWeight() * gridCost;\n'
         '                    if(curEwDec > maxEwDec) {'
     )
     source = replace_once(source, before, after, "boundary split score")
@@ -114,7 +114,7 @@ def patch_trimesh_source(source: str) -> str:
         'const double gridRemoved = onestringGridEdgeCost(\n'
         '                        V.row(path_max[0]), V.row(path_max[1]),\n'
         '                        (V_rest.row(path_max[0]) - V_rest.row(path_max[1])).norm(), virtualRadius);\n'
-        '                    return lambda_t * (seDec + onestringGridWeight() * gridRemoved)\n'
+        '                    return lambda_t * seDec + onestringGridWeight() * gridRemoved\n'
         '                        - (1.0 - lambda_t) * SDInc;'
     )
     source = replace_once(source, before, after, "merge score")
