@@ -157,7 +157,7 @@ def test_refined_gradient_matches_finite_difference_for_reduced_roots(monkeypatc
     original = np.array([[0., 0.], [1., 0.], [1., 1.], [0., 1.]])
     root0 = np.array([0.2, 0.1])
     root1 = np.array([1., -0.3])
-    root3 = np.array([-0.3, 1.1])
+    root3 = np.array([1.5, 0.1])  # Flips the second source triangle
     roots = np.r_[root0, root1, root3]
     matrices = np.tile(np.eye(2, dtype=int), (4, 1, 1))
     matrices[2] = np.array([[0, -1], [1, 0]])
