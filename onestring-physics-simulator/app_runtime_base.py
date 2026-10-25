@@ -2027,6 +2027,7 @@ def current_pipeline_key() -> tuple:
         m2d_crop_policy,
         omega_boundary_mode,
         omega_parameterization_mode,
+        optcuts_seamless_lattice_enabled,
         optcuts_grid_aware_enabled,
         optcuts_grid_aware_strength,
         optcuts_area_grid_boundary_enabled,
