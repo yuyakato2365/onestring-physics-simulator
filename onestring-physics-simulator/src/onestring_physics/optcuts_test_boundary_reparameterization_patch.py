@@ -229,9 +229,11 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 "requested_omega_parameterization_mode": (
                     "optcuts_area_grid_boundary" if bool(getattr(
                         params,"optcuts_area_grid_boundary_enabled",False))
+                    else ("optcuts_seamless_lattice" if bool(getattr(
+                        params,"optcuts_seamless_lattice_enabled",False))
                     else ("optcuts_grid_aware" if bool(getattr(
                         params,"optcuts_grid_aware_enabled",False))
-                    else "optcuts_test")
+                    else "optcuts_test"))
                 ),
                 "optcuts_grid_aware_selected_as_omega_mode": bool(
                     getattr(params,"optcuts_grid_aware_enabled",False)
