@@ -318,6 +318,9 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
         failures = []
         selected = None
         selected_report = None
+        native_grid = bool(getattr(params,"optcuts_grid_seam_native_enabled",False))
+        best_native_score = float("inf")
+        native_valid_count = 0
         for candidate_rank, (chart, candidate_domain, row) in enumerate(ranked, 1):
             print(
                 "[GRID-SEAM-FIT] "
@@ -359,6 +362,38 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 f"rank={candidate_rank}/{len(ranked)}",
                 flush=True,
             )
+            if native_grid:
+                # Only in the dedicated C++-seam experiment: compare the
+                # shape of the local UV->3D grid differential after exact
+                # grid-boundary fitting. Avoid automatically accepting the
+                # first valid but very non-square M3D candidate.
+                from .optcuts_grid_square_proxy import score_parameterization
+                try:
+                    native_score, native_metrics = score_parameterization(
+                        chart,grid_score=float(row["score"]),
+                        square_weight=.5)
+                except ValueError as exc:
+                    row["status"] = "square_proxy_invalid"
+                    row["error"] = str(exc)
+                    failures.append(str(exc))
+                    continue
+                row.update(native_metrics)
+                row["native_postfit_score"] = float(native_score)
+                native_valid_count += 1
+                if native_score < best_native_score:
+                    best_native_score=float(native_score)
+                    selected, selected_report=chart,row
+                print(
+                    "[GRID-NATIVE-M3D-PROXY] "
+                    f"candidate={candidate_rank} "
+                    f"score={native_score:.6g} "
+                    f"mean={native_metrics['square_grid_proxy_mean']:.6g} "
+                    f"p95={native_metrics['square_grid_proxy_p95']:.6g} "
+                    f"best={best_native_score:.6g}",
+                    flush=True)
+                if native_valid_count>=3:
+                    break
+                continue
             selected, selected_report = chart, row
             break
 
@@ -382,6 +417,18 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             )
 
         selected.metrics.update(
+            optcuts_native_grid_seam_postfit_candidates=int(native_valid_count),
+            optcuts_native_grid_seam_postfit_score=(
+                float(best_native_score) if native_grid else None),
+            optcuts_native_grid_seam_selected_square_proxy=(
+                {
+                    k: selected_report[k] for k in (
+                        "square_grid_proxy_mean",
+                        "square_grid_proxy_p95",
+                        "square_grid_proxy_orthogonality_mean",
+                        "square_grid_proxy_side_ratio_mean",
+                    )
+                } if native_grid else None),
             optcuts_area_grid_seam_selection_enabled=True,
             optcuts_area_grid_seam_candidate_count=len(report),
             optcuts_area_grid_seam_ranking=report,
