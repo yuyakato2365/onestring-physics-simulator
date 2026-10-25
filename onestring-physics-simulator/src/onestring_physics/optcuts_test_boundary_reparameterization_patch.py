@@ -356,6 +356,50 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                     f"score={row['score']:.5g}: {str(exc)[:210]}"
                 )
                 continue
+            if native_grid:
+                # Do not select an Omega whose actual 50%-mask M2D later
+                # fails exact source-seam pairing. This is the SAME
+                # frozen-production grid and tile IDs used by paper_m2d;
+                # merely compacting unused vertices cannot change its
+                # boundary geometry or physical seam provenance.
+                from .optcuts_grid_seam_preflight import (
+                    preview_fixed_grid_seam_topology,
+                )
+                from .optcuts_seam_exact_closure import (
+                    SeamTopologyMismatch,
+                )
+                from .optcuts_seam_affine_constraints import (
+                    SourceSeamAffineError,
+                )
+                try:
+                    seam_preflight=preview_fixed_grid_seam_topology(
+                        chart,grid)
+                except (SeamTopologyMismatch,SourceSeamAffineError,ValueError) as exc:
+                    row["status"]="seam_preflight_rejected"
+                    row["error"]=str(exc)
+                    failures.append(
+                        f"cut={row['source_start_index']},"
+                        f"uv_rotation={row['uv_rotation_degrees']:g}deg,"
+                        f"reason=SEAM_PREFLIGHT:{str(exc)[:220]}"
+                    )
+                    print(
+                        "[GRID-NATIVE-SEAM-PREFLIGHT] rejected "
+                        f"rank={candidate_rank}/{len(ranked)} "
+                        f"reason={str(exc)[:450]} "
+                        "retaining_original_grid_and_trying_next_candidate",
+                        flush=True,
+                    )
+                    continue
+                row["native_seam_preflight"]=seam_preflight
+                print(
+                    "[GRID-NATIVE-SEAM-PREFLIGHT] accepted "
+                    f"rank={candidate_rank}/{len(ranked)} "
+                    f"grid_faces={seam_preflight['grid_face_count']} "
+                    f"seam_grid_edges={seam_preflight['seam_grid_edges']} "
+                    f"unclassified={seam_preflight['unclassified_boundary_edges']} "
+                    f"mode={seam_preflight['seam_stitch_mode']}",
+                    flush=True,
+                )
             row["status"] = "boundary_fit_accepted"
             print(
                 "[GRID-SEAM-FIT] candidate_accepted "
@@ -417,6 +461,8 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
             )
 
         selected.metrics.update(
+            optcuts_native_grid_seam_selected_m2d_preflight=(
+                selected_report.get("native_seam_preflight") if native_grid else None),
             optcuts_native_grid_seam_postfit_candidates=int(native_valid_count),
             optcuts_native_grid_seam_postfit_score=(
                 float(best_native_score) if native_grid else None),
