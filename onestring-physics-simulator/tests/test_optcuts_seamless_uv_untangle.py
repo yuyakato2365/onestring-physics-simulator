@@ -112,3 +112,65 @@ def test_impossible_collapsed_seam_keeps_failure_no_fallback(monkeypatch):
         mode.solve_seamless_lattice_uv(chart, 1.)
     assert "no fallback" in str(exc.value)
     assert "repair_attempted=True" in str(exc.value)
+
+
+def test_relative_area_stage_repairs_tiny_triangle_without_ignoring_it():
+    # The former absolute-area penalty costs O(area) for an equal relative
+    # fold: a very small source triangle may remain inverted. Both reference
+    # and solved signed-area ratios must be considered instead.
+    original = np.array([[0., 0.], [1.e-4, 0.], [0., 1.e-4]])
+    faces = np.array([[0, 1, 2]], dtype=int)
+    folded = original.copy()
+    folded[2, 1] = -1.e-4
+    roots, report = refine_positive_uv(
+        eye(6, format="csr"), folded.ravel(), folded.ravel(),
+        component=np.arange(3),
+        matrices=np.tile(np.eye(2, dtype=int), (3, 1, 1)),
+        offsets=np.zeros((3, 2)), fixed={},
+        columns={i: 2*i for i in range(3)},
+        faces=faces, reference_uv=original, h=1.)
+    final = roots.reshape((-1, 2))
+    assert report["refinement_bad_faces"] == 0
+    assert (signed_areas(final, faces) / signed_areas(original, faces)).min() > 1.e-3
+    assert any(entry["stage"] == "relative_area"
+               for entry in report["refinement_history"])
+
+
+def test_refined_gradient_matches_finite_difference_for_reduced_roots(monkeypatch):
+    # Check the chain-rule and area derivative used by L-BFGS-B with
+    # nonidentity rotation and constrained duplicate UV vertices.
+    from scipy.optimize import minimize as real_minimize
+    inspected = []
+    def checking_minimize(fn, x, **kwargs):
+        f0, grad = fn(x)
+        eps = 1.e-7
+        for i in range(len(x)):
+            perturb = np.zeros(len(x))
+            perturb[i] = eps
+            fd = (fn(x + perturb)[0] - fn(x - perturb)[0]) / (2. * eps)
+            np.testing.assert_allclose(grad[i], fd, rtol=1.e-4, atol=2.e-5)
+        inspected.append(True)
+        return real_minimize(fn, x, **kwargs)
+
+    from onestring_physics import optcuts_seamless_uv_untangle as untangle
+    monkeypatch.setattr(untangle, "minimize", checking_minimize)
+    original = np.array([[0., 0.], [1., 0.], [1., 1.], [0., 1.]])
+    root0 = np.array([0.2, 0.1])
+    root1 = np.array([1., -0.3])
+    root3 = np.array([-0.3, 1.1])
+    roots = np.r_[root0, root1, root3]
+    matrices = np.tile(np.eye(2, dtype=int), (4, 1, 1))
+    matrices[2] = np.array([[0, -1], [1, 0]])
+    offsets = np.zeros((4, 2))
+    offsets[2] = [1., 0.]
+    # UV2 is R*UV1 + (1, 0); reduced variables are roots 0,1,3.
+    out, info = refine_positive_uv(
+        eye(6, format="csr"), roots, roots,
+        component=np.array([0, 1, 1, 2]),
+        matrices=matrices, offsets=offsets, fixed={},
+        columns={0: 0, 1: 2, 2: 4},
+        faces=np.array([[0, 1, 2], [0, 2, 3]]),
+        reference_uv=original, h=1., maxiter=10,
+        penalties=(16.,))
+    assert inspected
+    assert np.all(np.isfinite(out))
