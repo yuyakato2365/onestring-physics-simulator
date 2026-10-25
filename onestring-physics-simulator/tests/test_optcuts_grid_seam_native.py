@@ -32,7 +32,7 @@ namespace OptCuts {
 """
     out = patch(source)
     assert out.count(MARKER) == 1
-    assert out.count("onestringGridEdgeCost(") == 4  # definition + 3 uses
+    assert out.count("onestringGridEdgeCost(") == 5  # definition + 4 edge-score uses
     assert out.count("onestringGridWeight() * gridCost") == 2
     assert "onestringGridWeight() * gridRemoved" in out
     assert "std::strtod" in out
