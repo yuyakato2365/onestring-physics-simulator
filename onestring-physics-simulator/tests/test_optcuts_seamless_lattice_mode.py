@@ -178,7 +178,7 @@ def test_shared_uv_cut_tip_chooses_lattice_cone_fixed_point():
     # SAME UV id on both sides. Two parallel shifted UV seam lines
     # would falsely demand two positions for vertex 0 (JUNCTION_CONFLICT).
     # A 90-degree transition has a legal fixed point at (1,1).
-    uv=np.array([[1.,1.],[2.,1.],[3.,2.]],float)
+    uv=np.array([[1.,1.],[2.,1.],[1.,2.]],float)
     chains=[((10,11),(0,1),(0,2))]
     transitions=m.best_integer_transitions(uv,chains,1.)
     assert transitions[0]["k"]==1
