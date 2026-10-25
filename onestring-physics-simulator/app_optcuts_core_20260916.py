@@ -58,6 +58,7 @@ from onestring_physics.optcuts_k3d_preflight_patch import install_optcuts_k3d_pr
 from onestring_physics.optcuts_visualization_compat_patch import install_optcuts_visualization_compat_patch  # noqa: E402
 from onestring_physics.optcuts_source_seam_visualization_patch import install_optcuts_source_seam_visualization_patch  # noqa: E402
 from onestring_physics.optcuts_seam_exact_closure import install_optcuts_exact_seam_closure  # noqa: E402
+from onestring_physics.optcuts_seamless_lattice_mode import install_seamless_lattice_mode_patch  # noqa: E402
 from onestring_physics.optcuts_grid_seam_patch import install_optcuts_seam_metadata_patch  # noqa: E402
 from onestring_physics.optcuts_seam_extraction_patch import install_robust_optcuts_seam_extraction  # noqa: E402
 from onestring_physics.optcuts_rectilinear_seam_patch import install_optcuts_rectilinear_seam_patch  # noqa: E402
@@ -86,7 +87,7 @@ def _install_optcuts_selector() -> None:
 
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
-                     "optcuts_grid"):
+                     "optcuts_seamless_lattice", "optcuts_grid"):
             if mode not in option_list:
                 option_list.append(mode)
         original_format=kwargs.get("format_func")
@@ -95,6 +96,8 @@ def _install_optcuts_selector() -> None:
                 return "2026-10-23 | Grid-aware OptCuts Ω + paper-aligned K3D/K2D (UV refinement)"
             if mode=="optcuts_area_grid_boundary":
                 return "2026-10-23 | OptCuts Ω + Area-Threshold Grid Boundary → Reparameterization"
+            if mode=="optcuts_seamless_lattice":
+                return "2026-10-25 | EXPERIMENTAL Seamless Lattice Ω (90°/integer transitions, no boundary staircase)"
             return str(original_format(mode)) if original_format else str(mode)
         kwargs["format_func"]=label_for_mode
         value = original_selectbox(label, option_list, *args, **kwargs)
@@ -107,9 +110,12 @@ def _install_optcuts_selector() -> None:
         st.session_state["_onestring_area_grid_boundary_omega_selected"] = (
             value == "optcuts_area_grid_boundary"
         )
+        st.session_state["_onestring_seamless_lattice_omega_selected"] = (
+            value == "optcuts_seamless_lattice"
+        )
         if value not in {"optcuts", "optcuts_test", "optcuts_test2",
                          "optcuts_grid_aware", "optcuts_area_grid_boundary",
-                         "optcuts_grid"}:
+                         "optcuts_seamless_lattice", "optcuts_grid"}:
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "0"
             return value
 
@@ -134,6 +140,15 @@ def _install_optcuts_selector() -> None:
                 "+ experimental grid-aligned UV refinement after official OptCuts. "
                 "The original OptCuts topology and K3D/K2D solvers remain unchanged. "
                 "Use OptCuts_test2 as the baseline comparison."
+            )
+        elif value == "optcuts_seamless_lattice":
+            st.warning(
+                "実験的UV再パラメータ化：元OptCutsの物理Seam両側を"
+                "uB = R^k uA + h*n (90度回転 + 格子整数平行移動)で拘束。"
+                "階段吸着・Seam直線化なし。"
+                "M2Dセル被覆と最終K3D完全閉合は未保証で、"
+                "コーン不整合やUV反転は明示エラーで停止します。"
+                "既存のΩモードは変更しません。"
             )
         elif value == "optcuts_area_grid_boundary":
             st.caption(
@@ -402,6 +417,9 @@ install_optcuts_test2_acceleration_patch(pipeline)
 # equality after every other K3D optimization wrapper. T3D consumes the
 # same hard equality groups in its shared top/bottom Eq.(2) solve.
 install_optcuts_exact_seam_closure(pipeline)
+# FINAL parameterization wrapper: only the new opt-in mode uses lattice
+# automorphism transitions; no existing OptCuts variants are touched.
+install_seamless_lattice_mode_patch(pipeline)
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
