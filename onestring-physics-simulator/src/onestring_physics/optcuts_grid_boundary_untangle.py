@@ -97,6 +97,37 @@ def untangle_fixed_boundary(base,faces,loop,target,harmonic,previous=None):
     return out,diag
 
 
+
+def native_linear_path_boundary_preflight(
+    source_boundary, destination_boundary, fractions=(
+        1/256, 1/128, 1/64, 1/32, 1/16, 1/8, 1/4, 1/2, 3/4, 1.
+    )
+):
+    """Find a WITNESSED proper boundary crossing on the fixed linear UV path.
+
+    Every return of a witness certifies that this particular straight-line
+    boundary homotopy cannot be an embedding. A clean result does NOT prove
+    injectivity at all unsampled fractions, or prove that another nonlinear
+    boundary isotopy does not exist. This check never alters source/target.
+    """
+    from .optcuts_grid_failure_diagnostics import proper_boundary_crossings
+    src=np.asarray(source_boundary,float)
+    dst=np.asarray(destination_boundary,float)
+    if (src.shape!=dst.shape or src.ndim!=2 or src.shape[1]!=2
+            or not np.isfinite(src).all() or not np.isfinite(dst).all()):
+        raise ValueError("GRID_BOUNDARY_NATIVE_PREFLIGHT_INVALID_INPUT")
+    for t in fractions:
+        t=float(t)
+        if not (0.<t<=1.):
+            raise ValueError("GRID_BOUNDARY_NATIVE_PREFLIGHT_INVALID_FRACTION")
+        interpolated=(1.-t)*src+t*dst
+        crossing=proper_boundary_crossings(interpolated,limit=6)
+        if int(crossing.get("count") or 0)>0:
+            return {"fraction":t,"count":int(crossing["count"]),
+                    "examples":crossing.get("examples",[])}
+    return None
+
+
 def fit_by_continuation(base,faces,loop,mapped,harmonic_dirichlet,assess,*,on_failure=None):
     """Refit at adaptive boundary positions; never suppress an invalid result."""
     progress=0.
