@@ -227,8 +227,19 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 # Expose the user-visible Omega choice without altering the
                 # stable internal optcuts_test carrier and its K3D/K2D patches.
                 "requested_omega_parameterization_mode": (
-                    "optcuts_area_grid_boundary" if bool(getattr(
-                        params,"optcuts_area_grid_boundary_enabled",False))
+                    ("optcuts_area_grid_combined"
+                     if all(bool(getattr(params,f,False)) for f in (
+                         "optcuts_area_grid_phase_search_enabled",
+                         "optcuts_area_grid_tail_sd_enabled",
+                         "optcuts_area_grid_adaptive_remesh_enabled"))
+                     else "optcuts_area_grid_phase_search"
+                     if bool(getattr(params,"optcuts_area_grid_phase_search_enabled",False))
+                     else "optcuts_area_grid_tail_sd"
+                     if bool(getattr(params,"optcuts_area_grid_tail_sd_enabled",False))
+                     else "optcuts_area_grid_adaptive_remesh"
+                     if bool(getattr(params,"optcuts_area_grid_adaptive_remesh_enabled",False))
+                     else "optcuts_area_grid_boundary")
+                    if bool(getattr(params,"optcuts_area_grid_boundary_enabled",False))
                     else ("optcuts_grid_aware" if bool(getattr(
                         params,"optcuts_grid_aware_enabled",False))
                     else "optcuts_test")
@@ -306,6 +317,8 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 f"candidate={candidate_rank}/{len(ranked)} "
                 f"cut={row['source_start_index']} "
                 f"rotation={row['uv_rotation_degrees']:g}deg "
+                f"phase=({row.get('grid_phase_u',0):g},"
+                f"{row.get('grid_phase_v',0):g}) "
                 f"corners={row['corners']} "
                 f"reflex={row['reflex_corners']} "
                 f"score={row['score']:.5g}",
@@ -369,6 +382,10 @@ def install_optcuts_test_boundary_reparameterization_patch(pipeline: Any) -> Non
                 selected_report["source_start_index"]),
             optcuts_area_grid_seam_selected_rotation_degrees=float(
                 selected_report["uv_rotation_degrees"]),
+            optcuts_area_grid_seam_selected_phase_u=float(
+                selected_report.get("grid_phase_u",0.)),
+            optcuts_area_grid_seam_selected_phase_v=float(
+                selected_report.get("grid_phase_v",0.)),
             optcuts_area_grid_seam_official_source_count=source_count,
             optcuts_area_grid_seam_selected_score=float(
                 selected_report["score"]),
