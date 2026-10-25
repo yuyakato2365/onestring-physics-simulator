@@ -28,13 +28,17 @@ namespace OptCuts {
                     const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;
                     if(EwDec > EwDec_max) {
                     return lambda_t * seDec - (1.0 - lambda_t) * SDInc;
+        EwDec_max = EwDecs[candI_max];
+        switch(operationType) {
 }
 """
     out = patch(source)
     assert out.count(MARKER) == 1
     assert out.count("onestringGridEdgeCost(") == 5  # definition + 4 edge-score uses
-    assert out.count("onestringGridWeight() * gridCost") == 2
-    assert "onestringGridWeight() * gridRemoved" in out
+    assert out.count("onestringGridProposalScore(") == 4  # def + 3 score calls
+    assert "origEwDec <= 1.e-12" not in out
+    assert "[GRID-CUT-NATIVE-NO-CANDIDATES]" in out
+    assert "legacy + delta : legacy - delta" in out
     assert "std::strtod" in out
     assert "std::isfinite" in out
     assert "std::cos" in out
@@ -69,6 +73,9 @@ def test_resolver_refuses_clean_official_binary_and_accepts_patched_one(monkeypa
     with pytest.raises(OptCutsUnavailableError,match="Grid-Seam C\\+\\+"):
         resolve_grid_seam_binary(project)
     source.write_text("// "+MARKER)
+    main_source=root/"src"/"main.cpp"
+    main_source.write_text("// "+MARKER)
+    os.utime(main_source, (10.,10.))
     os.utime(source, (10.,10.))
     os.utime(binary, (11.,11.))
     assert resolve_grid_seam_binary(project)==binary.resolve()
@@ -142,7 +149,7 @@ def test_grid_square_proxy_uses_3d_inverse_mapping_and_is_rotation_invariant():
     assert bad["square_grid_proxy_p95"]>0.4
 
 
-def test_native_cpp_grid_term_is_scaled_by_seam_lambda_and_monotone():
+def test_native_cpp_grid_term_is_scaled_and_does_not_change_candidate_sign():
     from runpy import run_path
     script=Path(__file__).resolve().parents[1]/"scripts"/"setup_optcuts_grid_seam.py"
     transform=run_path(str(script))["patch_trimesh_source"]
@@ -154,16 +161,19 @@ def test_native_cpp_grid_term_is_scaled_by_seam_lambda_and_monotone():
         "const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;",
         "                    if(EwDec > EwDec_max) {",
         "return lambda_t * seDec - (1.0 - lambda_t) * SDInc;",
+        "        EwDec_max = EwDecs[candI_max];",
+        "        switch(operationType) {",
         "}",
         ""))
     patched=transform(sample)
-    assert "origEwDec - lambda_t * onestringGridWeight() * gridCost" in patched
-    assert "origEwDec + lambda_t * onestringGridWeight() * gridRemoved" in patched
-    assert patched.count("origEwDec <= 1.e-12") == 3
-    assert patched.count("return -__DBL_MAX__;") >= 1
-    # beta=0 must leave original split/merge comparison unchanged:
-    # the zero-weight gate is explicitly conditional on beta>0.
-    assert patched.count("onestringGridWeight() > 0.0") == 3
+    assert "onestringGridProposalScore(" in patched
+    assert "legacy + delta : legacy - delta" in patched
+    assert "std::min(raw, 0.25 * legacy)" in patched
+    assert "origEwDec <= 1.e-12" not in patched
+    assert "GRID_CUT_NATIVE_NO_ADMISSIBLE_SPLIT_AT_FIXED_LAMBDA" in patched
+    # The original energy delta is still stored for the unchanged dual update.
+    assert "energyChanges_max.first = -SDDec;" in patched or (
+        "energyChanges_max" not in sample)
 
 
 def test_grid_penalty_no_longer_outweighs_native_seam_term_by_100x():
@@ -205,3 +215,54 @@ def test_native_subprocess_timeout_terminates_child(tmp_path, capsys):
             cwd=str(tmp_path), env=dict(os.environ),
             timeout=.07, heartbeat_seconds=.015)
     assert "timed_out" in capsys.readouterr().out
+
+
+def test_native_grid_rank_preserves_all_signs_and_zero_beta():
+    # This is the C++ helper's intentionally restricted score policy.
+    def score(legacy, lam, beta, cost, merge=False):
+        if legacy <= 0.0 or beta <= 0.0:
+            return legacy
+        delta = min(lam * beta * cost, 0.25 * legacy)
+        return legacy + delta if merge else legacy - delta
+    for orig in (-1.0e6, -0.02, 0.0, 0.02, 2.0):
+        assert score(orig,.001,0,4.0)==orig
+        assert score(orig,.001,0,4.0,merge=True)==orig
+        if orig<=0:
+            assert score(orig,.001,.1,4.0)==orig
+            assert score(orig,.001,.1,4.0,merge=True)==orig
+        else:
+            assert score(orig,.001,.1,4.0)>0
+            assert score(orig,.001,.1,4.0,merge=True)>0
+            assert score(orig,.001,.1,4.0)>=.75*orig
+            assert score(orig,.001,.1,4.0,merge=True)<=1.25*orig
+
+
+def test_patch_main_guards_bounded_lambda_search_in_all_four_paths():
+    from runpy import run_path
+    script=Path(__file__).resolve().parents[1]/"scripts"/"setup_optcuts_grid_seam.py"
+    patch=run_path(str(script))["patch_main_source"]
+    upstream="""#include <fstream>
+bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence = false)
+{
+                do {
+                    energyParams[0] = updateLambda(measure_bound);
+                } while((computeOptPicked(energyChanges_bSplit, energyChanges_merge, 1.0 - energyParams[0]) == 1));
+                while((eDec_b > 0.0) && (eDec_i > 0.0)) {
+                    energyParams[0] = updateLambda(measure_bound);
+                do {
+                    energyParams[0] = updateLambda(measure_bound);
+                } while(computeOptPicked(energyChanges_bSplit, energyChanges_merge, 1.0 - energyParams[0]) == 0);
+            while(eDec_m > 0.0) {
+                energyParams[0] = updateLambda(measure_bound);
+}
+"""
+    out=patch(upstream)
+    assert out.count("[GRID-CUT-NATIVE-LAMBDA-STALLED]") == 4
+    assert out.count("++gridLambdaAttempts > 256") == 4
+    assert out.count("std::abs(energyParams[0] - previousLambda)") == 4
+    assert out.count("int gridLambdaAttempts = 0;") == 4
+    assert "std::runtime_error" in out
+    with pytest.raises(ValueError,match="already patched"):
+        patch(out)
+    with pytest.raises(ValueError,match="upstream changed"):
+        patch(upstream.replace("while(eDec_m > 0.0)", "while(eDec_m > 1.0)"))
