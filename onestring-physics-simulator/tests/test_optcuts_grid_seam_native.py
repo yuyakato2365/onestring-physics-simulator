@@ -266,3 +266,54 @@ bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence 
         patch(out)
     with pytest.raises(ValueError,match="upstream changed"):
         patch(upstream.replace("while(eDec_m > 0.0)", "while(eDec_m > 1.0)"))
+
+
+def test_native_grid_cpp_scoring_helper_compiles_and_preserves_lambda_sign(tmp_path):
+    """Compile and execute the REAL injected C++ helper, not a Python paraphrase."""
+    from runpy import run_path
+    import shutil
+    cxx=shutil.which("c++")
+    if cxx is None:
+        pytest.skip("C++ compiler unavailable")
+    script=Path(__file__).resolve().parents[1]/"scripts"/"setup_optcuts_grid_seam.py"
+    helper=run_path(str(script))["HELPER"]
+    stub = """
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+namespace Eigen {
+struct RowVector2d {
+    double x, y;
+    double operator[](int i) const { return i ? y : x; }
+};
+}
+namespace OptCuts {
+""" + helper + """
+}
+int main() {
+    Eigen::RowVector2d a{0.0,0.0}, d{1.0,1.0}, h{1.0,0.0};
+    const double diagonal=OptCuts::onestringGridEdgeCost(a,d,1.0,1.0);
+    const double horizontal=OptCuts::onestringGridEdgeCost(a,h,1.0,1.0);
+    std::cout << std::setprecision(17)
+        << diagonal << " " << horizontal << " "
+        << OptCuts::onestringGridProposalScore(-.01,.001,diagonal,false) << " "
+        << OptCuts::onestringGridProposalScore(.001,.001,diagonal,false) << " "
+        << OptCuts::onestringGridProposalScore(.001,.001,diagonal,true) << "\\n";
+}
+"""
+    cpp=tmp_path/"score.cpp"
+    exe=tmp_path/"score"
+    cpp.write_text(stub)
+    subprocess.run([cxx,"-std=c++14","-O0",str(cpp),"-o",str(exe)],
+                   check=True,capture_output=True,text=True,timeout=30)
+    environment=dict(os.environ,ONESTRING_OPTCUTS_GRID_SEAM_WEIGHT="0.1")
+    output=subprocess.run([str(exe)],env=environment,check=True,
+                          capture_output=True,text=True,timeout=5)
+    diagonal,horizontal,negative,positive,merged=map(float,output.stdout.split())
+    assert diagonal==pytest.approx(1.0,abs=1e-12)
+    assert horizontal==pytest.approx(0.0,abs=1e-12)
+    assert negative==pytest.approx(-.01)
+    assert positive==pytest.approx(.0009)
+    assert merged==pytest.approx(.0011)
