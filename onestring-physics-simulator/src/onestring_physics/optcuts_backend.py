@@ -437,22 +437,17 @@ def _run_official_optcuts_once(
                 )
             else:
                 completed = subprocess.run(
-                command,
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                timeout=float(cfg.timeout_seconds),
-                check=False,
-                env=(dict(os.environ,
-                    ONESTRING_OPTCUTS_GRID_SEAM_WEIGHT=str(float(
-                        cfg.grid_seam_native_weight)),
-                    ONESTRING_OPTCUTS_GRID_SEAM_ANGLE_DEGREES=str(float(
-                        cfg.grid_seam_native_angle_degrees))
-                ) if cfg.grid_seam_native_enabled else None),
+                    command,
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=float(cfg.timeout_seconds),
+                    check=False,
                 )
         except subprocess.TimeoutExpired as exc:
             raise OptCutsError(
-                f"Official OptCuts timed out after {cfg.timeout_seconds:g} s"
+                f"{'Grid-Seam native' if cfg.grid_seam_native_enabled else 'Official'} "
+                f"OptCuts timed out after {cfg.timeout_seconds:g} s"
             ) from exc
         except OSError as exc:
             raise OptCutsUnavailableError(f"Failed to execute {executable}: {exc}") from exc
