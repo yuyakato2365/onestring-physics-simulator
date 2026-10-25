@@ -5,8 +5,14 @@ on:
     branches:
       - fix/optcuts-real-m2d-footprint-20261023
       - feature/optcuts-omega-phase-tail-remesh-20261025
+      - feature/optcuts-grid-seam-native-20261026
     paths:
       - "onestring-physics-simulator/src/onestring_physics/optcuts_official_binary_patch.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_backend.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_pipeline_patch.py"
+      - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_seam_native.py"
+      - "onestring-physics-simulator/scripts/setup_optcuts_grid_seam.py"
+      - "onestring-physics-simulator/tests/test_optcuts_grid_seam_native.py"
       - "onestring-physics-simulator/tests/test_optcuts_official_binary_separation.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_area_grid_boundary.py"
       - "onestring-physics-simulator/src/onestring_physics/optcuts_grid_corner_remesh.py"
@@ -66,9 +72,10 @@ jobs:
           python -m pip install "matplotlib>=3.8" "imageio-ffmpeg>=0.5"
       - name: Check syntax
         run: |
+          python -m py_compile src/onestring_physics/optcuts_backend.py src/onestring_physics/optcuts_pipeline_patch.py src/onestring_physics/optcuts_grid_seam_native.py scripts/setup_optcuts_grid_seam.py tests/test_optcuts_grid_seam_native.py
           python -m py_compile src/onestring_physics/optcuts_grid_corner_remesh.py src/onestring_physics/optcuts_grid_aware_seam_selection.py src/onestring_physics/optcuts_grid_sd_refinement.py src/onestring_physics/optcuts_area_grid_boundary.py src/onestring_physics/optcuts_test_boundary_reparameterization_patch.py app_optcuts_core_20260916.py app_runtime_base.py src/onestring_physics/onestring_pipeline.py tests/test_optcuts_omega_phase_tail_remesh.py
           python -m py_compile src/onestring_physics/optcuts_official_binary_patch.py tests/test_optcuts_official_binary_separation.py
           python -m py_compile src/onestring_physics/stage_audit_bundle.py src/onestring_physics/legacy_pipeline_base.py scripts/render_stage_audit.py tests/test_stage_audit_phase0.py
           python -m py_compile src/onestring_physics/optcuts_area_grid_boundary.py src/onestring_physics/optcuts_grid_boundary_untangle.py src/onestring_physics/optcuts_grid_failure_diagnostics.py src/onestring_physics/optcuts_grid_ear_correspondence.py src/onestring_physics/optcuts_grid_sd_refinement.py src/onestring_physics/optcuts_seam_exact_closure.py src/onestring_physics/optcuts_seam_affine_constraints.py src/onestring_physics/optcuts_seam_soft_constraints.py src/onestring_physics/extrusion_aware.py src/onestring_physics/split_geometry_constraints.py src/onestring_physics/optcuts_test_k3d_augmented_lagrangian_patch.py src/onestring_physics/paper_extrusion.py src/onestring_physics/optcuts_grid_aware_seam_selection.py src/onestring_physics/optcuts_test_boundary_reparameterization_patch.py src/onestring_physics/optcuts_test_boundary_clip_m2d_patch.py tests/test_optcuts_area_grid_boundary.py tests/test_optcuts_area_grid_m2d_authoritative_mask.py tests/test_optcuts_grid_failure_diagnostics.py tests/test_optcuts_grid_sd_refinement.py tests/test_optcuts_seam_exact_closure.py tests/test_optcuts_seam_mixed_boundary_affine.py tests/test_optcuts_seam_nonaffine_rank_soft.py tests/test_optcuts_smoothmax_default_active.py scripts/summarize_grid_boundary_failures.py scripts/replay_grid_ear_correspondence.py
       - name: Test area-grid boundary and fixed-M2D invariants
-        run: python -m pytest -q tests/test_optcuts_omega_phase_tail_remesh.py tests/test_optcuts_official_binary_separation.py tests/test_optcuts_area_grid_boundary.py tests/test_optcuts_area_grid_m2d_authoritative_mask.py tests/test_optcuts_grid_failure_diagnostics.py tests/test_optcuts_grid_sd_refinement.py tests/test_optcuts_seam_exact_closure.py tests/test_optcuts_seam_mixed_boundary_affine.py tests/test_optcuts_seam_nonaffine_rank_soft.py tests/test_optcuts_smoothmax_default_active.py tests/test_stage_audit_phase0.py tests/test_square_beta_zero.py tests/test_k3d_al_launcher_wiring.py tests/test_paper_t3d_20260920.py
+        run: python -m pytest -q tests/test_optcuts_grid_seam_native.py tests/test_optcuts_omega_phase_tail_remesh.py tests/test_optcuts_official_binary_separation.py tests/test_optcuts_area_grid_boundary.py tests/test_optcuts_area_grid_m2d_authoritative_mask.py tests/test_optcuts_grid_failure_diagnostics.py tests/test_optcuts_grid_sd_refinement.py tests/test_optcuts_seam_exact_closure.py tests/test_optcuts_seam_mixed_boundary_affine.py tests/test_optcuts_seam_nonaffine_rank_soft.py tests/test_optcuts_smoothmax_default_active.py tests/test_stage_audit_phase0.py tests/test_square_beta_zero.py tests/test_k3d_al_launcher_wiring.py tests/test_paper_t3d_20260920.py
