@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import time
 
 from .optcuts_backend import OptCutsUnavailableError
 
@@ -70,3 +71,48 @@ def resolve_grid_seam_binary(project: Path) -> Path:
         "experimental version using python3 scripts/setup_optcuts_grid_seam.py. "
         "The ordinary official binary is deliberately not a fallback.\n"
         + "\n".join(errors[:12]))
+
+
+def run_native_with_heartbeat(
+    command, *, cwd: str, env: dict[str, str], timeout: float,
+    heartbeat_seconds: float = 20.0,
+) -> subprocess.CompletedProcess:
+    """Run the independent native grid OptCuts fork with periodic progress.
+
+    Maintain the previous run() contract (captured stdout/stderr and
+    CompletedProcess). communicate() can safely be retried after a timeout;
+    its internal buffers preserve all output. This avoids silent ten-minute
+    waits without changing any numerical algorithm or killing valid work.
+    """
+    if not (timeout > 0.0 and heartbeat_seconds > 0.0):
+        raise ValueError("GRID_SEAM_INVALID_TIMEOUT_OR_HEARTBEAT")
+    start = time.monotonic()
+    proc = subprocess.Popen(command, cwd=cwd, env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+    print("[GRID-CUT-NATIVE-RUN] started "
+          f"pid={proc.pid} timeout={timeout:g}s executable={command[0]}",
+          flush=True)
+    while True:
+        elapsed = time.monotonic() - start
+        remaining = timeout - elapsed
+        if remaining <= 0.0:
+            proc.kill()
+            proc.communicate()
+            print("[GRID-CUT-NATIVE-RUN] timed_out "
+                  f"pid={proc.pid} elapsed={elapsed:.1f}s", flush=True)
+            raise subprocess.TimeoutExpired(command, timeout)
+        try:
+            stdout, stderr = proc.communicate(
+                timeout=min(heartbeat_seconds, remaining))
+        except subprocess.TimeoutExpired:
+            print("[GRID-CUT-NATIVE-RUN] still_running "
+                  f"pid={proc.pid} elapsed={time.monotonic()-start:.1f}s "
+                  "stage=external_C++_OptCuts", flush=True)
+            continue
+        duration = time.monotonic() - start
+        print("[GRID-CUT-NATIVE-RUN] finished "
+              f"pid={proc.pid} elapsed={duration:.1f}s "
+              f"exit_code={proc.returncode}", flush=True)
+        return subprocess.CompletedProcess(
+            command, proc.returncode, stdout, stderr)
