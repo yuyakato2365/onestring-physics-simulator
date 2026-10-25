@@ -719,6 +719,11 @@ with st.sidebar:
     # parameterization mode. The dated UI choice is internally routed through
     # the proven optcuts_test2 carrier, while this per-session flag selects
     # only the additional UV-stage refinement. No second ON/OFF checkbox.
+    optcuts_seamless_lattice_enabled = bool(
+        not paper_fidelity_enabled
+        and omega_parameterization_mode == "optcuts_test"
+        and st.session_state.get("_onestring_seamless_lattice_omega_selected",False)
+    )
     optcuts_grid_aware_enabled = bool(
         not paper_fidelity_enabled
         and omega_parameterization_mode == "optcuts_test"
@@ -2186,6 +2191,7 @@ pipeline_params = PipelineParameters(
     omega_boundary_mode=omega_boundary_mode,
     omega_parameterization_mode=omega_parameterization_mode,
     optcuts_grid_aware_enabled=optcuts_grid_aware_enabled,
+    optcuts_seamless_lattice_enabled=optcuts_seamless_lattice_enabled,
     optcuts_grid_aware_strength=optcuts_grid_aware_strength,
     optcuts_area_grid_boundary_enabled=optcuts_area_grid_boundary_enabled,
     optcuts_area_grid_coverage_threshold=optcuts_area_grid_coverage_threshold,
