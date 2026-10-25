@@ -42,16 +42,63 @@ Compare original 10/23, the four prior ①/③/⑤ ablations, and beta=0/0.05/0.
 
 Validation status: Python regressions verify source patch transformation, binary resolution, parameter routing, and synthetic grid-square proxy. A full compiled native C++ run and real Bunny improvement remain UNVERIFIED and must not be claimed from those tests.
 
-## Timeout diagnosis and V2 upgrade
+## V3 repair (2026-10-26): repeated -DBL_MAX and 600s timeout
 
-After an actual 600-second native OptCuts timeout on Bunny, the initial V1 objective was found to overscale the grid penalty and potentially accept topological operations that did not improve OptCuts' original energy. **V1 builds are now rejected**: the resolver requires `ONESTRING_NATIVE_GRID_SEAM_V2_MONOTONE` in the patched C++ source with a fresh executable. The isolated builder resets the *experimental* C++ source to the upstream commit before applying the patch, so the following commands are sufficient; no destructive reclone is necessary:
+Mac Bunny failure: the V2 native binary repeatedly printed
 
-```bash
-git fetch origin
-git pull --ff-only
-python3 scripts/setup_optcuts_grid_seam.py --jobs 4
-python3 -m pytest -q tests/test_optcuts_grid_seam_native.py
-python3 -m streamlit run app_optcuts_20260923_extrusion_aware.py
-```
+    evaluate vertex splits, 7792 candidate verts
+    max E_dec = -1.79769e+308 < thres 0
 
-The dedicated native runner now emits a PID and a periodic 20-second heartbeat, preserving the partial C++ stdout/stderr for timeout reports. An unchanged 10/23 mode still uses the original Official OptCuts subprocess. In a rigorous experiment, run beta=0 first (same input/settings) to measure the original C++ runtime before beta=0.10. The 600s limit is NOT increased or suppressed. If beta=0 also exceeds 600s, the modified grid score is not sufficient to explain the entire slowdown: capture C++ tail logs and reassess original OptCuts cost and solver convergence.
+The V2 hard gate on origEwDec <= 1e-12 incorrectly replaced legitimate
+negative/zero original OptCuts split/merge candidate scores with -DBL_MAX.
+The authors' dual lambda controller uses those signed energyChanges values.
+Erasing candidates can prevent its switching logic from making progress.
+
+V3 uses grid orientation ONLY to rerank already-positive original moves.
+Let S be the original weighted OptCuts local energy decrease, G>=0 be
+the grid alignment edge cost, lambda_t=1-lambda_init the old seam weight,
+and beta the new relative grid strength:
+
+    if S <= 0: new_score = S
+    if S > 0: delta = min(lambda_t*beta*G, 0.25*S)
+    if S > 0 and split: new_score = S-delta
+    if S > 0 and merge: new_score = S+delta
+
+Thus every nonpositive original score and every sentinel passes through
+unchanged, positive scores remain positive, and beta=0 is identical to
+the original local selection score. Original energyChanges used by the
+lambda controller are kept unchanged. This is a conservative proposal
+ranking heuristic, NOT a unified global Grid+UV objective.
+
+V3 also adds explicit diagnostic failure instead of unlimited loops:
+- Experimental TriMesh.cpp: three consecutive all-invalid candidate slates
+  at identical lambda and source vertex count => clear error.
+- Experimental main.cpp: four lambda searching loops are bounded and detect
+  unchanged lambda; they report GRID-CUT-NATIVE-LAMBDA-STALLED.
+
+This never fabricates a valid Cut/UV result or relaxes the distortion,
+bijectivity, or collision constraints. The clean Official OptCuts remains
+unchanged. The dedicated V3 resolver requires marker
+ONESTRING_NATIVE_GRID_SEAM_V3_SAFE_RANK in BOTH C++ source files and
+an executable newer than both.
+
+### Update and rebuild on Mac
+
+    cd /Users/yuyakato/Documents/onestring-postcut-rebff/onestring-native-grid-seam/onestring-physics-simulator
+    git status
+    git fetch origin
+    git merge --ff-only origin/feature/optcuts-grid-seam-native-20261026
+    python3 scripts/setup_optcuts_grid_seam.py --jobs 4
+    python3 -m pytest -q tests/test_optcuts_grid_seam_native.py
+    python3 -m streamlit run app_optcuts_20260923_extrusion_aware.py
+
+Stop Streamlit before rebuilding. The build setup resets/repatches only
+its own isolated C++ clone under third_party/OptCuts_grid_seam_onestring.
+
+### Verification status
+
+GitHub Actions currently passes synthetic and compiled-C++ helper tests,
+plus prior geometry tests. The entire patched external OptCuts C++ build,
+and Bunny runtime/quality, are NOT yet validated on the user's Mac.
+Compare beta=0 against beta=0.1 with identical Bunny and Grid settings.
+Do not increase the timeout or hide geometry invalidity to mask failures.
