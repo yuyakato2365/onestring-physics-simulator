@@ -13,7 +13,7 @@ import time
 
 from .optcuts_backend import OptCutsUnavailableError
 
-MARKER = "ONESTRING_NATIVE_GRID_SEAM_V1"
+MARKER = "ONESTRING_NATIVE_GRID_SEAM_V2_MONOTONE"
 
 
 def candidate_roots(project: Path) -> list[Path]:
@@ -98,10 +98,12 @@ def run_native_with_heartbeat(
         remaining = timeout - elapsed
         if remaining <= 0.0:
             proc.kill()
-            proc.communicate()
+            stdout, stderr = proc.communicate()
             print("[GRID-CUT-NATIVE-RUN] timed_out "
-                  f"pid={proc.pid} elapsed={elapsed:.1f}s", flush=True)
-            raise subprocess.TimeoutExpired(command, timeout)
+                  f"pid={proc.pid} elapsed={elapsed:.1f}s "
+                  "reason=C++_did_not_complete", flush=True)
+            raise subprocess.TimeoutExpired(
+                command, timeout, output=stdout, stderr=stderr)
         try:
             stdout, stderr = proc.communicate(
                 timeout=min(heartbeat_seconds, remaining))
