@@ -24,10 +24,10 @@ The frontend chooses the proven `optcuts_test` carrier and sets `PipelineParamet
 
 1. Run original OptCuts with its original physical seam/cut topology. Bypass the legacy optcuts_test Taubin boundary smoothing in this mode only.
 2. Pair both UV copies **by original surface edge and physical vertex IDs**, using `_surface_seam_records`, `_physical_chains`, `_uv_copy_chains_for_physical_chain`. Do NOT use UV nearest-neighbor matching.
-3. Search per chain over four grid automorphisms:
+3. Search over four grid automorphisms:
    `u_B = R^k u_A + h*n`, `k in {0,1,2,3}`, `n in Z²`, `h=tile_size`.
-   Each chain gets one fixed rotation and integer translation. It is NEVER straightened into an artificial parallel horizontal/vertical line.
-4. Build a global graph of transform equations. Propagate root-to-vertex affine maps. Reject inconsistent translational holonomy at source junctions. A cone with compatible lattice-grid fixed point is permitted; partial/incompatible/off-grid cones are reported explicitly and rejected. **General cone placement (MIQ/QuadCover) is not implemented**.
+   **2026-10-25 bug fix:** independently rounding the nearest `(k,n)` for every cut chain can introduce an impossible nonzero translation around a source seam junction (`SEAMLESS_INCONSISTENT_TRANSLATIONAL_HOLONOMY`). Now `optcuts_seamless_joint_transitions.py` enumerates alternatives per physical chain and uses a bounded joint beam search with a C4/integer-offset union-find. Every partial candidate passes an EXACT global cycle/translated cone check before any UV optimization; original source UV correspondence is validated edge by edge. No seam equation is silently dropped. Each chain gets one rotation/translation. It is NEVER straightened into an artificial parallel horizontal/vertical line.
+4. Build a global graph of transform equations. Propagate root-to-vertex affine maps. Reject inconsistent translational holonomy at source junctions. The discrete search **tries coordinated changes to chain transforms first** instead of aborting upon an independently chosen inconsistent round-off. A cone with compatible lattice-grid fixed point is permitted; partial/incompatible/off-grid cones are reported explicitly and rejected. **General cone placement (MIQ/QuadCover), arbitrary change in official cut topology and exhaustive global search are not implemented**. Default beam width 24 and 24 local candidates per source chain are research-budget limits, not proof of infeasibility. When no compatible assignment is found, the exception `SEAMLESS_JOINT_TRANSITION_INFEASIBLE` includes source chain, frontier, rejection counts and example conflicting integer steps.
 5. Minimize a sparse quadratic combining source OptCuts UV anchors and original triangle-edge vectors over independent root UV positions. Seam transition equations are **exact by variable elimination**, not strong soft penalty. All original OptCuts surface triangles and the original Grid spacing remain unchanged.
 6. Validate the original surface/UV face orientation and source-relative signed triangle areas. A flip/collapse raises `SEAMLESS_UV_FLIP_OR_COLLAPSE`. UV folded candidates NEVER fall back to the current area-grid staircase.
 7. Update `SurfaceParameterization.uv_vertices_2d` and `omega_boundary` in the real production builder. Record rotation, integer shift, source-chain IDs, UV residual, cone count, worst signed area and RMS UV motion as metrics.
@@ -84,3 +84,15 @@ If a cut-tip cone violates the lattice constraints or the constrained UV chart f
 Only gate 1 and triangle signed-area of gate 2 are currently enforced. Self-overlap, strict 3D coverage and hard closure remain **unverified**.
 
 The October 25 tube script `omega/exp3_seam_vs_seamless.py` is a special known periodic arrangement; it is not evidence that arbitrary OptCuts charts or Bunny automatically admit a compatible lattice-atlas mapping.
+
+## 2026-10-25 Bunny failure and follow-up
+
+Reported failure before this fix:
+```
+SEAMLESS_INCONSISTENT_TRANSLATIONAL_HOLONOMY: vertex=8129 mismatch=0.6324555
+```
+This means that the independently picked source-seam lattice transforms did not compose to the identity around one UV graph cycle. It **does not by itself prove** the Bunny cut topology mathematically impossible: a different integer translation / 90-degree rotation assignment may satisfy the graph.
+
+The new jointly constrained discrete search and explicit UV edge-copy validation are implemented in the **separate experimental mode only**. Synthetic tests include a graph in which both locally best independent transforms conflict but the global solver chooses a second-best transform and closes the graph exactly. The existing area-grid, BFF, OptCuts, SmoothMax and T2D modes are unchanged.
+
+**Not yet verified:** the user's same Bunny mesh and original full Streamlit parameter set; 3D seam closure, K3D degenerate panel counts and collision behavior. If the next run raises `SEAMLESS_JOINT_TRANSITION_INFEASIBLE`, share its `frontier`, `first_conflicts` and `rejected` diagnostics. This may indicate a real cone-placement/cut-topology obstruction **or** the bounded search missing valid alternatives. Do not force this by weakening the exactness threshold or erasing Seam equations.
