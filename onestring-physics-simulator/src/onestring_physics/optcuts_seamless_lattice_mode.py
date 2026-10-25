@@ -181,25 +181,13 @@ def _global_lattice_constraints(count,transitions,h):
     return component,matrices,offsets,fixed
 
 
-def solve_seamless_lattice_uv(chart,h,*,edge_weight=.3):
-    """Solve chart UVs with EXACT paired-grid transition identities.
-
-    Optimizes original UV vertex positions and edge vectors over the
-    independent 2D root positions by sparse least-squares. Guards signed
-    area; no accepted foldovers or arbitrary seam straightening.
-    """
+def _solve_lattice_candidate(chart,h,transitions,joint_report,*,
+                             edge_weight=.3,repair_flips=False):
+    """Solve one holonomy-compatible choice; never relax seam identities."""
     old=np.asarray(chart.uv_vertices_2d,float)
     faces=np.asarray(chart.uv_faces,int)
     if old.ndim!=2 or old.shape[1]!=2 or len(old)==0:
         raise SeamlessLatticeError("SEAMLESS_INVALID_UV_CHART")
-    chains=source_chains(chart)
-    if not chains:
-        raise SeamlessLatticeError("SEAMLESS_NO_PHYSICAL_OPT CUT_CHAIN".replace(" ","_"))
-    # Source-chain transforms must be selected jointly. The former
-    # independent rounding of every chain had no holonomy preflight:
-    # two individually good integer shifts can sum to a NONZERO loop.
-    from .optcuts_seamless_joint_transitions import select_joint_transitions
-    transitions,joint_report=select_joint_transitions(old,chains,h)
     # Re-check the complete (uncompressed) source UV graph before solving.
     # This independent audit also catches accidental solver regressions.
     comp,mat,offset,fixed=_global_lattice_constraints(
@@ -239,21 +227,18 @@ def solve_seamless_lattice_uv(chart,h,*,edge_weight=.3):
             insert(coeff,(old[i,d]-old[j,d])-(oa-ob),float(edge_weight)**.5)
     A=sparse.coo_matrix((values,(rows,cols)),
          shape=(len(rhs),2*len(free))).tocsr()
-    roots=lsmr(A,np.asarray(rhs),atol=1e-10,btol=1e-10,
-               maxiter=max(200,4*len(free)))[0]
-    new=np.zeros_like(old)
-    for i in range(len(old)):
-        g=int(comp[i])
-        base=fixed[g] if g in fixed else roots[
-            columns[g]:columns[g]+2]
-        new[i]=mat[i]@base+offset[i]
-    residual=max(float(np.linalg.norm(
-        new[b]-(new[a]@ROT[t["k"]].T+h*np.asarray(t["steps"]))
-    )) for t in transitions for a,b in zip(t["a"],t["b"]))
-    if residual>max(1e-8,h*1e-7):
-        raise SeamlessLatticeError(
-            f"SEAMLESS_NONZERO_TRANSITION_RESIDUAL: {residual:.9g}"
-        )
+    linear_result=lsmr(A,np.asarray(rhs),atol=1e-10,btol=1e-10,
+                       maxiter=max(200,4*len(free)))
+    roots=linear_result[0]
+    def reconstruct(root_values):
+        points=np.zeros_like(old)
+        for i in range(len(old)):
+            g=int(comp[i])
+            base=(fixed[g] if g in fixed else
+                  root_values[columns[g]:columns[g]+2])
+            points[i]=mat[i]@base+offset[i]
+        return points
+    new=reconstruct(roots)
     def signed_areas(points):
         tri=points[faces]
         u=tri[:,1]-tri[:,0];v=tri[:,2]-tri[:,0]
@@ -262,12 +247,40 @@ def solve_seamless_lattice_uv(chart,h,*,edge_weight=.3):
     if np.any(abs(before)<1e-14):
         raise SeamlessLatticeError("SEAMLESS_DEGENERATE_INPUT_UV")
     ratios=after/before
+    refinement={"refinement_attempted":False}
+    initial_bad=int(np.count_nonzero(ratios<=1e-3))
+    initial_min=float(ratios.min())
+    if initial_bad and repair_flips:
+        from .optcuts_seamless_uv_untangle import refine_positive_uv
+        roots,refinement=refine_positive_uv(
+            A,np.asarray(rhs,float),roots,
+            component=comp,matrices=mat,offsets=offset,
+            fixed=fixed,columns=columns,faces=faces,
+            reference_uv=old,h=h)
+        new=reconstruct(roots)
+        after=signed_areas(new)
+        ratios=after/before
+    # This remains an EXACT lattice solve after refinement because all
+    # optimization variables are reduced root coordinates.
+    residual=max(float(np.linalg.norm(
+        new[b]-(new[a]@ROT[t["k"]].T+h*np.asarray(t["steps"]))
+    )) for t in transitions for a,b in zip(t["a"],t["b"]))
+    if residual>max(1e-8,h*1e-7):
+        raise SeamlessLatticeError(
+            f"SEAMLESS_NONZERO_TRANSITION_RESIDUAL: {residual:.9g}"
+        )
+    if not np.all(np.isfinite(new)) or not np.all(np.isfinite(ratios)):
+        raise SeamlessLatticeError("SEAMLESS_NONFINITE_SOLVED_UV")
     if np.min(ratios)<=1e-3:
         bad=np.flatnonzero(ratios<=1e-3)
         raise SeamlessLatticeError(
             "SEAMLESS_UV_FLIP_OR_COLLAPSE: "
             f"count={len(bad)} sample={bad[:12].tolist()} "
-            f"min_signed_ratio={ratios.min():.7g}; no fallback"
+            f"min_signed_ratio={ratios.min():.7g} "
+            f"initial_count={initial_bad} initial_min={initial_min:.7g} "
+            f"repair_attempted={repair_flips} "
+            f"repair_iterations={refinement.get('refinement_iterations',0)}; "
+            "no fallback"
         )
     return new,{
         "seamless_lattice_mode_enabled":True,
@@ -281,12 +294,63 @@ def solve_seamless_lattice_uv(chart,h,*,edge_weight=.3):
         } for t in transitions],
         "seamless_lattice_cone_count":len(fixed),
         "seamless_lattice_source_relative_area_min":float(ratios.min()),
+        "seamless_lattice_source_relative_area_max":float(ratios.max()),
+        "seamless_lattice_initial_folded_triangle_count":initial_bad,
+        "seamless_lattice_initial_min_signed_ratio":initial_min,
+        "seamless_lattice_refinement":refinement,
+        "seamless_lattice_linear_solver_istop":int(linear_result[1]),
+        "seamless_lattice_linear_solver_iterations":int(linear_result[2]),
         "seamless_lattice_uv_movement_rms":float(np.sqrt(
             np.mean(np.sum((new-old)**2,axis=1)))),
         "seamless_lattice_staircase_snap_applied":False,
         "seamless_lattice_m2d_coverage_proven":False,
         "seamless_lattice_final_seam_gap_proven":False,
     }
+
+
+def solve_seamless_lattice_uv(chart,h,*,edge_weight=.3):
+    """Jointly screen discrete transitions and find non-folded exact UVs.
+
+    First screen several holonomy-compatible candidates using the original
+    linear solver. Only if *all* are folded do we try orientation-preserving
+    nonlinear refinement in the exact constraint nullspace. A failed repair
+    always raises; it never returns a folded UV or invokes another mode.
+    """
+    old=np.asarray(chart.uv_vertices_2d,float)
+    if old.ndim!=2 or old.shape[1]!=2 or len(old)==0:
+        raise SeamlessLatticeError("SEAMLESS_INVALID_UV_CHART")
+    chains=source_chains(chart)
+    if not chains:
+        raise SeamlessLatticeError("SEAMLESS_NO_PHYSICAL_OPT_CUT_CHAIN")
+    from .optcuts_seamless_joint_transitions import select_joint_transitions
+    alternatives,joint_report=select_joint_transitions(
+        old,chains,h,return_alternatives=True,max_alternatives=6)
+    folded=[]
+    for repair in (False,True):
+        for index,(transitions,cost) in enumerate(alternatives):
+            try:
+                uv,report=_solve_lattice_candidate(
+                    chart,h,transitions,joint_report,
+                    edge_weight=edge_weight,repair_flips=repair)
+                report["seamless_lattice_selected_alternative"]=index
+                report["seamless_lattice_selected_discrete_cost"]=float(cost)
+                report["seamless_lattice_alternatives_screened"]=len(alternatives)
+                report["seamless_lattice_geometry_attempts_before_success"]=len(folded)
+                return uv,report
+            except SeamlessLatticeError as error:
+                message=str(error)
+                if not message.startswith("SEAMLESS_UV_FLIP_OR_COLLAPSE:"):
+                    raise
+                folded.append({
+                    "index":index,"discrete_cost":round(float(cost),6),
+                    "refined":repair,"reason":message[:320]})
+        # The next phase uses nonlinear refinement only if every
+        # unrefined alternative failed its area-orientation check.
+    raise SeamlessLatticeError(
+        "SEAMLESS_UV_FLIP_OR_COLLAPSE: "
+        f"tested={len(folded)} candidates={len(alternatives)} "
+        f"details={folded[:12]}; exact seams retained, no fallback"
+    )
 
 
 def _audit_actual_seamless_m2d(mesh,domain,params):
