@@ -1031,6 +1031,9 @@ class PipelineParameters(_original.PipelineParameters):
     # Experimental, opt-in, Paper-OFF and official OptCuts ONLY.
     # UV is refined with fixed OptCuts seam topology, not C++ joint cuts.
     optcuts_grid_aware_enabled: bool = False
+    # Isolated 2026-10-25 research mode: 90-degree lattice
+    # transitions between original source-cut UV copies.
+    optcuts_seamless_lattice_enabled: bool = False
     optcuts_grid_aware_strength: float = 3.0
     # Distinct Omega mode: original OptCuts -> area-selected grid footprint
     # -> rectilinear boundary + interior harmonic reparameterization.
