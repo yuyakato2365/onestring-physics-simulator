@@ -1040,6 +1040,10 @@ class PipelineParameters(_original.PipelineParameters):
     # Try rigid orientations BEFORE each official chart's production M2D grid
     # is first constructed. Does not edit seam topology or rephase a fixed grid.
     optcuts_area_grid_orientation_search_enabled: bool = True
+    # Four isolated October 23 area-grid UV ablation modes.
+    optcuts_area_grid_phase_search_enabled: bool = False
+    optcuts_area_grid_tail_sd_enabled: bool = False
+    optcuts_area_grid_adaptive_remesh_enabled: bool = False
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
