@@ -743,6 +743,13 @@ with st.sidebar:
         and omega_parameterization_mode == "optcuts_test"
         and st.session_state.get("_onestring_area_grid_boundary_omega_selected",False)
     )
+    _grid_experiment = st.session_state.get("_onestring_area_grid_optimizations", {})
+    optcuts_area_grid_phase_search_enabled = bool(
+        optcuts_area_grid_boundary_enabled and _grid_experiment.get("phase_search", False))
+    optcuts_area_grid_tail_sd_enabled = bool(
+        optcuts_area_grid_boundary_enabled and _grid_experiment.get("tail_sd", False))
+    optcuts_area_grid_adaptive_remesh_enabled = bool(
+        optcuts_area_grid_boundary_enabled and _grid_experiment.get("adaptive_remesh", False))
     optcuts_area_grid_coverage_threshold = 0.50
     optcuts_area_grid_orientation_search_enabled = True
     if optcuts_area_grid_boundary_enabled:
@@ -2027,6 +2034,9 @@ def current_pipeline_key() -> tuple:
         optcuts_area_grid_boundary_enabled,
         optcuts_area_grid_coverage_threshold,
         optcuts_area_grid_orientation_search_enabled,
+        optcuts_area_grid_phase_search_enabled,
+        optcuts_area_grid_tail_sd_enabled,
+        optcuts_area_grid_adaptive_remesh_enabled,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
@@ -2190,6 +2200,9 @@ pipeline_params = PipelineParameters(
     optcuts_area_grid_boundary_enabled=optcuts_area_grid_boundary_enabled,
     optcuts_area_grid_coverage_threshold=optcuts_area_grid_coverage_threshold,
     optcuts_area_grid_orientation_search_enabled=optcuts_area_grid_orientation_search_enabled,
+    optcuts_area_grid_phase_search_enabled=optcuts_area_grid_phase_search_enabled,
+    optcuts_area_grid_tail_sd_enabled=optcuts_area_grid_tail_sd_enabled,
+    optcuts_area_grid_adaptive_remesh_enabled=optcuts_area_grid_adaptive_remesh_enabled,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
