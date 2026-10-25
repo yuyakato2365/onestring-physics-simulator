@@ -421,7 +421,22 @@ def _run_official_optcuts_once(
             tag,
         ]
         try:
-            completed = subprocess.run(
+            if cfg.grid_seam_native_enabled:
+                from .optcuts_grid_seam_native import run_native_with_heartbeat
+                completed = run_native_with_heartbeat(
+                    command,
+                    cwd=str(root),
+                    env=dict(
+                        os.environ,
+                        ONESTRING_OPTCUTS_GRID_SEAM_WEIGHT=str(float(
+                            cfg.grid_seam_native_weight)),
+                        ONESTRING_OPTCUTS_GRID_SEAM_ANGLE_DEGREES=str(float(
+                            cfg.grid_seam_native_angle_degrees)),
+                    ),
+                    timeout=float(cfg.timeout_seconds),
+                )
+            else:
+                completed = subprocess.run(
                 command,
                 cwd=str(root),
                 capture_output=True,
@@ -434,7 +449,7 @@ def _run_official_optcuts_once(
                     ONESTRING_OPTCUTS_GRID_SEAM_ANGLE_DEGREES=str(float(
                         cfg.grid_seam_native_angle_degrees))
                 ) if cfg.grid_seam_native_enabled else None),
-            )
+                )
         except subprocess.TimeoutExpired as exc:
             raise OptCutsError(
                 f"Official OptCuts timed out after {cfg.timeout_seconds:g} s"
