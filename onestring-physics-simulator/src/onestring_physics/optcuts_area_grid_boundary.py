@@ -677,7 +677,12 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
                 )
                 refined_quality=assess(refined_uv)
                 refined_sd=float(refined_quality["distortion_area_mean"])
-                if refined_sd<trial_sd-1e-7:
+                tail_improved = bool(tail_mode and refinement is not None
+                    and float(refinement.get("tail_score_after",float("inf")))
+                        < float(refinement.get("tail_score_before",0.))-1e-7
+                    and refined_sd<=max_mean_sd
+                    and refined_sd<=trial_sd*1.02)
+                if refined_sd<trial_sd-1e-7 or tail_improved:
                     trial_uv=refined_uv
                     trial_quality=refined_quality
                     trial_sd=refined_sd
