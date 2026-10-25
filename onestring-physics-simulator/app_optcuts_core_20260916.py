@@ -319,6 +319,12 @@ def _install_optcuts_selector() -> None:
             # Grid awareness is a separate Omega-only parameter.
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "2"
             return "optcuts_test"
+        if value == "optcuts_seamless_lattice":
+            # Run on optcuts_test carrier, with a separate per-session
+            # numerical flag. NEVER send the display-only mode name to
+            # the legacy original build, which would reject it.
+            os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "1"
+            return "optcuts_test"
         if value == "optcuts_test":
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "1"
         else:
