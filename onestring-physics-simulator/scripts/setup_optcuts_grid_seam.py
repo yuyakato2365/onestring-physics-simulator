@@ -180,6 +180,88 @@ def patch_trimesh_source(source: str) -> str:
     return source
 
 
+def patch_main_source(source: str) -> str:
+    """Guard upstream OptCuts' dual-lambda search against stationary loops.
+
+    These are explicitly diagnostic stop conditions, NOT an alternative seam,
+    UV fallback, or fabricated feasible output. Applied only to the native
+    experimental C++ build.
+    """
+    if MARKER in source:
+        raise ValueError("grid-aware C++ main already patched")
+    source = replace_once(
+        source, '#include <fstream>\n',
+        '#include <fstream>\n#include <cmath>\n#include <stdexcept>\n',
+        "main C++ diagnostics includes")
+    source = replace_once(
+        source, 'bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence = false)\n{',
+        'bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence = false)\n'
+        '{\n    // ONESTRING_NATIVE_GRID_SEAM_V3_SAFE_RANK lambda bounded-search checks',
+        "main lambda dual-update location")
+    # The legacy dual updater can repeatedly call updateLambda with a
+    # saturated result and an unchanged candidate slate. Enforce a finite
+    # search that diagnoses this explicitly rather than running forever.
+    def guard(label: str, indent: str) -> str:
+        return (
+            f'{indent}const double previousLambda = energyParams[0];\n'
+            f'{indent}energyParams[0] = updateLambda(measure_bound);\n'
+            f'{indent}if(!std::isfinite(energyParams[0]) ||\n'
+            f'{indent}   std::abs(energyParams[0] - previousLambda) <= 1.e-14 ||\n'
+            f'{indent}   ++gridLambdaAttempts > 256) {{\n'
+            f'{indent}    std::cerr << "[GRID-CUT-NATIVE-LAMBDA-STALLED] {label} "\n'
+            f'{indent}        << "lambda=" << energyParams[0]\n'
+            f'{indent}        << " measure=" << measure_bound\n'
+            f'{indent}        << " target=" << upperBound << std::endl;\n'
+            f'{indent}    throw std::runtime_error("GRID_CUT_NATIVE_LAMBDA_SEARCH_STALLED_{label}");\n'
+            f'{indent}}}\n'
+        )
+    old = (
+        '                do {\n'
+        '                    energyParams[0] = updateLambda(measure_bound);\n'
+        '                } while((computeOptPicked(energyChanges_bSplit, energyChanges_merge, 1.0 - energyParams[0]) == 1));'
+    )
+    new = (
+        '                int gridLambdaAttempts = 0;\n'
+        '                do {\n'
+        + guard("CUT_NOT_SELECTED", "                    ")
+        + '                } while((computeOptPicked(energyChanges_bSplit, energyChanges_merge, 1.0 - energyParams[0]) == 1));'
+    )
+    source = replace_once(source, old, new, "search for feasible cut")
+    old = (
+        '                while((eDec_b > 0.0) && (eDec_i > 0.0)) {\n'
+        '                    energyParams[0] = updateLambda(measure_bound);\n'
+    )
+    new = (
+        '                int gridLambdaAttempts = 0;\n'
+        '                while((eDec_b > 0.0) && (eDec_i > 0.0)) {\n'
+        + guard("BOUNDARY_INTERIOR_SCORE_STALLED", "                    ")
+    )
+    source = replace_once(source, old, new, "boundary / interior lambda search")
+    old = (
+        '                do {\n'
+        '                    energyParams[0] = updateLambda(measure_bound);\n'
+        '                } while(computeOptPicked(energyChanges_bSplit, energyChanges_merge, 1.0 - energyParams[0]) == 0);'
+    )
+    new = (
+        '                int gridLambdaAttempts = 0;\n'
+        '                do {\n'
+        + guard("MERGE_NOT_SELECTED", "                    ")
+        + '                } while(computeOptPicked(energyChanges_bSplit, energyChanges_merge, 1.0 - energyParams[0]) == 0);'
+    )
+    source = replace_once(source, old, new, "search for feasible merge")
+    old = (
+        '            while(eDec_m > 0.0) {\n'
+        '                energyParams[0] = updateLambda(measure_bound);\n'
+    )
+    new = (
+        '            int gridLambdaAttempts = 0;\n'
+        '            while(eDec_m > 0.0) {\n'
+        + guard("MERGE_SCORE_STALLED", "                ")
+    )
+    source = replace_once(source, old, new, "merge-score lambda search")
+    return source
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--jobs", type=int, default=4)
@@ -201,7 +283,12 @@ def main() -> None:
     file = root / "src" / "TriMesh.cpp"
     original = file.read_text()
     patched = patch_trimesh_source(original)
+    main_file = root / "src" / "main.cpp"
+    main_original = main_file.read_text()
+    main_patched = patch_main_source(main_original)
+    # Write only after both source transformations succeed.
     file.write_text(patched)
+    main_file.write_text(main_patched)
     subprocess.run(["cmake", "--build", str(root / "build"),
                     "--config", "Release", "--parallel", str(args.jobs)],
                    check=True)
