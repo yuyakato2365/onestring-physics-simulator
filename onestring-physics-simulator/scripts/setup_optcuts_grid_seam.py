@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Build an isolated OptCuts fork with native UV-grid seam penalties.
+
+NEVER edits third_party/OptCuts_official or third_party/OptCuts. Runs the
+existing clean-source setup in a separate tree, patches its verified C++ source
+anchors, then rebuilds only this experimental fork.
+"""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+EXPERIMENT_ROOT = ROOT / "third_party" / "OptCuts_grid_seam_onestring"
+MARKER = "ONESTRING_NATIVE_GRID_SEAM_V1"
+
+HELPER = r"""
+// ONESTRING_NATIVE_GRID_SEAM_V1
+// Deliberately isolated from unmodified Official OptCuts.
+static double onestringGridWeight() {
+    const char* raw = std::getenv("ONESTRING_OPTCUTS_GRID_SEAM_WEIGHT");
+    if (!raw || !*raw) return 0.0;
+    char* end = nullptr;
+    double value = std::strtod(raw, &end);
+    return (end != raw && end && *end == '\0' && std::isfinite(value)
+            && value >= 0.0 && value <= 100.0) ? value : 0.0;
+}
+static double onestringGridAngle() {
+    const char* raw = std::getenv("ONESTRING_OPTCUTS_GRID_SEAM_ANGLE_DEGREES");
+    if (!raw || !*raw) return 0.0;
+    char* end = nullptr;
+    double value = std::strtod(raw, &end);
+    return (end != raw && end && *end == '\0' && std::isfinite(value))
+        ? value * (3.14159265358979323846 / 180.0) : 0.0;
+}
+// Axis misalignment: sin^2(2 theta), i.e. 0 for 0/90 deg, 1 for 45 deg.
+// Scaled by original 3D edge length / surface virtual radius so its magnitude
+// is comparable with the original cohesive-seam cost.
+static double onestringGridEdgeCost(
+    const Eigen::RowVector2d& a, const Eigen::RowVector2d& b,
+    double physicalLength, double virtualRadius
+) {
+    const double t = onestringGridAngle();
+    const double c = std::cos(t), s = std::sin(t);
+    const double dx = b[0] - a[0], dy = b[1] - a[1];
+    const double u = c * dx + s * dy;
+    const double v = -s * dx + c * dy;
+    const double d2 = u * u + v * v;
+    if (!(d2 > 1.0e-24) || !(virtualRadius > 0.0)) return 0.0;
+    const double axisMismatch = 4.0 * u * u * v * v / (d2 * d2);
+    return (physicalLength / virtualRadius) * axisMismatch;
+}
+"""
+
+def replace_once(data: str, needle: str, replacement: str, name: str) -> str:
+    count = data.count(needle)
+    if count != 1:
+        raise ValueError(f"OptCuts upstream changed: {name}: {count} matches, expected exactly 1")
+    return data.replace(needle, replacement, 1)
+
+
+def patch_trimesh_source(source: str) -> str:
+    if MARKER in source:
+        raise ValueError("grid-aware C++ source already patched: rebuild clean tree first")
+    source = replace_once(source, '#include <fstream>\n',
+                          '#include <fstream>\n#include <cmath>\n#include <cstdlib>\n',
+                          "C++ includes")
+    source = replace_once(source, 'namespace OptCuts {\n',
+                          'namespace OptCuts {\n' + HELPER + '\n',
+                          "OptCuts namespace")
+    # Boundary split: a newly exposed seam edge incurs an additional
+    # orientation cost. Its old SD local solver and orientation check are
+    # unchanged. Weight=0 reproduces the original decision score exactly.
+    before = (
+        'const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n'
+        '                    if(curEwDec > maxEwDec) {'
+    )
+    after = (
+        'const double gridCost = onestringGridEdgeCost(\n'
+        '                        V.row(vI), V.row(nbVI),\n'
+        '                        (V_rest.row(vI) - V_rest.row(nbVI)).norm(), virtualRadius);\n'
+        '                    const double curEwDec = (1.0 - lambda_t) * SDDec\n'
+        '                        - lambda_t * (seInc + onestringGridWeight() * gridCost);\n'
+        '                    if(curEwDec > maxEwDec) {'
+    )
+    source = replace_once(source, before, after, "boundary split score")
+
+    # Interior split: two new seam edges; path changes in querySplit itself.
+    before = (
+        'const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n'
+        '                    if(EwDec > EwDec_max) {'
+    )
+    after = (
+        'const double gridCost = onestringGridEdgeCost(\n'
+        '                        V.row(path[0]), V.row(path[1]),\n'
+        '                        (V_rest.row(path[0]) - V_rest.row(path[1])).norm(), virtualRadius)\n'
+        '                        + onestringGridEdgeCost(\n'
+        '                        V.row(path[1]), V.row(path[2]),\n'
+        '                        (V_rest.row(path[1]) - V_rest.row(path[2])).norm(), virtualRadius);\n'
+        '                    const double EwDec = (1.0 - lambda_t) * SDDec\n'
+        '                        - lambda_t * (seInc + onestringGridWeight() * gridCost);\n'
+        '                    if(EwDec > EwDec_max) {'
+    )
+    source = replace_once(source, before, after, "interior split score")
+
+    # Merge removes an internal seam segment. Reward removing a non-grid
+    # aligned segment. A coherent physical edge is V_rest[path[0],path[1]].
+    before = (
+        'return lambda_t * seDec - (1.0 - lambda_t) * SDInc;'
+    )
+    after = (
+        'const double gridRemoved = onestringGridEdgeCost(\n'
+        '                        V.row(path_max[0]), V.row(path_max[1]),\n'
+        '                        (V_rest.row(path_max[0]) - V_rest.row(path_max[1])).norm(), virtualRadius);\n'
+        '                    return lambda_t * (seDec + onestringGridWeight() * gridRemoved)\n'
+        '                        - (1.0 - lambda_t) * SDInc;'
+    )
+    source = replace_once(source, before, after, "merge score")
+    return source
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--root", type=Path, default=EXPERIMENT_ROOT)
+    parser.add_argument("--reclone", action="store_true")
+    args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be positive")
+    root = args.root.expanduser().resolve()
+    if root in ((ROOT / "third_party" / "OptCuts").resolve(),
+                (ROOT / "third_party" / "OptCuts_official").resolve()):
+        parser.error("Refusing to patch the Official or legacy Grid-OptCuts tree")
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "setup_optcuts_official.py"),
+         "--root", str(root), "--jobs", str(args.jobs)]
+        + (["--reclone"] if args.reclone else []),
+        check=True,
+    )
+    file = root / "src" / "TriMesh.cpp"
+    original = file.read_text()
+    patched = patch_trimesh_source(original)
+    file.write_text(patched)
+    subprocess.run(["cmake", "--build", str(root / "build"),
+                    "--config", "Release", "--parallel", str(args.jobs)],
+                   check=True)
+    executables = [root / "build" / "OptCuts_bin",
+                   root / "build" / "Release" / "OptCuts_bin"]
+    binary = next((p for p in executables if p.is_file()), None)
+    if binary is None:
+        raise RuntimeError(f"Patched OptCuts binary not found; checked {executables}")
+    print(f"[GRID-CUT-NATIVE] compiled isolated C++ seam-scoring fork: {binary}")
+    print(f"[GRID-CUT-NATIVE] source marker: {MARKER}")
+
+
+if __name__ == "__main__":
+    main()
