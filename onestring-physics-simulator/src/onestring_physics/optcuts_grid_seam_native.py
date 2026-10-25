@@ -13,7 +13,7 @@ import time
 
 from .optcuts_backend import OptCutsUnavailableError
 
-MARKER = "ONESTRING_NATIVE_GRID_SEAM_V2_MONOTONE"
+MARKER = "ONESTRING_NATIVE_GRID_SEAM_V3_SAFE_RANK"
 
 
 def candidate_roots(project: Path) -> list[Path]:
@@ -59,11 +59,16 @@ def resolve_grid_seam_binary(project: Path) -> Path:
             errors.append(f"{source}: {exc}")
             continue
         if MARKER not in text:
-            errors.append(f"{root}: lacks {MARKER} marker")
+            errors.append(f"{root}: lacks {MARKER} in TriMesh.cpp")
+            continue
+        main_source = root / "src" / "main.cpp"
+        if not main_source.is_file() or MARKER not in main_source.read_text():
+            errors.append(f"{root}: native C++ lambda diagnostic patch missing in main.cpp")
             continue
         for binary in (root / "build" / "OptCuts_bin",
                        root / "build" / "Release" / "OptCuts_bin"):
-            if binary.is_file() and binary.stat().st_mtime >= source.stat().st_mtime:
+            if (binary.is_file() and binary.stat().st_mtime >= max(
+                    source.stat().st_mtime, main_source.stat().st_mtime)):
                 return binary.resolve()
         errors.append(f"{root}: patched executable missing/stale")
     raise OptCutsUnavailableError(
