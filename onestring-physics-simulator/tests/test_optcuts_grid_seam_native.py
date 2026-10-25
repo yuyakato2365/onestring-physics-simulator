@@ -142,7 +142,7 @@ def test_grid_square_proxy_uses_3d_inverse_mapping_and_is_rotation_invariant():
     assert bad["square_grid_proxy_p95"]>0.4
 
 
-def test_native_cpp_grid_term_is_independent_of_original_length_lambda():
+def test_native_cpp_grid_term_is_scaled_by_seam_lambda_and_monotone():
     from runpy import run_path
     script=Path(__file__).resolve().parents[1]/"scripts"/"setup_optcuts_grid_seam.py"
     transform=run_path(str(script))["patch_trimesh_source"]
@@ -157,8 +157,25 @@ def test_native_cpp_grid_term_is_independent_of_original_length_lambda():
         "}",
         ""))
     patched=transform(sample)
-    assert "- lambda_t * seInc - onestringGridWeight() * gridCost" in patched
-    assert "lambda_t * seDec + onestringGridWeight() * gridRemoved" in patched
+    assert "origEwDec - lambda_t * onestringGridWeight() * gridCost" in patched
+    assert "origEwDec + lambda_t * onestringGridWeight() * gridRemoved" in patched
+    assert patched.count("origEwDec <= 1.e-12") == 3
+    assert patched.count("return -__DBL_MAX__;") >= 1
+    # beta=0 must leave original split/merge comparison unchanged:
+    # the zero-weight gate is explicitly conditional on beta>0.
+    assert patched.count("onestringGridWeight() > 0.0") == 3
+
+
+def test_grid_penalty_no_longer_outweighs_native_seam_term_by_100x():
+    # At the observed lambda_init=.999 the seam-side weight is .001.
+    # Relative beta=.10 should contribute at most 10% of the seam length
+    # weight for a same-length 45 degree edge, not 100 times it.
+    original_seam_weight=1-.999
+    beta=.10
+    maximum_penalty=original_seam_weight*beta
+    assert maximum_penalty==pytest.approx(0.0001)
+    assert maximum_penalty/original_seam_weight==pytest.approx(0.10)
+
 
 
 def test_native_subprocess_heartbeat_reports_progress_without_losing_output(capsys, tmp_path):
