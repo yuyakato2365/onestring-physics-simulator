@@ -187,7 +187,7 @@ def _install_optcuts_selector() -> None:
             st.number_input(
                 "Grid seam penalty strength",
                 min_value=0.0, max_value=20.0,
-                value=2.0, step=.25, format="%.2f",
+                value=0.10, step=.05, format="%.2f",
                 key="onestring_native_grid_seam_weight",
                 help="0 reproduces original OptCuts C++ split/merge scoring; "
                      "higher values discourage diagonally oriented new seam edges. "
