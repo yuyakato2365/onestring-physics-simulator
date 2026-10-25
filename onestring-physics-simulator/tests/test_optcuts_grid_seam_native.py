@@ -122,3 +122,40 @@ def test_ui_and_parameter_names_are_isolated_from_10_23_baseline():
     assert "optcuts_grid_seam_native_enabled=optcuts_grid_seam_native_enabled" in ui
     assert "optcuts_grid_seam_native_enabled: bool = False" in params
     assert "optcuts_grid_seam_native_weight: float = 0.0" in params
+
+
+def test_grid_square_proxy_uses_3d_inverse_mapping_and_is_rotation_invariant():
+    from onestring_physics.optcuts_grid_square_proxy import square_grid_local_quality
+    faces=np.array([[0,1,2],[0,2,3]])
+    uv=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+    xyz=np.c_[uv,np.zeros(4)]
+    exact=square_grid_local_quality(xyz,faces,uv,faces)
+    assert exact["square_grid_proxy_mean"]==pytest.approx(0.,abs=1e-12)
+    angle=np.deg2rad(31.)
+    rot=np.array([[np.cos(angle),-np.sin(angle)],
+                  [np.sin(angle),np.cos(angle)]])
+    rigid=square_grid_local_quality(np.c_[uv@rot.T,np.zeros(4)],faces,uv,faces)
+    assert rigid["square_grid_proxy_mean"]==pytest.approx(0.,abs=1e-12)
+    stretched=np.c_[uv*np.array([2.,1.]),np.zeros(4)]
+    bad=square_grid_local_quality(stretched,faces,uv,faces)
+    assert bad["square_grid_proxy_mean"]>0.4
+    assert bad["square_grid_proxy_p95"]>0.4
+
+
+def test_native_cpp_grid_term_is_independent_of_original_length_lambda():
+    from runpy import run_path
+    script=Path(__file__).resolve().parents[1]/"scripts"/"setup_optcuts_grid_seam.py"
+    transform=run_path(str(script))["patch_trimesh_source"]
+    sample="\n".join((
+        "#include <fstream>",
+        "namespace OptCuts {",
+        "const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;",
+        "                    if(curEwDec > maxEwDec) {",
+        "const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;",
+        "                    if(EwDec > EwDec_max) {",
+        "return lambda_t * seDec - (1.0 - lambda_t) * SDInc;",
+        "}",
+        ""))
+    patched=transform(sample)
+    assert "- lambda_t * seInc - onestringGridWeight() * gridCost" in patched
+    assert "lambda_t * seDec + onestringGridWeight() * gridRemoved" in patched
