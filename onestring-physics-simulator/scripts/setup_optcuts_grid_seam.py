@@ -14,10 +14,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_ROOT = ROOT / "third_party" / "OptCuts_grid_seam_onestring"
-MARKER = "ONESTRING_NATIVE_GRID_SEAM_V2_MONOTONE"
+MARKER = "ONESTRING_NATIVE_GRID_SEAM_V3_SAFE_RANK"
 
 HELPER = r"""
-// ONESTRING_NATIVE_GRID_SEAM_V2_MONOTONE
+// ONESTRING_NATIVE_GRID_SEAM_V3_SAFE_RANK
 // Deliberately isolated from unmodified Official OptCuts.
 static double onestringGridWeight() {
     const char* raw = std::getenv("ONESTRING_OPTCUTS_GRID_SEAM_WEIGHT");
@@ -36,14 +36,14 @@ static double onestringGridAngle() {
         ? value * (3.14159265358979323846 / 180.0) : 0.0;
 }
 // Axis misalignment: sin^2(2 theta), i.e. 0 for 0/90 deg, 1 for 45 deg.
-// Multiplicative beta relative to the *original seam length weight*.
-// For lambda_init=0.999 the seam cost weight is roughly 0.001; adding
-// beta=0.1 independently would overpower it by approximately 100x.
-// Only accept candidate topology moves that still decrease the original
-// OptCuts energy. Otherwise the unchanged global OptCuts energy check and
-// modified split/merge decisions disagree and can cycle indefinitely.
-// Scaled by original 3D edge length / surface virtual radius so its magnitude
-// is comparable with the original cohesive-seam cost.
+// Score proposal directions, NOT a new global energy. Preserve every
+// original candidate and its SD/seam energyChanges used by the lambda dual
+// update. V2's origEwDec <= 0 hard exclusion incorrectly erased candidate
+// information and could cause repeated -DBL_MAX searches.
+// The grid adjustment is bounded to 25% of an ORIGINAL POSITIVE gain;
+// negative/zero gains remain unchanged for the original lambda controller.
+// Scaling uses the original seam coefficient lambda_t (1-lambda_init).
+// The actual global SD and bijectivity constraints remain unchanged.
 static double onestringGridEdgeCost(
     const Eigen::RowVector2d& a, const Eigen::RowVector2d& b,
     double physicalLength, double virtualRadius
@@ -58,6 +58,20 @@ static double onestringGridEdgeCost(
     const double axisMismatch = 4.0 * u * u * v * v / (d2 * d2);
     return (physicalLength / virtualRadius) * axisMismatch;
 }
+// Preserve the legacy score's sign and the native dual-update information.
+// Move proposals are only reprioritized when the OLD objective already
+// predicts positive decrease. No formerly invalid candidate is made valid.
+static double onestringGridProposalScore(
+    double legacy, double lambda_t, double gridCost, bool merge
+) {
+    if (!(legacy > 0.0) || !std::isfinite(legacy) ||
+        !(gridCost >= 0.0) || !std::isfinite(gridCost)) return legacy;
+    const double beta = onestringGridWeight();
+    if (!(beta > 0.0) || !(lambda_t > 0.0)) return legacy;
+    const double raw = lambda_t * beta * gridCost;
+    const double delta = std::min(raw, 0.25 * legacy);
+    return merge ? legacy + delta : legacy - delta;
+}
 """
 
 def replace_once(data: str, needle: str, replacement: str, name: str) -> str:
@@ -71,7 +85,7 @@ def patch_trimesh_source(source: str) -> str:
     if MARKER in source:
         raise ValueError("grid-aware C++ source already patched: rebuild clean tree first")
     source = replace_once(source, '#include <fstream>\n',
-                          '#include <fstream>\n#include <cmath>\n#include <cstdlib>\n',
+                          '#include <fstream>\n#include <cmath>\n#include <cstdlib>\n#include <algorithm>\n#include <stdexcept>\n',
                           "C++ includes")
     source = replace_once(source, 'namespace OptCuts {\n',
                           'namespace OptCuts {\n' + HELPER + '\n',
@@ -88,10 +102,8 @@ def patch_trimesh_source(source: str) -> str:
         '                        V.row(vI), V.row(nbVI),\n'
         '                        (V_rest.row(vI) - V_rest.row(nbVI)).norm(), virtualRadius);\n'
         '                    const double origEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n'
-        '                    const double curEwDec =\n'
-        '                        (onestringGridWeight() > 0.0 && origEwDec <= 1.e-12)\n'
-        '                        ? -__DBL_MAX__\n'
-        '                        : origEwDec - lambda_t * onestringGridWeight() * gridCost;\n'
+        '                    const double curEwDec = onestringGridProposalScore(\n'
+        '                        origEwDec, lambda_t, gridCost, false);\n'
         '                    if(curEwDec > maxEwDec) {'
     )
     source = replace_once(source, before, after, "boundary split score")
@@ -109,10 +121,8 @@ def patch_trimesh_source(source: str) -> str:
         '                        V.row(path[1]), V.row(path[2]),\n'
         '                        (V_rest.row(path[1]) - V_rest.row(path[2])).norm(), virtualRadius);\n'
         '                    const double origEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n'
-        '                    const double EwDec =\n'
-        '                        (onestringGridWeight() > 0.0 && origEwDec <= 1.e-12)\n'
-        '                        ? -__DBL_MAX__\n'
-        '                        : origEwDec - lambda_t * onestringGridWeight() * gridCost;\n'
+        '                    const double EwDec = onestringGridProposalScore(\n'
+        '                        origEwDec, lambda_t, gridCost, false);\n'
         '                    if(EwDec > EwDec_max) {'
     )
     source = replace_once(source, before, after, "interior split score")
@@ -127,12 +137,46 @@ def patch_trimesh_source(source: str) -> str:
         '                        V.row(path_max[0]), V.row(path_max[1]),\n'
         '                        (V_rest.row(path_max[0]) - V_rest.row(path_max[1])).norm(), virtualRadius);\n'
         '                    const double origEwDec = lambda_t * seDec - (1.0 - lambda_t) * SDInc;\n'
-        '                    if(onestringGridWeight() > 0.0 && origEwDec <= 1.e-12) {\n'
-        '                        return -__DBL_MAX__;\n'
-        '                    }\n'
-        '                    return origEwDec + lambda_t * onestringGridWeight() * gridRemoved;'
+        '                    return onestringGridProposalScore(\n'
+        '                        origEwDec, lambda_t, gridRemoved, true);'
     )
     source = replace_once(source, before, after, "merge score")
+    # Fail closed on repeated identical all-invalid candidate slates. The
+    # original optimizer can otherwise rescan thousands of vertices forever
+    # when lambda does not change. Never substitute a fabricated Cut/UV.
+    old_query = (
+        '        EwDec_max = EwDecs[candI_max];\n'
+        '        switch(operationType) {'
+    )
+    new_query = (
+        '        EwDec_max = EwDecs[candI_max];\n'
+        '        if(!propagate) {\n'
+        '            static int noCandidateStreak[2] = {0, 0};\n'
+        '            static double noCandidateLambda[2] = {-1.0, -1.0};\n'
+        '            static int noCandidateVertexCount[2] = {-1, -1};\n'
+        '            const int kind = splitInterior ? 1 : 0;\n'
+        '            const bool allInvalid = EwDec_max <= -__DBL_MAX__ / 2.0;\n'
+        '            if(allInvalid &&\n'
+        '               std::abs(noCandidateLambda[kind] - lambda_t) < 1.e-13 &&\n'
+        '               noCandidateVertexCount[kind] == V_rest.rows()) {\n'
+        '                ++noCandidateStreak[kind];\n'
+        '            } else {\n'
+        '                noCandidateStreak[kind] = allInvalid ? 1 : 0;\n'
+        '            }\n'
+        '            noCandidateLambda[kind] = lambda_t;\n'
+        '            noCandidateVertexCount[kind] = static_cast<int>(V_rest.rows());\n'
+        '            if(noCandidateStreak[kind] >= 3) {\n'
+        '                std::cerr << "[GRID-CUT-NATIVE-NO-CANDIDATES] kind="\n'
+        '                    << kind << " examined=" << bestCandVerts.size()\n'
+        '                    << " lambda_t=" << lambda_t\n'
+        '                    << " vertices=" << V_rest.rows() << std::endl;\n'
+        '                throw std::runtime_error(\n'
+        '                    "GRID_CUT_NATIVE_NO_ADMISSIBLE_SPLIT_AT_FIXED_LAMBDA");\n'
+        '            }\n'
+        '        }\n'
+        '        switch(operationType) {'
+    )
+    source = replace_once(source, old_query, new_query, "all-invalid candidate slate diagnostic")
     return source
 
 
