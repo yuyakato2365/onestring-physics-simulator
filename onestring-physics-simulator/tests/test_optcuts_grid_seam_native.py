@@ -368,3 +368,28 @@ def test_native_homotopy_guard_excludes_no_non_native_legacy_mode():
     assert 'native_grid=bool(getattr(params,"optcuts_grid_seam_native_enabled",False))' in source
     assert 'if native_grid:' in source
     assert 'GRID_NATIVE_NO_LINEAR_HOMOTOPY_CANDIDATES' in source
+
+
+def test_native_early_continuation_crossing_skips_expensive_harmonic_solver():
+    from onestring_physics.optcuts_grid_boundary_untangle import (
+        fit_by_continuation,
+    )
+    base=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+    mapped=np.array([[0.,0.],[1.,4.],[1.,-3.],[0.,1.]])
+    faces=np.array([[0,1,2],[0,2,3]],int)
+    loop=np.arange(4)
+    calls=[]
+    def forbidden_harmonic(*args):
+        calls.append(True)
+        raise AssertionError("expensive harmonic should NOT execute")
+    with pytest.raises(ValueError,match="GRID_NATIVE_LINEAR_HOMOTOPY_SELF_INTERSECTION"):
+        fit_by_continuation(base,faces,loop,mapped,forbidden_harmonic,
+                            lambda _: {},
+                            strict_linear_boundary_path=True)
+    assert not calls
+    # The ordinary 10/23 fit retains its previous numerical workflow.
+    with pytest.raises(AssertionError,match="harmonic should NOT execute"):
+        fit_by_continuation(base,faces,loop,mapped,forbidden_harmonic,
+                            lambda _: {},
+                            strict_linear_boundary_path=False)
+    assert calls==[True]
