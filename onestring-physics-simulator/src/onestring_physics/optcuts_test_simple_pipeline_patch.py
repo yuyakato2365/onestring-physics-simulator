@@ -190,6 +190,12 @@ def install_optcuts_test_simple_pipeline_patch(pipeline: Any) -> None:
     def builder(surface: Any, target: Any, grid: Any, params: Any):
         if str(getattr(params, "omega_parameterization_mode", "")) != "optcuts_test":
             return base(surface, target, grid, params)
+        if bool(getattr(params, "optcuts_seamless_lattice_enabled", False)):
+            # New isolated mode must use the ACTUAL official OptCuts cut
+            # without Taubin/resampling of the UV boundary beforehand.
+            # The outer seamless solver imposes geometric copy-to-copy
+            # lattice transitions rather than a straightening heuristic.
+            return base(surface,target,grid,params)
         ordinary = replace(params, omega_parameterization_mode="optcuts", optcuts_try_alternative_initial_cut=True)
         return _smooth_and_regenerate_omega(base(surface, target, grid, ordinary))
     pipeline._build_surface_parameterization = builder
