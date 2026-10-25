@@ -542,6 +542,47 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
         raise GridBoundaryReparameterizationError(
             "GRID_BOUNDARY_SOURCE_INVALID: original OptCuts has inverted/overlapping UV")
     from .optcuts_grid_boundary_untangle import fit_by_continuation,oriented_area_ratio
+    # In the native Grid-Seam experiment only, screen the actual LINEAR
+    # boundary continuation path before expensive 16k-face UV solves. A
+    # witnessed proper crossing is a rigorous obstruction for this specific
+    # intermediate boundary: no bijective interior UV can realize it.
+    # This does not claim that a different nonlinear boundary isotopy or
+    # a different selected Grid/Seam is impossible.
+    native_grid=bool(getattr(params,"optcuts_grid_seam_native_enabled",False))
+    if native_grid:
+        from .optcuts_grid_boundary_untangle import (
+            native_linear_path_boundary_preflight,
+        )
+        eligible=[]
+        blocked=[]
+        for candidate in boundary_candidates:
+            _,phase,mapped,method=candidate
+            witness=native_linear_path_boundary_preflight(
+                uv[np.asarray(loop,int)],mapped)
+            if witness is None:
+                eligible.append(candidate)
+            else:
+                blocked.append((int(phase),str(method),witness))
+        print(
+            "[GRID-NATIVE-HOMOTOPY-PREFLIGHT] "
+            f"total={len(boundary_candidates)} "
+            f"witnessed_crossing={len(blocked)} "
+            f"eligible_for_numeric_fit={len(eligible)} "
+            f"sample={blocked[:2]}",
+            flush=True,
+        )
+        if not eligible:
+            first=blocked[0] if blocked else None
+            raise GridBoundaryReparameterizationError(
+                "GRID_NATIVE_NO_LINEAR_HOMOTOPY_CANDIDATES: "
+                f"all {len(boundary_candidates)} boundary correspondences "
+                "have a witnessed proper crossing during the prescribed "
+                "linear boundary continuation; "
+                f"first_witness={first}. This is NOT proof that a different "
+                "nonlinear homotopy or seam/grid topology is infeasible. "
+                "Do not accept an overlapping intermediate UV."
+            )
+        boundary_candidates=eligible
     # Keep the SAME selected cell union, change only cyclic vertex matching.
     phase_errors=[]
     chosen_phase=None
