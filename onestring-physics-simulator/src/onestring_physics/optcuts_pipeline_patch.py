@@ -93,6 +93,10 @@ def _config_from_params(params: Any, grid: Any = None) -> OptCutsConfig:
         grid_aware_nx=int(getattr(grid, "nx", 20)),
         grid_aware_ny=int(getattr(grid, "ny", 20)),
         grid_aware_strength=float(getattr(params, "optcuts_grid_aware_strength", 3.0)),
+        grid_seam_native_enabled=bool(getattr(
+            params, "optcuts_grid_seam_native_enabled", False)),
+        grid_seam_native_weight=float(getattr(
+            params, "optcuts_grid_seam_native_weight", 0.0)),
     )
 
 
