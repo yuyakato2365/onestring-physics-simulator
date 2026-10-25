@@ -95,7 +95,10 @@ def test_installer_only_changes_explicit_new_mode(monkeypatch):
             uv_faces=base_chart.uv_faces,
             metrics={},
         )
-    owner=SimpleNamespace(_build_surface_parameterization=builder)
+    owner=SimpleNamespace(
+        _build_surface_parameterization=builder,
+        _build_m2d=lambda *args:"passthrough",
+    )
     m.install_seamless_lattice_mode_patch(owner)
     old=owner._build_surface_parameterization(
         None,None,None,SimpleNamespace(optcuts_seamless_lattice_enabled=False)
