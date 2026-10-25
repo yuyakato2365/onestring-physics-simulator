@@ -754,7 +754,7 @@ with st.sidebar:
         optcuts_area_grid_boundary_enabled
         and st.session_state.get("_onestring_grid_seam_native_selected",False))
     optcuts_grid_seam_native_weight = (
-        float(st.session_state.get("onestring_native_grid_seam_weight",2.0))
+        float(st.session_state.get("onestring_native_grid_seam_weight",0.10))
         if optcuts_grid_seam_native_enabled else 0.0)
     optcuts_area_grid_coverage_threshold = 0.50
     optcuts_area_grid_orientation_search_enabled = True
