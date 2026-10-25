@@ -84,9 +84,15 @@ def _install_optcuts_selector() -> None:
         if label != "Omega parameterization mode":
             return original_selectbox(label, options, *args, **kwargs)
 
+        experimental = (
+            "optcuts_area_grid_phase_search",
+            "optcuts_area_grid_tail_sd",
+            "optcuts_area_grid_adaptive_remesh",
+            "optcuts_area_grid_combined",
+        )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
-                     "optcuts_grid"):
+                     *experimental, "optcuts_grid"):
             if mode not in option_list:
                 option_list.append(mode)
         original_format=kwargs.get("format_func")
@@ -95,6 +101,14 @@ def _install_optcuts_selector() -> None:
                 return "2026-10-23 | Grid-aware OptCuts Ω + paper-aligned K3D/K2D (UV refinement)"
             if mode=="optcuts_area_grid_boundary":
                 return "2026-10-23 | OptCuts Ω + Area-Threshold Grid Boundary → Reparameterization"
+            variants = {
+                "optcuts_area_grid_phase_search": "① Rotate/phase search only",
+                "optcuts_area_grid_tail_sd": "③ Boundary-tail SD optimization only",
+                "optcuts_area_grid_adaptive_remesh": "⑤ Boundary-corner adaptive remeshing only",
+                "optcuts_area_grid_combined": "①+③+⑤ Combined",
+            }
+            if mode in variants:
+                return "EXPERIMENTAL 10/23 OptCuts Ω | " + variants[mode]
             return str(original_format(mode)) if original_format else str(mode)
         kwargs["format_func"]=label_for_mode
         value = original_selectbox(label, option_list, *args, **kwargs)
@@ -105,11 +119,19 @@ def _install_optcuts_selector() -> None:
             value == "optcuts_grid_aware"
         )
         st.session_state["_onestring_area_grid_boundary_omega_selected"] = (
-            value == "optcuts_area_grid_boundary"
+            value == "optcuts_area_grid_boundary" or value in experimental
         )
+        st.session_state["_onestring_area_grid_optimizations"] = {
+            "phase_search": value in {
+                "optcuts_area_grid_phase_search", "optcuts_area_grid_combined"},
+            "tail_sd": value in {
+                "optcuts_area_grid_tail_sd", "optcuts_area_grid_combined"},
+            "adaptive_remesh": value in {
+                "optcuts_area_grid_adaptive_remesh", "optcuts_area_grid_combined"},
+        }
         if value not in {"optcuts", "optcuts_test", "optcuts_test2",
                          "optcuts_grid_aware", "optcuts_area_grid_boundary",
-                         "optcuts_grid"}:
+                         *experimental, "optcuts_grid"}:
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "0"
             return value
 
@@ -143,6 +165,12 @@ def _install_optcuts_selector() -> None:
                 "interior reparameterization. The ORIGINAL lattice is held fixed. "
                 "Non-disk outlines, insufficient boundary vertices, UV foldovers "
                 "and excessive distortion fail explicitly; no silent fallback."
+            )
+        elif value in experimental:
+            st.caption(
+                "Isolated 10/23 OptCuts area-grid experiment; exact 50% mask, "
+                "paired 3D/UV geometry and fail-closed distortion checks remain. "
+                "Only the method(s) named in this mode are enabled."
             )
         else:
             st.caption(
@@ -184,7 +212,7 @@ def _install_optcuts_selector() -> None:
         )
 
         if value in {"optcuts", "optcuts_test", "optcuts_test2",
-                      "optcuts_grid_aware","optcuts_area_grid_boundary"}:
+                      "optcuts_grid_aware","optcuts_area_grid_boundary",*experimental}:
             use_bijectivity = st.checkbox(
                 "OptCuts enforce bijectivity",
                 value=os.environ.get("ONESTRING_OPTCUTS_USE_BIJECTIVITY", "1").lower()
@@ -204,7 +232,7 @@ def _install_optcuts_selector() -> None:
             os.environ["ONESTRING_OPTCUTS_GRID_PHASE_V"] = "0"
 
             if value in {"optcuts_test", "optcuts_test2",
-                          "optcuts_grid_aware","optcuts_area_grid_boundary"}:
+                          "optcuts_grid_aware","optcuts_area_grid_boundary",*experimental}:
                 st.markdown("**K3D hard-planarity (Augmented Lagrangian)**")
                 anchor_weight = st.number_input(
                     "K3D AL anchor weight (w_a)",
@@ -299,7 +327,7 @@ def _install_optcuts_selector() -> None:
         # mature optcuts_test patch stack.  The environment flag is the only
         # behavioral difference and is read by the acceleration wrapper.
         if value in {"optcuts_test2","optcuts_grid_aware",
-                      "optcuts_area_grid_boundary"}:
+                      "optcuts_area_grid_boundary",*experimental}:
             # Both keep the same proven K3D/K2D and paper-aligned M2D route.
             # Grid awareness is a separate Omega-only parameter.
             os.environ["ONESTRING_OPTCUTS_TEST_VARIANT"] = "2"
