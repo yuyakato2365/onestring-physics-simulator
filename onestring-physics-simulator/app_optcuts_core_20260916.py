@@ -89,6 +89,7 @@ def _install_optcuts_selector() -> None:
             "optcuts_area_grid_tail_sd",
             "optcuts_area_grid_adaptive_remesh",
             "optcuts_area_grid_combined",
+            "optcuts_grid_seam_native",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -106,6 +107,7 @@ def _install_optcuts_selector() -> None:
                 "optcuts_area_grid_tail_sd": "③ Boundary-tail SD optimization only",
                 "optcuts_area_grid_adaptive_remesh": "⑤ Boundary-corner adaptive remeshing only",
                 "optcuts_area_grid_combined": "①+③+⑤ Combined",
+                "optcuts_grid_seam_native": "Native C++ seam penalty + actual-grid boundary fitting",
             }
             if mode in variants:
                 return "EXPERIMENTAL 10/23 OptCuts Ω | " + variants[mode]
@@ -121,6 +123,8 @@ def _install_optcuts_selector() -> None:
         st.session_state["_onestring_area_grid_boundary_omega_selected"] = (
             value == "optcuts_area_grid_boundary" or value in experimental
         )
+        st.session_state["_onestring_grid_seam_native_selected"] = (
+            value == "optcuts_grid_seam_native")
         st.session_state["_onestring_area_grid_optimizations"] = {
             "phase_search": value in {
                 "optcuts_area_grid_phase_search", "optcuts_area_grid_combined"},
@@ -178,6 +182,22 @@ def _install_optcuts_selector() -> None:
                 "the fixed fabrication lattice."
             )
 
+        if value == "optcuts_grid_seam_native":
+            st.markdown("**Native OptCuts Grid-Seam penalty (C++ Split/Merge)**")
+            st.number_input(
+                "Grid seam penalty strength",
+                min_value=0.0, max_value=20.0,
+                value=2.0, step=.25, format="%.2f",
+                key="onestring_native_grid_seam_weight",
+                help="0 reproduces original OptCuts C++ split/merge scoring; "
+                     "higher values discourage diagonally oriented new seam edges. "
+                     "Requires separately compiled patched C++ OptCuts.",
+            )
+            st.caption(
+                "Uses a dedicated patched OptCuts binary; no fallback to "
+                "Official OptCuts. The original 10/23 mask and distortion "
+                "validity checks remain active."
+            )
         executable = st.text_input(
             "OptCuts executable",
             value=os.environ.get("ONESTRING_OPTCUTS_EXECUTABLE", ""),
