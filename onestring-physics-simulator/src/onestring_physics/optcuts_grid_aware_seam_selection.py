@@ -125,6 +125,25 @@ def _make_chart(original, optcuts_result, rank_index, *, rotation_degrees=0.):
     return chart
 
 
+def _shift_production_lattice(domain, phase_u, phase_v):
+    """Move the original regular production-grid origin BEFORE mask selection.
+
+    This is a new candidate lattice, not a post-selection rephase. The exact
+    chosen origin and step are frozen after acceptance in fix_domain_lattice().
+    """
+    from .optcuts_area_grid_boundary import _actual_overlay_lattice
+    import copy
+    origin, step, nx, ny = _actual_overlay_lattice(domain)
+    du, dv = float(phase_u), float(phase_v)
+    if not (0. <= du < 1. and 0. <= dv < 1.):
+        raise ValueError("GRID_PHASE_OUT_OF_RANGE")
+    shifted = copy.copy(domain)
+    shifted.uv_vertices = np.asarray(domain.uv_vertices, float).copy()
+    shifted.uv_vertices[:, :2] += step * np.array([du, dv])
+    # No cell count, spacing, mesh, seam or topology changes.
+    return shifted
+
+
 def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_builder):
     """Evaluate official seam candidates against their *actual* M2D overlays.
 
@@ -148,10 +167,12 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
     rotations = (0., 22.5, 45., 67.5) if bool(
         getattr(params, "optcuts_area_grid_orientation_search_enabled",
                 True)) else (0.,)
-    tasks = ([(i, source, 0.) for i, source in enumerate(sources)] +
-             [(i, source, degrees)
-              for degrees in rotations if degrees != 0.
-              for i, source in enumerate(sources)])
+    phase_offsets = ((0., 0.), (.5, 0.), (0., .5), (.5, .5)) if bool(
+        getattr(params, "optcuts_area_grid_phase_search_enabled", False)
+    ) else ((0., 0.),)
+    tasks = [(i, source, angle, du, dv)
+             for angle in rotations for i, source in enumerate(sources)
+             for du, dv in phase_offsets]
     evaluated = []
     report = []
     # Rotation is rigid: SD, area Jacobian, seam length and overlap counts
@@ -161,14 +182,15 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
     print(
         "[GRID-SEAM-SEARCH] started; official_cut_sources="
         f"{len(sources)}; orientations={list(rotations)}; "
-        f"grid_variants={len(tasks)}",
+        f"grid_variants={len(tasks)} phases={list(phase_offsets)}",
         flush=True,
     )
-    for index, (source_index, source, rotation) in enumerate(tasks):
+    for index, (source_index, source, rotation, phase_u, phase_v) in enumerate(tasks):
         iteration_started = time.perf_counter()
         print(
             f"[GRID-SEAM-SEARCH] evaluate={index+1}/{len(tasks)} "
             f"cut={source_index} rotation={rotation:g}deg "
+            f"phase=({phase_u:g},{phase_v:g}) "
             f"elapsed={iteration_started-started:.1f}s",
             flush=True,
         )
@@ -176,6 +198,8 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
             "candidate_index": int(index),
             "source_start_index": int(source_index),
             "uv_rotation_degrees": float(rotation),
+            "grid_phase_u": float(phase_u),
+            "grid_phase_v": float(phase_v),
             "source": ("official_initial_cut" if source is not None
                        else "single_official_chart"),
         }
@@ -200,6 +224,8 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
                     or float(audit["distortion_area_mean"]) <= 0):
                 raise ValueError("GRID_SEAM_BAD_SOURCE_SD")
             domain = domain_builder(chart, grid, params)
+            if phase_u or phase_v:
+                domain = _shift_production_lattice(domain, phase_u, phase_v)
             from .optcuts_backend import _boundary_loops
             loops = _boundary_loops(np.asarray(chart.uv_faces, int))
             if len(loops) != 1:
@@ -243,7 +269,8 @@ def rank_grid_aware_seam_candidates(parameterization, grid, params, domain_build
         raise GridBoundaryReparameterizationError(
             "GRID_SEAM_NO_VALID_CANDIDATE: "
             + " | ".join(
-                f"cut={r['source_start_index']} rotation={r['uv_rotation_degrees']}: "
+                f"cut={r['source_start_index']} rotation={r['uv_rotation_degrees']} "
+                f"phase=({r['grid_phase_u']},{r['grid_phase_v']}): "
                 f"{r.get('error')}" for r in report))
     ref_sd = min(float(a["distortion_area_mean"])
                  for _c, _d, _r, a in evaluated)
