@@ -151,3 +151,40 @@ with a folded UV, mutate the 3D target, or raise the timeout as a fix.
 Only Python source files changed in this repair; the V3 native C++
 executable does not require rebuilding. Stop Streamlit, fetch/merge
 the branch and restart with the same experimental Omega mode.
+
+## 2026-10-26: M2D -> M3D SEAM_DEGENERATE_GRID_BOUNDARY_EDGE
+
+The next real Bunny run completed Omega/production M2D and failed inside
+`discover_exact_seam_topology()` because a nonzero UV Grid boundary
+edge's 3D seam sample endpoint positions mapped to identical rounded
+physical keys. The previous diagnostic contained NO edge IDs or actual
+3D positions, so true geometry collapse vs overly coarse quantization
+cannot be distinguished from that traceback alone.
+
+Native-only repair: use the actual frozen original grid `origin,step,nx,ny`,
+its unchanged 50% area mask, and the same `create_quad_grid()` vertex IDs
+to run `discover_exact_seam_topology()` after each successful Omega
+candidate boundary fit, before marking that candidate accepted. A
+candidate that would fail the real M2D source-seam check is rejected
+explicitly and the next ranked candidate is tried. This does not
+change the source seam, triangle geometry, mask, fabrication tiles or
+UV tolerance criteria.
+
+Separately, native-only source sample grouping resolution is bounded
+by one quarter of the smallest POSITIVE sampled seam edge's actual
+3D length. This prevents distinct close 3D endpoints being grouped by
+the old global 1e-7*surface_span quantizer, without moving any vertex
+or changing the surface itself. Truly identical/indistinguishable
+source samples still trigger fail-closed error.
+
+Every such error now contains M2D vertex IDs, UV endpoints, 3D seam
+positions, raw physical length, quantization threshold, and reason.
+Correspondence preflight logs begin with
+`[GRID-NATIVE-SEAM-PREFLIGHT]`, precision with
+`[GRID-NATIVE-SEAM-SAMPLE-PRECISION]`.
+
+Only Python source changed; no C++ rebuild is needed. Existing 10/23
+area-grid mode is intentionally unchanged. The Python CI regression
+covers original mask vs compacted production mesh, source edge
+quantization collision, and strict malformed-grid rejection. Actual
+Bunny success has not yet been demonstrated.
