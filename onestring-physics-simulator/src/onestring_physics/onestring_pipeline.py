@@ -1044,6 +1044,8 @@ class PipelineParameters(_original.PipelineParameters):
     optcuts_area_grid_phase_search_enabled: bool = False
     optcuts_area_grid_tail_sd_enabled: bool = False
     optcuts_area_grid_adaptive_remesh_enabled: bool = False
+    optcuts_grid_seam_native_enabled: bool = False
+    optcuts_grid_seam_native_weight: float = 0.0
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
