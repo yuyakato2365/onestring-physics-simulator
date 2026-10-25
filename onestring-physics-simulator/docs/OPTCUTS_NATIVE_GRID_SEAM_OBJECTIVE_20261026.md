@@ -109,3 +109,45 @@ plus prior geometry tests. The entire patched external OptCuts C++ build,
 and Bunny runtime/quality, are NOT yet validated on the user's Mac.
 Compare beta=0 against beta=0.1 with identical Bunny and Grid settings.
 Do not increase the timeout or hide geometry invalidity to mask failures.
+
+## 2026-10-26: Repeated boundary-fit continuation after successful native C++
+
+The new native C++ run did finish in 61.4 seconds. The uploaded log shows
+`GRID-SEAM-SEARCH` ranking four rotations in 10.7 seconds, then
+`GRID-BOUNDARY-FIT` spending over 254 seconds on 8 of 12 boundary
+correspondences for the first rotation. The first seven attempted
+correspondences failed at 0.5%-6.5% of the boundary interpolation.
+Their diagnostic bundles repeatedly identify triangle 2058 and
+`boundary_crossings=2` on the *intermediate intended boundary*.
+
+Thus the bottleneck is NOT C++ OptCuts but post-C++ boundary fitting:
+the old method linearly interpolates the OptCuts boundary into the
+grid-cell polygon, and for some choices this intermediate boundary
+self-intersects. No interior UV solver can make that intermediate
+boundary globally bijective.
+
+Native-only repair:
+- Pre-screen *all* original ear-safe boundary correspondences for actual
+  witnessed proper crossings on a fixed sequence of intermediate
+  boundary fractions. Do not spend the 12 expensive solver attempts on
+  witnesses of an impossible straight-line intermediate state.
+- If a narrow crossing interval escapes the sampled preflight, test each
+  actual adaptive continuation step BEFORE calling harmonic/untangling.
+  Abort the blocked linear path immediately with an explicit error.
+- Re-rank the remaining ear-safe correspondences by existing displacement
+  cost. The 50% cell mask, grid size, original Seam, 3D geometry, hard
+  signed-area, SD, and overlap checks remain identical.
+- Skip only the **specific straight-line correspondence/path** with a
+  witnessed crossing. The new error is not a proof that the final target
+  polygon lacks some other nonlinear bijective homotopy.
+
+Important: this repair can avoid hundreds of seconds of futile work,
+but does NOT create a new viable nonlinear boundary map. If every
+existing correspondence is blocked, the correct next research task is
+to design an injectivity-preserving nonlinear boundary isotopy or
+to change the underlying Cut/grid mask before fitting. Never fake success
+with a folded UV, mutate the 3D target, or raise the timeout as a fix.
+
+Only Python source files changed in this repair; the V3 native C++
+executable does not require rebuilding. Stop Streamlit, fetch/merge
+the branch and restart with the same experimental Omega mode.
