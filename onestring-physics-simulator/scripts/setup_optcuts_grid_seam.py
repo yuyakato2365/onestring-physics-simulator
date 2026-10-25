@@ -14,10 +14,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_ROOT = ROOT / "third_party" / "OptCuts_grid_seam_onestring"
-MARKER = "ONESTRING_NATIVE_GRID_SEAM_V1"
+MARKER = "ONESTRING_NATIVE_GRID_SEAM_V2_MONOTONE"
 
 HELPER = r"""
-// ONESTRING_NATIVE_GRID_SEAM_V1
+// ONESTRING_NATIVE_GRID_SEAM_V2_MONOTONE
 // Deliberately isolated from unmodified Official OptCuts.
 static double onestringGridWeight() {
     const char* raw = std::getenv("ONESTRING_OPTCUTS_GRID_SEAM_WEIGHT");
@@ -36,7 +36,13 @@ static double onestringGridAngle() {
         ? value * (3.14159265358979323846 / 180.0) : 0.0;
 }
 // Axis misalignment: sin^2(2 theta), i.e. 0 for 0/90 deg, 1 for 45 deg.
-// Independent additive beta (not multiplied by the authors\' lambda)\n// so users can tune the grid-seam term without coupling it to SD/length weights.\n// Scaled by original 3D edge length / surface virtual radius so its magnitude
+// Multiplicative beta relative to the *original seam length weight*.
+// For lambda_init=0.999 the seam cost weight is roughly 0.001; adding
+// beta=0.1 independently would overpower it by approximately 100x.
+// Only accept candidate topology moves that still decrease the original
+// OptCuts energy. Otherwise the unchanged global OptCuts energy check and
+// modified split/merge decisions disagree and can cycle indefinitely.
+// Scaled by original 3D edge length / surface virtual radius so its magnitude
 // is comparable with the original cohesive-seam cost.
 static double onestringGridEdgeCost(
     const Eigen::RowVector2d& a, const Eigen::RowVector2d& b,
@@ -81,8 +87,11 @@ def patch_trimesh_source(source: str) -> str:
         'const double gridCost = onestringGridEdgeCost(\n'
         '                        V.row(vI), V.row(nbVI),\n'
         '                        (V_rest.row(vI) - V_rest.row(nbVI)).norm(), virtualRadius);\n'
-        '                    const double curEwDec = (1.0 - lambda_t) * SDDec\n'
-        '                        - lambda_t * seInc - onestringGridWeight() * gridCost;\n'
+        '                    const double origEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n'
+        '                    const double curEwDec =\n'
+        '                        (onestringGridWeight() > 0.0 && origEwDec <= 1.e-12)\n'
+        '                        ? -__DBL_MAX__\n'
+        '                        : origEwDec - lambda_t * onestringGridWeight() * gridCost;\n'
         '                    if(curEwDec > maxEwDec) {'
     )
     source = replace_once(source, before, after, "boundary split score")
@@ -99,8 +108,11 @@ def patch_trimesh_source(source: str) -> str:
         '                        + onestringGridEdgeCost(\n'
         '                        V.row(path[1]), V.row(path[2]),\n'
         '                        (V_rest.row(path[1]) - V_rest.row(path[2])).norm(), virtualRadius);\n'
-        '                    const double EwDec = (1.0 - lambda_t) * SDDec\n'
-        '                        - lambda_t * (seInc + onestringGridWeight() * gridCost);\n'
+        '                    const double origEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;\n'
+        '                    const double EwDec =\n'
+        '                        (onestringGridWeight() > 0.0 && origEwDec <= 1.e-12)\n'
+        '                        ? -__DBL_MAX__\n'
+        '                        : origEwDec - lambda_t * onestringGridWeight() * gridCost;\n'
         '                    if(EwDec > EwDec_max) {'
     )
     source = replace_once(source, before, after, "interior split score")
@@ -114,8 +126,11 @@ def patch_trimesh_source(source: str) -> str:
         'const double gridRemoved = onestringGridEdgeCost(\n'
         '                        V.row(path_max[0]), V.row(path_max[1]),\n'
         '                        (V_rest.row(path_max[0]) - V_rest.row(path_max[1])).norm(), virtualRadius);\n'
-        '                    return lambda_t * seDec + onestringGridWeight() * gridRemoved\n'
-        '                        - (1.0 - lambda_t) * SDInc;'
+        '                    const double origEwDec = lambda_t * seDec - (1.0 - lambda_t) * SDInc;\n'
+        '                    if(onestringGridWeight() > 0.0 && origEwDec <= 1.e-12) {\n'
+        '                        return -__DBL_MAX__;\n'
+        '                    }\n'
+        '                    return origEwDec + lambda_t * onestringGridWeight() * gridRemoved;'
     )
     source = replace_once(source, before, after, "merge score")
     return source
