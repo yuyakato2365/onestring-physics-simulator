@@ -73,6 +73,22 @@ m2d = to_onestring_m2d(audited, tile_size=1., gap_size=.05)
 The supplied command will run only when an actual adapter exists.
 Without it, `REFERENCE_ADAPTER_NOT_CONFIGURED` is an intended failure.
 
+## Standalone candidate inspection
+
+If a paper-derived backend eventually produces a candidate NPZ, inspect it
+without importing or modifying any Streamlit launcher:
+
+```bash
+cd onestring-physics-simulator
+python3 scripts/audit_zhang2021_candidate.py \
+    --source /path/to/optcuts_source.npz \
+    --candidate /path/to/candidate_quads.npz \
+    --report /path/to/audit.json
+```
+
+This CLI **audits** supplied quads, it does not generate them. The report
+explicitly says `zhang2021_algorithm_verified: false` even after success.
+
 ## Tests and CI
 
 ```bash
