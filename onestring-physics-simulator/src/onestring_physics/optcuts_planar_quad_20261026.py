@@ -508,13 +508,28 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
                 mesh.metrics.get("csf_split_bound_certified", False))
             mesh.metrics["planar_quad_csf_split_mechanism"] = (
                 "existing OneString complete-edge Split with explicit certification metrics")
+            # The Split module can duplicate vertex IDs and disconnect panels.
+            # The original irregular grid still contains PRE-SPLIT face IDs.
+            # Reconstruct adjacency from the actual final faces only; no
+            # guessed row/col, no fabricated hinge and no face reordering.
+            post_faces = np.asarray(mesh.faces, int)
+            post_uv = np.asarray(mesh.vertices, float)[:, :2]
+            changed = len(post_uv) != len(uv) or not np.array_equal(post_faces, faces)
+            if changed:
+                mesh.grid = UnstructuredQuadGrid(
+                    post_uv, post_faces, effective_size, effective_gap)
+            mesh.metrics["planar_quad_post_split_grid_reconstructed"] = bool(changed)
+            mesh.metrics["planar_quad_post_split_face_count"] = int(len(post_faces))
+            mesh.metrics["planar_quad_post_split_actual_hinge_count"] = int(len(mesh.grid.hinges))
             if (bool(getattr(params, "enable_csf_splits", True))
                     and float(getattr(domain, "csf_before", 1.)) >
                         float(getattr(params, "csf_split_threshold", 2.))
                     and not mesh.metrics["planar_quad_csf_split_certified"]):
-                print("[PLANAR-QUAD-20261026] WARNING: CSF limit NOT "
-                      "certified; no fictitious irregular cut has been invented",
-                      flush=True)
+                raise PlanarQuadMeshingError(
+                    "PLANAR_QUAD_CSF_SPLIT_UNCERTIFIED: "
+                    f"source_lambda_max={float(domain.csf_before):.6g} "
+                    f"threshold={float(getattr(params, 'csf_split_threshold', 2.)):.6g}; "
+                    "unstructured quad edge-chain Split did not certify the bound")
         return mesh
 
     pipeline._build_surface_parameterization = with_parameterization
