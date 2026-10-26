@@ -1,0 +1,52 @@
+name: Build original Zhang 2021 authors C++ implementation
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-original-windows-build-20261027.yml
+      - onestring-physics-simulator/scripts/download_zhang2021_authors.py
+  workflow_dispatch:
+jobs:
+  author-sources:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: microsoft/setup-msbuild@v2
+      - name: Retrieve original public Zhang C++ source from official USTC share
+        run: |
+          python scripts/download_zhang2021_authors.py --directory "$env:RUNNER_TEMP\zhang2021_author"
+      - name: Show solution configurations and platform/build metadata
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_author\authors_source\Code"
+          Get-ChildItem $root -Depth 1 | Where-Object { $_.Name -match 'sln|vcxproj' } | ForEach-Object { Write-Output $_.FullName }
+          foreach($part in @('Straighten','Segment','QuadMeshSimplify')){
+            $sol=Join-Path $root "$part\$part.sln"
+            if(Test-Path $sol) {
+              Write-Output "=== SOLUTION $part ==="
+              Select-String -Path $sol -Pattern "ActiveCfg|Build.0" | Select-Object -First 12
+            }
+          }
+      - name: Compile authors original Straighten/Segment/QuadMeshSimplify under MSVC
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_author\authors_source\Code"
+          foreach($part in @('Straighten','Segment','QuadMeshSimplify')){
+            $sol=Join-Path $root "$part\$part.sln"
+            if(Test-Path $sol){
+              Write-Output "=== BUILDING AUTHORS ORIGINAL $part ==="
+              & msbuild $sol /t:Build /p:Configuration=Release /p:Platform=x64 /m:2 /v:minimal /nologo
+              if($LASTEXITCODE -ne 0){
+                Write-Output "BUILD_FAILED $part EXIT=$LASTEXITCODE"
+              } else {
+                Write-Output "BUILD_OK $part"
+              }
+            }
+          }
+          Write-Output "=== ORIGINAL AUTHOR EXECUTABLES ==="
+          Get-ChildItem $root -Recurse -Filter '*.exe' | ForEach-Object { Write-Output $_.FullName }
