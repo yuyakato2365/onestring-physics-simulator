@@ -89,3 +89,20 @@ jobs:
                   for pos in ps[:6]:
                       print(repr(blob[max(0,pos-190):min(len(blob),pos+230)]))
           PY
+
+      - name: Recover guest-share endpoint names from publicly served Javascript
+        run: |
+          python3 - <<'PY'
+          import re, urllib.request
+          root="https://rec.ustc.edu.cn"
+          for name in ["/js/runtime.4f1c887e.js","/js/chunk-common.646a2039.js"]:
+              body=urllib.request.urlopen(root+name,timeout=40).read().decode(errors="replace")
+              if "runtime" in name:
+                  for m in list(re.finditer("1fe9560c",body))[:8]:
+                      print("ROUTE-CHUNK",repr(body[max(0,m.start()-160):m.end()+210]))
+              else:
+                  matches=set(re.findall(r'url:"(/[a-zA-Z0-9/_?={}.+-]+)"',body))
+                  for v in sorted(matches):
+                      if any(k in v.lower() for k in ("share","download","public","file")):
+                          print("SHARE-API-PATH",v)
+          PY
