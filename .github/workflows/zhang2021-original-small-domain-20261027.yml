@@ -21,6 +21,10 @@ jobs:
       - name: Install official genuine author binaries
         run: |
           python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang2021_real_square"
+      - name: Restore missing Qt 5.7 platform plugins required by original QApplication
+        run: |
+          $root="$env:RUNNER_TEMP\\zhang2021_real_square\\authors_executables\\ExeProgram"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$root"
       - name: Generate 9x9 original OBJ UV triangle chart
         run: |
           $root="$env:RUNNER_TEMP\zhang2021_real_square\authors_executables\ExeProgram"
