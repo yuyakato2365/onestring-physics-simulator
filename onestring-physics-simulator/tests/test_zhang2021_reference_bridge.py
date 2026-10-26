@@ -134,3 +134,53 @@ def test_standalone_cli_validates_reference_candidate(square_source, tmp_path):
     record = json.loads(report.read_text(encoding="utf-8"))
     assert record["quad_count"] == 1
     assert record["zhang2021_algorithm_verified"] is False
+
+
+def test_reference_only_pipeline_fails_closed_without_authors_backend():
+    """No implicit Gmsh, heuristic generator, or regular-grid fallback."""
+    from onestring_physics.input_shape import create_builtin_shape
+    from onestring_physics import onestring_pipeline as pipeline
+    from onestring_physics.optcuts_planar_quad_20261026 import (
+        install_planar_quad_20261026)
+    from onestring_physics.optcuts_planar_quad_downstream_20261026 import (
+        install_unstructured_quad_downstream_20261026)
+    install_unstructured_quad_downstream_20261026()
+    install_planar_quad_20261026(pipeline)
+    params = pipeline.PipelineParameters(
+        nx=3,
+        max_3d_iterations=4,
+        max_2d_iterations=4,
+        omega_boundary_mode="shape_preserving_experimental",
+        omega_parameterization_mode="pca_debug",
+        allow_experimental_pipeline=True,
+        optcuts_planar_quad_20261026_enabled=True,
+        optcuts_zhang2021_experimental_enabled=False,
+        optcuts_zhang2021_reference_enabled=True,
+        zhang2021_reference_adapter_command="",
+        planar_quad_uv_reparam=False,
+        enable_csf_splits=False,
+        collision_split_enabled=False,
+    )
+    target = create_builtin_shape("dome", {"amplitude": .25, "radius": 2.})
+    with pytest.raises(Zhang2021BridgeError, match="NOT_CONFIGURED"):
+        pipeline.build_onestring_design(target, params)
+
+
+def test_reference_only_mode_refuses_unrequested_uv_reparam():
+    from onestring_physics.input_shape import create_builtin_shape
+    from onestring_physics import onestring_pipeline as pipeline
+    from onestring_physics.optcuts_planar_quad_20261026 import (
+        install_planar_quad_20261026, PlanarQuadMeshingError)
+    install_planar_quad_20261026(pipeline)
+    params = pipeline.PipelineParameters(
+        nx=3,
+        omega_boundary_mode="shape_preserving_experimental",
+        omega_parameterization_mode="pca_debug",
+        allow_experimental_pipeline=True,
+        optcuts_planar_quad_20261026_enabled=True,
+        optcuts_zhang2021_reference_enabled=True,
+        planar_quad_uv_reparam=True,
+    )
+    target = create_builtin_shape("dome", {"amplitude": .25, "radius": 2.})
+    with pytest.raises(PlanarQuadMeshingError, match="SOURCE_UV_MUST_NOT_BE_PREMODIFIED"):
+        pipeline.build_onestring_design(target, params)
