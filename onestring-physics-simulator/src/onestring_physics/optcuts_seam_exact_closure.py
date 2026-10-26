@@ -373,8 +373,10 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
     # resolution from the actual 3D lengths of those already-classified
     # M2D seam edges. This changes only the grouping tolerance, NEVER
     # their geometry, and leaves the 10/23 baseline behavior unchanged.
-    if bool(getattr(parameterization,"metrics",{}).get(
-            "optcuts_grid_seam_native_enabled",False)):
+    if (bool(getattr(parameterization,"metrics",{}).get(
+            "optcuts_grid_seam_native_enabled",False))
+        or bool(getattr(parameterization,"metrics",{}).get(
+            "planar_quad_20261026_enabled",False))):
         source_resolution=max(1e-12*xyzspan,1e-14)
         seam_lengths=[
             float(np.linalg.norm(sampled[a]-sampled[b]))
