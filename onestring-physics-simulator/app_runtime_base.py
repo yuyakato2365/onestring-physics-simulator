@@ -799,6 +799,10 @@ with st.sidebar:
     )
     zhang2021_reference_adapter_command = str(st.session_state.get(
         "onestring_zhang2021_reference_adapter_cmd", "")).strip()
+    zhang2021_author_exe_root = str(st.session_state.get(
+        "onestring_zhang2021_author_exe_root", "")).strip()
+    zhang2021_author_wine_command = str(st.session_state.get(
+        "onestring_zhang2021_author_wine_cmd", "")).strip()
     optcuts_zhang2021_experimental_enabled = bool(
         optcuts_planar_quad_20261026_enabled and (
             omega_parameterization_mode == "optcuts_zhang2021_coarse_layout_experiment"
@@ -2112,6 +2116,8 @@ def current_pipeline_key() -> tuple:
         optcuts_zhang2021_experimental_enabled,
         optcuts_zhang2021_reference_enabled,
         zhang2021_reference_adapter_command,
+        zhang2021_author_exe_root,
+        zhang2021_author_wine_command,
         planar_quad_target_faces,
         planar_quad_refine_m3d,
         planar_quad_uv_reparam,
@@ -2287,6 +2293,8 @@ pipeline_params = PipelineParameters(
     optcuts_zhang2021_experimental_enabled=optcuts_zhang2021_experimental_enabled,
     optcuts_zhang2021_reference_enabled=optcuts_zhang2021_reference_enabled,
     zhang2021_reference_adapter_command=zhang2021_reference_adapter_command,
+    zhang2021_author_exe_root=zhang2021_author_exe_root,
+    zhang2021_author_wine_command=zhang2021_author_wine_command,
     planar_quad_target_faces=planar_quad_target_faces,
     planar_quad_refine_m3d=planar_quad_refine_m3d,
     planar_quad_uv_reparam=planar_quad_uv_reparam,
