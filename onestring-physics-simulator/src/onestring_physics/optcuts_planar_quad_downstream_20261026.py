@@ -35,7 +35,28 @@ def install_unstructured_quad_downstream_20261026():
                 owner.setdefault(tuple(sorted((int(a), int(b)))), []).append(
                     (tile.id, k, (k+1) % 4))
         boundary = [items[0] for items in owner.values() if len(items) == 1]
-        return [(int(tile), (int(a), int(b))) for tile, a, b in boundary]
+        outgoing = {}
+        for tile, a, b in boundary:
+            face = grid.tiles[int(tile)].vertex_ids
+            initial = face[int(a)]
+            end = face[int(b)]
+            if initial in outgoing:
+                raise ValueError("PLANAR_QUAD_BOUNDARY_BRANCHING")
+            outgoing[initial] = (end, int(tile), (int(a), int(b)))
+        first = min(outgoing)
+        here = first
+        ordered = []
+        seen = set()
+        while here not in seen:
+            seen.add(here)
+            if here not in outgoing:
+                raise ValueError("PLANAR_QUAD_BOUNDARY_DISCONNECTED")
+            end, tile, corners = outgoing[here]
+            ordered.append((tile, corners))
+            here = end
+        if here != first or len(ordered) != len(boundary):
+            raise ValueError("PLANAR_QUAD_BOUNDARY_NOT_SINGLE_CYCLE")
+        return ordered
 
     def initial_layout(raw_tiles, grid):
         if not isinstance(grid, UnstructuredQuadGrid):
