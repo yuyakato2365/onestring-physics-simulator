@@ -1,0 +1,29 @@
+name: Planar quad Omega 2026-10-26
+
+on:
+  push:
+    branches:
+      - feature/planar-quad-omega-20261026
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-and-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and tests
+        run: |
+          python -m pip install -e . pytest
+      - name: Compile changed Python entrypoints
+        run: |
+          python -m py_compile src/onestring_physics/optcuts_planar_quad_20261026.py app_optcuts_core_20260916.py app_runtime_base.py
+      - name: Verify UV inverse and irregular face topology
+        run: |
+          python -m pytest -q tests/test_optcuts_planar_quad_20261026.py
