@@ -16,6 +16,7 @@ https://doi.org/10.1016/j.cad.2021.103084
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import subprocess
@@ -195,7 +196,8 @@ def audit_reference_quads(
 
 def run_reference_adapter(
     source: Any, adapter_command: Sequence[str], *,
-    timeout_seconds: int = 240,
+    timeout_seconds: int = 1200,
+    target_quads: int = 35,
     require_seam_correspondence: bool = True,
 ) -> AuditedQuadMesh:
     """Execute ONLY a caller-supplied, separately verified adapter.
@@ -219,12 +221,15 @@ def run_reference_adapter(
             "executable's CLI has NOT been established")
     if timeout_seconds < 1:
         raise Zhang2021BridgeError("INVALID_ADAPTER_TIMEOUT")
+    if int(target_quads) < 4:
+        raise Zhang2021BridgeError("INVALID_NATIVE_TARGET_QUAD_COUNT")
     with TemporaryDirectory(prefix="onestring_zhang2021_") as directory:
         source_file = Path(directory) / "optcuts_source.npz"
         output_file = Path(directory) / "candidate_quads.npz"
         export_source_chart(source, source_file)
         expanded = [arg.replace("{input}", str(source_file))
-                        .replace("{output}", str(output_file)) for arg in cmd]
+                        .replace("{output}", str(output_file))
+                        .replace("{target_quads}", str(int(target_quads))) for arg in cmd]
         try:
             completed = subprocess.run(
                 expanded, check=False, capture_output=True, text=True,
@@ -247,10 +252,28 @@ def run_reference_adapter(
         except (OSError, KeyError, ValueError) as exc:
             raise Zhang2021BridgeError(
                 "REFERENCE_ADAPTER_OUTPUT_INVALID") from exc
-    return audit_reference_quads(
+        # The native adapter writes provenance beside its output; retain it
+        # before the temp directory is deleted. This claim does not by itself
+        # establish that an arbitrary external command is the authors' binary.
+        claimed = {}
+        manifest_path = output_file.with_suffix(".provenance.json")
+        if manifest_path.is_file():
+            try:
+                claimed = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                raise Zhang2021BridgeError("REFERENCE_PROVENANCE_CORRUPT") from exc
+    result = audit_reference_quads(
         source, vertices, faces,
         require_seam_correspondence=require_seam_correspondence,
     )
+    result.diagnostics["reference_manifest_present"] = bool(claimed)
+    result.diagnostics["reference_backend_declared"] = str(
+        claimed.get("engine", "unverified_adapter"))
+    result.diagnostics["authors_native_stages_reported"] = [
+        str(step.get("program", "")) for step in claimed.get("stages", [])
+        if isinstance(step, dict)
+    ]
+    return result
 
 
 def to_onestring_m2d(audit: AuditedQuadMesh, *, tile_size: float,
