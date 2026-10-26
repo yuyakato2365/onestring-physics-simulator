@@ -237,6 +237,23 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
                       for x, y in boundary]
             lines = [gmsh.model.geo.addLine(points[i], points[(i + 1) % len(points)])
                      for i in range(len(points))]
+            # Full-quad recombination (Mesh.RecombinationAlgorithm=2)
+            # internally coarsens *each individual 1D curve* by pairing
+            # adjacent line elements. Merely giving the whole polygon an
+            # even number of edges does NOT suffice: a short boundary curve
+            # independently meshed into one/three elements triggers
+            # Gmsh's "1D mesh cannot be divided by 2".
+            # Give EVERY boundary curve an even positive element count.
+            # The node count for setTransfiniteCurve is elements + 1.
+            edge_lengths = np.linalg.norm(
+                np.roll(boundary, -1, axis=0) - boundary, axis=1)
+            if np.any(edge_lengths <= 1e-12 * max(float(h), 1.)):
+                raise PlanarQuadMeshingError(
+                    "PLANAR_QUAD_ZERO_LENGTH_BOUNDARY_CURVE")
+            curve_elements = np.maximum(
+                2, 2 * np.ceil(edge_lengths / (2. * h)).astype(int))
+            for curve, count in zip(lines, curve_elements):
+                gmsh.model.mesh.setTransfiniteCurve(int(curve), int(count) + 1)
             loop = gmsh.model.geo.addCurveLoop(lines)
             surface = gmsh.model.geo.addPlaneSurface([loop])
             gmsh.model.geo.synchronize()
@@ -352,6 +369,10 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
         "planar_quad_faces": int(len(faces)),
         "planar_quad_target_faces": int(target_faces),
         "planar_quad_target_edge_length": float(h),
+        "planar_quad_gmsh_boundary_curve_count": int(len(boundary)),
+        "planar_quad_gmsh_boundary_curve_elements": int(np.sum(curve_elements)),
+        "planar_quad_gmsh_per_curve_even_subdivisions": bool(
+            np.all(curve_elements >= 2) and np.all(curve_elements % 2 == 0)),
         "planar_quad_omega_undercoverage_fraction": float(
             polygon.difference(union).area / polygon.area),
         "planar_quad_omega_overcoverage_fraction": float(
