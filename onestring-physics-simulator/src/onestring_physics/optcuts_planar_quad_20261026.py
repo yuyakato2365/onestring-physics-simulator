@@ -353,7 +353,9 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         if params is not None and bool(getattr(params, "optcuts_planar_quad_20261026_enabled", False)):
             result._planar_quad_source = parameterization
             result._planar_quad_target_faces = int(getattr(params, "planar_quad_target_faces", 35))
-            result.paper_split_policy = False
+            # Retain the audited CSF Split stage. On irregular quad layouts it
+            # may reject cuts that do not follow a complete shared edge chain.
+            result.paper_split_policy = True
         return result
 
     def with_m2d(grid, domain, params=None):
@@ -364,15 +366,10 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         uv, faces, report = build_planar_quad(
             domain._planar_quad_source, domain._planar_quad_target_faces,
             refine_m3d=bool(getattr(params, "planar_quad_refine_m3d", True)))
-        # No claiming this is regular-grid CSF Split. Support is not implemented.
-        source = domain._planar_quad_source
-        limit = float(getattr(params, "csf_split_threshold", 2.))
-        if (bool(getattr(params, "enable_csf_splits", True))
-                and float(getattr(domain, "csf_before", 1.)) > limit):
-            raise PlanarQuadMeshingError(
-                "PLANAR_QUAD_CSF_SPLIT_UNIMPLEMENTED: irregular-grid component "
-                "splitting is required before enabling full OneString assembly; "
-                "no silent suppression of requested Split")
+        # Unlike the regular 50%-mask mode, irregular faces are never
+        # silently reconstructed on a rectangular lattice. The existing Split
+        # module is allowed to test complete cuts, and reports failure to
+        # certify the CSF bound if no cut is geometrically admissible.
         # Match the mesh's actual UV length scale; passing the old regular-grid
         # tile_size unchanged would make T2D gap/shrink geometry meaningless.
         all_edges = np.linalg.norm(np.roll(uv[faces], -1, axis=1) - uv[faces], axis=2)
@@ -390,6 +387,20 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
               f"from {len(uv)} UV vertices; "
               f"min3Dangle={report['planar_quad_m3d_angle_min_degrees']:.2f}",
               flush=True)
+        if bool(getattr(domain, "paper_split_policy", False)):
+            from .simple_split_panel_patch import apply_paper_split
+            mesh = apply_paper_split(pipeline, mesh, domain, params)
+            mesh.metrics["planar_quad_csf_split_certified"] = bool(
+                mesh.metrics.get("csf_split_bound_certified", False))
+            mesh.metrics["planar_quad_csf_split_mechanism"] = (
+                "existing OneString complete-edge Split with explicit certification metrics")
+            if (bool(getattr(params, "enable_csf_splits", True))
+                    and float(getattr(domain, "csf_before", 1.)) >
+                        float(getattr(params, "csf_split_threshold", 2.))
+                    and not mesh.metrics["planar_quad_csf_split_certified"]):
+                print("[PLANAR-QUAD-20261026] WARNING: CSF limit NOT "
+                      "certified; no fictitious irregular cut has been invented",
+                      flush=True)
         return mesh
 
     pipeline._build_surface_parameterization = with_parameterization
