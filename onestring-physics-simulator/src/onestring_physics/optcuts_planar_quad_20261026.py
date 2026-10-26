@@ -255,6 +255,16 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
         if owner:
             gmsh.finalize()
 
+    # This is required even when refine_m3d=False. In the old implementation
+    # the disk/nonmanifold audit ran only inside the optional refinement.
+    from .optcuts_planar_quad_refine_20261026 import validate_disk_mesh
+    try:
+        validate_disk_mesh(uv, faces)
+    except ValueError as exc:
+        raise PlanarQuadMeshingError(
+            "PLANAR_QUAD_GRID_TOPOLOGY_INVALID: " + str(exc)
+        ) from exc
+
     # Strict all-quad connectivity and subsequent geometry must be verified.
     polys = []
     orientations = []
