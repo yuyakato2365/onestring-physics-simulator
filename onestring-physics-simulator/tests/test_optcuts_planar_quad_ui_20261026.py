@@ -71,4 +71,4 @@ def test_planar_quad_routing_is_not_dependent_on_the_launcher(
         "paper_fidelity_enabled": paper_mode,
         "omega_parameterization_mode": selected,
     }
-    assert bool(eval(check, {"__builtins__": {}}, scope)) is expected
+    assert bool(eval(check, {"__builtins__": {"bool": bool}}, scope)) is expected
