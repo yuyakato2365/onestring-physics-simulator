@@ -11,11 +11,14 @@ For an irregular UV disk this may disconnect selected cells or produce narrow
 3D quads. This isolated experiment tests a different approach:
 
 ```
-S → Official OptCuts (original UV triangles / cut unchanged)
+S → Official OptCuts (3D cut and vertex/face pairing unchanged)
+  → conservative boundary UV smoothing + harmonic interior continuation
+  → optional coarse-boundary straightening with SD/flip/overlap guards
   → planar Gmsh 2D quadrangulation with target edge length
   → strict all-quad / original-Ω coverage / UV inverse tests
   → M2D + quantitative M3D shape diagnostics
-  → experimental downstream adapters
+  → conditional M3D-aware interior-vertex quad adjustment
+  → existing audited CSF Split attempt + conservative unstructured T2D adapters
 ```
 
 The generating mesher currently uses **Gmsh recombination**, NOT the reference
@@ -46,6 +49,7 @@ count is **not** guaranteed to equal the requested count.
 ## Strict acceptance
 
 - Input: original paired OptCuts UV/3D triangles and one simple UV disk.
+- The source paired UV triangles may be moved by bounded harmonic deformation; every accepted chart retains winding, one simple boundary and SD ≤ its guard. 3D vertices / triangle IDs / 3D cut remain fixed.
 - UV triangle correspondences are kept intact; no silent resampling of S.
 - Target edge length is based on Ω area and requested count.
 - Mesh output **must** be all quads with consistent winding and positive
@@ -57,24 +61,17 @@ count is **not** guaranteed to equal the requested count.
   surface fallback.
 - Metrics include 2D and 3D smallest angle, edge-length max/median,
   smallest area, area max/median, and Ω coverage loss.
-- Original CSF Split is **not** silently run on irregular quad connectivity.
-  If requested and needed, the experiment raises
-  `PLANAR_QUAD_CSF_SPLIT_UNIMPLEMENTED` rather than pretending to support it.
+- The existing OneString CSF Split stage is invoked with the actual unstructured faces. It may reject all complete cuts; diagnostics expose `csf_split_bound_certified=False`. No made-up grid seam or unverified bound is labeled success.
 
 ## Explicitly unfinished
 
 1. The specific Zhang et al. 2021 coarse-layout implementation, field-guided
    segmentation and template optimizations have **not** been ported.
-2. This version holds the original OptCuts UV mapping fixed; it does not jointly
-   optimize the S↔Ω parameterization and the quad layout (SLIM or other
-   bijective UV reparameterization). Only the mesh changes.
-3. M3D shape is **measured**, not optimized. A future mode should activate
-   3D-aware vertex adjustment when the worst-panel metrics are poor.
-4. Seam-sampling parity / exact reconstructed cut-edge pairing for arbitrary
-   all-quad topology is not completed.
-5. Regular-grid-only downstream CSF Split, tile index assumptions, K3D, T2D,
-   hinge/collision algorithms need compatibility validation. Full Bunny
-   end-to-end success, especially at 30/35 panels, is **not established**.
+2. This version adds bounded-SD source UV boundary adjustment and harmonic interior continuation, but **does not yet implement** a global joint SD/quad objective or the published cross-field rectangular-patch layout algorithm.
+3. M3D shape is measured, and a conservative interior-vertex M2D relocation is attempted only for poor 3D panels. This is local search, not a globally optimal 3D shape guarantee.
+4. Full seam-sampling parity and fabrication verification for arbitrary
+   all-quad topology are not completed.
+5. Some downstream row/column assumptions are replaced by face connectivity. The original CSF Split may fail to certify the threshold for irregular meshes; K3D, T2D and exact seam pairing still need full Bunny end-to-end verification at 30/35 panels. **This is not yet a demonstrated complete Bunny assembly.**
 6. Gmsh's recombination is heuristic; an unpaired boundary or difficult
    concave shape may still yield triangles. This mode fails explicitly.
 
