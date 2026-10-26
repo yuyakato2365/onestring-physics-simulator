@@ -556,6 +556,7 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
                 params, "zhang2021_reference_adapter_command", "")).strip())
             audited = run_reference_adapter(
                 domain._planar_quad_source, cmd,
+                target_quads=int(domain._planar_quad_target_faces),
                 require_seam_correspondence=True)
             uv, faces = audited.vertices_uv, audited.faces
             report = dict(audited.diagnostics)
