@@ -105,7 +105,7 @@ def _triangle_inverse(uv_vertices: np.ndarray, uv_faces: np.ndarray,
     u, v = b - a, c - a
     det = u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]
     scale = max(float(np.max(np.ptp(uv, axis=0))), 1e-9)
-    if np.any(det <= 1e-14 * scale * scale):
+    if np.any(np.abs(det) <= 1e-14 * scale * scale) or np.any(det * det[0] <= 0):
         raise PlanarQuadMeshingError("QUAD_SOURCE_UV_FLIPPED_OR_DEGENERATE")
     low = np.min(uv[tris], axis=1) - 1e-9 * scale
     high = np.max(uv[tris], axis=1) + 1e-9 * scale
@@ -153,7 +153,7 @@ def build_planar_quad(parameterization: Any, target_faces: int):
     """Gmsh conforming 2D quadrangulation; no masked-square fallback."""
     try:
         import gmsh
-        from shapely.geometry import Polygon, Point
+        from shapely.geometry import Polygon
         from shapely.ops import unary_union
     except ImportError as exc:
         raise PlanarQuadMeshingError(
@@ -181,6 +181,12 @@ def build_planar_quad(parameterization: Any, target_faces: int):
         boundary = np.asarray(polygon.exterior.coords, float)[:-1, :2]
     if len(boundary) < 4:
         raise PlanarQuadMeshingError("PLANAR_QUAD_BOUNDARY_TOO_FEW_CORNERS")
+    # Disk all-quad topology needs even boundary-edge parity.
+    if len(boundary) % 2:
+        spans = np.linalg.norm(np.roll(boundary, -1, axis=0) - boundary, axis=1)
+        j = int(np.argmax(spans))
+        boundary = np.insert(boundary, j + 1,
+                             .5 * (boundary[j] + boundary[(j + 1) % len(boundary)]), axis=0)
 
     # Gmsh is process-global. Always clear and finalize even after failure.
     owner = not gmsh.isInitialized()
