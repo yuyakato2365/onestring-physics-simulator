@@ -554,6 +554,30 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
             from .zhang2021_reference_bridge import run_reference_adapter
             cmd = shlex.split(str(getattr(
                 params, "zhang2021_reference_adapter_command", "")).strip())
+            if not cmd:
+                # User may install the ORIGINAL author executables separately.
+                # This is an exact native 3-stage adapter, NEVER a generator
+                # substitution; source ZIP/license stay outside this repo.
+                import os
+                import sys
+                from pathlib import Path
+                native_root = os.environ.get(
+                    "ONESTRING_ZHANG2021_EXE_ROOT", "").strip()
+                if native_root:
+                    adapter = (Path(__file__).resolve().parents[2]
+                               / "scripts/zhang2021_authors_native_adapter.py")
+                    if not adapter.is_file():
+                        raise PlanarQuadMeshingError(
+                            "ZHANG_AUTHORS_NATIVE_ADAPTER_SCRIPT_MISSING")
+                    cmd = [
+                        sys.executable, str(adapter), "--input", "{input}",
+                        "--output", "{output}", "--target-quads", "{target_quads}",
+                        "--exe-root", str(Path(native_root).resolve()),
+                    ]
+                    wine = os.environ.get(
+                        "ONESTRING_ZHANG2021_WINE_COMMAND", "").strip()
+                    if wine:
+                        cmd.extend(["--wine-command", *shlex.split(wine)])
             audited = run_reference_adapter(
                 domain._planar_quad_source, cmd,
                 target_quads=int(domain._planar_quad_target_faces),
