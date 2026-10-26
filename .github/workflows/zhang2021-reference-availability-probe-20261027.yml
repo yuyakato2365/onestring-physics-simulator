@@ -70,3 +70,22 @@ jobs:
               for x in matches[:18]:
                   print(x)
           PY
+
+      - name: Inspect guest-share Vue route bundle endpoints
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, urllib.request
+          base="https://rec.ustc.edu.cn"
+          html=urllib.request.urlopen(base+"/share/8081ab10-dd29-11eb-b5e1-5fc36251b03b",timeout=20).read().decode()
+          hits=re.findall(r'/js/chunk-1fe9560c\\.[0-9a-f]+\\.js',html)
+          print("guest-route-bundles",hits)
+          for name in hits[:2]:
+              blob=urllib.request.urlopen(base+name,timeout=30).read().decode(errors="replace")
+              print("GUEST-BUNDLE-SIZE",len(blob))
+              for pat in ['share_number','shareInfo','shareFile','axios','download','getshare','getShare','/api','/share','apiUrl']:
+                  ps=[m.start() for m in re.finditer(re.escape(pat),blob,re.I)]
+                  print("PATTERN",pat,"N",len(ps))
+                  for pos in ps[:6]:
+                      print(repr(blob[max(0,pos-190):min(len(blob),pos+230)]))
+          PY
