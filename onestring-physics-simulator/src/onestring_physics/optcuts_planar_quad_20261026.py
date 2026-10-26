@@ -446,9 +446,17 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         result = base_parameterization(surface, target, grid, params)
         if bool(getattr(params, "optcuts_planar_quad_20261026_enabled", False)):
             result.metrics["requested_omega_parameterization_mode"] = (
-                "optcuts_zhang2021_coarse_layout_experiment"
+                "optcuts_zhang2021_reference_only"
+                if bool(getattr(params, "optcuts_zhang2021_reference_enabled", False))
+                else "optcuts_zhang2021_coarse_layout_experiment"
                 if bool(getattr(params, "optcuts_zhang2021_experimental_enabled", False))
                 else MODE)
+            # Preserve the ORIGINAL OptCuts domain for a faithful source run.
+            # Arbitrary harmonic smoothing is prohibited in reference-only mode.
+            if (bool(getattr(params, "optcuts_zhang2021_reference_enabled", False))
+                    and bool(getattr(params, "planar_quad_uv_reparam", False))):
+                raise PlanarQuadMeshingError(
+                    "ZHANG_REFERENCE_SOURCE_UV_MUST_NOT_BE_PREMODIFIED")
             result.metrics["planar_quad_source_seam_policy"] = "original OptCuts fixed"
             result.metrics["planar_quad_20261026_enabled"] = True
             if bool(getattr(params, "planar_quad_uv_reparam", True)):
@@ -539,7 +547,32 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
             return base_m2d(grid, domain, params)
         if not hasattr(domain, "_planar_quad_source"):
             raise PlanarQuadMeshingError("PLANAR_QUAD_MISSING_OPTCUTS_SOURCE")
-        if bool(getattr(params, "optcuts_zhang2021_experimental_enabled", False)):
+        if bool(getattr(params, "optcuts_zhang2021_reference_enabled", False)):
+            if bool(getattr(params, "optcuts_zhang2021_experimental_enabled", False)):
+                raise PlanarQuadMeshingError("ZHANG_BACKENDS_MUTUALLY_EXCLUSIVE")
+            import shlex
+            from .zhang2021_reference_bridge import run_reference_adapter
+            cmd = shlex.split(str(getattr(
+                params, "zhang2021_reference_adapter_command", "")).strip())
+            audited = run_reference_adapter(
+                domain._planar_quad_source, cmd,
+                require_seam_correspondence=True)
+            uv, faces = audited.vertices_uv, audited.faces
+            report = dict(audited.diagnostics)
+            report["planar_quad_engine"] = (
+                "external reference-only adapter; algorithm identity UNVERIFIED")
+            report["planar_quad_target_faces"] = int(
+                domain._planar_quad_target_faces)
+            report["planar_quad_faces"] = int(len(faces))
+            report["planar_quad_reference_identity_verified"] = False
+            q2 = _quad_quality(
+                np.column_stack((uv, np.zeros(len(uv)))), faces)
+            q3 = _quad_quality(audited.vertices_3d, faces)
+            for name, value in q2.items():
+                report["planar_quad_m2d_" + name] = value
+            for name, value in q3.items():
+                report["planar_quad_m3d_" + name] = value
+        elif bool(getattr(params, "optcuts_zhang2021_experimental_enabled", False)):
             # OneString's strict preflight applies to both engines.
             # This is a real, independent quad generator, not the authors'
             # C++ Zhang 2021 reference method. Never fall back to Gmsh.
@@ -590,7 +623,7 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         })
         if str(seam["status"]) == "nonconforming":
             raise PlanarQuadMeshingError(
-                "PLANAR_QUAD_SEAM_NOT_CONFORMING: Gmsh boundary quad edges "
+                "PLANAR_QUAD_SEAM_NOT_CONFORMING: boundary quad edges "
                 "cannot be proven to follow the paired original OptCuts cut. "
                 f"unmatched={seam.get('unmatched_edges')} "
                 f"unclassified={seam.get('unclassified_boundary_edges')}; "
