@@ -322,9 +322,15 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
                 "PLANAR_QUAD_CSF_SPLIT_UNIMPLEMENTED: irregular-grid component "
                 "splitting is required before enabling full OneString assembly; "
                 "no silent suppression of requested Split")
-        irregular = UnstructuredQuadGrid(uv, faces,
-                                         float(getattr(grid, "tile_size", 1.)),
-                                         float(getattr(grid, "gap_size", .08)))
+        # Match the mesh's actual UV length scale; passing the old regular-grid
+        # tile_size unchanged would make T2D gap/shrink geometry meaningless.
+        all_edges = np.linalg.norm(np.roll(uv[faces], -1, axis=1) - uv[faces], axis=2)
+        effective_size = float(np.median(all_edges))
+        original_size = max(float(getattr(grid, "tile_size", 1.)), 1e-12)
+        effective_gap = float(getattr(grid, "gap_size", .08)) * effective_size / original_size
+        irregular = UnstructuredQuadGrid(uv, faces, effective_size, effective_gap)
+        report["planar_quad_effective_uv_tile_size"] = effective_size
+        report["planar_quad_effective_uv_gap_size"] = effective_gap
         xyz = np.column_stack((uv, np.zeros(len(uv))))
         mesh_type = pipeline._original.QuadMesh
         mesh = mesh_type(xyz, np.asarray(faces, int), irregular,
