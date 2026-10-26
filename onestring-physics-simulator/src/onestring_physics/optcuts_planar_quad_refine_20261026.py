@@ -71,9 +71,16 @@ def _quad_penalty(quads_uv, quads_xyz, h_uv, h_xyz):
     cos3 = np.sum(e3 * np.roll(e3, 1, axis=1), axis=-1) / (
         l3 * np.roll(l3, 1, axis=1))
     angle = np.mean(cos3**2, axis=1)
-    diag2 = np.linalg.norm(quads_uv[:, 2] - quads_uv[:, 0], axis=1)
-    diag3 = np.linalg.norm(quads_uv[:, 3] - quads_uv[:, 1], axis=1)
-    diag_reg = np.log(np.maximum(diag2, 1e-12) / np.maximum(diag3, 1e-12)) ** 2
+    # Assess diagonal imbalance independently on M2D and lifted M3D.
+    # The previous implementation accidentally used UV coordinates for
+    # both diagonals, making this term blind to lifted 3D skew.
+    uv_d02 = np.linalg.norm(quads_uv[:, 2] - quads_uv[:, 0], axis=1)
+    uv_d13 = np.linalg.norm(quads_uv[:, 3] - quads_uv[:, 1], axis=1)
+    xyz_d02 = np.linalg.norm(quads_xyz[:, 2] - quads_xyz[:, 0], axis=1)
+    xyz_d13 = np.linalg.norm(quads_xyz[:, 3] - quads_xyz[:, 1], axis=1)
+    uv_diag_reg = np.log(np.maximum(uv_d02, 1e-12) / np.maximum(uv_d13, 1e-12)) ** 2
+    xyz_diag_reg = np.log(np.maximum(xyz_d02, 1e-12) / np.maximum(xyz_d13, 1e-12)) ** 2
+    diag_reg = 0.5 * (uv_diag_reg + xyz_diag_reg)
     return 1.8 * e3_shape + .7 * angle + .4 * e3_size + .35 * e2_size + .15 * diag_reg
 
 
