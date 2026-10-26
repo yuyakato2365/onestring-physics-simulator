@@ -13,10 +13,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import math
+from threading import RLock
 import numpy as np
 
 
 MODE = "optcuts_planar_quad_20261026"
+
+# Gmsh has a process-global model/option state. Streamlit may dispatch
+# independent browser sessions on separate script threads. Serialize our
+# initialize/mesh/finalize transaction rather than clearing another run's model.
+_GMSH_LOCK = RLock()
 
 
 class PlanarQuadMeshingError(RuntimeError):
@@ -211,54 +217,58 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
                              .5 * (boundary[j] + boundary[(j + 1) % len(boundary)]), axis=0)
 
     # Gmsh is process-global. Always clear and finalize even after failure.
-    owner = not gmsh.isInitialized()
-    if owner:
-        gmsh.initialize()
-    try:
-        gmsh.clear()
-        gmsh.option.setNumber("General.Terminal", 0)
-        gmsh.option.setNumber("Mesh.Algorithm", 8)
-        gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 2)
-        gmsh.option.setNumber("Mesh.ElementOrder", 1)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h * .75)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h * 1.25)
-        gmsh.model.add("onestring_planar_quad_20261026")
-        points = [gmsh.model.geo.addPoint(float(x), float(y), 0., h)
-                  for x, y in boundary]
-        lines = [gmsh.model.geo.addLine(points[i], points[(i + 1) % len(points)])
-                 for i in range(len(points))]
-        loop = gmsh.model.geo.addCurveLoop(lines)
-        surface = gmsh.model.geo.addPlaneSurface([loop])
-        gmsh.model.geo.synchronize()
-        gmsh.model.mesh.setRecombine(2, surface)
-        gmsh.model.mesh.generate(2)
-        tags, coords, _ = gmsh.model.mesh.getNodes()
-        xyz = np.asarray(coords, float).reshape(-1, 3)
-        tags = np.asarray(tags, int)
-        types, _elem_tags, node_tags = gmsh.model.mesh.getElements(2, surface)
-        pieces = []
-        for kind, conn in zip(types, node_tags):
-            _, dim, order, count, *_ = gmsh.model.mesh.getElementProperties(kind)
-            if int(dim) != 2 or int(order) != 1 or int(count) != 4:
-                raise PlanarQuadMeshingError(
-                    f"PLANAR_QUAD_NON_QUAD_ELEMENTS: element_type={kind} "
-                    "(Gmsh recombination failed; not accepted as all-quad)")
-            pieces.append(np.asarray(conn, int).reshape(-1, 4))
-        if not pieces:
-            raise PlanarQuadMeshingError("PLANAR_QUAD_NO_FACES")
-        faces_tags = np.concatenate(pieces)
-        lookup = {int(tag): i for i, tag in enumerate(tags)}
-        faces = np.asarray([[lookup[int(t)] for t in face] for face in faces_tags], int)
-        uv = xyz[:, :2]
-        used = np.unique(faces)
-        remap = np.full(len(uv), -1, int)
-        remap[used] = np.arange(len(used))
-        faces = remap[faces]
-        uv = uv[used]
-    finally:
-        gmsh.clear()
+    with _GMSH_LOCK:
+        owner = not gmsh.isInitialized()
         if owner:
-            gmsh.finalize()
+            # Streamlit executes scripts on worker threads. Gmsh's default
+            # interruptible=True installs a SIGINT handler, which Python permits
+            # only on the main thread. This flag disables only that handler.
+            gmsh.initialize(interruptible=False)
+        try:
+            gmsh.clear()
+            gmsh.option.setNumber("General.Terminal", 0)
+            gmsh.option.setNumber("Mesh.Algorithm", 8)
+            gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 2)
+            gmsh.option.setNumber("Mesh.ElementOrder", 1)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h * .75)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h * 1.25)
+            gmsh.model.add("onestring_planar_quad_20261026")
+            points = [gmsh.model.geo.addPoint(float(x), float(y), 0., h)
+                      for x, y in boundary]
+            lines = [gmsh.model.geo.addLine(points[i], points[(i + 1) % len(points)])
+                     for i in range(len(points))]
+            loop = gmsh.model.geo.addCurveLoop(lines)
+            surface = gmsh.model.geo.addPlaneSurface([loop])
+            gmsh.model.geo.synchronize()
+            gmsh.model.mesh.setRecombine(2, surface)
+            gmsh.model.mesh.generate(2)
+            tags, coords, _ = gmsh.model.mesh.getNodes()
+            xyz = np.asarray(coords, float).reshape(-1, 3)
+            tags = np.asarray(tags, int)
+            types, _elem_tags, node_tags = gmsh.model.mesh.getElements(2, surface)
+            pieces = []
+            for kind, conn in zip(types, node_tags):
+                _, dim, order, count, *_ = gmsh.model.mesh.getElementProperties(kind)
+                if int(dim) != 2 or int(order) != 1 or int(count) != 4:
+                    raise PlanarQuadMeshingError(
+                        f"PLANAR_QUAD_NON_QUAD_ELEMENTS: element_type={kind} "
+                        "(Gmsh recombination failed; not accepted as all-quad)")
+                pieces.append(np.asarray(conn, int).reshape(-1, 4))
+            if not pieces:
+                raise PlanarQuadMeshingError("PLANAR_QUAD_NO_FACES")
+            faces_tags = np.concatenate(pieces)
+            lookup = {int(tag): i for i, tag in enumerate(tags)}
+            faces = np.asarray([[lookup[int(t)] for t in face] for face in faces_tags], int)
+            uv = xyz[:, :2]
+            used = np.unique(faces)
+            remap = np.full(len(uv), -1, int)
+            remap[used] = np.arange(len(used))
+            faces = remap[faces]
+            uv = uv[used]
+        finally:
+            gmsh.clear()
+            if owner:
+                gmsh.finalize()
 
     # This is required even when refine_m3d=False. In the old implementation
     # the disk/nonmanifold audit ran only inside the optional refinement.
