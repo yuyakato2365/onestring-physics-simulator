@@ -264,3 +264,25 @@ jobs:
                   print("OFFICIAL_EXE_SHARE",suffix,j.get("status_code"),repr(j.get("entity"))[:5000])
               except Exception as e: print("EXE_SHARE_ERROR",type(e).__name__,str(e)[:300])
           PY
+
+      - name: Summarize actual original three-stage command-line contracts
+        run: |
+          python3 - <<'PY'
+          import zipfile,re
+          z=zipfile.ZipFile("/tmp/zhang2021_Code_new.zip")
+          for part in ("Straighten","Segment","QuadMeshSimplify"):
+              f=f"Code/{part}/{part}/main.cpp"
+              raw=z.read(f)
+              txt=raw.decode("utf-16",errors="replace") if raw.startswith(b"\\xff\\xfe") or raw[:30].count(b"\\x00")>=3 else raw.decode("utf-8",errors="replace")
+              lines=txt.splitlines()
+              print("AUTHOR_MAIN",part,"LINES",len(lines))
+              for i,line in enumerate(lines):
+                  if ("argv[" in line or "OpenMesh(" in line or "read_mesh" in line
+                       or "write_mesh" in line or "Save" in line or "save" in line
+                       or "output" in line.lower() or "int main(" in line):
+                      print("CALL",part,i+1,repr(line.strip()[:260]))
+              starts=[i for i,line in enumerate(lines) if "int main(" in line]
+              for idx in starts[:1]:
+                  for i in range(idx,min(idx+90,len(lines))):
+                      print("EXEC",part,i+1,lines[i][:230])
+          PY
