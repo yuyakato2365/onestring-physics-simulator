@@ -3,7 +3,7 @@ import pytest
 from types import SimpleNamespace
 from onestring_physics.optcuts_planar_quad_20261026 import (
     PlanarQuadMeshingError, UnstructuredQuadGrid, _triangle_inverse,
-    _quad_quality, build_planar_quad,
+    _quad_quality, build_planar_quad, _choose_contained_omega_boundary,
 )
 
 def test_original_cut_uv_inverse_exact_piecewise_linear():
@@ -86,3 +86,38 @@ def test_gmsh_concave_L_domain_all_quads_no_outside():
     assert report["planar_quad_omega_overcoverage_fraction"] <= 1e-5
     assert report["planar_quad_omega_undercoverage_fraction"] < .02
     assert report["planar_quad_m2d_area_min"] > 0.
+
+
+def test_shallow_concave_notch_is_not_filled_by_boundary_simplification():
+    """Topology preserving simplify may go OUTSIDE the original UV polygon.
+
+    Shapely removes a shallow inward notch, then the quad footprint exceeds
+    Omega and the old pipeline raises PLANAR_QUAD_OUTSIDE_ORIGINAL_OMEGA.
+    The new preflight must reject that particular boundary simplification.
+    """
+    from shapely.geometry import Polygon
+    uv_boundary = np.array([
+        [0., 0.], [2., 0.], [2., 2.],
+        [1.1, 2.], [1.0, 1.997], [.9, 2.], [0., 2.],
+    ])
+    source = Polygon(uv_boundary)
+    h = float(np.sqrt(source.area / 35))
+    old = source.simplify(min(h * .03, np.sqrt(source.area) * .005),
+                          preserve_topology=True)
+    assert old.is_valid
+    assert old.difference(source).area > 1e-5 * source.area
+    chosen, report = _choose_contained_omega_boundary(source, h)
+    assert Polygon(chosen).difference(source).area <= 1e-12 * source.area
+    assert report["planar_quad_boundary_outside_rejected_candidates"] >= 1
+    assert report["planar_quad_meshed_boundary_vertices"] <= len(uv_boundary)
+
+
+def test_convex_corner_simplification_is_allowed_when_it_stays_inside():
+    """Don't disable helpful simplification everywhere as a workaround."""
+    from shapely.geometry import Polygon
+    source = Polygon([(0., 0.), (2., 0.), (2., 2.), (1.1, 2.),
+                      (1., 2.003), (.9, 2.), (0., 2.)])
+    h = float(np.sqrt(source.area / 35))
+    chosen, report = _choose_contained_omega_boundary(source, h)
+    assert Polygon(chosen).difference(source).area <= 1e-12 * source.area
+    assert report["planar_quad_meshed_boundary_vertices"] <= len(source.exterior.coords)-1
