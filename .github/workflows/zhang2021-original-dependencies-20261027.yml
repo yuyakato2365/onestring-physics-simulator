@@ -1,0 +1,62 @@
+name: Diagnose official Zhang binary loader dependencies
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-original-dependencies-20261027.yml
+  workflow_dispatch:
+jobs:
+  pe-imports:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve genuine original executables
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_deps"
+          python -m pip install pefile
+      - name: Inspect direct and transitive PE DLL imports
+        run: |
+          $env:ZHANG_AUTHOR_ROOT="$env:RUNNER_TEMP\zhang_deps\authors_executables\ExeProgram"
+          @'
+          from pathlib import Path
+          import os
+          import pefile
+          root=Path(os.environ["ZHANG_AUTHOR_ROOT"])
+          files={p.name.lower():p for p in root.glob("*.dll")}
+          files.update({p.name.lower():p for p in root.glob("*.exe")})
+          binaries=[root/n for n in ["Straighten.exe","Segment.exe","QMSim.exe"]]
+          whitelist=("api-ms-win-", "ext-ms-win-")
+          system={"kernel32.dll","user32.dll","gdi32.dll","advapi32.dll",
+                  "shell32.dll","ole32.dll","oleaut32.dll","ws2_32.dll",
+                  "bcrypt.dll","ntdll.dll","comdlg32.dll","shlwapi.dll",
+                  "comctl32.dll","msvcrt.dll","ucrtbase.dll","secur32.dll",
+                  "vcruntime140.dll","msvcp140.dll","vcomp140.dll",
+                  "opengl32.dll","glu32.dll","imm32.dll","version.dll",
+                  "winmm.dll","setupapi.dll","crypt32.dll","shcore.dll",
+                  "winspool.drv","dwmapi.dll","dxgi.dll","d3d9.dll"}
+          visited=set()
+          def walk(path,depth=0):
+              if depth>4 or path.name.lower() in visited: return
+              visited.add(path.name.lower())
+              try:
+                  pe=pefile.PE(str(path),fast_load=True)
+                  pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT']])
+              except Exception as e:
+                  print("UNREADABLE",path.name,str(e)[:200]); return
+              ds=[entry.dll.decode(errors="replace") for entry in getattr(pe,"DIRECTORY_ENTRY_IMPORT",[])]
+              print("IMPORTS",path.name,"=>",", ".join(ds))
+              for dep in ds:
+                  low=dep.lower()
+                  if low in files: walk(files[low],depth+1)
+                  elif low in system or low.startswith(whitelist): pass
+                  else: print("UNBUNDLED_DEPENDENCY",path.name,"=>",dep)
+          for b in binaries: walk(b)
+          '@ | python -
