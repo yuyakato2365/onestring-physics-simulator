@@ -18,9 +18,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install package and tests
+      - name: Install OpenGL runtime used by Gmsh
+        run: sudo apt-get update -qq && sudo apt-get install -y libglu1-mesa
+      - name: Install package, Gmsh, and tests
         run: |
-          python -m pip install -e . pytest
+          python -m pip install -e . pytest gmsh shapely
       - name: Compile changed Python entrypoints
         run: |
           python -m py_compile src/onestring_physics/optcuts_planar_quad_20261026.py app_optcuts_core_20260916.py app_runtime_base.py
