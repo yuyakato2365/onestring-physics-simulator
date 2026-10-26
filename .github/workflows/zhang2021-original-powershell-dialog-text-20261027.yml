@@ -1,0 +1,64 @@
+name: Extract authors original Straighten Windows error dialog
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-original-powershell-dialog-text-20261027.yml]
+  workflow_dispatch:
+jobs:
+  original-straighten-dialog:
+    runs-on: windows-2022
+    timeout-minutes: 6
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve original author EXE and Qt QPA plugins
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_original_modal"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_original_modal\authors_executables\ExeProgram"
+      - name: Capture message text of modal dialog from original author process
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_original_modal\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after' | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $p=Start-Process -FilePath (Join-Path $root 'Straighten.exe') -ArgumentList @('Source/Input/model_15.obj','Source/before/model_15.obj','Source/after/model_15_axis.obj') -PassThru -NoNewWindow
+          $env:ZHANG_PID_TO_INSPECT="$($p.Id)"
+          Start-Sleep -Seconds 12
+          @'
+          import ctypes,ctypes.wintypes as w,os
+          user=ctypes.windll.user32
+          pid_target=int(os.environ["ZHANG_PID_TO_INSPECT"])
+          CB=ctypes.WINFUNCTYPE(w.BOOL,w.HWND,w.LPARAM)
+          user.EnumWindows.argtypes=[CB,w.LPARAM]
+          user.EnumChildWindows.argtypes=[w.HWND,CB,w.LPARAM]
+          user.GetWindowThreadProcessId.argtypes=[w.HWND,ctypes.POINTER(w.DWORD)]
+          def desc(hwnd):
+              title=ctypes.create_unicode_buffer(32768)
+              cl=ctypes.create_unicode_buffer(500)
+              user.GetWindowTextW(hwnd,title,32768)
+              user.GetClassNameW(hwnd,cl,500)
+              return repr(title.value),cl.value
+          @CB
+          def each(hwnd,lparam):
+              pid=w.DWORD()
+              user.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+              if pid.value!=pid_target:return True
+              print("NATIVE_MODAL",hex(hwnd),desc(hwnd),flush=True)
+              @CB
+              def child(h,unused):
+                  print("NATIVE_MODAL_CHILD",hex(h),desc(h),flush=True)
+                  return True
+              user.EnumChildWindows(hwnd,child,0)
+              return True
+          user.EnumWindows(each,0)
+          '@ | python -
+          $p.Refresh()
+          Write-Output "AUTHORS_NATIVE_EXITED=$($p.HasExited)"
+          if(!$p.HasExited){$p.Kill();$p.WaitForExit()}
+          Pop-Location
