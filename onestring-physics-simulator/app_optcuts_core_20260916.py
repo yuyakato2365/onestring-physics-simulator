@@ -50,6 +50,7 @@ from onestring_physics.optcuts_grid_native_pipeline_patch import install_native_
 from onestring_physics.optcuts_grid_native_lift_patch import install_native_grid_optcuts_lift_patch  # noqa: E402
 from onestring_physics.optcuts_grid_constrained_m2d_patch import install_optcuts_grid_constrained_m2d_patch  # noqa: E402
 from onestring_physics.optcuts_planar_quad_20261026 import install_planar_quad_20261026  # noqa: E402
+from onestring_physics.optcuts_planar_quad_downstream_20261026 import install_unstructured_quad_downstream_20261026  # noqa: E402
 from onestring_physics.optcuts_grid_consistency_patch import install_optcuts_grid_consistency_patch  # noqa: E402
 from onestring_physics.optcuts_test_k3d_augmented_lagrangian_patch import (  # noqa: E402
     install_optcuts_test_k3d_augmented_lagrangian_patch,
@@ -192,6 +193,8 @@ def _install_optcuts_selector() -> None:
                 help="Target edge length is sqrt(OptCuts Omega area / requested panels). "
                      "Final number of quads can differ."
             )
+            st.checkbox("M3D-aware quad refinement when panels are distorted", value=True,
+                        key="onestring_planar_quad_refine_m3d")
             st.caption("Optional dependencies: python3 -m pip install gmsh shapely")
         elif value in experimental:
             st.caption(
@@ -475,6 +478,7 @@ install_optcuts_test2_acceleration_patch(pipeline)
 install_optcuts_exact_seam_closure(pipeline)
 # Outermost adapter: intercept only the explicit 2026-10-26 mode.
 install_planar_quad_20261026(pipeline)
+install_unstructured_quad_downstream_20261026()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
