@@ -1048,6 +1048,7 @@ class PipelineParameters(_original.PipelineParameters):
     optcuts_grid_seam_native_weight: float = 0.0
     optcuts_planar_quad_20261026_enabled: bool = False
     planar_quad_target_faces: int = 35
+    planar_quad_refine_m3d: bool = True
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
