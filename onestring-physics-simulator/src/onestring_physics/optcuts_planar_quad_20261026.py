@@ -321,6 +321,25 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         if bool(getattr(params, "optcuts_planar_quad_20261026_enabled", False)):
             result.metrics["requested_omega_parameterization_mode"] = MODE
             result.metrics["planar_quad_source_seam_policy"] = "original OptCuts fixed"
+            if bool(getattr(params, "planar_quad_uv_reparam", True)):
+                from .optcuts_planar_quad_uv_reparam_20261026 import (
+                    harmonically_smoothed_uv, boundary_cycle)
+                old_uv = np.asarray(result.uv_vertices_2d, float)
+                next_uv, report = harmonically_smoothed_uv(
+                    result.surface_vertices_3d, result.surface_faces,
+                    old_uv, result.uv_faces,
+                    intensity=float(getattr(params, "planar_quad_uv_reparam_intensity", .12)))
+                result.uv_vertices_2d = next_uv
+                bd = boundary_cycle(np.asarray(result.uv_faces, int))
+                result.omega_boundary = np.vstack((next_uv[bd], next_uv[bd[0]]))
+                # No stale acceleration structure may reference old UV.
+                if hasattr(result, "triangle_acceleration"):
+                    result.triangle_acceleration = None
+                result.metrics.update(report)
+            else:
+                result.metrics.update(
+                    planar_quad_uv_boundary_reparameterized=False,
+                    planar_quad_uv_reparameterization_disabled=True)
         return result
 
     def with_domain(parameterization, grid, params=None):
