@@ -185,3 +185,30 @@ jobs:
               print("DOWNLOAD_EXCEPTION",type(e).__name__,str(e)[:900])
               raise
           PY
+
+      - name: Analyze original author project entrypoints and OS dependencies
+        run: |
+          python3 - <<'PY'
+          from collections import Counter
+          import zipfile, os
+          z=zipfile.ZipFile("/tmp/zhang2021_Code_new.zip")
+          allfiles=[x for x in z.namelist() if not x.endswith("/")]
+          print("TOP_LEVEL_PROJECTS")
+          print("\n".join(sorted(set("/".join(x.split("/")[:3]) for x in allfiles if x.startswith("Code/")))))
+          print("FILE_EXTENSIONS",Counter(os.path.splitext(x)[1].lower() for x in allfiles).most_common(20))
+          app=[x for x in allfiles if x.lower().endswith((".sln",".vcxproj",".exe",".lib",".dll",".a",".so"))]
+          print("BUILD_AND_BINARIES",len(app))
+          for x in app[:70]: print("ARTIFACT",x)
+          lic=[x for x in allfiles if x.lower().endswith(("/license","/license.txt","/license.md","/copyright")) and "ThirdParty" not in x and "/include/" not in x]
+          print("TOPLEVEL_LICENSES",lic[:20])
+          mainnames=[
+              x for x in allfiles if x.endswith("/main.cpp")
+                 and (x.count("/")<=4)
+          ]
+          print("PROJECT_MAIN",mainnames)
+          for x in mainnames[:5]:
+              blob=z.read(x).decode("utf-8",errors="replace")
+              print("MAIN_CODE",x,"LINES",len(blob.splitlines()))
+              for n,line in enumerate(blob.splitlines()[:240],1):
+                  print(f"{x}:{n}: {line[:180]}")
+          PY
