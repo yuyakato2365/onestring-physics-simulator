@@ -1052,6 +1052,8 @@ class PipelineParameters(_original.PipelineParameters):
     # Command targets a separately verified converter around the authors' code.
     optcuts_zhang2021_reference_enabled: bool = False
     zhang2021_reference_adapter_command: str = ""
+    zhang2021_author_exe_root: str = ""
+    zhang2021_author_wine_command: str = ""
     planar_quad_target_faces: int = 35
     planar_quad_refine_m3d: bool = True
     planar_quad_uv_reparam: bool = True
