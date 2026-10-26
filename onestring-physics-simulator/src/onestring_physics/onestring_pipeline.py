@@ -1049,6 +1049,8 @@ class PipelineParameters(_original.PipelineParameters):
     optcuts_planar_quad_20261026_enabled: bool = False
     planar_quad_target_faces: int = 35
     planar_quad_refine_m3d: bool = True
+    planar_quad_uv_reparam: bool = True
+    planar_quad_uv_reparam_intensity: float = 0.12
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
