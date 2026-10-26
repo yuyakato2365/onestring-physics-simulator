@@ -76,3 +76,24 @@ def test_coarse_boundary_preserves_bijective_source_triangle_correspondence():
     if m["planar_quad_coarse_uv_accepted"]:
         assert m["planar_quad_coarse_boundary_points_after"] < len(boundary)
     _triangle_inverse(moved,tris,xyz,tris,moved[[0,2,12]])
+
+def test_actual_onestring_m2d_to_m3d_lift_accepts_unstructured_quads():
+    from onestring_physics import legacy_pipeline_base as old
+    uv = np.array([[0,0],[.5,0],[1,0],[0,.5],[.5,.5],[1,.5],
+                   [0,1],[.5,1],[1,1]],float)
+    tri = np.array([[0,1,4],[0,4,3],[1,2,5],[1,5,4],
+                    [3,4,7],[3,7,6],[4,5,8],[4,8,7]],int)
+    quads = np.array([[0,1,4,3],[1,2,5,4],[3,4,7,6],[4,5,8,7]],int)
+    xyz = np.column_stack((uv,np.zeros(len(uv))))
+    original = SimpleNamespace(
+        uv_vertices_2d=uv, uv_faces=tri, surface_vertices_3d=xyz,
+        surface_faces=tri, omega_boundary=np.vstack((uv[[0,1,2,5,8,7,6,3]],uv[0])),
+        method="optcuts_test", metrics={}, triangle_acceleration=None)
+    quadgrid = UnstructuredQuadGrid(uv, quads, .5, .01)
+    m2d = old.QuadMesh(xyz, quads, quadgrid, "M2D", {}, [])
+    params = old.PipelineParameters(nx=3,ny=3,tile_size=.5,
+                                    m3d_construction_mode="mesh_harmonic")
+    m3d,report = old._lift_m2d_to_m3d(None, m2d, original, params)
+    assert len(m3d.faces) == 4
+    assert np.allclose(m3d.vertices,xyz,atol=1e-6)
+    assert m3d.metrics["m3d_outside_omega_count"] == 0
