@@ -112,3 +112,25 @@ def test_undercovered_boundary_cannot_pass_seam_audit(square_source):
         audit_reference_quads(
             square_source, uv, [[0, 1, 2, 3]],
             max_undercoverage_fraction=.99, require_seam_correspondence=True)
+
+
+def test_standalone_cli_validates_reference_candidate(square_source, tmp_path):
+    import json
+    import subprocess
+    from pathlib import Path
+    source = tmp_path / "source.npz"
+    candidate = tmp_path / "candidate.npz"
+    report = tmp_path / "report.json"
+    export_source_chart(square_source, source)
+    np.savez(candidate, vertices_uv=square_source.uv_vertices_2d,
+             faces=np.array([[0, 1, 2, 3]], dtype=int))
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([
+        sys.executable, "scripts/audit_zhang2021_candidate.py",
+        "--source", str(source), "--candidate", str(candidate),
+        "--report", str(report),
+    ], cwd=repo_root, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    record = json.loads(report.read_text(encoding="utf-8"))
+    assert record["quad_count"] == 1
+    assert record["zhang2021_algorithm_verified"] is False
