@@ -252,11 +252,13 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
                     "PLANAR_QUAD_ZERO_LENGTH_BOUNDARY_CURVE")
             curve_elements = np.maximum(
                 2, 2 * np.ceil(edge_lengths / (2. * h)).astype(int))
-            for curve, count in zip(lines, curve_elements):
-                gmsh.model.mesh.setTransfiniteCurve(int(curve), int(count) + 1)
             loop = gmsh.model.geo.addCurveLoop(lines)
             surface = gmsh.model.geo.addPlaneSurface([loop])
+            # gmsh.model.mesh.* operates on the synchronized model; the
+            # uncommitted geo.addLine entities do not exist there yet.
             gmsh.model.geo.synchronize()
+            for curve, count in zip(lines, curve_elements):
+                gmsh.model.mesh.setTransfiniteCurve(int(curve), int(count) + 1)
             gmsh.model.mesh.setRecombine(2, surface)
             gmsh.model.mesh.generate(2)
             tags, coords, _ = gmsh.model.mesh.getNodes()
