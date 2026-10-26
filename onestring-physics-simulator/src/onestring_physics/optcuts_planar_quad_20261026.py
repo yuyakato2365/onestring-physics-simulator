@@ -329,9 +329,15 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
                     result.surface_vertices_3d, result.surface_faces,
                     old_uv, result.uv_faces,
                     intensity=float(getattr(params, "planar_quad_uv_reparam_intensity", .12)))
-                result.uv_vertices_2d = next_uv
+                from .optcuts_planar_quad_uv_reparam_20261026 import (
+                    coarse_boundary_reparameterize)
+                final_uv, coarse_metrics = coarse_boundary_reparameterize(
+                    result.surface_vertices_3d, result.surface_faces, next_uv,
+                    result.uv_faces, int(getattr(params, "planar_quad_target_faces", 35)))
+                report.update(coarse_metrics)
+                result.uv_vertices_2d = final_uv
                 bd = boundary_cycle(np.asarray(result.uv_faces, int))
-                result.omega_boundary = np.vstack((next_uv[bd], next_uv[bd[0]]))
+                result.omega_boundary = np.vstack((final_uv[bd], final_uv[bd[0]]))
                 # No stale acceleration structure may reference old UV.
                 if hasattr(result, "triangle_acceleration"):
                     result.triangle_acceleration = None
