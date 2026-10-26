@@ -199,6 +199,21 @@ def _install_optcuts_selector() -> None:
                     "code; without it this mode fails explicitly, NEVER "
                     "switches to Gmsh or an approximation.")
                 st.text_input(
+                    "Official authors' ExeProgram folder",
+                    value=os.environ.get("ONESTRING_ZHANG2021_EXE_ROOT", ""),
+                    key="onestring_zhang2021_author_exe_root",
+                    help="Folder containing the original published Straighten.exe, "
+                         "Segment.exe, QMSim.exe, dependencies, and WholePipeline.bat. "
+                         "Download via scripts/download_zhang2021_executables.py "
+                         "and DO NOT commit their proprietary binary ZIP.")
+                st.text_input(
+                    "Wine launcher command (Mac only, optional)",
+                    value=os.environ.get("ONESTRING_ZHANG2021_WINE_COMMAND", ""),
+                    key="onestring_zhang2021_author_wine_cmd",
+                    help="Example: wine64. Requires working Wine, GUI/Qt and "
+                         "the original PARDISO license; macOS native run "
+                         "has not yet been verified.")
+                st.text_input(
                     "Zhang 2021 reference adapter command",
                     value=os.environ.get("ONESTRING_ZHANG2021_REFERENCE_ADAPTER", ""),
                     key="onestring_zhang2021_reference_adapter_cmd",
