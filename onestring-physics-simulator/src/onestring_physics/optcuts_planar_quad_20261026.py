@@ -240,11 +240,20 @@ def build_planar_quad(parameterization: Any, target_faces: int):
 
     # Do not assert valid geometry simply because a mesher generated it.
     polys = []
+    orientations = []
     for i, ids in enumerate(faces):
-        quad = Polygon(uv[ids])
+        pts = uv[ids]
+        signed = .5 * np.sum(pts[:, 0] * np.roll(pts[:, 1], -1)
+                            - pts[:, 1] * np.roll(pts[:, 0], -1))
+        orientations.append(signed)
+        quad = Polygon(pts)
         if not quad.is_valid or quad.area <= 1e-12 * polygon.area:
             raise PlanarQuadMeshingError(f"PLANAR_QUAD_INVERTED_OR_DEGENERATE: face={i}")
         polys.append(quad)
+    orientations = np.asarray(orientations, float)
+    if (np.any(np.abs(orientations) <= 1e-12 * polygon.area)
+            or np.any(orientations * orientations[0] <= 0)):
+        raise PlanarQuadMeshingError("PLANAR_QUAD_MIXED_OR_ZERO_ORIENTATION")
     union = unary_union(polys)
     tol_area = 1e-5 * polygon.area
     if abs(sum(q.area for q in polys) - union.area) > tol_area:
