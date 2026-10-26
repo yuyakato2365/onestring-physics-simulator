@@ -177,6 +177,47 @@ def _quad_quality(vertices: np.ndarray, faces: np.ndarray) -> dict[str, float]:
             "longest_edge_face_index": int(np.argmax(np.max(lengths, axis=1)))}
 
 
+def _choose_contained_omega_boundary(polygon: Any, edge_length: float) -> tuple[np.ndarray, dict[str, float | int | str]]:
+    """Reduce boundary complexity only if the whole candidate stays in Ω.
+
+    Shapely's preserve_topology=True prevents self-intersections; it does NOT
+    promise geometric containment. Removing a shallow concave notch can create
+    a shortcut *outside* the original OptCuts disk and invalidate UV inverse.
+    """
+    original = np.asarray(polygon.exterior.coords, float)[:-1, :2]
+    area = float(polygon.area)
+    tolerance = min(float(edge_length) * .03, math.sqrt(area) * .005)
+    if len(original) < 4:
+        raise PlanarQuadMeshingError("PLANAR_QUAD_BOUNDARY_TOO_FEW_CORNERS")
+    chosen = original
+    chosen_tolerance = 0.
+    rejected_outside = 0
+    for factor in (1., .5, .25, .125, .0625):
+        candidate = polygon.simplify(tolerance * factor, preserve_topology=True)
+        if candidate.geom_type != "Polygon" or not candidate.is_valid:
+            continue
+        coords = np.asarray(candidate.exterior.coords, float)[:-1, :2]
+        if len(coords) < 4 or len(coords) >= len(chosen):
+            continue
+        # A valid polygon need not be a subset of the original Ω.
+        if float(candidate.difference(polygon).area) > 1e-12 * area:
+            rejected_outside += 1
+            continue
+        if float(polygon.difference(candidate).area) > .02 * area:
+            continue
+        chosen = coords
+        chosen_tolerance = tolerance * factor
+        break
+    return chosen.copy(), {
+        "planar_quad_original_boundary_vertices": int(len(original)),
+        "planar_quad_meshed_boundary_vertices": int(len(chosen)),
+        "planar_quad_boundary_simplification_tolerance": float(chosen_tolerance),
+        "planar_quad_boundary_outside_rejected_candidates": int(rejected_outside),
+        "planar_quad_boundary_source_preserved": bool(
+            len(chosen) == len(original) and np.array_equal(chosen, original)),
+    }
+
+
 def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: bool = True):
     """Gmsh conforming 2D quadrangulation; no masked-square fallback."""
     try:
@@ -199,22 +240,17 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
         raise PlanarQuadMeshingError("PLANAR_QUAD_SOURCE_NOT_SIMPLE_DISK")
     target_faces = max(4, int(target_faces))
     h = math.sqrt(float(polygon.area) / target_faces)
-    # Boundary decimation is deliberately bounded; no arbitrary topology repair.
-    simplified = polygon.simplify(min(h * .03, math.sqrt(polygon.area) * .005),
-                                  preserve_topology=True)
-    if simplified.geom_type != "Polygon" or not simplified.is_valid:
-        raise PlanarQuadMeshingError("PLANAR_QUAD_BOUNDARY_SIMPLIFY_INVALID")
-    boundary = np.asarray(simplified.exterior.coords, float)[:-1, :2]
-    if len(boundary) < 4:
-        boundary = np.asarray(polygon.exterior.coords, float)[:-1, :2]
-    if len(boundary) < 4:
-        raise PlanarQuadMeshingError("PLANAR_QUAD_BOUNDARY_TOO_FEW_CORNERS")
-    # Disk all-quad topology needs even boundary-edge parity.
-    if len(boundary) % 2:
-        spans = np.linalg.norm(np.roll(boundary, -1, axis=0) - boundary, axis=1)
-        j = int(np.argmax(spans))
-        boundary = np.insert(boundary, j + 1,
-                             .5 * (boundary[j] + boundary[(j + 1) % len(boundary)]), axis=0)
+    # Only simplify when the whole resulting contour remains inside the
+    # original OptCuts Ω. Topology-preserving does not imply containment.
+    boundary, boundary_report = _choose_contained_omega_boundary(polygon, h)
+    # Each Gmsh curve gets even 1D segments; even corner parity is unnecessary.
+    meshed_polygon = Polygon(boundary)
+    meshed_outside_fraction = float(
+        meshed_polygon.difference(polygon).area / polygon.area)
+    if meshed_outside_fraction > 1e-12:
+        raise PlanarQuadMeshingError(
+            "PLANAR_QUAD_BOUNDARY_NOT_CONTAINED: "
+            f"outside_fraction={meshed_outside_fraction:.9g}")
 
     # Gmsh is process-global. Always clear and finalize even after failure.
     with _GMSH_LOCK:
@@ -327,8 +363,15 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
         raise PlanarQuadMeshingError("PLANAR_QUAD_OVERLAPPING_FACES")
     if polygon.difference(union).area > .02 * polygon.area:
         raise PlanarQuadMeshingError("PLANAR_QUAD_DOMAIN_UNDERCOVERED_GT_2_PERCENT")
-    if union.difference(polygon).area > tol_area:
-        raise PlanarQuadMeshingError("PLANAR_QUAD_OUTSIDE_ORIGINAL_OMEGA")
+    outside_area = float(union.difference(polygon).area)
+    if outside_area > tol_area:
+        raise PlanarQuadMeshingError(
+            "PLANAR_QUAD_OUTSIDE_ORIGINAL_OMEGA: "
+            f"mesh_overcoverage_fraction={outside_area / polygon.area:.9g} "
+            f"boundary_overcoverage_fraction={meshed_outside_fraction:.9g} "
+            f"original_boundary_vertices={boundary_report['planar_quad_original_boundary_vertices']} "
+            f"meshed_boundary_vertices={len(boundary)}; "
+            "refusing to accept outside UV geometry")
     # Check intersections at quad edges as well as at vertices.
     checks = np.concatenate([uv, uv[faces].mean(axis=1),
         .5 * (uv[faces] + np.roll(uv[faces], -1, axis=1)).reshape(-1, 2)])
@@ -371,6 +414,7 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
         "planar_quad_faces": int(len(faces)),
         "planar_quad_target_faces": int(target_faces),
         "planar_quad_target_edge_length": float(h),
+        **boundary_report,
         "planar_quad_gmsh_boundary_curve_count": int(len(boundary)),
         "planar_quad_gmsh_boundary_curve_elements": int(np.sum(curve_elements)),
         "planar_quad_gmsh_per_curve_even_subdivisions": bool(
