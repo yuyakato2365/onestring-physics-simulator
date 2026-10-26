@@ -22,7 +22,12 @@ jobs:
           python -m pip install -e . pytest 'shapely>=2.1'
       - name: Compile isolated reference bridge
         run: |
-          python -m py_compile src/onestring_physics/zhang2021_reference_bridge.py
+          python -m py_compile \
+            src/onestring_physics/zhang2021_reference_bridge.py \
+            src/onestring_physics/zhang2021_field_layout_experiment.py \
+            src/onestring_physics/optcuts_planar_quad_20261026.py \
+            src/onestring_physics/onestring_pipeline.py \
+            app_optcuts_core_20260916.py app_runtime_base.py
       - name: Test reference adapter and fail-closed audits
         run: |
           python -m pytest -q tests/test_zhang2021_reference_bridge.py tests/test_zhang2021_field_layout_experiment.py
