@@ -445,7 +445,10 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
     def with_parameterization(surface, target, grid, params):
         result = base_parameterization(surface, target, grid, params)
         if bool(getattr(params, "optcuts_planar_quad_20261026_enabled", False)):
-            result.metrics["requested_omega_parameterization_mode"] = MODE
+            result.metrics["requested_omega_parameterization_mode"] = (
+                "optcuts_zhang2021_coarse_layout_experiment"
+                if bool(getattr(params, "optcuts_zhang2021_experimental_enabled", False))
+                else MODE)
             result.metrics["planar_quad_source_seam_policy"] = "original OptCuts fixed"
             result.metrics["planar_quad_20261026_enabled"] = True
             if bool(getattr(params, "planar_quad_uv_reparam", True)):
@@ -536,9 +539,22 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
             return base_m2d(grid, domain, params)
         if not hasattr(domain, "_planar_quad_source"):
             raise PlanarQuadMeshingError("PLANAR_QUAD_MISSING_OPTCUTS_SOURCE")
-        uv, faces, report = build_planar_quad(
-            domain._planar_quad_source, domain._planar_quad_target_faces,
-            refine_m3d=bool(getattr(params, "planar_quad_refine_m3d", True)))
+        if bool(getattr(params, "optcuts_zhang2021_experimental_enabled", False)):
+            # OneString's strict preflight applies to both engines.
+            # This is a real, independent quad generator, not the authors'
+            # C++ Zhang 2021 reference method. Never fall back to Gmsh.
+            from .zhang2021_field_layout_experiment import generate_field_layout
+            candidate = generate_field_layout(
+                domain._planar_quad_source,
+                domain._planar_quad_target_faces,
+                require_seam_correspondence=True,
+            )
+            uv, faces, report = (
+                candidate.uv, candidate.quads, dict(candidate.metrics))
+        else:
+            uv, faces, report = build_planar_quad(
+                domain._planar_quad_source, domain._planar_quad_target_faces,
+                refine_m3d=bool(getattr(params, "planar_quad_refine_m3d", True)))
         # Unlike the regular 50%-mask mode, irregular faces are never
         # silently reconstructed on a rectangular lattice. The existing Split
         # module is allowed to test complete cuts, and reports failure to
