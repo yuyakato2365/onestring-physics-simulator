@@ -165,3 +165,132 @@ def harmonically_smoothed_uv(
         "planar_quad_uv_reparam_step":0.,
         "planar_quad_uv_reparam_max_displacement":0.,
     }
+
+
+def coarse_boundary_reparameterize(
+    xyz: np.ndarray, faces3d: np.ndarray, uv: np.ndarray, faces2d: np.ndarray,
+    target_faces: int, *, max_sd_relative: float = 1.08,
+) -> tuple[np.ndarray, dict[str,float|int|bool]]:
+    """Simplify *Omega* by moving paired UV boundary points, never deleting any.
+
+    Unlike simplifying the Gmsh polyline alone, all source UV triangles are
+    updated by harmonic interior extension. Their original 3D vertex/face
+    identity remains unchanged. A successful full relocation makes adjacent
+    source boundary UV points collinear; Gmsh can then use the coarse boundary
+    polygon without extending outside the registered UV region.
+
+    Only entirely bijective, SD-bounded full relocation is accepted. On
+    failure returns the original UV intact and reports why.
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.linalg import spsolve
+    from shapely.geometry import Polygon
+    uv = np.asarray(uv,float)
+    faces2d = np.asarray(faces2d,int)
+    cycle = boundary_cycle(faces2d)
+    boundary = uv[cycle]
+    poly = Polygon(boundary)
+    if not poly.is_valid or poly.area <= 0:
+        raise UVReparameterizationError("PLANAR_QUAD_COARSE_INPUT_NOT_DISK")
+    n = len(cycle)
+    desired = max(4, int(target_faces))
+    h = float(np.sqrt(poly.area / desired))
+    source_sd = surface_uv_sd(xyz,faces3d,uv,faces2d)
+    scale = max(float(np.max(np.ptp(uv,axis=0))),1e-12)
+    orient = np.cross(uv[faces2d[:,1]]-uv[faces2d[:,0]],
+                      uv[faces2d[:,2]]-uv[faces2d[:,0]])
+    if np.any(orient * orient[0] <= 1e-14 * scale * scale):
+        raise UVReparameterizationError("PLANAR_QUAD_COARSE_SOURCE_FOLDOVER")
+    # Try finer boundary approximations if coarser segmentation cannot produce
+    # a bijective low-distortion UV map.
+    for tol_fraction in (.18,.12,.07,.04,.02):
+        coarse = poly.simplify(tol_fraction * h, preserve_topology=True)
+        if coarse.geom_type != "Polygon" or not coarse.is_valid:
+            continue
+        coords = np.asarray(coarse.exterior.coords,float)[:-1,:2]
+        if len(coords) < 4 or len(coords) >= n - 2:
+            continue
+        anchors=[]
+        for p in coords:
+            d=np.linalg.norm(boundary-p,axis=1)
+            idx=int(np.argmin(d))
+            if d[idx] > 1e-8 * scale:
+                anchors=[]
+                break
+            anchors.append(idx)
+        anchors=sorted(set(anchors))
+        if len(anchors)<4:
+            continue
+        updated_bd=boundary.copy()
+        for ai in range(len(anchors)):
+            left=anchors[ai]
+            right=anchors[(ai+1)%len(anchors)]
+            ids=np.arange(left,right+1,dtype=int) if right>left else np.r_[np.arange(left,n),np.arange(right+1)]
+            if len(ids)<3:
+                continue
+            segment=np.linalg.norm(boundary[np.mod(ids[1:],n)]-
+                                   boundary[np.mod(ids[:-1],n)],axis=1)
+            cumul=np.r_[0.,np.cumsum(segment)]
+            total=float(cumul[-1])
+            if total<1e-14:
+                continue
+            # Every source boundary vertex remains, with distinct arclength
+            # parameters, but now lies on a straight target segment.
+            updated_bd[ids%n]=(1.-cumul[:,None]/total)*boundary[left]+(
+                cumul[:,None]/total)*boundary[right]
+        displacement=np.zeros_like(uv)
+        displacement[cycle]=updated_bd-boundary
+        if np.max(np.linalg.norm(displacement[cycle],axis=1))<=1e-13*scale:
+            continue
+        # Harmonic interior continuation; original cut source faces remain paired.
+        bset=set(cycle.tolist())
+        free=np.asarray([j for j in range(len(uv)) if j not in bset],int)
+        if len(free):
+            adjacent=[set() for _ in uv]
+            for a,b,c in faces2d:
+                adjacent[a].update((int(b),int(c)))
+                adjacent[b].update((int(a),int(c)))
+                adjacent[c].update((int(a),int(b)))
+            idx={int(j):k for k,j in enumerate(free)}
+            rows=[];cols=[];vals=[]
+            rhs=np.zeros((len(free),2),float)
+            for k,j in enumerate(free):
+                ring=adjacent[int(j)]
+                rows.append(k);cols.append(k);vals.append(float(len(ring)))
+                for t in ring:
+                    if t in idx:
+                        rows.append(k);cols.append(idx[t]);vals.append(-1.)
+                    else:
+                        rhs[k]+=displacement[t]
+            mat=csr_matrix((vals,(rows,cols)),shape=(len(free),len(free)))
+            for dim in (0,1):
+                displacement[free,dim]=spsolve(mat,rhs[:,dim])
+        trial=uv+displacement
+        new_orient=np.cross(trial[faces2d[:,1]]-trial[faces2d[:,0]],
+                            trial[faces2d[:,2]]-trial[faces2d[:,0]])
+        if np.any(new_orient*orient[0]<=1e-12*scale*scale):
+            continue
+        trial_poly=Polygon(trial[cycle])
+        if not trial_poly.is_valid or trial_poly.area<=0:
+            continue
+        sd=surface_uv_sd(xyz,faces3d,trial,faces2d)
+        if not np.isfinite(sd) or sd>max_sd_relative*source_sd:
+            continue
+        return trial,{
+            "planar_quad_coarse_uv_accepted":True,
+            "planar_quad_coarse_boundary_points_before":int(n),
+            "planar_quad_coarse_boundary_points_after":int(len(anchors)),
+            "planar_quad_coarse_uv_sd_before":float(source_sd),
+            "planar_quad_coarse_uv_sd_after":float(sd),
+            "planar_quad_coarse_boundary_tolerance":float(tol_fraction*h),
+            "planar_quad_coarse_max_uv_displacement":float(np.max(np.linalg.norm(displacement,axis=1))),
+        }
+    return uv.copy(),{
+        "planar_quad_coarse_uv_accepted":False,
+        "planar_quad_coarse_boundary_points_before":int(n),
+        "planar_quad_coarse_boundary_points_after":int(n),
+        "planar_quad_coarse_uv_sd_before":float(source_sd),
+        "planar_quad_coarse_uv_sd_after":float(source_sd),
+        "planar_quad_coarse_boundary_tolerance":0.,
+        "planar_quad_coarse_max_uv_displacement":0.,
+    }
