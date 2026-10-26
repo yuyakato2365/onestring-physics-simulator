@@ -23,6 +23,57 @@ current module as implementing paper stages (field-guided segmentation,
 template layout, or global optimization). In particular, do not silently
 run Gmsh, a cropped regular grid, or invented heuristics as Zhang 2021.
 
+## Second stage: ACTUALLY GENERATING experimental Quad Meshes
+
+Added `src/onestring_physics/zhang2021_field_layout_experiment.py`.
+
+This is a **separate independent experimental algorithm** (not the original
+Zhang et al. 2021 C++ implementation). It does **not** call Gmsh. It performs:
+
+1. Source Omega simplification **only within** the original area bound.
+2. 4-RoSy directional estimation from weighted boundary-edge directions.
+3. Geometrically constrained planar triangulation.
+4. Field-weighted adjacent-triangle pairing into coarse, convex quad patches.
+5. Conforming midpoint/centroid template quadrangulation (three/four quads
+   per triangle/quad patch).
+6. Constrained center-only improvement of 2D angle and edge-length quality.
+7. Original OptCuts UV/3D barycentric inverse and **mandatory** seam audit.
+8. A separate Streamlit dropdown labeled
+   `OptCuts → independent coarse-patch Quad experiment (NOT Zhang reference)`.
+   The original Gmsh mode is unchanged.
+
+The paper's *specific* low-distortion straightening, field-guided
+segmentation solver, template library, patch-count global optimizer
+and original C++ reference are NOT implemented and are NOT claimed.
+
+The engine can produce actual all-quad M2D. It has been tested on square,
+concave L/stepped polygons and a built-in open dome throughout the
+OneString M2D→M3D→K3D→T3D→K2D→T2D stages. The dome input uses
+`pca_debug`, NOT an actual OptCuts Bunny run. The actual 30–35 quad
+target remains approximate, not hard-constrained.
+
+### Run on a saved OptCuts source NPZ
+
+```bash
+cd onestring-physics-simulator
+python3 -m pip install -e . pytest 'shapely>=2.1'
+python3 scripts/run_field_layout_experiment.py \
+  --source /path/to/optcuts_source.npz \
+  --output /tmp/field_layout_quads.npz \
+  --report /tmp/field_layout_report.json \
+  --target-quads 35
+```
+
+The exporter `zhang2021_reference_bridge.export_source_chart()` writes the
+required `optcuts_source.npz` format.
+
+Streamlit: run the existing OptCuts launcher; select the new
+`2026-10-27 | independent coarse-patch Quad experiment` option, with
+`Paper-oriented computation mode` disabled. Official OptCuts binary
+is still required for actual Bunny OptCuts input. The updated mode
+remains an **experimental** mesh generator and may fail on a seam or
+CSF Split constraint rather than silently return an invalid design.
+
 ## What IS implemented and tested
 
 `src/onestring_physics/zhang2021_reference_bridge.py`
