@@ -53,6 +53,11 @@ def test_planar_quad_runs_all_onestring_stages_on_open_dome(target_faces):
     assert int(m2d.metrics["planar_quad_faces"]) == len(m2d.faces)
     assert m2d.metrics["planar_quad_m2d_angle_min_degrees"] >= 20.
     assert m2d.metrics["planar_quad_m3d_angle_min_degrees"] >= 12.
+    for stage in ("m2d", "m3d"):
+        for criterion in ("worst_angle", "largest_area", "smallest_area", "longest_edge"):
+            face_idx = m2d.metrics[f"planar_quad_{stage}_{criterion}_face_index"]
+            assert isinstance(face_idx, int)
+            assert 0 <= face_idx < len(m2d.faces)
     assert np.array_equal(m2d.faces, m3d.faces)
     assert np.array_equal(m2d.faces, k3d.faces)
     assert np.array_equal(m2d.faces, k2d.faces)
