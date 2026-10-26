@@ -106,3 +106,35 @@ jobs:
                       if any(k in v.lower() for k in ("share","download","public","file")):
                           print("SHARE-API-PATH",v)
           PY
+
+      - name: Inspect authors-code guest share using official public legacy endpoint
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request,urllib.error,json,re
+          root="https://rec.ustc.edu.cn"
+          p="/js/chunk-1fe9560c.300096c9.js"
+          raw=urllib.request.urlopen(root+p,timeout=30).read().decode(errors="replace")
+          print("GUEST_ROUTER_JS",len(raw))
+          for pattern in ("share_number","getShareInfo","getShareTargetInfo","target","download"):
+              positions=[m.start() for m in re.finditer(re.escape(pattern),raw,re.I)]
+              print("MATCHES",pattern,len(positions))
+              for pos in positions[:4]:
+                  print("CONTEXT",repr(raw[max(0,pos-190):min(len(raw),pos+270)]))
+          share="8081ab10-dd29-11eb-b5e1-5fc36251b03b"
+          base="https://recapi.ustc.edu.cn/api/v2"
+          for path in ("/share/target/info","/share/target/resource/list"):
+              for method in ("GET","POST"):
+                  try:
+                      url=base+path+("?share_number="+share if method=="GET" else "")
+                      body=(json.dumps({"share_number":share}).encode() if method=="POST" else None)
+                      headers={"Content-Type":"application/json","Origin":root}
+                      req=urllib.request.Request(url,data=body,headers=headers,method=method)
+                      response=urllib.request.urlopen(req,timeout=15)
+                      sample=response.read(1500).decode(errors="replace")
+                      print("REC_API",path,method,"HTTP",response.status,"BODY",sample)
+                  except urllib.error.HTTPError as e:
+                      print("REC_API",path,method,"HTTP",e.code,"BODY",e.read(500).decode(errors="replace"))
+                  except Exception as e:
+                      print("REC_API",path,method,"ERROR",type(e).__name__,str(e)[:160])
+          PY
