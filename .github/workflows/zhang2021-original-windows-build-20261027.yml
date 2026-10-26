@@ -40,7 +40,7 @@ jobs:
             $sol=Join-Path $root "$part\$part.sln"
             if(Test-Path $sol){
               Write-Output "=== BUILDING AUTHORS ORIGINAL $part ==="
-              & msbuild $sol /t:Build /p:Configuration=Release /p:Platform=x64 /m:2 /v:minimal /nologo
+              & msbuild $sol /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 /m:2 /v:minimal /nologo
               if($LASTEXITCODE -ne 0){
                 Write-Output "BUILD_FAILED $part EXIT=$LASTEXITCODE"
               } else {
