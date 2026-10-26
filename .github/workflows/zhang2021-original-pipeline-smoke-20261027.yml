@@ -1,0 +1,54 @@
+name: Run original Zhang 2021 pipeline on authors input
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-original-pipeline-smoke-20261027.yml
+      - onestring-physics-simulator/scripts/download_zhang2021_executables.py
+  workflow_dispatch:
+jobs:
+  original-authors-sample:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download official original binaries and original sample from author
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang2021_original"
+      - name: Execute original Straighten then Segment then QMSim on one authors sample
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_original\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after','Result\finalOut' | Out-Null
+          $name='model_15'
+          $env:QT_QPA_PLATFORM='offscreen'
+          $env:OMP_NUM_THREADS='2'
+          Write-Output '=== SOURCE OBJ FACE STRUCTURE ==='
+          Select-String -Path "Source\Input\$name.obj" -Pattern '^(v |vt |f )' | Select-Object -First 5 | ForEach-Object {$_.Line}
+          Write-Output '=== ORIGINAL AUTHORS STAGE 1: STRAIGHTEN ==='
+          & .\Straighten.exe "Source\Input\$name.obj" "Source\before\$name.obj" "Source\after\${name}_axis.obj"
+          Write-Output "STRAIGHTEN EXIT=$LASTEXITCODE"
+          if($LASTEXITCODE -ne 0){ throw "Authors Straighten exited $LASTEXITCODE" }
+          if(!(Test-Path "Source\after\${name}_axis.obj")){throw 'Original Straighten produced no output'}
+          Write-Output '=== ORIGINAL AUTHORS STAGE 2: SEGMENT ==='
+          & .\Segment.exe "Source\after\${name}_axis.obj" 'Result' "Source\before\$name.obj" 35 0.01
+          Write-Output "SEGMENT EXIT=$LASTEXITCODE"
+          if($LASTEXITCODE -ne 0){ throw "Authors Segment exited $LASTEXITCODE" }
+          Get-ChildItem Result -Recurse -File | Select-Object -First 15 | ForEach-Object {Write-Output "NATIVE_SEGMENT_OUTPUT $($_.Name) $($_.Length)"}
+          if(!(Test-Path "Result\$name.obj")){throw 'Original Segment produced no target OBJ'}
+          Write-Output '=== ORIGINAL AUTHORS STAGE 3: QMSim ==='
+          & .\QMSim.exe "Result\$name.obj" "Result\finalOut\${name}_out.obj" "Source\before\$name.obj" 0 35 0.01 0.05
+          Write-Output "QMSIM EXIT=$LASTEXITCODE"
+          if($LASTEXITCODE -ne 0){throw "Authors QMSim exited $LASTEXITCODE"}
+          if(!(Test-Path "Result\finalOut\${name}_out.obj")){throw 'Original QMSim produced no final OBJ'}
+          Get-Item "Result\finalOut\${name}_out.obj" | Select-Object Length,FullName
+          Get-Content "Result\finalOut\${name}_out.obj" -TotalCount 25
+          Write-Output 'AUTHOR_ORIGINAL_PIPELINE_SAMPLE_SUCCESS'
+          Pop-Location
