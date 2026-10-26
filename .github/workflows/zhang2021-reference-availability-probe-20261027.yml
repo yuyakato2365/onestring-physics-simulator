@@ -37,3 +37,36 @@ jobs:
           grep -oE '(src=|href=)[^ >]+' /tmp/rec_share.html | grep -E 'js|css' | tail -20 || true
           echo '=== REC file title / shutdown markup ==='
           grep -oE '.{0,40}(停止服务|2026年8月6日|Code|download).{0,100}' /tmp/rec_share.html | head -12 || true
+
+      - name: Identify public guest-share API from static JS bundles
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import urllib.request
+          from urllib.parse import urljoin
+          origin="https://rec.ustc.edu.cn"
+          html=urllib.request.urlopen(origin+"/share/8081ab10-dd29-11eb-b5e1-5fc36251b03b",timeout=20).read().decode()
+          script_paths=re.findall(r'<script\s+src=([^ >]+)',html)
+          script_paths += ["/js/chunk-common.646a2039.js", "/js/main.f3e80b7c.js"]
+          print("=== candidate API tokens from public bundles ===")
+          for p in list(dict.fromkeys(script_paths)):
+              try:
+                  raw=urllib.request.urlopen(urljoin(origin,p),timeout=30).read()
+                  data=raw.decode("utf-8",errors="replace")
+              except Exception as e:
+                  print("skip",p,type(e).__name__)
+                  continue
+              patterns=['/api/','share/','shareInfo','shareLink','download','getShare',
+                        'fileShare','shareId','share_id']
+              matches=[]
+              for pattern in patterns:
+                  spots=[m.start() for m in re.finditer(re.escape(pattern),data,re.I)]
+                  for pos in spots[:3]:
+                      snippet=data[max(0,pos-100):min(len(data),pos+120)]
+                      snippet=re.sub(r'[^\\x20-\\x7e]','?',snippet)
+                      matches.append((pattern,snippet))
+              print("SCRIPT",p,"SIZE",len(raw),"MARKERS",len(matches))
+              for x in matches[:18]:
+                  print(x)
+          PY
