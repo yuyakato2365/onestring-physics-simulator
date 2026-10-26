@@ -49,6 +49,16 @@ class UnstructuredQuadGrid:
     this adapter never claims the irregular connectivity is a regular grid.
     """
     def __init__(self, uv: np.ndarray, faces: np.ndarray, tile_size: float, gap_size: float):
+        uv = np.asarray(uv, dtype=float)
+        faces = np.asarray(faces, dtype=int)
+        if (uv.ndim != 2 or uv.shape[1] != 2 or faces.ndim != 2
+                or faces.shape[1] != 4 or not len(faces)
+                or not np.isfinite(uv).all()):
+            raise PlanarQuadMeshingError("PLANAR_QUAD_GRID_INVALID_ARRAYS")
+        if np.any(faces < 0) or np.any(faces >= len(uv)):
+            raise PlanarQuadMeshingError("PLANAR_QUAD_GRID_VERTEX_INDEX_INVALID")
+        if any(len(set(map(int, face))) != 4 for face in faces):
+            raise PlanarQuadMeshingError("PLANAR_QUAD_GRID_REPEATED_FACE_VERTEX")
         self.vertex_positions = np.column_stack((uv, np.zeros(len(uv))))
         self.tiles = [QuadTile(i, -1, -1, tuple(int(v) for v in f))
                       for i, f in enumerate(faces)]
@@ -56,18 +66,25 @@ class UnstructuredQuadGrid:
         self.gap_size = float(gap_size)
         self.nx = 0
         self.ny = 0
-        edge_owner: dict[tuple[int, int], tuple[int, int]] = {}
-        hinges = []
+        edge_owner: dict[tuple[int, int], list[tuple[int, int, int, int]]] = {}
         for tile in self.tiles:
             vs = tile.vertex_ids
             for k in range(4):
-                edge = tuple(sorted((vs[k], vs[(k + 1) % 4])))
-                if edge in edge_owner:
-                    previous, previous_k = edge_owner.pop(edge)
-                    hinges.append(QuadHinge(previous, previous_k, (previous_k + 1) % 4,
-                                            tile.id, k, (k + 1) % 4, "unstructured"))
-                else:
-                    edge_owner[edge] = (tile.id, k)
+                a, b = int(vs[k]), int(vs[(k + 1) % 4])
+                edge_owner.setdefault((min(a, b), max(a, b)), []).append(
+                    (tile.id, k, a, b))
+        hinges = []
+        for edge, owners in edge_owner.items():
+            if len(owners) > 2:
+                raise PlanarQuadMeshingError(
+                    f"PLANAR_QUAD_GRID_NONMANIFOLD_EDGE: edge={edge} owners={len(owners)}")
+            if len(owners) == 2:
+                (prev, pk, pa, pb), (cur, ck, ca, cb) = owners
+                if pa != cb or pb != ca:
+                    raise PlanarQuadMeshingError(
+                        f"PLANAR_QUAD_GRID_SHARED_EDGE_WINDING: edge={edge}")
+                hinges.append(QuadHinge(prev, pk, (pk + 1) % 4,
+                                        cur, ck, (ck + 1) % 4, "unstructured"))
         self.hinges = hinges
 
     @property
