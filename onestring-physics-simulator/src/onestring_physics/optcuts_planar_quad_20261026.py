@@ -163,7 +163,12 @@ def _quad_quality(vertices: np.ndarray, faces: np.ndarray) -> dict[str, float]:
             "angle_min_degrees": float(np.min(angles)),
             "angle_max_degrees": float(np.max(angles)),
             "area_min": float(np.min(areas)),
-            "area_max_to_median": float(np.max(areas)) / max(float(np.median(areas)), 1e-12)}
+            "area_max_to_median": float(np.max(areas)) / max(float(np.median(areas)), 1e-12),
+            # An average or minimum alone cannot locate a Bunny neck failure.
+            "worst_angle_face_index": int(np.argmin(np.min(angles, axis=1))),
+            "largest_area_face_index": int(np.argmax(areas)),
+            "smallest_area_face_index": int(np.argmin(areas)),
+            "longest_edge_face_index": int(np.argmax(np.max(lengths, axis=1)))}
 
 
 def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: bool = True):
@@ -342,8 +347,10 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
         "planar_quad_omega_overcoverage_fraction": float(
             union.difference(polygon).area / polygon.area),
         "planar_quad_uv_inverse_exact_piecewise_linear": True,
-        **{"planar_quad_m2d_" + k: float(v) for k, v in q2.items()},
-        **{"planar_quad_m3d_" + k: float(v) for k, v in q3.items()},
+        **{"planar_quad_m2d_" + k: int(v) if k.endswith("_face_index") else float(v)
+           for k, v in q2.items()},
+        **{"planar_quad_m3d_" + k: int(v) if k.endswith("_face_index") else float(v)
+           for k, v in q3.items()},
         **refine_report,
         "planar_quad_m3d_quality_policy": "conditionally improved by constrained interior UV moves",
     }
