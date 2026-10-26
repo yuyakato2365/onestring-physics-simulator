@@ -71,3 +71,18 @@ def test_gmsh_planar_rectangle_all_quads_and_inverse():
     assert metrics["planar_quad_uv_inverse_exact_piecewise_linear"]
     assert metrics["planar_quad_omega_undercoverage_fraction"] < .02
     assert metrics["planar_quad_m2d_angle_min_degrees"] >= 8
+
+def test_gmsh_concave_L_domain_all_quads_no_outside():
+    pytest.importorskip("gmsh")
+    pytest.importorskip("shapely")
+    uv = np.array([[0,0],[2,0],[2,1],[1,1],[1,2],[0,2]],float)
+    triangles = np.array([[0,1,3],[1,2,3],[0,3,5],[3,4,5]],int)
+    xyz = np.column_stack((uv,np.zeros(len(uv))))
+    src = SimpleNamespace(uv_vertices_2d=uv,uv_faces=triangles,
+                          surface_vertices_3d=xyz,surface_faces=triangles,
+                          omega_boundary=np.vstack((uv,uv[0])))
+    qv, qf, report = build_planar_quad(src, 35)
+    assert len(qf) > 0 and qf.shape[1] == 4
+    assert report["planar_quad_omega_overcoverage_fraction"] <= 1e-5
+    assert report["planar_quad_omega_undercoverage_fraction"] < .02
+    assert report["planar_quad_m2d_area_min"] > 0.
