@@ -758,6 +758,7 @@ with st.sidebar:
         and omega_parameterization_mode == "optcuts_test"
         and st.session_state.get("_onestring_planar_quad_20261026_selected", False))
     planar_quad_target_faces = int(st.session_state.get("onestring_planar_quad_target_faces", 35))
+    planar_quad_refine_m3d = bool(st.session_state.get("onestring_planar_quad_refine_m3d", True))
     optcuts_grid_seam_native_weight = (
         float(st.session_state.get("onestring_native_grid_seam_weight",0.10))
         if optcuts_grid_seam_native_enabled else 0.0)
@@ -2052,6 +2053,7 @@ def current_pipeline_key() -> tuple:
         optcuts_grid_seam_native_weight,
         optcuts_planar_quad_20261026_enabled,
         planar_quad_target_faces,
+        planar_quad_refine_m3d,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
@@ -2222,6 +2224,7 @@ pipeline_params = PipelineParameters(
     optcuts_grid_seam_native_weight=optcuts_grid_seam_native_weight,
     optcuts_planar_quad_20261026_enabled=optcuts_planar_quad_20261026_enabled,
     planar_quad_target_faces=planar_quad_target_faces,
+    planar_quad_refine_m3d=planar_quad_refine_m3d,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,
