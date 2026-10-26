@@ -93,6 +93,7 @@ def _install_optcuts_selector() -> None:
             "optcuts_area_grid_combined",
             "optcuts_grid_seam_native",
             "optcuts_planar_quad_20261026",
+            "optcuts_zhang2021_coarse_layout_experiment",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -101,6 +102,8 @@ def _install_optcuts_selector() -> None:
                 option_list.append(mode)
         original_format=kwargs.get("format_func")
         def label_for_mode(mode):
+            if mode=="optcuts_zhang2021_coarse_layout_experiment":
+                return "2026-10-27 | OptCuts → independent coarse-patch Quad experiment (NOT Zhang reference)"
             if mode=="optcuts_planar_quad_20261026":
                 return "2026-10-26 | OptCuts → boundary-conforming Planar Quad M2D (Gmsh prototype)"
             if mode=="optcuts_grid_aware":
@@ -126,9 +129,14 @@ def _install_optcuts_selector() -> None:
             value == "optcuts_grid_aware"
         )
         st.session_state["_onestring_area_grid_boundary_omega_selected"] = (
-            value == "optcuts_area_grid_boundary" or (value in experimental and value != "optcuts_planar_quad_20261026")
+            value == "optcuts_area_grid_boundary" or (value in experimental and value not in {"optcuts_planar_quad_20261026", "optcuts_zhang2021_coarse_layout_experiment"})
         )
-        st.session_state["_onestring_planar_quad_20261026_selected"] = (value == "optcuts_planar_quad_20261026")
+        st.session_state["_onestring_planar_quad_20261026_selected"] = (value in {
+            "optcuts_planar_quad_20261026",
+            "optcuts_zhang2021_coarse_layout_experiment",
+        })
+        st.session_state["_onestring_zhang2021_experiment_selected"] = (
+            value == "optcuts_zhang2021_coarse_layout_experiment")
         st.session_state["_onestring_grid_seam_native_selected"] = (
             value == "optcuts_grid_seam_native")
         st.session_state["_onestring_area_grid_optimizations"] = {
@@ -176,8 +184,17 @@ def _install_optcuts_selector() -> None:
                 "Non-disk outlines, insufficient boundary vertices, UV foldovers "
                 "and excessive distortion fail explicitly; no silent fallback."
             )
-        elif value == "optcuts_planar_quad_20261026":
-            st.caption(
+        elif value in {"optcuts_planar_quad_20261026", "optcuts_zhang2021_coarse_layout_experiment"}:
+            if value == "optcuts_zhang2021_coarse_layout_experiment":
+                st.caption(
+                    "INDEPENDENT EXPERIMENT, NOT Zhang 2021 reference: "
+                    "OptCuts Omega -> boundary-conservative triangulation -> "
+                    "field-weighted patch pairing -> conforming quad templates -> "
+                    "strict UV/3D/seam validation. No Gmsh fallback; "
+                    "the paper's original field segmentation and global optimizer "
+                    "have NOT been reproduced.")
+            else:
+                st.caption(
                 "2026-10-26 EXPERIMENT: official OptCuts UV triangle chart -> "
                 "Gmsh boundary-conforming all-quad mesh. The original UV↔3D "
                 "piecewise-linear inverse is checked; 50% masked-grid clipping is "
@@ -194,10 +211,13 @@ def _install_optcuts_selector() -> None:
                      "Final number of quads can differ."
             )
             st.checkbox("Low-distortion Ω boundary + interior UV reparameterization",
-                        value=True, key="onestring_planar_quad_uv_reparam")
+                        value=value == "optcuts_planar_quad_20261026",
+                        key="onestring_planar_quad_uv_reparam")
             st.checkbox("M3D-aware quad refinement when panels are distorted", value=True,
                         key="onestring_planar_quad_refine_m3d")
-            st.caption("Optional dependencies: python3 -m pip install gmsh shapely")
+            st.caption(
+                "Dependencies: shapely>=2.1 for the independent mode; "
+                "Gmsh is only needed by the old Gmsh prototype.")
         elif value in experimental:
             st.caption(
                 "Isolated 10/23 OptCuts area-grid experiment; exact 50% mask, "
