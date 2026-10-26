@@ -247,3 +247,20 @@ jobs:
                               if n<300:
                                   print("PIPELINE",component,n+1,line[:200])
           PY
+
+      - name: Inspect authors' official published executable share
+        run: |
+          python3 - <<'PY'
+          import urllib.request,urllib.error,json
+          api="https://recapi.ustc.edu.cn/api/v2"
+          num="911f9e50-dd29-11eb-aa39-130e36684f1f"
+          for suffix in ("/share/target/info","/share/target/resource/list"):
+              req=urllib.request.Request(api+suffix,data=json.dumps({"share_number":num}).encode(),
+                  headers={"Content-Type":"application/json","Origin":"https://rec.ustc.edu.cn"},
+                  method="POST")
+              try:
+                  with urllib.request.urlopen(req,timeout=25) as f:
+                      j=json.loads(f.read().decode("utf-8-sig"))
+                  print("OFFICIAL_EXE_SHARE",suffix,j.get("status_code"),repr(j.get("entity"))[:5000])
+              except Exception as e: print("EXE_SHARE_ERROR",type(e).__name__,str(e)[:300])
+          PY
