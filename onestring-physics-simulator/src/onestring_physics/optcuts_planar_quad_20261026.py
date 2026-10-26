@@ -251,6 +251,12 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
             raise PlanarQuadMeshingError(f"PLANAR_QUAD_INVERTED_OR_DEGENERATE: face={i}")
         polys.append(quad)
     orientations = np.asarray(orientations, float)
+    # Positive polygon area alone accepts concave four-gons. Require every
+    # corner to retain the orientation of its containing quadrilateral.
+    local_edges = np.roll(uv[faces], -1, axis=1) - uv[faces]
+    turns = np.cross(local_edges, np.roll(local_edges, -1, axis=1))
+    if np.any(turns * orientations[:, None] <= 1e-12 * polygon.area):
+        raise PlanarQuadMeshingError("PLANAR_QUAD_CONCAVE_OR_DEGENERATE_FACE")
     if (np.any(np.abs(orientations) <= 1e-12 * polygon.area)
             or np.any(orientations * orientations[0] <= 0)):
         raise PlanarQuadMeshingError("PLANAR_QUAD_MIXED_OR_ZERO_ORIENTATION")
@@ -287,8 +293,17 @@ def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: b
                                 parameterization.surface_faces, uv)
         q2 = _quad_quality(np.column_stack((uv, np.zeros(len(uv)))), faces)
         q3 = _quad_quality(xyz3, faces)
-    if q2["angle_min_degrees"] < 8 or q3["area_min"] <= 1e-14:
-        raise PlanarQuadMeshingError("PLANAR_QUAD_BAD_SHAPE_OR_3D_COLLAPSE")
+    if (q2["angle_min_degrees"] < 20
+            or q2["edge_max_to_median"] > 6.
+            or q2["area_max_to_median"] > 8.
+            or q3["angle_min_degrees"] < 12
+            or q3["area_min"] <= 1e-8 * max(
+                float(np.median(np.linalg.norm(
+                    np.cross(xyz3[faces][:,1]-xyz3[faces][:,0],
+                             xyz3[faces][:,2]-xyz3[faces][:,0]), axis=1))),1e-12)):
+        raise PlanarQuadMeshingError(
+            "PLANAR_QUAD_PANEL_QUALITY_INVALID: "
+            f"m2d={q2}; m3d={q3}; no invalid panel accepted")
     report = {
         "planar_quad_engine": "Gmsh frontal-delaunay+recombine; NOT Zhang2021 reference code",
         "planar_quad_method": MODE,
