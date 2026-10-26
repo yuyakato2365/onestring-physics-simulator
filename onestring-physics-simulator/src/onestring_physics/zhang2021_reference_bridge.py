@@ -18,7 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import math
 import subprocess
 from typing import Any, Sequence
 
@@ -125,7 +124,15 @@ def audit_reference_quads(
     corners = qv[qf]
     edges = np.roll(corners, -1, axis=1) - corners
     signed_turns = np.cross(edges, np.roll(edges, -1, axis=1))
-    if np.any(signed_turns <= 1e-12 * source_polygon.area):
+    signed_areas = 0.5 * np.sum(
+        corners[:, :, 0] * np.roll(corners[:, :, 1], -1, axis=1)
+        - corners[:, :, 1] * np.roll(corners[:, :, 0], -1, axis=1),
+        axis=1)
+    # Clockwise source meshes are valid. The requirement is a consistent
+    # orientation and convex turns, NOT globally positive winding.
+    if (np.any(np.abs(signed_areas) <= 1e-12 * source_polygon.area)
+            or np.any(signed_turns * np.sign(signed_areas)[:, None]
+                      <= 1e-12 * source_polygon.area)):
         raise Zhang2021BridgeError("QUAD_CONCAVE_OR_DEGENERATE_CORNER")
 
     union = unary_union(polygons)
