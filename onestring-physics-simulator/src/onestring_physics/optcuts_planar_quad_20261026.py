@@ -321,6 +321,7 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         if bool(getattr(params, "optcuts_planar_quad_20261026_enabled", False)):
             result.metrics["requested_omega_parameterization_mode"] = MODE
             result.metrics["planar_quad_source_seam_policy"] = "original OptCuts fixed"
+            result.metrics["planar_quad_20261026_enabled"] = True
             if bool(getattr(params, "planar_quad_uv_reparam", True)):
                 from .optcuts_planar_quad_uv_reparam_20261026 import (
                     harmonically_smoothed_uv, boundary_cycle)
@@ -383,6 +384,31 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         mesh_type = pipeline._original.QuadMesh
         mesh = mesh_type(xyz, np.asarray(faces, int), irregular,
                          "M2D", report, [])
+        from .optcuts_seam_exact_closure import (
+            discover_exact_seam_topology, SeamTopologyMismatch)
+        try:
+            seam = discover_exact_seam_topology(domain._planar_quad_source, uv, faces)
+        except SeamTopologyMismatch as exc:
+            raise PlanarQuadMeshingError(
+                "PLANAR_QUAD_SOURCE_SEAM_PREFLIGHT_FAILED: " + str(exc)
+            ) from exc
+        mesh.metrics.update({
+            "planar_quad_seam_preflight_status": str(seam["status"]),
+            "planar_quad_seam_preflight_stitch_mode": str(
+                seam.get("seam_stitch_mode", "none")),
+            "planar_quad_seam_preflight_unmatched": int(seam.get("unmatched_edges",0)),
+            "planar_quad_seam_preflight_unclassified": int(
+                seam.get("unclassified_boundary_edges",0)),
+        })
+        if str(seam["status"]) == "nonconforming":
+            raise PlanarQuadMeshingError(
+                "PLANAR_QUAD_SEAM_NOT_CONFORMING: Gmsh boundary quad edges "
+                "cannot be proven to follow the paired original OptCuts cut. "
+                f"unmatched={seam.get('unmatched_edges')} "
+                f"unclassified={seam.get('unclassified_boundary_edges')}; "
+                "accepting this candidate would break inverse correspondence "
+                "or seam closure. A seam-aware remeshing stage is still needed."
+            )
         print(f"[PLANAR-QUAD-20261026] validated {len(faces)} all-quad faces "
               f"from {len(uv)} UV vertices; "
               f"min3Dangle={report['planar_quad_m3d_angle_min_degrees']:.2f}",
