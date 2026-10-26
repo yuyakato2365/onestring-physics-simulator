@@ -193,6 +193,8 @@ def _install_optcuts_selector() -> None:
                 help="Target edge length is sqrt(OptCuts Omega area / requested panels). "
                      "Final number of quads can differ."
             )
+            st.checkbox("Low-distortion Ω boundary + interior UV reparameterization",
+                        value=True, key="onestring_planar_quad_uv_reparam")
             st.checkbox("M3D-aware quad refinement when panels are distorted", value=True,
                         key="onestring_planar_quad_refine_m3d")
             st.caption("Optional dependencies: python3 -m pip install gmsh shapely")
