@@ -561,8 +561,9 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
                 import os
                 import sys
                 from pathlib import Path
-                native_root = os.environ.get(
-                    "ONESTRING_ZHANG2021_EXE_ROOT", "").strip()
+                native_root = (
+                    str(getattr(params, "zhang2021_author_exe_root", "")).strip()
+                    or os.environ.get("ONESTRING_ZHANG2021_EXE_ROOT", "").strip())
                 if native_root:
                     adapter = (Path(__file__).resolve().parents[2]
                                / "scripts/zhang2021_authors_native_adapter.py")
@@ -574,8 +575,10 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
                         "--output", "{output}", "--target-quads", "{target_quads}",
                         "--exe-root", str(Path(native_root).resolve()),
                     ]
-                    wine = os.environ.get(
-                        "ONESTRING_ZHANG2021_WINE_COMMAND", "").strip()
+                    wine = (
+                        str(getattr(params, "zhang2021_author_wine_command", "")).strip()
+                        or os.environ.get(
+                            "ONESTRING_ZHANG2021_WINE_COMMAND", "").strip())
                     if wine:
                         cmd.extend(["--wine-command", *shlex.split(wine)])
             audited = run_reference_adapter(
