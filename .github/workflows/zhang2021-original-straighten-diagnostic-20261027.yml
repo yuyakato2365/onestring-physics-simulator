@@ -1,0 +1,54 @@
+name: Diagnose original Zhang 2021 Straighten stage stall
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-original-straighten-diagnostic-20261027.yml
+  workflow_dispatch:
+jobs:
+  original-straighten:
+    runs-on: windows-2022
+    timeout-minutes: 9
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve ORIGINAL author binary package
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_straighten_diagnostic"
+      - name: Monitor original Straighten process CPU and output, do not modify source
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_straighten_diagnostic\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after' | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $env:QT_DEBUG_PLUGINS='1'
+          $name='model_15'
+          $out=Join-Path $root 'Straighten.stdout.txt'
+          $err=Join-Path $root 'Straighten.stderr.txt'
+          $cmd=@("Source/Input/$name.obj","Source/before/$name.obj","Source/after/${name}_axis.obj")
+          $p=Start-Process -FilePath (Join-Path $root 'Straighten.exe') -ArgumentList $cmd -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+          for($i=0;$i -lt 8;$i++){
+            Start-Sleep -Seconds 8
+            $p.Refresh()
+            Write-Output "STRAIGHTEN_SAMPLE i=$i running=$(!$p.HasExited) cpu_seconds=$($p.TotalProcessorTime.TotalSeconds) private_bytes=$($p.PrivateMemorySize64)"
+            foreach($result in @("Source/before/$name.obj","Source/after/${name}_axis.obj")){
+              if(Test-Path $result){$f=Get-Item $result; Write-Output "INTERMEDIATE $result size=$($f.Length)"}
+            }
+            if($p.HasExited){break}
+          }
+          if(!$p.HasExited){$p.Kill()}
+          $p.WaitForExit()
+          Write-Output "STRAIGHTEN_NATIVE_EXIT=$($p.ExitCode)"
+          Write-Output "==== ORIGINAL STDOUT TAIL ===="
+          if(Test-Path $out){Get-Content $out -Tail 35}
+          Write-Output "==== ORIGINAL STDERR TAIL ===="
+          if(Test-Path $err){Get-Content $err -Tail 50}
+          Write-Output "==== ORIGINAL Qt PLATFORM PLUGINS ===="
+          Get-ChildItem $root -Recurse -Filter '*qwindows*' | ForEach-Object {Write-Output $_.FullName}
+          Pop-Location
