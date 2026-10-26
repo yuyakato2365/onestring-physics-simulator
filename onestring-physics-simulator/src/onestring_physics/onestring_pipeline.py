@@ -1047,6 +1047,7 @@ class PipelineParameters(_original.PipelineParameters):
     optcuts_grid_seam_native_enabled: bool = False
     optcuts_grid_seam_native_weight: float = 0.0
     optcuts_planar_quad_20261026_enabled: bool = False
+    optcuts_zhang2021_experimental_enabled: bool = False
     planar_quad_target_faces: int = 35
     planar_quad_refine_m3d: bool = True
     planar_quad_uv_reparam: bool = True
