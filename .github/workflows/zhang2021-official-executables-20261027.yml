@@ -34,3 +34,19 @@ jobs:
           Get-ChildItem $root -Recurse -File | Where-Object {$_.Extension -in @('.md','.txt','.obj','.off','.ply','.msh','.quad') } | Select-Object -First 100 | ForEach-Object {
             Write-Output "AUTHOR_DATA $($_.FullName) length=$($_.Length)"
           }
+
+      - name: Read original author's complete executable README and directory layout
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_official\authors_executables\ExeProgram"
+          Write-Output "=== README ORIGINAL ==="
+          $bytes=[System.IO.File]::ReadAllBytes((Join-Path $root 'readme.txt'))
+          $txt=[System.Text.Encoding]::UTF8.GetString($bytes)
+          Write-Output $txt
+          Write-Output "=== RUNTIME FILES ==="
+          Get-ChildItem $root -File | ForEach-Object {
+            Write-Output "NATIVE_FILE $($_.Name) $($_.Length)"
+          }
+          Write-Output "=== SOURCE DIRECTORIES ==="
+          Get-ChildItem (Join-Path $root 'Source') -Directory -Recurse | Select-Object -First 70 | ForEach-Object {
+            Write-Output "AUTHOR_DIR $($_.FullName)"
+          }
