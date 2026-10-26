@@ -701,11 +701,25 @@ with st.sidebar:
         "S→Omega のパラメータ化。paper_reference_bff だけが公式BFF CLIを使用し、代替fallbackを禁止する。",
         lambda: st.selectbox(
             "Omega parameterization mode",
-            ["rectangular_harmonic_legacy", "lscm_free_boundary", "paper_reference_bff", "bff", "boundary_sliding_lscm", "pca_debug"],
+            [
+                "rectangular_harmonic_legacy",
+                "lscm_free_boundary",
+                "paper_reference_bff",
+                "bff",
+                "boundary_sliding_lscm",
+                "pca_debug",
+                # Register the dated mode in the authoritative UI itself.
+                # Do not rely on the optional OptCuts launcher monkey-patch
+                # to append it dynamically: direct launches and Streamlit
+                # widget reruns must render the same stable options.
+                "optcuts_planar_quad_20261026",
+            ],
             format_func=lambda mode: {
                 "bff":"bff — LEGACY harmonic, NOT official BFF",
                 "paper_reference_bff":"paper_reference_bff — official BFF CLI",
                 "rectangular_harmonic_legacy":"rectangular_harmonic_legacy — NOT BFF",
+                "optcuts_planar_quad_20261026":
+                    "2026-10-26 | OptCuts → boundary-conforming Planar Quad M2D (Gmsh prototype)",
             }.get(mode,mode),
             index=2 if (paper_fidelity_enabled
                         or selected_model_version["id"]=="0.2.0-paper-reference-bff") else 0,
@@ -713,6 +727,11 @@ with st.sidebar:
             help="Paper mode always uses official BFF CLI. bff is a legacy harmonic alias.",
         ),
     )
+    if paper_fidelity_enabled:
+        st.caption(
+            "To select the 2026-10-26 OptCuts → Planar Quad mode, "
+            "turn OFF 'Paper-oriented computation mode (2025 Sec.4–5)' above."
+        )
     if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
         st.warning("This is not Boundary First Flattening. It is rectangular-boundary cotangent harmonic parameterization.")
     # The grid-aware variant is now selected directly from Omega
@@ -755,8 +774,20 @@ with st.sidebar:
         and st.session_state.get("_onestring_grid_seam_native_selected",False))
     optcuts_planar_quad_20261026_enabled = bool(
         not paper_fidelity_enabled
-        and omega_parameterization_mode == "optcuts_test"
-        and st.session_state.get("_onestring_planar_quad_20261026_selected", False))
+        and (
+            omega_parameterization_mode == "optcuts_planar_quad_20261026"
+            or (
+                omega_parameterization_mode == "optcuts_test"
+                and st.session_state.get(
+                    "_onestring_planar_quad_20261026_selected", False)
+            )
+        ))
+    # The dated mode is a visible UI choice, while the numerical OptCuts
+    # pipeline still uses the proven optcuts_test carrier. The launcher
+    # normally handles this conversion; enforce it here too so the mode
+    # cannot silently fall back to an unsupported parameterization name.
+    if optcuts_planar_quad_20261026_enabled:
+        omega_parameterization_mode = "optcuts_test"
     planar_quad_target_faces = int(st.session_state.get("onestring_planar_quad_target_faces", 35))
     planar_quad_refine_m3d = bool(st.session_state.get("onestring_planar_quad_refine_m3d", True))
     planar_quad_uv_reparam = bool(st.session_state.get("onestring_planar_quad_uv_reparam", True))
