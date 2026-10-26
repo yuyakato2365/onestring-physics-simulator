@@ -24,3 +24,16 @@ jobs:
             head -c 160 /tmp/zhang_body.txt | tr '\n' ' ' || true
             printf '\n'
           done
+
+      - name: Inspect public REC page script routes (diagnostic only)
+        run: |
+          set -euo pipefail
+          curl -sSL --max-time 20 \
+            'https://rec.ustc.edu.cn/share/8081ab10-dd29-11eb-b5e1-5fc36251b03b' \
+            > /tmp/rec_share.html
+          echo '=== script tags ==='
+          grep -oE '<script[^>]*>' /tmp/rec_share.html | tail -12 || true
+          echo '=== public JS file paths ==='
+          grep -oE '(src=|href=)[^ >]+' /tmp/rec_share.html | grep -E 'js|css' | tail -20 || true
+          echo '=== REC file title / shutdown markup ==='
+          grep -oE '.{0,40}(停止服务|2026年8月6日|Code|download).{0,100}' /tmp/rec_share.html | head -12 || true
