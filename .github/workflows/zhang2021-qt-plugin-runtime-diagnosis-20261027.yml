@@ -1,0 +1,61 @@
+name: Diagnose original Zhang Qt5 plugin loader incompatibility
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-qt-plugin-runtime-diagnosis-20261027.yml]
+  workflow_dispatch:
+jobs:
+  native-qt-loader:
+    runs-on: windows-2022
+    timeout-minutes: 7
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download original author binaries and PyQt5 5.7 plugin
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_qt_imports"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_qt_imports\authors_executables\ExeProgram"
+          python -m pip install pefile
+      - name: Compare DLL versions/imports against original author's Qt binaries
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_qt_imports\authors_executables\ExeProgram"
+          foreach($name in @('Qt5Core.dll','Qt5Gui.dll','Qt5Widgets.dll','platforms\qoffscreen.dll','platforms\qwindows.dll')){
+            $p=Join-Path $root $name
+            $f=Get-Item $p
+            Write-Output "DLL_VERSION $name $($f.VersionInfo.FileVersion) bytes=$($f.Length)"
+          }
+          $env:AUTHORS_ROOT=$root
+          @'
+          import pefile,os,pathlib
+          root=pathlib.Path(os.environ["AUTHORS_ROOT"])
+          for nm in ("platforms/qoffscreen.dll","platforms/qwindows.dll"):
+              path=root/nm
+              pe=pefile.PE(str(path),fast_load=True)
+              pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT']])
+              print("QT_PLUGIN",nm,[(x.dll.decode(errors="replace")) for x in pe.DIRECTORY_ENTRY_IMPORT])
+          '@ | python -
+      - name: Capture original Qt plugin loader diagnostic stderr, without bypassing error
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_qt_imports\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after' | Out-Null
+          $env:QT_DEBUG_PLUGINS='1'
+          $env:QT_QPA_PLATFORM='offscreen'
+          $out=Join-Path $root 'stdout.log'
+          $err=Join-Path $root 'stderr.log'
+          $p=Start-Process -FilePath (Join-Path $root 'Straighten.exe') -ArgumentList @('Source/Input/model_15.obj','Source/before/model_15.obj','Source/after/model_15_axis.obj') -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+          Start-Sleep -Seconds 12
+          $p.Refresh()
+          Write-Output "STALLED=$(!$p.HasExited)"
+          if(!$p.HasExited){$p.Kill();$p.WaitForExit()}
+          Write-Output '=== QT_PLUGIN_STDERR ==='
+          if(Test-Path $err){Get-Content $err -Tail 110}
+          Write-Output '=== APP_STDOUT ==='
+          if(Test-Path $out){Get-Content $out -Tail 40}
+          Pop-Location
