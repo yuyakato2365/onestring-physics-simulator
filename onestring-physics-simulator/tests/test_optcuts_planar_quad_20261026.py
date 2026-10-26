@@ -55,3 +55,19 @@ def test_gmsh_missing_dependency_fails_closed(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fail_gmsh)
     with pytest.raises(PlanarQuadMeshingError, match="DEPENDENCY_MISSING"):
         build_planar_quad(SimpleNamespace(), 35)
+
+def test_gmsh_planar_rectangle_all_quads_and_inverse():
+    pytest.importorskip("gmsh")
+    pytest.importorskip("shapely")
+    uv = np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+    xyz = np.column_stack((uv, np.zeros(4)))
+    faces = np.array([[0,1,2],[0,2,3]], dtype=int)
+    src = SimpleNamespace(uv_vertices_2d=uv, uv_faces=faces,
+                          surface_vertices_3d=xyz, surface_faces=faces,
+                          omega_boundary=np.vstack((uv,uv[0])))
+    quv, quads, metrics = build_planar_quad(src, 16)
+    assert len(quads) > 0
+    assert quads.shape[1] == 4
+    assert metrics["planar_quad_uv_inverse_exact_piecewise_linear"]
+    assert metrics["planar_quad_omega_undercoverage_fraction"] < .02
+    assert metrics["planar_quad_m2d_angle_min_degrees"] >= 8
