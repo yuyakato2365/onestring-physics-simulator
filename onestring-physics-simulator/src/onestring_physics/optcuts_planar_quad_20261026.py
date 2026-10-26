@@ -392,13 +392,59 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         return result
 
     def with_domain(parameterization, grid, params=None):
-        result = base_domain(parameterization, grid, params)
-        if params is not None and bool(getattr(params, "optcuts_planar_quad_20261026_enabled", False)):
-            result._planar_quad_source = parameterization
-            result._planar_quad_target_faces = int(getattr(params, "planar_quad_target_faces", 35))
-            # Retain the audited CSF Split stage. On irregular quad layouts it
-            # may reject cuts that do not follow a complete shared edge chain.
-            result.paper_split_policy = True
+        if not bool(getattr(params, "optcuts_planar_quad_20261026_enabled", False)):
+            return base_domain(parameterization, grid, params)
+        # The previous prototype invoked the regular cropped-grid domain
+        # builder even in this mode. That route constructs an entirely
+        # unnecessary rectangular overlay and can fail on the SAME Ω that
+        # the independent planar quad mesher should handle. Construct only
+        # the audited source chart and real area-Jacobian metadata.
+        if params is None:
+            raise PlanarQuadMeshingError("PLANAR_QUAD_DOMAIN_MISSING_PARAMETERS")
+        original = getattr(pipeline, "_original", None)
+        cls = getattr(original, "PlanarDomain", None)
+        area_metrics_fn = getattr(pipeline, "_paper_lambda_vertices_for_existing_omega", None)
+        if cls is None or area_metrics_fn is None:
+            raise PlanarQuadMeshingError(
+                "PLANAR_QUAD_DOMAIN_DEPENDENCY_UNAVAILABLE: source area field")
+        vertex, triangle, differential = area_metrics_fn(parameterization)
+        vertex = np.asarray(vertex, float)
+        triangle = np.asarray(triangle, float)
+        if (len(vertex) != len(parameterization.uv_vertices_2d)
+                or not len(triangle) or not np.isfinite(triangle).all()
+                or not np.isfinite(vertex).all()):
+            raise PlanarQuadMeshingError("PLANAR_QUAD_DOMAIN_CSF_INVALID")
+        threshold = float(getattr(params, "csf_split_threshold", 2.))
+        if not np.isfinite(threshold) or threshold < 1.:
+            raise PlanarQuadMeshingError("PLANAR_QUAD_DOMAIN_CSF_THRESHOLD_INVALID")
+        result = cls(
+            np.asarray(parameterization.omega_boundary, float).copy(),
+            np.asarray(parameterization.uv_vertices_2d, float).copy(),
+            f"{parameterization.method} surface parameterization + independent planar quad",
+            vertex.copy(), [])
+        result.parameterization = parameterization
+        result._planar_quad_source = parameterization
+        result._planar_quad_target_faces = int(getattr(params, "planar_quad_target_faces", 35))
+        result.paper_split_policy = True
+        result.csf_before = float(np.max(triangle))
+        result.csf_after_split = result.csf_before
+        result.csf_split_threshold = threshold
+        result.max_csf_splits = max(0, int(getattr(params, "max_csf_splits", 64)))
+        result.csf_split_enabled = bool(getattr(params, "enable_csf_splits", True))
+        result.csf_model = "original paired UV/3D triangle area Jacobian"
+        result.csf_split_exactness_label = "pending unstructured M2D Split audit"
+        result.paper_split_diagnostics = {
+            "status": "pending_unstructured_m2d",
+            "area_expansion_bound": threshold,
+            "lambda_max": result.csf_before,
+            "split_rule": "complete existing quad-edge-chain only",
+        }
+        result.localize_csf_splits = False
+        result.localized_split_segments = []
+        result.reference_mode = False
+        parameterization.metrics["split_diagnostics"] = dict(result.paper_split_diagnostics)
+        parameterization.metrics["planar_quad_independent_domain"] = True
+        parameterization.metrics["planar_quad_legacy_regular_overlay_bypassed"] = True
         return result
 
     def with_m2d(grid, domain, params=None):
