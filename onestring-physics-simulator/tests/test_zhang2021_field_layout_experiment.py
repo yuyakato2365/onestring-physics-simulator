@@ -119,3 +119,30 @@ def test_paper_inspired_generated_quads_reach_all_onestring_stages_on_dome():
     assert np.array_equal(m2d.faces, state.mesh_3d_optimized.faces)
     assert np.array_equal(m2d.faces, state.mesh_2d_optimized.faces)
     assert len(state.tiles_2d_dual_hinge.vertices) == len(m2d.faces)
+
+
+def test_cli_generates_actual_mesh_and_serialized_report(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    from onestring_physics.zhang2021_reference_bridge import export_source_chart
+    source = source_from_polygon([[0, 0], [2, 0], [2, 1], [1, 1], [1, 2], [0, 2]])
+    path = tmp_path / "source.npz"
+    output = tmp_path / "generated.npz"
+    report = tmp_path / "report.json"
+    export_source_chart(source, path)
+    root = Path(__file__).resolve().parents[1]
+    task = subprocess.run(
+        [sys.executable, "scripts/run_field_layout_experiment.py",
+         "--source", str(path), "--output", str(output),
+         "--report", str(report), "--target-quads", "35"],
+        cwd=root, capture_output=True, text=True, check=False)
+    assert task.returncode == 0, task.stdout + task.stderr
+    assert output.is_file() and report.is_file()
+    with np.load(output) as mesh:
+        assert len(mesh["faces"]) >= 4
+        assert mesh["faces"].shape[1] == 4
+    data = json.loads(report.read_text())
+    assert data["quad_count"] == len(np.load(output)["faces"])
+    assert data["zhang2021_algorithm_verified"] is False
