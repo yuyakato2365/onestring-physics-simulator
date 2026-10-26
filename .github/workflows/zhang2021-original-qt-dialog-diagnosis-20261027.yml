@@ -1,0 +1,79 @@
+name: Diagnose native Zhang Straighten Qt dialog and process wait
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-original-qt-dialog-diagnosis-20261027.yml
+  workflow_dispatch:
+jobs:
+  original-straighten-diagnosis:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve original binaries plus matching Qt plugin
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_qt_diagnostic"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_qt_diagnostic\authors_executables\ExeProgram"
+      - name: Inspect Windows dialog windows, loaded modules, Qt debug for real original executable
+        run: |
+          $env:ZHANG_AUTHOR_ROOT="$env:RUNNER_TEMP\zhang_qt_diagnostic\authors_executables\ExeProgram"
+          @'
+          import ctypes
+          import ctypes.wintypes as w
+          import os,subprocess,time,pathlib
+          root=pathlib.Path(os.environ["ZHANG_AUTHOR_ROOT"])
+          (root/"Source/before").mkdir(parents=True,exist_ok=True)
+          (root/"Source/after").mkdir(parents=True,exist_ok=True)
+          u32=ctypes.windll.user32
+          EnumWindows=u32.EnumWindows
+          GetWindowThreadProcessId=u32.GetWindowThreadProcessId
+          GetWindowTextW=u32.GetWindowTextW
+          GetClassNameW=u32.GetClassNameW
+          EnumWindows.argtypes=[ctypes.WINFUNCTYPE(w.BOOL,w.HWND,w.LPARAM),w.LPARAM]
+          def inspect_windows(pid):
+              matches=[]
+              @ctypes.WINFUNCTYPE(w.BOOL,w.HWND,w.LPARAM)
+              def cb(hwnd,lparam):
+                  p=w.DWORD()
+                  GetWindowThreadProcessId(hwnd,ctypes.byref(p))
+                  if p.value==pid:
+                      title=ctypes.create_unicode_buffer(1024)
+                      cls=ctypes.create_unicode_buffer(1024)
+                      GetWindowTextW(hwnd,title,1024)
+                      GetClassNameW(hwnd,cls,1024)
+                      matches.append((hex(hwnd),title.value,cls.value))
+                  return True
+              EnumWindows(cb,0)
+              return matches
+          for platform in ("offscreen","windows",""):
+              env=os.environ.copy()
+              env["QT_DEBUG_PLUGINS"]="1"
+              env.pop("QT_QPA_PLATFORM",None)
+              if platform: env["QT_QPA_PLATFORM"]=platform
+              with open(root/f"Straighten_{platform or 'unset'}.stdout.txt","wb") as out, open(root/f"Straighten_{platform or 'unset'}.stderr.txt","wb") as err:
+                  cmd=[str(root/"Straighten.exe"),"Source/Input/model_15.obj",
+                       "Source/before/model_15.obj","Source/after/model_15_axis.obj"]
+                  p=subprocess.Popen(cmd,cwd=root,stdout=out,stderr=err,env=env)
+                  print("MODE",platform,"PID",p.pid,flush=True)
+                  time.sleep(15)
+                  print("WINDOWS",platform,inspect_windows(p.pid),flush=True)
+                  print("PROC_POLL",platform,p.poll(),flush=True)
+                  if p.poll() is None:
+                      p.kill()
+                      p.wait(timeout=10)
+              for stream in ("stdout","stderr"):
+                  f=root/f"Straighten_{platform or 'unset'}.{stream}.txt"
+                  content=f.read_text(encoding="utf-8",errors="replace")
+                  print("LOG",platform,stream,"bytes",len(content),"head",repr(content[:4000]),flush=True)
+              for name in ("Source/before/model_15.obj","Source/after/model_15_axis.obj"):
+                  path=root/name
+                  print("OUTPUT",platform,name,path.exists(),(path.stat().st_size if path.exists() else 0),flush=True)
+          '@ | python -
