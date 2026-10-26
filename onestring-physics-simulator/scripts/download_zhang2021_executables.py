@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import zipfile
 
 SHARE="911f9e50-dd29-11eb-aa39-130e36684f1f"
+EXPECTED_SHA256="be7971f41821800ce32e0e2c0c9a53e081b002ec33e60521ccb4e2c9be848d37"
 RESOURCE="287d8cc0-dd29-11eb-95dd-410793957484"
 API="https://recapi.ustc.edu.cn/api/v2"
 
@@ -55,6 +56,8 @@ def download(directory:Path):
             out.write(p)
     if archive_path.stat().st_size!=int(expected[0]["bytes"]):
         raise RuntimeError("Original executable archive size mismatch")
+    if digest.hexdigest()!=EXPECTED_SHA256:
+        raise RuntimeError("Original executable archive SHA256 did not match verified official release")
     target=directory/"authors_executables"
     target.mkdir(exist_ok=True)
     with zipfile.ZipFile(archive_path) as z:
