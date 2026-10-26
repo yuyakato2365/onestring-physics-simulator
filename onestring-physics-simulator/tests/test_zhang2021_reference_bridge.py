@@ -98,3 +98,17 @@ def test_inconsistent_source_boundary_detected(square_source):
         audit_reference_quads(square_source,
                               square_source.uv_vertices_2d,
                               [[0, 1, 2, 3]])
+
+
+def test_clockwise_quads_have_valid_orientation(square_source):
+    uv = square_source.uv_vertices_2d
+    result = audit_reference_quads(square_source, uv, [[3, 2, 1, 0]])
+    assert result.diagnostics["quad_count"] == 1
+
+
+def test_undercovered_boundary_cannot_pass_seam_audit(square_source):
+    uv = np.array([[.1, .1], [.9, .1], [.9, .9], [.1, .9]])
+    with pytest.raises(Zhang2021BridgeError, match="QUAD_SEAM_PREFLIGHT_FAILED"):
+        audit_reference_quads(
+            square_source, uv, [[0, 1, 2, 3]],
+            max_undercoverage_fraction=.99, require_seam_correspondence=True)
