@@ -1,0 +1,26 @@
+name: Zhang 2021 source availability probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-reference-availability-probe-20261027.yml]
+jobs:
+  public-source-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check public authors' source links without authentication
+        run: |
+          set -euo pipefail
+          for url in \
+            'https://rec.ustc.edu.cn/share/8081ab10-dd29-11eb-b5e1-5fc36251b03b' \
+            'https://rec.ustc.edu.cn/share/671127a0-dd29-11eb-8844-eff549b50054' \
+            'https://rec.ustc.edu.cn/share/9d666eb0-dd29-11eb-b44e-f1734f8d7078' \
+            'https://pan.ustc.edu.cn/' ; do
+            printf '\n=== %s ===\n' "$url"
+            curl -Ls --max-time 20 -D /tmp/zhang_headers.txt -o /tmp/zhang_body.txt \
+              -w 'HTTP=%{http_code} type=%{content_type} bytes=%{size_download} redirect=%{url_effective}\n' \
+              "$url" || true
+            grep -iE '^HTTP/|^content-type:|^location:' /tmp/zhang_headers.txt | tail -10 || true
+            head -c 160 /tmp/zhang_body.txt | tr '\n' ' ' || true
+            printf '\n'
+          done
