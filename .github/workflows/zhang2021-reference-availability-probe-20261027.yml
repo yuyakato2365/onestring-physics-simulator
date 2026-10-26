@@ -212,3 +212,38 @@ jobs:
               for n,line in enumerate(blob.splitlines()[:240],1):
                   print(f"{x}:{n}: {line[:180]}")
           PY
+
+      - name: Decode authors' UTF16 source and locate pipeline entrypoints and native dependencies
+        run: |
+          python3 - <<'PY'
+          import zipfile,re
+          z=zipfile.ZipFile("/tmp/zhang2021_Code_new.zip")
+          files=z.namelist()
+          for component in ("Straighten","Segment","QuadMeshSimplify"):
+              folder=f"Code/{component}/{component}/"
+              names=[x for x in files if x.startswith(folder) and x.endswith(("main.cpp",".vcxproj","Pipeline.cpp","Pipeline.h"))]
+              for filename in names[:5]:
+                  data=z.read(filename)
+                  if data.startswith((b"\\xff\\xfe",b"\\xfe\\xff")) or data[:40].count(b"\\x00")>3:
+                      code=data.decode("utf-16",errors="replace")
+                  else: code=data.decode("utf-8",errors="replace")
+                  lines=code.splitlines()
+                  print("SOURCE",filename,"LINES",len(lines))
+                  if filename.endswith(".vcxproj"):
+                      for n,line in enumerate(lines):
+                          if any(x in line for x in ("AdditionalDependencies","AdditionalIncludeDirectories","PlatformToolset","PreprocessorDefinitions","ClCompile Include","ProjectReference","AdditionalLibraryDirectories")):
+                              print("VSBUILD",component,n+1,line[:260])
+                  elif filename.endswith("main.cpp"):
+                      for n,line in enumerate(lines):
+                          if re.search(r'\\b(int|void)\\s+(main|main_)\\s*\\(|argc|argv|\\b[a-zA-Z_]+\\.obj|\\b[a-zA-Z_]+\\.off|\\.ply|\\.quad',line,re.I):
+                              print("ENTRY",component,n+1,line[:240])
+                      for n,line in enumerate(lines):
+                          if re.search(r'\\bint\\s+main\\s*\\(',line):
+                              for k in range(max(0,n-2),min(n+120,len(lines))):
+                                  print("MAIN",component,k+1,lines[k][:240])
+                  else:
+                      for n,line in enumerate(lines):
+                          if re.search("OpenMesh::IO::read_mesh|Read|read|\\.obj|\\.off|\\.vtk|\\.quad",line):
+                              if n<300:
+                                  print("PIPELINE",component,n+1,line[:200])
+          PY
