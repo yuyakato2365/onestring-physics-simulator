@@ -36,6 +36,11 @@ def test_planar_quad_runs_all_onestring_stages_on_open_dome(target_faces):
     )
     target = create_builtin_shape("dome", {"amplitude": 0.25, "radius": 2.0})
     state = pipeline.build_onestring_design(target, params)
+    # Feature mode must never depend on the old rectangular grid overlay.
+    assert state.surface_parameterization.metrics["planar_quad_independent_domain"] is True
+    assert state.surface_parameterization.metrics["planar_quad_legacy_regular_overlay_bypassed"] is True
+    assert not hasattr(state.conformal_domain, "overlay_nx")
+    assert len(state.conformal_domain.uv_vertices) == len(state.surface_parameterization.uv_vertices_2d)
     m2d = state.mesh_2d_initial
     m3d = state.mesh_3d_initial
     k3d = state.mesh_3d_optimized
