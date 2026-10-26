@@ -2,7 +2,7 @@ import numpy as np
 from types import SimpleNamespace
 
 from onestring_physics.optcuts_planar_quad_uv_reparam_20261026 import (
-    boundary_cycle, harmonically_smoothed_uv, surface_uv_sd
+    boundary_cycle, harmonically_smoothed_uv, surface_uv_sd, coarse_boundary_reparameterize
 )
 from onestring_physics.optcuts_planar_quad_refine_20261026 import (
     validate_disk_mesh, relax_m3d_quality
@@ -62,3 +62,17 @@ def test_unstructured_downstream_collision_pairs_are_not_empty():
     assert len(old._boundary_tile_edges(g)) == 6
     out=old._initial_auxetic_vertex_hinge_layout(uv[faces],g)
     assert out.shape == (2,4,2)
+
+def test_coarse_boundary_preserves_bijective_source_triangle_correspondence():
+    boundary = np.array([[0,0],[.35,.01],[.67,-.01],[1,0],
+                         [1,.34],[1.01,.66],[1,1],[.67,.99],
+                         [.34,1.01],[0,1],[-.01,.66],[.01,.34]],float)
+    uv = np.vstack((boundary,[.5,.5]))
+    tris = np.array([[len(boundary),i,(i+1)%len(boundary)]
+                     for i in range(len(boundary))],int)
+    xyz=np.column_stack((uv,np.zeros(len(uv))))
+    moved,m=coarse_boundary_reparameterize(xyz,tris,uv,tris,16)
+    assert m["planar_quad_coarse_uv_sd_after"] <= 1.08 * m["planar_quad_coarse_uv_sd_before"] + 1e-8
+    if m["planar_quad_coarse_uv_accepted"]:
+        assert m["planar_quad_coarse_boundary_points_after"] < len(boundary)
+    _triangle_inverse(moved,tris,xyz,tris,moved[[0,2,12]])
