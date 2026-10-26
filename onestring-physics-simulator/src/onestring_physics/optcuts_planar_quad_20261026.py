@@ -149,7 +149,7 @@ def _quad_quality(vertices: np.ndarray, faces: np.ndarray) -> dict[str, float]:
             "area_max_to_median": float(np.max(areas)) / max(float(np.median(areas)), 1e-12)}
 
 
-def build_planar_quad(parameterization: Any, target_faces: int):
+def build_planar_quad(parameterization: Any, target_faces: int, *, refine_m3d: bool = True):
     """Gmsh conforming 2D quadrangulation; no masked-square fallback."""
     try:
         import gmsh
@@ -196,7 +196,7 @@ def build_planar_quad(parameterization: Any, target_faces: int):
         gmsh.clear()
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.option.setNumber("Mesh.Algorithm", 8)
-        gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 1)
+        gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 2)
         gmsh.option.setNumber("Mesh.ElementOrder", 1)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h * .75)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h * 1.25)
@@ -238,7 +238,7 @@ def build_planar_quad(parameterization: Any, target_faces: int):
         if owner:
             gmsh.finalize()
 
-    # Do not assert valid geometry simply because a mesher generated it.
+    # Strict all-quad connectivity and subsequent geometry must be verified.
     polys = []
     orientations = []
     for i, ids in enumerate(faces):
@@ -271,6 +271,22 @@ def build_planar_quad(parameterization: Any, target_faces: int):
     xyz3 = mapped[:len(uv)]
     q2 = _quad_quality(np.column_stack((uv, np.zeros(len(uv)))), faces)
     q3 = _quad_quality(xyz3, faces)
+    refine_report = {
+        "planar_quad_m3d_quality_optimized": False,
+        "planar_quad_refine_3d_moves_accepted": 0,
+        "planar_quad_optimization_model": "original OptCuts UV unchanged; no 3D relaxation necessary",
+    }
+    if refine_m3d and (q3["angle_min_degrees"] < 55.
+                       or q3["edge_max_to_median"] > 2.5
+                       or q3["area_max_to_median"] > 3.5):
+        from .optcuts_planar_quad_refine_20261026 import relax_m3d_quality
+        uv, refine_report = relax_m3d_quality(
+            uv, faces, parameterization, _triangle_inverse, sweeps=2, max_moves=2000)
+        xyz3 = _triangle_inverse(uv_original, parameterization.uv_faces,
+                                parameterization.surface_vertices_3d,
+                                parameterization.surface_faces, uv)
+        q2 = _quad_quality(np.column_stack((uv, np.zeros(len(uv)))), faces)
+        q3 = _quad_quality(xyz3, faces)
     if q2["angle_min_degrees"] < 8 or q3["area_min"] <= 1e-14:
         raise PlanarQuadMeshingError("PLANAR_QUAD_BAD_SHAPE_OR_3D_COLLAPSE")
     report = {
@@ -286,8 +302,8 @@ def build_planar_quad(parameterization: Any, target_faces: int):
         "planar_quad_uv_inverse_exact_piecewise_linear": True,
         **{"planar_quad_m2d_" + k: float(v) for k, v in q2.items()},
         **{"planar_quad_m3d_" + k: float(v) for k, v in q3.items()},
-        "planar_quad_m3d_quality_optimized": False,
-        "planar_quad_m3d_quality_policy": "evaluated; no upstream deformation in v1",
+        **refine_report,
+        "planar_quad_m3d_quality_policy": "conditionally improved by constrained interior UV moves",
     }
     return uv, faces, report
 
@@ -321,7 +337,8 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
         if not hasattr(domain, "_planar_quad_source"):
             raise PlanarQuadMeshingError("PLANAR_QUAD_MISSING_OPTCUTS_SOURCE")
         uv, faces, report = build_planar_quad(
-            domain._planar_quad_source, domain._planar_quad_target_faces)
+            domain._planar_quad_source, domain._planar_quad_target_faces,
+            refine_m3d=bool(getattr(params, "planar_quad_refine_m3d", True)))
         # No claiming this is regular-grid CSF Split. Support is not implemented.
         source = domain._planar_quad_source
         limit = float(getattr(params, "csf_split_threshold", 2.))
