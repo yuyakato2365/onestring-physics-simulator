@@ -5,6 +5,7 @@ NOT a Bunny / OptCuts certification. It catches mismatched grid/mesh APIs and
 silent loss of M2D face topology downstream. Failures must fail CI.
 """
 import numpy as np
+import pytest
 
 from onestring_physics.input_shape import create_builtin_shape
 from onestring_physics import onestring_pipeline as pipeline
@@ -14,7 +15,8 @@ from onestring_physics.optcuts_planar_quad_downstream_20261026 import (
 )
 
 
-def test_planar_quad_runs_all_onestring_stages_on_open_dome():
+@pytest.mark.parametrize("target_faces", [16, 30, 35])
+def test_planar_quad_runs_all_onestring_stages_on_open_dome(target_faces):
     # Distinct from optcuts_test, whose official binary is unavailable on CI.
     install_unstructured_quad_downstream_20261026()
     install_planar_quad_20261026(pipeline)
@@ -26,9 +28,9 @@ def test_planar_quad_runs_all_onestring_stages_on_open_dome():
         omega_parameterization_mode="pca_debug",
         allow_experimental_pipeline=True,
         optcuts_planar_quad_20261026_enabled=True,
-        planar_quad_target_faces=16,
-        planar_quad_uv_reparam=False,
-        planar_quad_refine_m3d=False,
+        planar_quad_target_faces=target_faces,
+        planar_quad_uv_reparam=(target_faces != 16),
+        planar_quad_refine_m3d=(target_faces != 16),
         enable_csf_splits=False,
         collision_split_enabled=False,
     )
@@ -41,6 +43,11 @@ def test_planar_quad_runs_all_onestring_stages_on_open_dome():
     assert len(m2d.faces) > 0
     assert all(len(face) == 4 for face in m2d.faces)
     assert m2d.metrics["planar_quad_engine"].startswith("Gmsh ")
+    # Keep the actual vs requested face count visible, never relabel the target as achieved.
+    assert int(m2d.metrics["planar_quad_target_faces"]) == target_faces
+    assert int(m2d.metrics["planar_quad_faces"]) == len(m2d.faces)
+    assert m2d.metrics["planar_quad_m2d_angle_min_degrees"] >= 20.
+    assert m2d.metrics["planar_quad_m3d_angle_min_degrees"] >= 12.
     assert np.array_equal(m2d.faces, m3d.faces)
     assert np.array_equal(m2d.faces, k3d.faces)
     assert np.array_equal(m2d.faces, k2d.faces)
