@@ -714,6 +714,7 @@ with st.sidebar:
                 # widget reruns must render the same stable options.
                 "optcuts_planar_quad_20261026",
                 "optcuts_zhang2021_coarse_layout_experiment",
+                "optcuts_zhang2021_reference_only",
             ],
             format_func=lambda mode: {
                 "bff":"bff — LEGACY harmonic, NOT official BFF",
@@ -723,6 +724,8 @@ with st.sidebar:
                     "2026-10-26 | OptCuts → boundary-conforming Planar Quad M2D (Gmsh prototype)",
                 "optcuts_zhang2021_coarse_layout_experiment":
                     "2026-10-27 | independent coarse-patch quad experiment (NOT Zhang reference)",
+                "optcuts_zhang2021_reference_only":
+                    "2026-10-27 | Zhang authors' native code ONLY (verified external adapter)",
             }.get(mode,mode),
             index=2 if (paper_fidelity_enabled
                         or selected_model_version["id"]=="0.2.0-paper-reference-bff") else 0,
@@ -780,13 +783,22 @@ with st.sidebar:
         and (
             omega_parameterization_mode in {
                 "optcuts_planar_quad_20261026",
-                "optcuts_zhang2021_coarse_layout_experiment"}
+                "optcuts_zhang2021_coarse_layout_experiment",
+                "optcuts_zhang2021_reference_only"}
             or (
                 omega_parameterization_mode == "optcuts_test"
                 and st.session_state.get(
                     "_onestring_planar_quad_20261026_selected", False)
             )
         ))
+    optcuts_zhang2021_reference_enabled = bool(
+        optcuts_planar_quad_20261026_enabled and (
+            omega_parameterization_mode == "optcuts_zhang2021_reference_only"
+            or st.session_state.get("_onestring_zhang2021_reference_selected", False)
+        )
+    )
+    zhang2021_reference_adapter_command = str(st.session_state.get(
+        "onestring_zhang2021_reference_adapter_cmd", "")).strip()
     optcuts_zhang2021_experimental_enabled = bool(
         optcuts_planar_quad_20261026_enabled and (
             omega_parameterization_mode == "optcuts_zhang2021_coarse_layout_experiment"
@@ -801,7 +813,9 @@ with st.sidebar:
         omega_parameterization_mode = "optcuts_test"
     planar_quad_target_faces = int(st.session_state.get("onestring_planar_quad_target_faces", 35))
     planar_quad_refine_m3d = bool(st.session_state.get("onestring_planar_quad_refine_m3d", True))
-    planar_quad_uv_reparam = bool(st.session_state.get("onestring_planar_quad_uv_reparam", True))
+    planar_quad_uv_reparam = (
+        False if optcuts_zhang2021_reference_enabled
+        else bool(st.session_state.get("onestring_planar_quad_uv_reparam", True)))
     optcuts_grid_seam_native_weight = (
         float(st.session_state.get("onestring_native_grid_seam_weight",0.10))
         if optcuts_grid_seam_native_enabled else 0.0)
@@ -2096,6 +2110,8 @@ def current_pipeline_key() -> tuple:
         optcuts_grid_seam_native_weight,
         optcuts_planar_quad_20261026_enabled,
         optcuts_zhang2021_experimental_enabled,
+        optcuts_zhang2021_reference_enabled,
+        zhang2021_reference_adapter_command,
         planar_quad_target_faces,
         planar_quad_refine_m3d,
         planar_quad_uv_reparam,
@@ -2269,6 +2285,8 @@ pipeline_params = PipelineParameters(
     optcuts_grid_seam_native_weight=optcuts_grid_seam_native_weight,
     optcuts_planar_quad_20261026_enabled=optcuts_planar_quad_20261026_enabled,
     optcuts_zhang2021_experimental_enabled=optcuts_zhang2021_experimental_enabled,
+    optcuts_zhang2021_reference_enabled=optcuts_zhang2021_reference_enabled,
+    zhang2021_reference_adapter_command=zhang2021_reference_adapter_command,
     planar_quad_target_faces=planar_quad_target_faces,
     planar_quad_refine_m3d=planar_quad_refine_m3d,
     planar_quad_uv_reparam=planar_quad_uv_reparam,
