@@ -1,0 +1,36 @@
+name: Verify original Zhang 2021 published executables
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-official-executables-20261027.yml
+      - onestring-physics-simulator/scripts/download_zhang2021_executables.py
+  workflow_dispatch:
+jobs:
+  official-native-exes:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download genuine original published binary distribution
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang2021_official"
+      - name: Inspect executable archive contents and documentation
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_official\authors_executables"
+          Write-Output "=== AUTHORS DISTRIBUTION TOP LEVEL ==="
+          Get-ChildItem $root | Select-Object Name,Length,Mode
+          Write-Output "=== ORIGINAL EXE PATHS ==="
+          Get-ChildItem $root -Recurse -File | Where-Object {$_.Extension -ieq '.exe'} | ForEach-Object {
+            Write-Output "AUTHOR_EXE $($_.FullName) length=$($_.Length)"
+          }
+          Write-Output "=== SAMPLES AND DOCUMENTATION ==="
+          Get-ChildItem $root -Recurse -File | Where-Object {$_.Extension -in @('.md','.txt','.obj','.off','.ply','.msh','.quad') } | Select-Object -First 100 | ForEach-Object {
+            Write-Output "AUTHOR_DATA $($_.FullName) length=$($_.Length)"
+          }
