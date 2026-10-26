@@ -49,6 +49,7 @@ from onestring_physics.optcuts_test2_acceleration_patch import (  # noqa: E402
 from onestring_physics.optcuts_grid_native_pipeline_patch import install_native_grid_optcuts_pipeline_patch  # noqa: E402
 from onestring_physics.optcuts_grid_native_lift_patch import install_native_grid_optcuts_lift_patch  # noqa: E402
 from onestring_physics.optcuts_grid_constrained_m2d_patch import install_optcuts_grid_constrained_m2d_patch  # noqa: E402
+from onestring_physics.optcuts_planar_quad_20261026 import install_planar_quad_20261026  # noqa: E402
 from onestring_physics.optcuts_grid_consistency_patch import install_optcuts_grid_consistency_patch  # noqa: E402
 from onestring_physics.optcuts_test_k3d_augmented_lagrangian_patch import (  # noqa: E402
     install_optcuts_test_k3d_augmented_lagrangian_patch,
@@ -90,6 +91,7 @@ def _install_optcuts_selector() -> None:
             "optcuts_area_grid_adaptive_remesh",
             "optcuts_area_grid_combined",
             "optcuts_grid_seam_native",
+            "optcuts_planar_quad_20261026",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -98,6 +100,8 @@ def _install_optcuts_selector() -> None:
                 option_list.append(mode)
         original_format=kwargs.get("format_func")
         def label_for_mode(mode):
+            if mode=="optcuts_planar_quad_20261026":
+                return "2026-10-26 | OptCuts → boundary-conforming Planar Quad M2D (Gmsh prototype)"
             if mode=="optcuts_grid_aware":
                 return "2026-10-23 | Grid-aware OptCuts Ω + paper-aligned K3D/K2D (UV refinement)"
             if mode=="optcuts_area_grid_boundary":
@@ -121,8 +125,9 @@ def _install_optcuts_selector() -> None:
             value == "optcuts_grid_aware"
         )
         st.session_state["_onestring_area_grid_boundary_omega_selected"] = (
-            value == "optcuts_area_grid_boundary" or value in experimental
+            value == "optcuts_area_grid_boundary" or (value in experimental and value != "optcuts_planar_quad_20261026")
         )
+        st.session_state["_onestring_planar_quad_20261026_selected"] = (value == "optcuts_planar_quad_20261026")
         st.session_state["_onestring_grid_seam_native_selected"] = (
             value == "optcuts_grid_seam_native")
         st.session_state["_onestring_area_grid_optimizations"] = {
@@ -170,6 +175,24 @@ def _install_optcuts_selector() -> None:
                 "Non-disk outlines, insufficient boundary vertices, UV foldovers "
                 "and excessive distortion fail explicitly; no silent fallback."
             )
+        elif value == "optcuts_planar_quad_20261026":
+            st.caption(
+                "2026-10-26 EXPERIMENT: official OptCuts UV triangle chart -> "
+                "Gmsh boundary-conforming all-quad mesh. The original UV↔3D "
+                "piecewise-linear inverse is checked; 50% masked-grid clipping is "
+                "not used. This is NOT the Zhang et al. 2021 implementation. "
+                "Invalid quad geometry, outside-UV points and unsupported "
+                "CSF Split fail explicitly; irregular-grid downstream compatibility "
+                "has not been validated end-to-end."
+            )
+            st.number_input(
+                "Target Planar Quad panel count (approximate)",
+                min_value=4, max_value=10000, value=35, step=1,
+                key="onestring_planar_quad_target_faces",
+                help="Target edge length is sqrt(OptCuts Omega area / requested panels). "
+                     "Final number of quads can differ."
+            )
+            st.caption("Optional dependencies: python3 -m pip install gmsh shapely")
         elif value in experimental:
             st.caption(
                 "Isolated 10/23 OptCuts area-grid experiment; exact 50% mask, "
@@ -450,6 +473,8 @@ install_optcuts_test2_acceleration_patch(pipeline)
 # equality after every other K3D optimization wrapper. T3D consumes the
 # same hard equality groups in its shared top/bottom Eq.(2) solve.
 install_optcuts_exact_seam_closure(pipeline)
+# Outermost adapter: intercept only the explicit 2026-10-26 mode.
+install_planar_quad_20261026(pipeline)
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design
 _install_optcuts_selector()
