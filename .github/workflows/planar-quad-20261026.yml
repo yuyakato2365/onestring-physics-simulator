@@ -25,7 +25,7 @@ jobs:
           python -m pip install -e . pytest gmsh shapely
       - name: Compile changed Python entrypoints
         run: |
-          python -m py_compile src/onestring_physics/optcuts_planar_quad_20261026.py app_optcuts_core_20260916.py app_runtime_base.py
+          python -m py_compile src/onestring_physics/optcuts_planar_quad_20261026.py src/onestring_physics/optcuts_planar_quad_refine_20261026.py src/onestring_physics/optcuts_planar_quad_uv_reparam_20261026.py src/onestring_physics/optcuts_planar_quad_downstream_20261026.py app_optcuts_core_20260916.py app_runtime_base.py
       - name: Verify UV inverse and irregular face topology
         run: |
-          python -m pytest -q tests/test_optcuts_planar_quad_20261026.py
+          python -m pytest -q tests/test_optcuts_planar_quad_20261026.py tests/test_optcuts_planar_quad_20261026_reparam_and_downstream.py
