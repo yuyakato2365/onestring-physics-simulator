@@ -84,3 +84,38 @@ def test_no_fictitious_exact_paper_claim():
     out = generate_field_layout(source)
     assert out.metrics["planar_quad_method"] == "field_guided_patch_templates_experiment"
     assert out.metrics["zhang2021_algorithm_verified"] is False
+
+
+def test_paper_inspired_generated_quads_reach_all_onestring_stages_on_dome():
+    """Run genuine M2D generation through K3D,T3D,K2D,T2D, no Gmsh."""
+    from onestring_physics.input_shape import create_builtin_shape
+    from onestring_physics import onestring_pipeline as pipeline
+    from onestring_physics.optcuts_planar_quad_20261026 import install_planar_quad_20261026
+    from onestring_physics.optcuts_planar_quad_downstream_20261026 import (
+        install_unstructured_quad_downstream_20261026)
+    install_unstructured_quad_downstream_20261026()
+    install_planar_quad_20261026(pipeline)
+    params = pipeline.PipelineParameters(
+        nx=3,
+        max_3d_iterations=4,
+        max_2d_iterations=4,
+        omega_boundary_mode="shape_preserving_experimental",
+        omega_parameterization_mode="pca_debug",
+        allow_experimental_pipeline=True,
+        optcuts_planar_quad_20261026_enabled=True,
+        optcuts_zhang2021_experimental_enabled=True,
+        planar_quad_target_faces=35,
+        planar_quad_uv_reparam=False,
+        planar_quad_refine_m3d=False,
+        enable_csf_splits=False,
+        collision_split_enabled=False,
+    )
+    target = create_builtin_shape("dome", {"amplitude": .25, "radius": 2.})
+    state = pipeline.build_onestring_design(target, params)
+    m2d = state.mesh_2d_initial
+    assert m2d.metrics["zhang2021_algorithm_verified"] is False
+    assert "coarse_layout" in m2d.metrics["planar_quad_engine"]
+    assert np.array_equal(m2d.faces, state.mesh_3d_initial.faces)
+    assert np.array_equal(m2d.faces, state.mesh_3d_optimized.faces)
+    assert np.array_equal(m2d.faces, state.mesh_2d_optimized.faces)
+    assert len(state.tiles_2d_dual_hinge.vertices) == len(m2d.faces)
