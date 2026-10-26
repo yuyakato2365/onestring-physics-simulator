@@ -1,0 +1,68 @@
+name: Read authors original Straighten modal dialog text
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-original-dialog-text-20261027.yml]
+  workflow_dispatch:
+jobs:
+  read-author-error:
+    runs-on: windows-2022
+    timeout-minutes: 6
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve unmodified original authors' executables
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_diag_text"
+      - name: Get dialog message text and child control labels, without dismissing
+        run: |
+          $env:ZHANG_AUTHOR_ROOT="$env:RUNNER_TEMP\zhang_diag_text\authors_executables\ExeProgram"
+          @'
+          import ctypes,ctypes.wintypes as w,subprocess,os,time,pathlib
+          root=pathlib.Path(os.environ["ZHANG_AUTHOR_ROOT"])
+          for d in ("Source/before","Source/after"):
+              (root/d).mkdir(parents=True,exist_ok=True)
+          p=subprocess.Popen([str(root/"Straighten.exe"),
+                "Source/Input/model_15.obj",
+                "Source/before/model_15.obj",
+                "Source/after/model_15_axis.obj"],cwd=root,
+                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+          time.sleep(7)
+          user=ctypes.windll.user32
+          WNDPROC=ctypes.WINFUNCTYPE(w.BOOL,w.HWND,w.LPARAM)
+          user.EnumWindows.argtypes=(WNDPROC,w.LPARAM)
+          user.EnumChildWindows.argtypes=(w.HWND,WNDPROC,w.LPARAM)
+          user.GetWindowThreadProcessId.argtypes=(w.HWND,ctypes.POINTER(w.DWORD))
+          user.GetWindowTextW.argtypes=(w.HWND,w.LPWSTR,ctypes.c_int)
+          user.GetClassNameW.argtypes=(w.HWND,w.LPWSTR,ctypes.c_int)
+          def label(hwnd):
+              title=ctypes.create_unicode_buffer(4096)
+              cname=ctypes.create_unicode_buffer(4096)
+              user.GetWindowTextW(hwnd,title,4096)
+              user.GetClassNameW(hwnd,cname,4096)
+              return title.value,cname.value
+          def findchild(parent):
+              controls=[]
+              @WNDPROC
+              def callback(hwnd,lp):
+                  controls.append((hex(hwnd),*label(hwnd)))
+                  return True
+              user.EnumChildWindows(parent,callback,0)
+              return controls
+          @WNDPROC
+          def callback(hwnd,lp):
+              pid=w.DWORD()
+              user.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+              if pid.value==p.pid:
+                  print("AUTHOR_MODAL",hex(hwnd),label(hwnd),flush=True)
+                  print("AUTHOR_MODAL_CONTROLS",findchild(hwnd),flush=True)
+              return True
+          user.EnumWindows(callback,0)
+          p.kill(); p.wait()
+          '@ | python -
