@@ -94,6 +94,7 @@ def _install_optcuts_selector() -> None:
             "optcuts_grid_seam_native",
             "optcuts_planar_quad_20261026",
             "optcuts_zhang2021_coarse_layout_experiment",
+            "optcuts_zhang2021_reference_only",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -104,6 +105,8 @@ def _install_optcuts_selector() -> None:
         def label_for_mode(mode):
             if mode=="optcuts_zhang2021_coarse_layout_experiment":
                 return "2026-10-27 | OptCuts → independent coarse-patch Quad experiment (NOT Zhang reference)"
+            if mode=="optcuts_zhang2021_reference_only":
+                return "2026-10-27 | OptCuts → verified Zhang authors' native backend ONLY (requires adapter)"
             if mode=="optcuts_planar_quad_20261026":
                 return "2026-10-26 | OptCuts → boundary-conforming Planar Quad M2D (Gmsh prototype)"
             if mode=="optcuts_grid_aware":
@@ -129,12 +132,15 @@ def _install_optcuts_selector() -> None:
             value == "optcuts_grid_aware"
         )
         st.session_state["_onestring_area_grid_boundary_omega_selected"] = (
-            value == "optcuts_area_grid_boundary" or (value in experimental and value not in {"optcuts_planar_quad_20261026", "optcuts_zhang2021_coarse_layout_experiment"})
+            value == "optcuts_area_grid_boundary" or (value in experimental and value not in {"optcuts_planar_quad_20261026", "optcuts_zhang2021_coarse_layout_experiment", "optcuts_zhang2021_reference_only"})
         )
         st.session_state["_onestring_planar_quad_20261026_selected"] = (value in {
             "optcuts_planar_quad_20261026",
             "optcuts_zhang2021_coarse_layout_experiment",
+            "optcuts_zhang2021_reference_only",
         })
+        st.session_state["_onestring_zhang2021_reference_selected"] = (
+            value == "optcuts_zhang2021_reference_only")
         st.session_state["_onestring_zhang2021_experiment_selected"] = (
             value == "optcuts_zhang2021_coarse_layout_experiment")
         st.session_state["_onestring_grid_seam_native_selected"] = (
@@ -184,8 +190,23 @@ def _install_optcuts_selector() -> None:
                 "Non-disk outlines, insufficient boundary vertices, UV foldovers "
                 "and excessive distortion fail explicitly; no silent fallback."
             )
-        elif value in {"optcuts_planar_quad_20261026", "optcuts_zhang2021_coarse_layout_experiment"}:
-            if value == "optcuts_zhang2021_coarse_layout_experiment":
+        elif value in {"optcuts_planar_quad_20261026", "optcuts_zhang2021_coarse_layout_experiment", "optcuts_zhang2021_reference_only"}:
+            if value == "optcuts_zhang2021_reference_only":
+                st.caption(
+                    "AUTHOR REFERENCE ONLY. Actual Zhang et al. (CAD 2021) "
+                    "C++ source and its precise CLI remain unavailable. "
+                    "Supply an independently verified adapter to the genuine "
+                    "code; without it this mode fails explicitly, NEVER "
+                    "switches to Gmsh or an approximation.")
+                st.text_input(
+                    "Zhang 2021 reference adapter command",
+                    value=os.environ.get("ONESTRING_ZHANG2021_REFERENCE_ADAPTER", ""),
+                    key="onestring_zhang2021_reference_adapter_cmd",
+                    help="Use shell-quoted arguments, e.g. python3 adapter.py "
+                         "--input {input} --output {output}. Adapter implements "
+                         "our NPZ exchange protocol and must run the ORIGINAL "
+                         "authors' backend. Neither wrapper nor backend is bundled.")
+            elif value == "optcuts_zhang2021_coarse_layout_experiment":
                 st.caption(
                     "INDEPENDENT EXPERIMENT, NOT Zhang 2021 reference: "
                     "OptCuts Omega -> boundary-conservative triangulation -> "
@@ -212,6 +233,7 @@ def _install_optcuts_selector() -> None:
             )
             st.checkbox("Low-distortion Ω boundary + interior UV reparameterization",
                         value=value == "optcuts_planar_quad_20261026",
+                        disabled=value == "optcuts_zhang2021_reference_only",
                         key="onestring_planar_quad_uv_reparam")
             st.checkbox("M3D-aware quad refinement when panels are distorted", value=True,
                         key="onestring_planar_quad_refine_m3d")
