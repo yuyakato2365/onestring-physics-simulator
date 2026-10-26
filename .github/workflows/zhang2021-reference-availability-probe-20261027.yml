@@ -221,7 +221,7 @@ jobs:
           files=z.namelist()
           for component in ("Straighten","Segment","QuadMeshSimplify"):
               folder=f"Code/{component}/{component}/"
-              names=[x for x in files if x.startswith(folder) and x.endswith(("main.cpp",".vcxproj","Pipeline.cpp","Pipeline.h"))]
+              names=[x for x in files if x.startswith(folder) and x.count("/")<=3 and x.endswith(("main.cpp",".vcxproj","Pipeline.cpp","Pipeline.h"))]
               for filename in names[:5]:
                   data=z.read(filename)
                   if data.startswith((b"\\xff\\xfe",b"\\xfe\\xff")) or data[:40].count(b"\\x00")>3:
@@ -235,10 +235,10 @@ jobs:
                               print("VSBUILD",component,n+1,line[:260])
                   elif filename.endswith("main.cpp"):
                       for n,line in enumerate(lines):
-                          if re.search(r'\\b(int|void)\\s+(main|main_)\\s*\\(|argc|argv|\\b[a-zA-Z_]+\\.obj|\\b[a-zA-Z_]+\\.off|\\.ply|\\.quad',line,re.I):
+                          if any(term in line for term in ("main(", "argv", ".obj", ".off", ".ply", ".quad")):
                               print("ENTRY",component,n+1,line[:240])
                       for n,line in enumerate(lines):
-                          if re.search(r'\\bint\\s+main\\s*\\(',line):
+                          if "main(" in line and "int" in line:
                               for k in range(max(0,n-2),min(n+120,len(lines))):
                                   print("MAIN",component,k+1,lines[k][:240])
                   else:
