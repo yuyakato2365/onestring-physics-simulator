@@ -50,3 +50,14 @@ jobs:
           Get-ChildItem (Join-Path $root 'Source') -Directory -Recurse | Select-Object -First 70 | ForEach-Object {
             Write-Output "AUTHOR_DIR $($_.FullName)"
           }
+
+      - name: Inspect authors' exact WholePipeline.bat and sample OBJ coordinate format
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_official\authors_executables\ExeProgram"
+          Write-Output "=== AUTHOR BATCH ==="
+          Get-Content (Join-Path $root 'WholePipeline.bat') -Encoding UTF8
+          Write-Output "=== AUTHOR INPUT TRIANGULAR OBJ ==="
+          $sample=(Get-ChildItem (Join-Path $root 'Source\Input') -Filter *.obj | Select-Object -First 1).FullName
+          Get-Content $sample -TotalCount 25
+          Write-Output "=== UV AND FACE SAMPLES ==="
+          (Get-Content $sample | Select-String -Pattern '^vt |^f ' | Select-Object -First 15).Line
