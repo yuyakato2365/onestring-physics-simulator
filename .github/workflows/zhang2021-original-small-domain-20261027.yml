@@ -1,0 +1,75 @@
+name: Zhang original native end-to-end on simple UV domain
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-original-small-domain-20261027.yml
+  workflow_dispatch:
+jobs:
+  original-authors-square:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install official genuine author binaries
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang2021_real_square"
+      - name: Generate 9x9 original OBJ UV triangle chart
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_real_square\authors_executables\ExeProgram"
+          $env:AUTHOR_ROOT=$root
+          @'
+          from pathlib import Path
+          import os
+          path=Path(os.environ["AUTHOR_ROOT"])/"Source/Input/onestring_square.obj"
+          path.parent.mkdir(parents=True,exist_ok=True)
+          n=9
+          with path.open("w") as f:
+              f.write("# original input format: flat 3D+2D uv\n")
+              for j in range(n):
+                  for i in range(n): f.write(f"v {i/(n-1)} {j/(n-1)} 0\n")
+              for j in range(n):
+                  for i in range(n): f.write(f"vt {i/(n-1)} {j/(n-1)}\n")
+              for j in range(n-1):
+                  for i in range(n-1):
+                      a=j*n+i+1;b=a+1;c=a+n;d=c+1
+                      f.write(f"f {a}/{a} {b}/{b} {d}/{d}\n")
+                      f.write(f"f {a}/{a} {d}/{d} {c}/{c}\n")
+          print("ORIGINAL_CHART_OBJ",path,path.stat().st_size)
+          '@ | python -
+      - name: Run genuine three author EXE files with bounded per-stage time
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_real_square\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after','Result\finalOut' | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $stages=@(
+            @('Straighten.exe','Source/Input/onestring_square.obj','Source/before/onestring_square.obj','Source/after/onestring_square_axis.obj'),
+            @('Segment.exe','Source/after/onestring_square_axis.obj','Result/','Source/before/onestring_square.obj','35','0.01'),
+            @('QMSim.exe','Result/onestring_square.obj','Result/finalOut/onestring_square_out.obj','Source/before/onestring_square.obj','0','35','0.01','0.05')
+          )
+          foreach($cmd in $stages){
+            Write-Output "=== GENUINE ZHANG STAGE $($cmd[0]) ==="
+            $exe=Join-Path $root $cmd[0]
+            $args_=@($cmd | Select-Object -Skip 1)
+            $p=Start-Process -FilePath $exe -ArgumentList $args_ -PassThru -NoNewWindow
+            if(!$p.WaitForExit(90000)){
+              $p.Kill()
+              throw "Authors original stage timed out without output: $($cmd[0])"
+            }
+            Write-Output "STAGE_END $($cmd[0]) EXIT=$($p.ExitCode)"
+            if($p.ExitCode -ne 0){throw "Authors native stage failed: $($cmd[0])"}
+          }
+          $final='Result/finalOut/onestring_square_out.obj'
+          if(!(Test-Path $final)){throw "Original authors final OBJ missing"}
+          Write-Output "ORIGINAL_ZHANG_END_TO_END_SQUARE_SUCCESS"
+          Get-Item $final | Select-Object Name,Length
+          (Get-Content $final | Select-String -Pattern '^f ' | Select-Object -First 4).Line
+          Pop-Location
