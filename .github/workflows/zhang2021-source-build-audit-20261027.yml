@@ -1,0 +1,42 @@
+name: Audit original Zhang Segment source dependencies
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-source-build-audit-20261027.yml]
+  workflow_dispatch:
+jobs:
+  native-source-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve genuine 2021 source
+        run: python onestring-physics-simulator/scripts/download_zhang2021_authors.py --directory "$RUNNER_TEMP/zhang"
+      - name: Determine MSVC dependency paths and thread processing
+        run: |
+          export AUTHORS="$RUNNER_TEMP/zhang/authors_source/Code"
+          python - <<'PY'
+          import os,re
+          from pathlib import Path
+          root=Path(os.environ["AUTHORS"])
+          segment=root/"Segment"/"Segment"
+          for p in [segment/"Segment.vcxproj",segment/"AdaptiveQuad.cpp"]:
+              raw=p.read_bytes()
+              txt=raw.decode("utf-16") if raw[:30].count(b"\x00")>=3 else raw.decode("utf8",errors="replace")
+              lines=txt.splitlines()
+              if p.suffix==".vcxproj":
+                  for i,l in enumerate(lines):
+                      if any(x in l for x in ("AdditionalIncludeDirectories","AdditionalDependencies","AdditionalLibraryDirectories","PreprocessorDefinitions","AdditionalOptions","PlatformToolset","WindowsTargetPlatformVersion","ClCompile Include")):
+                          print(f"VCXPROJ:{i+1}: {l[:700]}")
+              else:
+                  for j in range(6150-1,min(6360,len(lines))):
+                      print(f"ADAPTIVE:{j+1}: {lines[j][:180]}")
+          for name in ["Eigen/Dense","CGAL/Exact_predicates_inexact_constructions_kernel.h","mkl.h","pardiso.h"]:
+              matches=[str(p.relative_to(root)) for p in root.rglob(Path(name).name) if "ThirdParty" in str(p) or "Straighten" in str(p)]
+              print("HEADER_AVAILABILITY",name, matches[:8])
+          for p in (root/"Segment"/"ThirdParty").rglob("*"):
+              if p.is_dir() and len(p.relative_to(root/"Segment"/"ThirdParty").parts)<=2:
+                  print("VENDOR_DIR",p.relative_to(root))
+          PY
