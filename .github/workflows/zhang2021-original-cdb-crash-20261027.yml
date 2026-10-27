@@ -1,0 +1,40 @@
+name: Debug original Zhang 2021 Segment fatal exception
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-original-cdb-crash-20261027.yml]
+  workflow_dispatch:
+jobs:
+  original-segment-debug:
+    runs-on: windows-2022
+    timeout-minutes: 9
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Fetch authors original executable and compatible Qt
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang2021_debug"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang2021_debug\authors_executables\ExeProgram"
+      - name: Run genuine Straighten and debug original Segment with Microsoft cdb
+        run: |
+          $root="$env:RUNNER_TEMP\zhang2021_debug\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after','Result\finalOut' | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $env:OMP_NUM_THREADS='1'
+          $a=Start-Process -FilePath (Join-Path $root 'Straighten.exe') -ArgumentList @('Source/Input/model_15.obj','Source/before/model_15.obj','Source/after/model_15_axis.obj') -NoNewWindow -PassThru
+          if(!$a.WaitForExit(60000)){$a.Kill();throw "Straighten timeout"}
+          if(!(Test-Path 'Source/after/model_15_axis.obj')){throw "Original Straighten failed"}
+          $cdb='C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          Write-Output '=== ORIGINAL AUTHOR SYMBOLS PRESENT ==='
+          Get-ChildItem $root -Recurse -Filter '*.pdb' | Select-Object -First 12 FullName
+          Write-Output '=== ORIGINAL SEGMENT EXCEPTION CALL STACK ==='
+          $program=Join-Path $root 'Segment.exe'
+          & $cdb -o -g -G -c 'sxe 0xc0000409;g;.ecxr;kv;!analyze -v;q' $program 'Source/after/model_15_axis.obj' 'Result/' 'Source/before/model_15.obj' '35' '0.01' 2>&1 | Select-Object -Last 170
+          Pop-Location
