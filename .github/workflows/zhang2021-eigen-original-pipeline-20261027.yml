@@ -1,0 +1,94 @@
+name: Zhang original 3-stage pipeline with independent Eigen numerical solver
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-eigen-original-pipeline-20261027.yml
+      - onestring-physics-simulator/native/zhang2021_sparse_solver/**
+      - onestring-physics-simulator/scripts/verify_zhang2021_eigen_abi.py
+  workflow_dispatch:
+jobs:
+  real-zhang-algorithm:
+    runs-on: windows-2022
+    timeout-minutes: 18
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download unchanged original authors binaries and source
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_official"
+          python scripts/download_zhang2021_authors.py --directory "$env:RUNNER_TEMP\zhang_source"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_official\authors_executables\ExeProgram"
+      - name: Find Eigen headers in authors source release
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_source\authors_source\Code"
+          $hits=@(Get-ChildItem $root -Recurse -File -Filter SparseLU -ErrorAction SilentlyContinue | Where-Object {$_.FullName -match '\\Eigen\\SparseLU$'})
+          Write-Output "EIGEN_HEADER_CANDIDATES=$($hits.Count)"
+          $hits | Select-Object -First 5 | ForEach-Object { Write-Output "EIGEN_HEADER=$($_.FullName)" }
+          if($hits.Count -eq 0){throw "Eigen/SparseLU not found in author C++ ZIP"}
+          $root2=Split-Path (Split-Path $hits[0].FullName -Parent) -Parent
+          "EIGEN_INCLUDE_DIR=$root2" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build licensed independent symmetric indefinite Eigen numerical library
+        run: |
+          cmake -S native/zhang2021_sparse_solver -B "$env:RUNNER_TEMP\zhang_solver" -G "Visual Studio 17 2022" -A x64 "-DEIGEN_INCLUDE_DIR=$env:EIGEN_INCLUDE_DIR"
+          if($LASTEXITCODE -ne 0){throw "Native configure error"}
+          cmake --build "$env:RUNNER_TEMP\zhang_solver" --config Release --parallel 2
+          if($LASTEXITCODE -ne 0){throw "Native compiler error"}
+          $dll="$env:RUNNER_TEMP\zhang_solver\Release\libpardiso600-WIN-X86-64.dll"
+          if(!(Test-Path $dll)){throw "Numerical DLL missing"}
+          "EIGEN_COMPAT_DLL=$dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Prove numerical 1-based symmetric indefinite KKT solve
+        run: |
+          python scripts/verify_zhang2021_eigen_abi.py --dll "$env:EIGEN_COMPAT_DLL"
+          if($LASTEXITCODE -ne 0){throw "Numerical residual test failed"}
+      - name: Replace only proprietary solver in temp distribution with independent Eigen implementation
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_official\authors_executables\ExeProgram"
+          Move-Item "$root\libpardiso600-WIN-X86-64.dll" "$root\original_pardiso_licensed.dll"
+          Copy-Item "$env:EIGEN_COMPAT_DLL" "$root\libpardiso600-WIN-X86-64.dll"
+          foreach($name in @("Straighten.exe","Segment.exe","QMSim.exe")){
+            Write-Output "ORIGINAL_AUTHORS_HASH $name $((Get-FileHash "$root\$name" -Algorithm SHA256).Hash)"
+          }
+      - name: Execute untouched Zhang Straighten Segment QMSim on original author sample
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_official\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after','Result\finalOut' | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $env:OMP_NUM_THREADS='1'
+          $env:MKL_NUM_THREADS='1'
+          $name='model_15'
+          $stages=@(
+            @('Straighten.exe',"Source/Input/$name.obj","Source/before/$name.obj","Source/after/$($name)_axis.obj"),
+            @('Segment.exe',"Source/after/$($name)_axis.obj",'Result/',"Source/before/$name.obj",'4000','0.01'),
+            @('QMSim.exe',"Result/$name.obj","Result/finalOut/$($name)_out.obj","Source/before/$name.obj",'0','4000','0.01','0.05')
+          )
+          foreach($args in $stages){
+            $exe=$args[0]
+            Write-Output "ORIGINAL_STAGE_START $exe"
+            $p=Start-Process -FilePath (Join-Path $root $exe) -ArgumentList @($args | Select-Object -Skip 1) -PassThru -NoNewWindow -RedirectStandardOutput "$exe.stdout" -RedirectStandardError "$exe.stderr"
+            if(!$p.WaitForExit(130000)){
+              $p.Kill();$p.WaitForExit()
+              Get-Content "$exe.stdout" -Tail 25 -ErrorAction SilentlyContinue
+              Get-Content "$exe.stderr" -Tail 25 -ErrorAction SilentlyContinue
+              throw "Original native stage timed out: $exe"
+            }
+            Write-Output "ORIGINAL_STAGE_EXIT $exe $($p.ExitCode)"
+            Get-Content "$exe.stdout" -Tail 25 -ErrorAction SilentlyContinue
+            Get-Content "$exe.stderr" -Tail 25 -ErrorAction SilentlyContinue
+            if($p.ExitCode -ne 0){throw "Original native stage failed: $exe"}
+          }
+          $out="Result\finalOut\$($name)_out.obj"
+          if(!(Test-Path $out)){throw "Original final quad OBJ missing"}
+          $faces=@(Get-Content $out | Where-Object {$_ -match '^f '})
+          $arities=@($faces | ForEach-Object {($_ -split '\s+').Length - 1} | Sort-Object -Unique)
+          Write-Output "ORIGINAL_ZHANG_RESULT_QUADS $($faces.Count) FACE_ARITIES=$($arities -join ',')"
+          if($arities.Count -ne 1 -or $arities[0] -ne 4){throw "Native result not all quad"}
+          Write-Output 'ORIGINAL_ZHANG_AUTHOR_ALGORITHM_END_TO_END_SUCCESS'
+          Pop-Location
