@@ -1,0 +1,65 @@
+name: Audit exact UV inverse correspondence of original Zhang Straighten
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-straighten-map-audit-20261027.yml]
+  workflow_dispatch:
+jobs:
+  original-uv-map:
+    runs-on: windows-2022
+    timeout-minutes: 7
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Fetch original authors' release and matched Qt runtime
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_uv_map"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_uv_map\authors_executables\ExeProgram"
+      - name: Run original Straighten and report authored source/after chart correspondence
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_uv_map\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after' | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $p=Start-Process -FilePath (Join-Path $root 'Straighten.exe') -ArgumentList @('Source/Input/model_15.obj','Source/before/model_15.obj','Source/after/model_15_axis.obj') -PassThru -NoNewWindow
+          if(!$p.WaitForExit(60000)){$p.Kill();throw "Original Straighten timeout"}
+          if($p.ExitCode -ne 0){throw "Original Straighten exit failure"}
+          $env:ORIG_CHART=$root
+          @'
+          from pathlib import Path
+          import os,collections,math
+          root=Path(os.environ["ORIG_CHART"])
+          def scan(file):
+            vv=[];uv=[];ff=[]
+            for l in (root/file).read_text(errors="replace").splitlines():
+              a=l.split()
+              if not a:continue
+              if a[0]=="v" and len(a)>=4: vv.append(tuple(map(float,a[1:4])))
+              if a[0]=="vt" and len(a)>=3:uv.append(tuple(map(float,a[1:3])))
+              if a[0]=="f":ff.append(a[1:])
+            return vv,uv,ff
+          items=["Source/Input/model_15.obj","Source/before/model_15.obj","Source/after/model_15_axis.obj"]
+          for file in items:
+            v,uv,faces=scan(file)
+            print("CHART",file,"nv",len(v),"nuv",len(uv),"nf",len(faces),
+              "face_lengths",dict(collections.Counter(map(len,faces))),"v_first",v[:4],
+              "uv_first",uv[:4],"faces_first",faces[:2],flush=True)
+          try:
+            a=scan(items[0]);b=scan(items[1]);c=scan(items[2])
+            for i,(x,y) in enumerate(((a,b),(a,c),(b,c))):
+              if len(x[0])==len(y[0]):
+                diff=max(math.dist(v,w) for v,w in zip(x[0],y[0]))
+                print("CHART_DIFF_V",i,diff)
+              if len(x[1])==len(y[1]) and x[1]:
+                diff=max(math.dist(v,w) for v,w in zip(x[1],y[1]))
+                print("CHART_DIFF_UV",i,diff)
+              print("CHART_FACE_INDEX_IDENTICAL",i,x[2]==y[2])
+          except Exception as e:print(type(e).__name__,str(e))
+          '@ | python -
+          Pop-Location
