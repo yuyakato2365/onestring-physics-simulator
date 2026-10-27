@@ -4,8 +4,8 @@
 The author's official ExeProgram.zip contains Qt5Core/Gui/Widgets.dll but
 NO platforms/qwindows.dll or qoffscreen.dll; Qt5's QApplication can therefore
 block on a GUI loader error even before the algorithm runs. This script
-retrieves exact-era Qt 5.7 plugins from the *unmodified* official PyPI PyQt5
-5.7 Windows wheel, hash-checked against PyPI metadata. It installs into a
+retrieves exact-era Qt 5.10 plugins from the *unmodified* official PyPI PyQt5
+5.10 Windows wheel, hash-checked against PyPI metadata. It installs into a
 local ExeProgram copy; do NOT redistribute Qt/PyQt5 binaries from this repo.
 Respect LGPL/GPL and PyPI distribution terms.
 """
@@ -19,7 +19,7 @@ import urllib.request
 import zipfile
 
 
-def install_plugins(exe_root:Path, qt_pyqt_version:str="5.7"):
+def install_plugins(exe_root:Path, qt_pyqt_version:str="5.10"):
     exe_root=exe_root.resolve()
     if not (exe_root/"Straighten.exe").is_file():
         raise ValueError("Missing ORIGINAL authors Straighten.exe")
@@ -58,6 +58,6 @@ def install_plugins(exe_root:Path, qt_pyqt_version:str="5.7"):
 if __name__=="__main__":
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--exe-root",type=Path,required=True)
-    ap.add_argument("--qt-pyqt-version",default="5.7")
+    ap.add_argument("--qt-pyqt-version",default="5.10")
     args=ap.parse_args()
     print(json.dumps(install_plugins(args.exe_root,args.qt_pyqt_version),indent=2))
