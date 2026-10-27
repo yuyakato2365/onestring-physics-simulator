@@ -31,6 +31,32 @@ import numpy as np
 class OriginalZhangExecutionError(RuntimeError):
     pass
 
+# SHA256 verified from authors' Code/Exe links (official ExeProgram.zip).
+# A renamed mock executable must NEVER be reported as original Zhang code.
+ORIGINAL_AUTHOR_EXE_SHA256 = {
+    "Straighten.exe": "3c88f817ef9ac6bee4da571d78c9d038d7edb1dce545c63548f5c8a3f93c95fc",
+    "Segment.exe": "f50287d3b3171bd0c4cab6959d5f7b05d01ae46637dfa8a3e00cdbe0f6ca5b5d",
+    "QMSim.exe": "aa73bed0b07446fb20fb25da2035023ccd5e13b073f858f5778387592ce5c4fe",
+}
+
+def _verify_authors_executable_provenance(exe_root:Path) -> dict[str,str]:
+    manifest = {}
+    for executable, expected in ORIGINAL_AUTHOR_EXE_SHA256.items():
+        path = exe_root / executable
+        if not path.is_file():
+            raise OriginalZhangExecutionError("ORIGINAL_AUTHOR_EXE_MISSING: " + executable)
+        hasher = hashlib.sha256()
+        with path.open("rb") as src:
+            while block := src.read(1 << 20):
+                hasher.update(block)
+        sha = hasher.hexdigest()
+        if sha != expected:
+            raise OriginalZhangExecutionError(
+                f"ORIGINAL_AUTHOR_EXE_HASH_MISMATCH: {executable} "
+                f"sha256={sha}; not the verified public Zhang release")
+        manifest[executable] = sha
+    return manifest
+
 
 def _obj_export(source:dict, dest:Path):
     """Export paired 3D and UV indices precisely as OBJ v/vt/f."""
@@ -209,6 +235,7 @@ def generate(source_npz:Path,output_npz:Path,exe_root:Path,target_quads:int,
     if not all((exe_root/name).is_file()
                for name in ("Straighten.exe","Segment.exe","QMSim.exe","WholePipeline.bat")):
         raise OriginalZhangExecutionError("GENUINE_AUTHOR_EXECUTABLES_NOT_FOUND")
+    original_exe_sha256 = _verify_authors_executable_provenance(exe_root)
     with np.load(source_npz,allow_pickle=False) as npz:
         src={key:npz[key].copy() for key in npz.files}
     # Separate runtime dir even from original author package; never alter it.
@@ -256,6 +283,7 @@ def generate(source_npz:Path,output_npz:Path,exe_root:Path,target_quads:int,
             "engine":"Zhang et al. 2021 ORIGINAL authors' binaries",
             "authors_executable_source":"ExeProgram.zip from official research page",
             "reference_backend_is_genuine":True,
+            "authors_original_executable_sha256":original_exe_sha256,
             "target_quads":target_quads,"actual_quads":int(len(faces)),
             "hausdorff_bound":hausdorff_bound,
             "sheet_width":sheet_width,"keep_features":keep_features,
