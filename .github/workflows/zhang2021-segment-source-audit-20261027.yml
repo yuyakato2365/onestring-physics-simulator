@@ -1,0 +1,37 @@
+name: Audit original Zhang Segment crash source
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-segment-source-audit-20261027.yml]
+  workflow_dispatch:
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve original C++ source and audit crash points
+        run: |
+          python onestring-physics-simulator/scripts/download_zhang2021_authors.py --directory /tmp/zhang2021_original
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          root=Path("/tmp/zhang2021_original/authors_source/Code/Segment/Segment")
+          print("SOURCECOUNT",len(list(root.rglob("*.cpp"))))
+          for f in sorted(root.rglob("*.cpp")):
+              if any(x in str(f).lower() for x in ('thirdparty','eigen','include/','cgal/')):continue
+              raw=f.read_bytes()
+              if raw.startswith((b'\xff\xfe',b'\xfe\xff')):data=raw.decode('utf-16',errors='replace')
+              else:data=raw.decode('utf-8',errors='replace')
+              lines=data.splitlines()
+              hits=[(i,line.strip()) for i,line in enumerate(lines,1) if any(t in line for t in ('Begin dealing with the','thred num:','exit(','abort(','assert(','_invalid_parameter','std::terminate','omp parallel','pragma omp','Pardiso','pardiso','memcpy','sprintf','strcpy'))]
+              if hits:
+                  print("SOURCEFILE",f.relative_to(root),"LINES",len(lines))
+                  for i,line in hits[:55]:
+                      print("HIT",i,line[:220])
+                      if 'Begin dealing with the' in line:
+                          for j in range(max(1,i-16),min(len(lines),i+27)):
+                              print("NEAR",j,lines[j-1][:210])
+          PY
