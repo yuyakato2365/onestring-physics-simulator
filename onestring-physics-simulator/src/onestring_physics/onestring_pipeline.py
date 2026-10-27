@@ -1126,7 +1126,8 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_cone_weight: float = 0.5
     structured_grid_shape_weight: float = 0.05
     structured_grid_turn_weight: float = 1.0       # local turning fit of every logical corner / cone
-    structured_grid_priority: str = "shape"        # panel optimiser: "shape" | "balanced" | "size"
+    structured_grid_priority: str = "size"         # "size" (equal M3D panel areas) | "balanced" | "shape"
+    structured_grid_area_weight: float = -1.0      # equal-area weight of the grid map (-1 = from priority)
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",

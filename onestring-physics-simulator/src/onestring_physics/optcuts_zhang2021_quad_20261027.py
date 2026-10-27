@@ -507,6 +507,13 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
                 f"ZHANG2021_ONESTRING_QUAD_VERTEX_OUTSIDE_CHART: {int(np.sum(tri < 0))} vertices")
         m3d = lift.lift(quv, tri)
     validity = quad_validity(quv, faces_ccw)[0]
+    if np.any(quv != quv_in):
+        # topology / validity of the FINAL M2D (after untangling and optimisation)
+        try:
+            validate_disk_mesh(quv, faces_ccw)
+            topology_ok, topology_detail = True, "all-quad disk"
+        except ValueError as exc:
+            topology_ok, topology_detail = False, str(exc)[:300]
     q2 = panel_quality(quv, faces_ccw, stage="M2D", thresholds=stage_thresholds(params, "m2d"),
                        planar_2d_orientation=1.0)
     q3 = panel_quality(m3d, faces_ccw, stage="M3D", thresholds=stage_thresholds(params, "m3d"))

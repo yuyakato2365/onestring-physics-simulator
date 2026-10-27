@@ -41,6 +41,7 @@ class PanelOptimizerWeights:
     barrier: float = 1e-2
     barrier_ratio: float = 0.05
     smooth: float = 0.0     # Brackbill-Saltzman smoothness on grid-line triples (structured grids)
+    area: float = 0.0       # log^2(panel area / L^2): equal panel AREAS (structured grids, size priority)
 
 
 @dataclass
@@ -128,6 +129,14 @@ def _quad_terms(X: np.ndarray, quads: np.ndarray, L: float, w: PanelOptimizerWei
     sum_dev = theta.sum(axis=1) - 2.0 * np.pi
     b = (w.angle * np.mean(c * c, axis=1) + w.size * np.mean(lr * lr, axis=1)
          + w.aspect * np.mean((y - ybar) ** 2, axis=1) + w.angle_sum * sum_dev ** 2)
+    if w.area > 0:
+        d1 = Q[:, 2] - Q[:, 0]
+        d2 = Q[:, 3] - Q[:, 1]
+        cr = np.cross(d1, d2)
+        crn = np.maximum(np.linalg.norm(cr, axis=1), 1e-300)
+        A = 0.5 * crn
+        la = np.log(A / (L * L))
+        b = b + w.area * la * la
     m = len(quads)
     if w.worst_alpha > 0 and w.worst_beta > 0:
         z = w.worst_beta * b
@@ -152,6 +161,15 @@ def _quad_terms(X: np.ndarray, quads: np.ndarray, L: float, w: PanelOptimizerWei
     gu = dbdc[..., None] * dcdu + (dbdy / (lu * lu))[..., None] * nxt   # y_k = log|u_k|
     gv = dbdc[..., None] * dcdv
     G = np.zeros_like(X)
+    if w.area > 0:
+        chat = cr / crn[:, None]
+        dbdA = (qw * w.area * 2.0 * la / A)[:, None]
+        g1 = dbdA * 0.5 * np.cross(d2, chat)          # dA/d d1
+        g2 = dbdA * 0.5 * np.cross(chat, d1)          # dA/d d2
+        np.add.at(G, quads[:, 2], g1)
+        np.add.at(G, quads[:, 0], -g1)
+        np.add.at(G, quads[:, 3], g2)
+        np.add.at(G, quads[:, 1], -g2)
     for k in range(4):
         kn, kp = (k + 1) % 4, (k - 1) % 4
         np.add.at(G, quads[:, kn], gu[:, k])

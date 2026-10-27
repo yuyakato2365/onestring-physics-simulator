@@ -364,7 +364,52 @@ def _untangle_triangles(P: np.ndarray, F: np.ndarray, free: np.ndarray, iters: i
     return P
 
 
-def _slim_polygon_map(Dc, Dg, quads, logical, bset_c, bpoly, cuv, cf, cxyz, cf3, bnd, harmonic_flips):
+def _area_refine(prob, uv, free, w_area: float, iters: int = 400):
+    """Flip-free L-BFGS on  sum_t A_t [ w_area log^2(det J_t) + (|J_t|_F^2 / det J_t - 2) ].
+
+    J_t maps the 3D triangle to the (area-normalised) logical polygon: log^2 det J pulls every
+    triangle towards its 3D area (equal-area map, Moser), the MIPS term keeps it from shearing."""
+    from .zhang2021_panel_optimizer import _lbfgs
+    uv = np.asarray(uv, float).copy()
+    n = len(uv)
+    wt = prob.weight
+    Dx, Dy = prob.Dx, prob.Dy
+    DxT, DyT = Dx.T.tocsr(), Dy.T.tocsr()
+
+    def fun(z):
+        P = uv.copy()
+        P[free] = z.reshape(-1, 2)
+        J = prob.jacobians(P)
+        det = J[:, 0, 0] * J[:, 1, 1] - J[:, 0, 1] * J[:, 1, 0]
+        if np.any(det <= 1e-14):
+            return np.inf, None
+        fro = np.sum(J * J, axis=(1, 2))
+        ld = np.log(det)
+        E = float(np.dot(wt, w_area * ld * ld + fro / det - 2.0))
+        cof = np.empty_like(J)
+        cof[:, 0, 0] = J[:, 1, 1]; cof[:, 0, 1] = -J[:, 1, 0]
+        cof[:, 1, 0] = -J[:, 0, 1]; cof[:, 1, 1] = J[:, 0, 0]
+        dE = (w_area * 2.0 * ld / det)[:, None, None] * cof + (2.0 / det)[:, None, None] * J \
+            - (fro / (det * det))[:, None, None] * cof
+        dE *= wt[:, None, None]
+        gu = DxT @ dE[:, 0, 0] + DyT @ dE[:, 0, 1]
+        gv = DxT @ dE[:, 1, 0] + DyT @ dE[:, 1, 1]
+        G = np.c_[gu, gv]
+        return E, G[free].ravel()
+
+    E0, _ = fun(uv[free].ravel())
+    z, E1, it = _lbfgs(fun, uv[free].ravel(), max_iter=iters)
+    uv[free] = z.reshape(-1, 2)
+    J = prob.jacobians(uv)
+    det = J[:, 0, 0] * J[:, 1, 1] - J[:, 0, 1] * J[:, 1, 0]
+    ws = wt / wt.sum()
+    return uv, {"phi_area_weight": w_area, "phi_area_energy_before": float(E0), "phi_area_energy_after": float(E1),
+                "phi_area_iterations": int(it),
+                "phi_area_scale_cv": float(np.sqrt(np.dot(ws, (det - np.dot(ws, det)) ** 2)) / max(np.dot(ws, det), 1e-300))}
+
+
+def _slim_polygon_map(Dc, Dg, quads, logical, bset_c, bpoly, cuv, cf, cxyz, cf3, bnd, harmonic_flips,
+                      area_weight=0.0):
     """Bijective chart -> logical polygon map with the least 3D distortion (symmetric Dirichlet, SLIM).
 
     Start: the composite Tutte map (bijective), then SLIM w.r.t. the 3D triangles with the polygon
@@ -414,6 +459,11 @@ def _slim_polygon_map(Dc, Dg, quads, logical, bset_c, bpoly, cuv, cf, cxyz, cf3,
         cur, _E, _st = progressive_boundary_slim(prob, P0 * scale, cf, bset_c, bpoly * scale, max_steps=400,
                                                  step_slim_iters=2, final_iters=0, error_prefix="SG_PHI")
         cur, E1, iters = _slim_iterations(prob, cur, free, iters=200, tol=1e-6)
+        area_info = {}
+        if area_weight > 0:
+            # equal-area pull-back: every lattice cell then carries the same 3D surface area
+            cur, area_info = _area_refine(prob, cur, free, float(area_weight),
+                                          iters=2000)
     except Exception as exc:  # noqa: BLE001 - fall back to the composite map
         print(f"[SG-PHI] SLIM failed: {type(exc).__name__}: {exc}", flush=True)
         return None
@@ -424,6 +474,7 @@ def _slim_polygon_map(Dc, Dg, quads, logical, bset_c, bpoly, cuv, cf, cxyz, cf3,
     return gfree, out, {"phi_model": "bijective SLIM map chart -> logical polygon (3D symmetric Dirichlet), "
                                      "started from the composite Tutte map",
                         "phi_sd_before": E0, "phi_sd_after": float(E1), "phi_slim_iterations": int(iters),
+                        **area_info,
                         "harmonic_direct_flipped_triangles": harmonic_flips}
 
 
@@ -586,7 +637,8 @@ def grid_line_triples(vid: dict[tuple[int, int], int]) -> np.ndarray:
 
 def place_grid(src, dom: dict, logical: np.ndarray, quads: np.ndarray, walk,
                chart_uv: np.ndarray | None = None, chart_f2: np.ndarray | None = None,
-               chart_xyz: np.ndarray | None = None, chart_f3: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+               chart_xyz: np.ndarray | None = None, chart_f3: np.ndarray | None = None,
+               area_weight: float = 0.0) -> tuple[np.ndarray, dict]:
     """Grid vertices in Omega_1: boundary by 3D arc length; interior pulled back from the logical domain.
 
     phi: Omega_1 -> logical polygon (boundary by the same 3D arc-length correspondence, interior
@@ -613,7 +665,7 @@ def place_grid(src, dom: dict, logical: np.ndarray, quads: np.ndarray, walk,
     if chart_uv is not None and chart_f2 is not None:
         try:
             got = _pullback_interior(src, dom, logical, quads, bnd, walk, np.asarray(chart_uv, float),
-                                     np.asarray(chart_f2, int), chart_xyz, chart_f3)
+                                     np.asarray(chart_f2, int), chart_xyz, chart_f3, area_weight)
         except Exception as exc:  # noqa: BLE001 - reported, falls back below
             got, info = None, {"placement": "grid-graph harmonic", "pullback_failed": f"{type(exc).__name__}: {exc}"}
         if got is not None:
@@ -658,7 +710,7 @@ def _tutte_disk(n: int, edges_w: tuple, bset: np.ndarray, bpos: np.ndarray) -> n
     return X
 
 
-def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, cf3=None):
+def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, cf3=None, area_weight=0.0):
     """Interior grid points as phi^-1(lattice) with phi = (Tutte disk map of the lattice polygon)^-1 o
     (Tutte disk map of Omega_1).  Both disk maps are bijective (positive weights, convex circle
     boundary, same boundary correspondence: 3D arc length <-> polygon arc length), so the composite
@@ -734,7 +786,7 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, 
     Dg = _tutte_disk(nl, (I, J, np.ones(len(I))), bnd, circ(t_grid[bnd]))
     if cxyz is not None and cf3 is not None:
         got = _slim_polygon_map(Dc, Dg, quads, np.asarray(logical, float), bset_c, bpoly, cuv, cf,
-                                np.asarray(cxyz, float), np.asarray(cf3, int), bnd, flips)
+                                np.asarray(cxyz, float), np.asarray(cf3, int), bnd, flips, area_weight)
         if got is not None:
             return got
     tri = Triangulation(Dc[:, 0], Dc[:, 1], cf)
@@ -813,8 +865,12 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     if dom is None:
         raise StructuredGridError("; ".join(errors))
     logical, quads, vid, walk = lattice_grid(dom)
+    priority = str(getattr(params, "structured_grid_priority", "size") or "size")
+    area_w = float(getattr(params, "structured_grid_area_weight", -1.0))
+    if area_w < 0:
+        area_w = {"size": 50.0, "balanced": 5.0}.get(priority, 0.0)
     grid_uv, placement = place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2,
-                                    chart_xyz=pre.xyz, chart_f3=pre.f3)
+                                    chart_xyz=pre.xyz, chart_f3=pre.f3, area_weight=area_w)
     grid_uv = grid_uv * mirror
     print(f"[SG-GRID] seam cones: {len(dom.get('seam_cones', []))} of {dom.get('cone_candidates', 0)} candidates "
           f"(3D valence 3: {sum(1 for c in dom.get('seam_cones', []) if c['valence_3d'] == 3)}, "
@@ -883,13 +939,13 @@ PRIORITY_WEIGHTS = {
     # panel optimiser (3D metric) weights per priority; "shape" = square-like panels first
     "shape": dict(angle=2.0, size=0.1, aspect=1.5, angle_sum=1.0),
     "balanced": dict(angle=1.0, size=0.5, aspect=1.0, angle_sum=1.0),
-    "size": dict(angle=0.5, size=4.0, aspect=0.5, angle_sum=1.0),
+    "size": dict(angle=0.5, size=0.0, aspect=0.5, angle_sum=1.0, area=4.0),
 }
 
 
 def _panel_weights(params: Any):
     from .zhang2021_panel_optimizer import PanelOptimizerWeights
-    pr = str(getattr(params, "structured_grid_priority", "shape") or "shape")
+    pr = str(getattr(params, "structured_grid_priority", "size") or "size")
     w = dict(PRIORITY_WEIGHTS.get(pr, PRIORITY_WEIGHTS["shape"]))
     return PanelOptimizerWeights(smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0)), **w)
 
