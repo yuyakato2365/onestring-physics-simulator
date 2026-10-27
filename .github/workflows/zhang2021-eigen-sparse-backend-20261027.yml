@@ -1,0 +1,103 @@
+name: Run original Zhang 2021 with independently licensed Eigen SparseLU
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths:
+      - .github/workflows/zhang2021-eigen-sparse-backend-20261027.yml
+      - onestring-physics-simulator/native/zhang2021_eigen_solver_abi.cpp
+      - onestring-physics-simulator/native/zhang2021_eigen_solver_probe.cpp
+  workflow_dispatch:
+jobs:
+  original-mesh-engine:
+    runs-on: windows-2022
+    timeout-minutes: 17
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download original C++ source and original published Windows executables
+        run: |
+          python scripts/download_zhang2021_authors.py --directory "$env:RUNNER_TEMP\zhang_eigen_author"
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_eigen_author"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_eigen_author\authors_executables\ExeProgram"
+      - name: Compile independently licensed Eigen SparseLU using official original Eigen headers
+        run: |
+          $temp="$env:RUNNER_TEMP\zhang_eigen_author"
+          $eigen=Join-Path $temp 'authors_source\Code\Straighten\Straighten\include\Eigen'
+          $vcwhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=(& $vcwhere -latest -products '*' -property installationPath | Select-Object -First 1)
+          $vc=Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $out=Join-Path $temp 'compat'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $source=(Resolve-Path 'native/zhang2021_eigen_solver_abi.cpp').Path
+          $probe=(Resolve-Path 'native/zhang2021_eigen_solver_probe.cpp').Path
+          $dll=Join-Path $out 'libpardiso600-WIN-X86-64.dll'
+          $exe=Join-Path $out 'zhang2021_eigen_solver_probe.exe'
+          $cmd=Join-Path $out 'compile.cmd'
+          @(
+            '@echo off',
+            'call "'+$vc+'" >nul',
+            'if errorlevel 1 exit /b 2',
+            'cl /nologo /EHsc /O2 /std:c++17 /LD /I"'+$eigen+'" "'+$source+'" /Fe:"'+$dll+'" /link /NOLOGO',
+            'if errorlevel 1 exit /b 3',
+            'cl /nologo /EHsc /O2 /std:c++17 "'+$probe+'" /Fe:"'+$exe+'" /link /NOLOGO',
+            'if errorlevel 1 exit /b 4',
+            'exit /b 0'
+          ) | Set-Content $cmd -Encoding Ascii
+          & cmd.exe /d /c "$cmd"
+          if($LASTEXITCODE -ne 0){throw "Eigen independent numerical backend compile failed $LASTEXITCODE"}
+          if(!(Test-Path $dll) -or !(Test-Path $exe)){throw 'Compiled numerical files missing'}
+          Write-Output "EIGEN_SOLVER_DLL=$dll"
+          Write-Output "EIGEN_PROBE=$exe"
+      - name: Numerically verify independent solver matches symmetric indefinite linear equations
+        run: |
+          $out="$env:RUNNER_TEMP\zhang_eigen_author\compat"
+          & (Join-Path $out 'zhang2021_eigen_solver_probe.exe') (Join-Path $out 'libpardiso600-WIN-X86-64.dll')
+          if($LASTEXITCODE -ne 0){throw "Linear system compatibility check failed $LASTEXITCODE"}
+      - name: Run unchanged original author meshing algorithms with legal Eigen backend on original sample
+        run: |
+          $temp="$env:RUNNER_TEMP\zhang_eigen_author"
+          $orig=Join-Path $temp 'authors_executables\ExeProgram'
+          $root=Join-Path $temp 'run_with_eigen'
+          Copy-Item -Path $orig -Destination $root -Recurse
+          $license_bound=Join-Path $root 'libpardiso600-WIN-X86-64.dll'
+          Move-Item -Path $license_bound -Destination (Join-Path $root 'original_license_bound_binary_NOT_LOADED.bak')
+          Copy-Item -Path (Join-Path $temp 'compat\libpardiso600-WIN-X86-64.dll') -Destination $license_bound
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'Source/before'),(Join-Path $root 'Source/after'),(Join-Path $root 'Result/finalOut') | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $env:OMP_NUM_THREADS='1'
+          Push-Location $root
+          $stages=@(
+            @('Straighten.exe','Source/Input/model_15.obj','Source/before/model_15.obj','Source/after/model_15_axis.obj'),
+            @('Segment.exe','Source/after/model_15_axis.obj','Result/','Source/before/model_15.obj','35','0.01'),
+            @('QMSim.exe','Result/model_15.obj','Result/finalOut/model_15_out.obj','Source/before/model_15.obj','0','35','0.01','0.05')
+          )
+          foreach($cmd in $stages){
+            $name=$cmd[0]
+            Write-Output "=== ORIGINAL_ZHANG_WITH_EIGEN $name ==="
+            $args_=@($cmd | Select-Object -Skip 1)
+            $log=Join-Path $root "$name.stdout"
+            $err=Join-Path $root "$name.stderr"
+            $p=Start-Process -FilePath (Join-Path $root $name) -ArgumentList $args_ -PassThru -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError $err
+            if(!$p.WaitForExit(110000)){
+              $p.Kill();$p.WaitForExit()
+              Write-Output "AUTHOR_STAGE_TIMEOUT $name"
+              Get-Content $log -Tail 35 -ErrorAction SilentlyContinue
+              throw "Original algorithm stage timed out: $name"
+            }
+            Write-Output "AUTHOR_STAGE_EXIT $name $($p.ExitCode)"
+            if(Test-Path $log){Get-Content $log -Tail 40}
+            if(Test-Path $err){Get-Content $err -Tail 30}
+            if($p.ExitCode -ne 0){throw "Original Zhang original stage failed: $name $($p.ExitCode)"}
+          }
+          $final=Join-Path $root 'Result/finalOut/model_15_out.obj'
+          if(!(Test-Path $final)){throw "Authors final mesh missing"}
+          Write-Output "ORIGINAL_AUTHOR_MESH_OUTPUT $final $((Get-Item $final).Length)"
+          Get-Content $final -TotalCount 18
+          Write-Output 'ORIGINAL_ZHANG_ALL_3_STAGES_COMPLETED_WITH_LEGAL_SOLVER'
+          Pop-Location
