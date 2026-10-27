@@ -63,7 +63,7 @@ def _turning_angles(src, feats: list[int], scale: float) -> dict[int, float]:
 
 def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio: float = 0.7,
                    max_rounds: int = 12, cone_pairs: list | None = None, w_cone: float = 0.5,
-                   w_head: float = 0.5, shape_weight: float = 0.05) -> dict:
+                   w_head: float = 0.5, shape_weight: float = 0.05, turn_weight: float = 0.3) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -132,7 +132,7 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
     iO = 15 * m + P_c                               # free heading offset
     nv = 15 * m + P_c + 1
     M = int(10 * max(L.max(), 4) + 10)
-    w_turn = 0.3 if cone_pairs else 1.0
+    w_turn = float(turn_weight) if cone_pairs else 1.0
     # A side may not be squeezed: n_k >= max(1, floor(min_ratio * L_k)) (protrusions keep their cells).
     n_lo = np.maximum(1, np.floor(min_ratio * L)).astype(int)
     A, lb, ub = [], [], []
@@ -205,7 +205,7 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             r = np.zeros(nv); r[ng] = 1
             A2.append(r); lb2.append(-np.inf); ub2.append(m - 1)
         res = milp(c, constraints=LinearConstraint(np.asarray(A2), lb2, ub2), integrality=integrality,
-                   bounds=Bounds(lo_b, hi_b), options={"time_limit": 30.0 if cone_pairs else 8.0})
+                   bounds=Bounds(lo_b, hi_b), options={"time_limit": 90.0 if cone_pairs else 8.0, "mip_rel_gap": 0.02})
         if res.x is None:
             attempts.append({"round": _round, "status": f"no turn assignment: {res.message}"})
             break
@@ -501,7 +501,7 @@ def _lengths_for_directions(dirs, L, n_lo, pairs, T, w_pos, *, max_iter: int = 4
         lo = np.r_[n_lo, np.zeros(3 * m + nb)]
         hi = np.r_[hi_n, np.full(3 * m, np.inf), np.ones(nb)]
         res = milp(c, constraints=LinearConstraint(np.asarray(A), lb, ub), integrality=integ,
-                   bounds=Bounds(lo, hi), options={"time_limit": 10.0})
+                   bounds=Bounds(lo, hi), options={"time_limit": 30.0})
         if res.x is None:
             return None, {"status": f"infeasible for these turns ({res.message})", "separated_pairs": len(sep_pairs),
                           "lazy_iterations": it + 1}
@@ -797,13 +797,14 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     cone_pairs = []
     if bool(getattr(params, "structured_grid_seam_cones", True)):
         feats, cone_pairs = seam_cone_candidates(
-            src, feats, h3d, spacing=float(getattr(params, "structured_grid_cone_spacing", 2.0)),
-            open_spacing=float(getattr(params, "structured_grid_cone_spacing", 2.0)))
+            src, feats, h3d, spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)),
+            open_spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)))
     for ratio in (ratio0, 0.5 * ratio0):
         try:
             dom = logical_domain(src, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
                                  w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
-                                 shape_weight=float(getattr(params, "structured_grid_shape_weight", 0.05)))
+                                 shape_weight=float(getattr(params, "structured_grid_shape_weight", 0.05)),
+                                 turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)))
             dom["min_side_ratio"] = ratio
             break
         except StructuredGridError as exc:
@@ -828,8 +829,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     try:
         plan = plan_zhang2021_m2d(pre.xyz, pre.f3, pre.uv, pre.f2, p, zhang_result=fake,
                                   panel_line_triples=grid_line_triples(vid), strict_node_valence=False,
-                                  panel_weights=PanelOptimizerWeights(
-                                      smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0))),
+                                  panel_weights=_panel_weights(params),
                                   report_only=True, keep_interior_3d=True)
     except Zhang2021QuadModeError as exc:
         raise StructuredGridError(str(exc)) from exc
@@ -877,6 +877,21 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
           f"{'passed' if m.get('zhang2021_m3d_quality_passed') else 'not met: ' + '; '.join(m.get('zhang2021_m3d_quality_failures', []))[:300]}; "
           f"unresolved={unresolved or 'none'}", flush=True)
     return plan
+
+
+PRIORITY_WEIGHTS = {
+    # panel optimiser (3D metric) weights per priority; "shape" = square-like panels first
+    "shape": dict(angle=2.0, size=0.1, aspect=1.5, angle_sum=1.0),
+    "balanced": dict(angle=1.0, size=0.5, aspect=1.0, angle_sum=1.0),
+    "size": dict(angle=0.5, size=4.0, aspect=0.5, angle_sum=1.0),
+}
+
+
+def _panel_weights(params: Any):
+    from .zhang2021_panel_optimizer import PanelOptimizerWeights
+    pr = str(getattr(params, "structured_grid_priority", "shape") or "shape")
+    w = dict(PRIORITY_WEIGHTS.get(pr, PRIORITY_WEIGHTS["shape"]))
+    return PanelOptimizerWeights(smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0)), **w)
 
 
 def _interior_valence_ok(quads: np.ndarray) -> bool:

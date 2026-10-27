@@ -1122,9 +1122,11 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_min_side_ratio: float = 0.7   # every logical side >= ratio x its 3D length / panel edge
     # seam cones: 3D valence 3 / 5 allowed on the OptCuts seams (M2D interior stays valence 4)
     structured_grid_seam_cones: bool = True
-    structured_grid_cone_spacing: float = 2.0      # candidate spacing along cuts, in panels
+    structured_grid_cone_spacing: float = 1.0      # candidate spacing along cuts, in panels
     structured_grid_cone_weight: float = 0.5
     structured_grid_shape_weight: float = 0.05
+    structured_grid_turn_weight: float = 1.0       # local turning fit of every logical corner / cone
+    structured_grid_priority: str = "shape"        # panel optimiser: "shape" | "balanced" | "size"
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
