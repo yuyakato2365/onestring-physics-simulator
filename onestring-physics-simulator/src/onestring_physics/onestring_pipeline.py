@@ -1054,6 +1054,7 @@ class PipelineParameters(_original.PipelineParameters):
     zhang2021_reference_adapter_command: str = ""
     zhang2021_author_exe_root: str = ""
     zhang2021_author_wine_command: str = ""
+    zhang2021_independent_solver_dll: str = ""
     planar_quad_target_faces: int = 35
     planar_quad_refine_m3d: bool = True
     planar_quad_uv_reparam: bool = True
