@@ -1,0 +1,47 @@
+name: Original Zhang 2021 true quad-count calibration
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-original-count-calibration-20261027.yml]
+  workflow_dispatch:
+jobs:
+  genuine-author-onestring:
+    runs-on: windows-2022
+    timeout-minutes: 18
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve exact original software and install Python audit dependencies
+        run: |
+          python -m pip install -e . --no-deps
+          python -m pip install "numpy>=1.26" "scipy>=1.11" "shapely>=2.1" "trimesh>=4.0" "plotly>=5.20,<6"
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_real_one"
+          python scripts/download_zhang2021_authors.py --directory "$env:RUNNER_TEMP\zhang_real_src"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_real_one\authors_executables\ExeProgram"
+      - name: Build separately licensed numerical solver for untouched Zhang executables
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_real_src\authors_source\Code"
+          $hs=@(Get-ChildItem $root -Recurse -File -Filter SparseLU | Where-Object {$_.FullName -match '\\Eigen\\SparseLU$'})
+          if($hs.Count -eq 0){throw 'Missing Eigen'}
+          $e=Split-Path (Split-Path $hs[0].FullName -Parent) -Parent
+          cmake -S native/zhang2021_sparse_solver -B "$env:RUNNER_TEMP\zhang_real_solver" -G "Visual Studio 17 2022" -A x64 "-DEIGEN_INCLUDE_DIR=$e"
+          if($LASTEXITCODE -ne 0){throw 'CMake failed'}
+          cmake --build "$env:RUNNER_TEMP\zhang_real_solver" --config Release
+          if($LASTEXITCODE -ne 0){throw 'C++ build failed'}
+          $dll="$env:RUNNER_TEMP\zhang_real_solver\Release\libpardiso600-WIN-X86-64.dll"
+          python scripts/verify_zhang2021_eigen_abi.py --dll "$dll"
+          if($LASTEXITCODE -ne 0){throw 'Solver ABI failed'}
+          "NUMERIC_DLL=$dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Measure ORIGINAL authors quad counts as density and target vary
+        run: |
+          $native="$env:RUNNER_TEMP\zhang_real_one\authors_executables\ExeProgram"
+          $output="$env:RUNNER_TEMP\zhang_original_count_experiments"
+          $env:OMP_NUM_THREADS='1'
+          python scripts/measure_zhang2021_original_panel_count.py --exe-root "$native" --independent-eigen-solver-dll "$env:NUMERIC_DLL" --output-dir "$output" --grid-sizes 5 7 12 --targets 8 20 35
+          if($LASTEXITCODE -ne 0){throw 'Original quad count calibration failed'}
