@@ -1,0 +1,91 @@
+name: Genuine Zhang algorithm on OneString paired UV XYZ chart
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-original-onestring-uv-20261027.yml]
+  workflow_dispatch:
+jobs:
+  genuine-author-onestring:
+    runs-on: windows-2022
+    timeout-minutes: 18
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Retrieve exact original software and install Python audit dependencies
+        run: |
+          python -m pip install -e . pytest "shapely>=2.1"
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_real_one"
+          python scripts/download_zhang2021_authors.py --directory "$env:RUNNER_TEMP\zhang_real_src"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_real_one\authors_executables\ExeProgram"
+      - name: Build separately licensed numerical solver for untouched Zhang executables
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_real_src\authors_source\Code"
+          $hs=@(Get-ChildItem $root -Recurse -File -Filter SparseLU | Where-Object {$_.FullName -match '\\Eigen\\SparseLU$'})
+          if($hs.Count -eq 0){throw 'Missing Eigen'}
+          $e=Split-Path (Split-Path $hs[0].FullName -Parent) -Parent
+          cmake -S native/zhang2021_sparse_solver -B "$env:RUNNER_TEMP\zhang_real_solver" -G "Visual Studio 17 2022" -A x64 "-DEIGEN_INCLUDE_DIR=$e"
+          if($LASTEXITCODE -ne 0){throw 'CMake failed'}
+          cmake --build "$env:RUNNER_TEMP\zhang_real_solver" --config Release
+          if($LASTEXITCODE -ne 0){throw 'C++ build failed'}
+          $dll="$env:RUNNER_TEMP\zhang_real_solver\Release\libpardiso600-WIN-X86-64.dll"
+          python scripts/verify_zhang2021_eigen_abi.py --dll "$dll"
+          if($LASTEXITCODE -ne 0){throw 'Solver ABI failed'}
+          "NUMERIC_DLL=$dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Generate paired UV and curved XYZ chart with 242 triangles
+        run: |
+          @'
+          from pathlib import Path
+          import os,math
+          import numpy as np
+          root=Path(os.environ["RUNNER_TEMP"])/"zhang_onestring_35"
+          root.mkdir(parents=True,exist_ok=True)
+          n=12
+          uv=np.array([(i/(n-1),j/(n-1)) for j in range(n) for i in range(n)],float)
+          faces=[]
+          for j in range(n-1):
+              for i in range(n-1):
+                  a=j*n+i
+                  faces.extend(((a,a+1,a+n+1),(a,a+n+1,a+n)))
+          faces=np.array(faces,dtype=int)
+          xyz=np.column_stack((uv,.14*np.sin(math.pi*uv[:,0])*np.sin(math.pi*uv[:,1])))
+          bound=np.array([[0.,0.],[1.,0.],[1.,1.],[0.,1.],[0.,0.]])
+          np.savez_compressed(root/"source.npz",source_uv_vertices=uv,
+               source_uv_faces=faces,source_xyz_vertices=xyz,
+               source_xyz_faces=faces,omega_boundary=bound)
+          print("ONESOURCE",len(uv),len(faces))
+          '@ | python -
+      - name: Execute all 3 original authors' stages with target 35 on OneString chart
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_onestring_35"
+          $native="$env:RUNNER_TEMP\zhang_real_one\authors_executables\ExeProgram"
+          $env:OMP_NUM_THREADS='1'
+          python scripts/zhang2021_authors_native_adapter.py --input "$root\source.npz" --output "$root\generated.npz" --exe-root "$native" --independent-eigen-solver-dll "$env:NUMERIC_DLL" --target-quads 35 --timeout-seconds 160
+          if($LASTEXITCODE -ne 0){throw 'Original author pipeline failed'}
+          @'
+          import os,json
+          from pathlib import Path
+          from types import SimpleNamespace
+          import numpy as np
+          from onestring_physics.zhang2021_reference_bridge import audit_reference_quads
+          root=Path(os.environ["RUNNER_TEMP"])/"zhang_onestring_35"
+          with np.load(root/"source.npz") as d:
+              src=SimpleNamespace(
+                  uv_vertices_2d=d["source_uv_vertices"].copy(),
+                  uv_faces=d["source_uv_faces"].copy(),
+                  surface_vertices_3d=d["source_xyz_vertices"].copy(),
+                  surface_faces=d["source_xyz_faces"].copy(),
+                  omega_boundary=d["omega_boundary"].copy(),
+                  method="optcuts_test",metrics={})
+          with np.load(root/"generated.npz") as q:
+              uv=q["vertices_uv"].copy()
+              faces=q["faces"].copy()
+          print("GENUINE_ZHANG_ONESTRING_QUAD_COUNT",len(faces))
+          checked=audit_reference_quads(src,uv,faces,require_seam_correspondence=True)
+          print("GENUINE_ZHANG_ONESTRING_AUDIT_SUCCESS",json.dumps(checked.diagnostics))
+          '@ | python -
