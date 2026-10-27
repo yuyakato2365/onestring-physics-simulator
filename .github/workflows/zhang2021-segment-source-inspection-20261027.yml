@@ -1,0 +1,48 @@
+name: Inspect original Zhang Segment C++ crash path
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-segment-source-inspection-20261027.yml]
+  workflow_dispatch:
+jobs:
+  original-segment-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download unmodified author sources
+        run: |
+          python onestring-physics-simulator/scripts/download_zhang2021_authors.py --directory "$RUNNER_TEMP/zhang2021_source"
+      - name: Locate crash path and original entrypoint
+        run: |
+          export ZHANG_DIR="$RUNNER_TEMP/zhang2021_source/authors_source/Code/Segment"
+          python - <<'PY'
+          import os,re
+          from pathlib import Path
+          root=Path(os.environ["ZHANG_DIR"])
+          all_cpp=[p for p in root.rglob("*") if p.suffix.lower() in (".cpp",".h",".hpp",".c",".cc") and "ThirdParty" not in str(p)]
+          print("ORIGINAL_SEGMENT_SOURCE_FILES",len(all_cpp))
+          for p in all_cpp[:110]: print("NATIVE_FILE",str(p.relative_to(root)))
+          keywords=["Begin dealing with the", "thred num:", "There are totally", "Max Norm", "Min Norm"]
+          for p in all_cpp:
+              raw=p.read_bytes()
+              code=raw.decode("utf-16",errors="replace") if raw.startswith((b"\\xff\\xfe",b"\\xfe\\xff")) or raw[:100].count(b"\\x00")>=10 else raw.decode("utf8",errors="replace")
+              lines=code.splitlines()
+              matched=[i for i,ln in enumerate(lines) if any(x in ln for x in keywords)]
+              if matched:
+                  print("MATCHED_SOURCE",p.relative_to(root),"matches",matched)
+                  for i in matched:
+                      for j in range(max(0,i-48),min(len(lines),i+80)):
+                          print(f"CRASH_CODE {p.name}:{j+1} {lines[j][:240]}")
+          for p in all_cpp:
+              if p.name.lower()=="main.cpp":
+                  raw=p.read_bytes()
+                  code=raw.decode("utf-16",errors="replace") if raw.startswith((b"\\xff\\xfe",b"\\xfe\\xff")) or raw[:100].count(b"\\x00")>=10 else raw.decode("utf8",errors="replace")
+                  lines=code.splitlines()
+                  print("ORIGINAL_MAIN",str(p.relative_to(root)),"LINES",len(lines))
+                  for j,ln in enumerate(lines[:270]):
+                      print(f"MAIN_CODE {p.name}:{j+1} {ln[:240]}")
+          PY
