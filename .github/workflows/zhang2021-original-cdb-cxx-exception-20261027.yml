@@ -34,5 +34,5 @@ jobs:
           $dbg='C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
           $exe=Join-Path $root 'Segment.exe'
           Write-Output '=== FIRST CHANCE C++ THROWN EXCEPTION ==='
-          & $dbg -o -c 'sxe e06d7363;g;.exr -1;!cppexr -1;kv;q' $exe 'Source/after/model_15_axis.obj' 'Result/' 'Source/before/model_15.obj' '35' '0.01' 2>&1 | Select-Object -Last 210
+          & $dbg -o -c 'sxe e06d7363;g;.exr -1;dq @$exr_param1 L6;da poi(@$exr_param1+8);du poi(@$exr_param1+8);!cppexr -1;kv;q' $exe 'Source/after/model_15_axis.obj' 'Result/' 'Source/before/model_15.obj' '35' '0.01' 2>&1 | Select-Object -Last 210
           Pop-Location
