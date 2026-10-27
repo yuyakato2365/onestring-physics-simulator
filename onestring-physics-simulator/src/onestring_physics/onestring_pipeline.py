@@ -1067,6 +1067,10 @@ class PipelineParameters(_original.PipelineParameters):
     # OneString downstream for the Zhang M2D: "optcuts_test2" (Seam closure)
     # or "paper_local_global_0918" (the 2026-09-18 Grid-route K3D/K2D/T2D).
     zhang2021_downstream_route: str = "optcuts_test2"
+    # Temporarily OFF for Zhang2021: the legacy initial Omega CSF Split
+    # assumes regular-grid cuts and its physical bound is not certified.
+    # Does not affect OptCuts cutting, Zhang quad meshing or later collision cuts.
+    zhang2021_initial_csf_split_enabled: bool = False
     # 2026-10-26 design order: pre-condition Omega (boundary simplification +
     # bijective SLIM) BEFORE Zhang quad meshing, then pick the best candidate.
     zhang2021_precondition_enabled: bool = True
