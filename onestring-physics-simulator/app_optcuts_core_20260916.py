@@ -219,6 +219,20 @@ def _install_optcuts_selector() -> None:
                          "a temporary author runtime copy. Build from "
                          "native/zhang2021_sparse_solver; keep original "
                          "Straighten, Segment and QMSim unchanged.")
+                st.number_input(
+                    "Authors' Hausdorff error upper bound (Ω units)",
+                    min_value=1e-7, max_value=10.0, value=0.01,
+                    format="%.6f",
+                    key="onestring_zhang2021_native_hausdorff_bound",
+                    help="Passed to the actual authors' Segment and QMSim. "
+                         "Larger values permit stronger quad-count reduction "
+                         "but can change boundary approximation; source Ω "
+                         "coverage is still audited strictly after output.")
+                st.number_input(
+                    "Authors' QMSim thin-sheet width (Ω units)",
+                    min_value=1e-7, max_value=10.0, value=0.05,
+                    format="%.6f",
+                    key="onestring_zhang2021_native_sheet_width")
                 st.text_input(
                     "Wine launcher command (Mac only, optional)",
                     value=os.environ.get("ONESTRING_ZHANG2021_WINE_COMMAND", ""),
