@@ -176,6 +176,10 @@ def install_zhang2021_verification_loop(pipeline: Any) -> None:
         if params is None or not mode_enabled(params):
             return inner(target, params, run_simulation=run_simulation, deployment_params=deployment_params,
                          progress_callback=progress_callback)
+        from .optcuts_zhang2021_quad_20261027 import structured_grid_enabled
+        if structured_grid_enabled(params):
+            return _structured_single_run(inner, target, params, run_simulation, deployment_params,
+                                          progress_callback)
         attempts = max(1, int(getattr(params, "zhang2021_verification_attempts", 3)))
         compare = bool(getattr(params, "zhang2021_compare_verified_candidates", False))
         cache: dict = {}
@@ -249,6 +253,50 @@ def install_zhang2021_verification_loop(pipeline: Any) -> None:
     zhang2021_build_onestring_design.__wrapped__ = inner
     pipeline.build_onestring_design = zhang2021_build_onestring_design
     pipeline._zhang2021_verification_loop_installed = True
+
+
+def _structured_single_run(inner, target, params, run_simulation, deployment_params, progress_callback):
+    """2026-10-28 structured grid: one run, every check reported, nothing rejected or retried."""
+    p = copy.copy(params)
+    p.zhang2021_candidate_rank = 0
+    p._zhang2021_run_cache = {}
+    p._zhang2021_progress = progress_callback
+    started = time.perf_counter()
+    state = inner(target, p, run_simulation=run_simulation, deployment_params=deployment_params,
+                  progress_callback=progress_callback)
+    verdict = final_verification(state, p)
+    pm = dict(getattr(getattr(state, "surface_parameterization", None), "metrics", {}) or {})
+    m2d = dict(getattr(getattr(state, "mesh_2d_initial", None), "metrics", {}) or {})
+    km = dict(getattr(getattr(state, "mesh_3d_optimized", None), "metrics", {}) or {})
+    unresolved = list(pm.get("structured_grid_unresolved", []) or []) + list(m2d.get("structured_grid_m2d_unresolved", []) or [])
+    for f in km.get("zhang2021_k3d_gate_failures", []) or []:
+        if "seam" in f.lower():
+            unresolved.append(f)
+    for c in verdict["checks"]:
+        if not c["ok"] and "seam" in c["check"].lower():
+            unresolved.append(f"{c['stage']} {c['check']}={c['value']} (limit {c['limit']})")
+    quality_notes = [f"{c['stage']} {c['check']}={c['value']} (limit {c['limit']})"
+                     for c in verdict["checks"] if not c["ok"] and "seam" not in c["check"].lower()]
+    summary = {
+        "structured_grid_run_completed": True,
+        "structured_grid_geometrically_verified": not unresolved,
+        "structured_grid_unresolved_all": unresolved,
+        "structured_grid_quality_notes": quality_notes,
+        "structured_grid_final_checks": verdict["checks"],
+        "structured_grid_total_seconds": float(time.perf_counter() - started),
+    }
+    from .zhang2021_diagnostics import write_structured_grid_diagnostics
+    summary["structured_grid_diagnostics_dir"] = write_structured_grid_diagnostics(state, summary, p)
+    for name in ("surface_parameterization", "mesh_2d_initial", "mesh_3d_optimized", "tiles_2d_dual_hinge"):
+        obj = getattr(state, name, None)
+        if obj is not None and isinstance(getattr(obj, "metrics", None), dict):
+            obj.metrics.update(summary)
+    print("[SG-RESULT] run completed; geometrically verified: "
+          f"{summary['structured_grid_geometrically_verified']}"
+          + (f"; UNRESOLVED: {'; '.join(unresolved)[:800]}" if unresolved else "")
+          + (f"; quality (display only): {'; '.join(quality_notes)[:600]}" if quality_notes else "")
+          + f"; diagnostics: {summary['structured_grid_diagnostics_dir']}", flush=True)
+    return state
 
 
 __all__ = ["k3d_gate", "final_verification", "seam_closure_report", "install_zhang2021_verification_loop"]

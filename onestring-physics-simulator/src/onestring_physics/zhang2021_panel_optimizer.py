@@ -40,6 +40,7 @@ class PanelOptimizerWeights:
     worst_beta: float = 20.0
     barrier: float = 1e-2
     barrier_ratio: float = 0.05
+    smooth: float = 0.0     # Brackbill-Saltzman smoothness on grid-line triples (structured grids)
 
 
 @dataclass
@@ -306,8 +307,14 @@ def untangle(P: np.ndarray, quads: np.ndarray, free: np.ndarray, *, margin: floa
 
 def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarray, fixed: np.ndarray, *,
                            weights: PanelOptimizerWeights | None = None, max_iter: int = 300,
-                           reference_length: float | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Move non-fixed vertices (UV) to optimise the lifted panels; returns (uv, xyz, report)."""
+                           reference_length: float | None = None,
+                           line_triples: np.ndarray | None = None,
+                           allow_invalid: bool = False) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Move non-fixed vertices (UV) to optimise the lifted panels; returns (uv, xyz, report).
+
+    ``line_triples`` (a, i, b): consecutive vertices along a grid line; with
+    ``weights.smooth > 0`` adds sum |X_a - 2 X_i + X_b|^2 / L^2 (3D smoothness).
+    """
     w = weights or PanelOptimizerWeights()
     quads = np.asarray(quads, int)
     P = np.asarray(quad_uv, float).copy()
@@ -322,11 +329,18 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
         return P, lift.lift(P, tri), report
     P, ureport = untangle(P, quads, free)
     report.update(ureport)
+    if ureport.get("untangle_needed") and not ureport.get("untangle_success") and allow_invalid:
+        P = _pull_inside(lift, P, free)
+        tri = lift.locate(P)
+        report["panel_optimizer_skipped"] = "untangle failed; grid left as is (inverted quads reported)"
+        return P, lift.lift(P, tri), report
     if ureport.get("untangle_needed") and not ureport.get("untangle_success"):
         raise PanelOptimizationError(
             "ZHANG2021_ONESTRING_PANEL_UNTANGLE_FAILED: a valid (convex, unflipped) UV embedding of the "
             f"modified quad mesh was not found ({ureport.get('untangle_invalid_quads')} quad(s) remain "
             f"invalid, min validity ratio {ureport.get('untangle_min_quad_validity_ratio'):.3g})")
+    if allow_invalid:
+        P = _pull_inside(lift, P, free)
     tri = lift.locate(P)
     if np.any(tri < 0):
         raise PanelOptimizationError(
@@ -339,6 +353,10 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
         reference_length = float(np.exp(np.mean(np.log(np.maximum(el, 1e-300)))))
     L = float(reference_length)
     state = {"tri": tri}
+    tri_lines = None
+    if line_triples is not None and len(line_triples) and w.smooth > 0:
+        tri_lines = np.asarray(line_triples, int).reshape(-1, 3)
+    report["panel_optimizer_smooth_triples"] = 0 if tri_lines is None else int(len(tri_lines))
 
     def fun(z):
         Pz = P.copy()
@@ -352,6 +370,15 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
         state["tri"] = t
         Xz = lift.lift(Pz, t)
         Eq, GX, _ = _quad_terms(Xz, quads, L, w)
+        if tri_lines is not None:
+            a, i, b = tri_lines[:, 0], tri_lines[:, 1], tri_lines[:, 2]
+            r = Xz[a] - 2.0 * Xz[i] + Xz[b]
+            c = w.smooth / (L * L * len(tri_lines))
+            Eq = Eq + c * float(np.sum(r * r))
+            GX = GX.copy()
+            np.add.at(GX, a, 2.0 * c * r)
+            np.add.at(GX, b, 2.0 * c * r)
+            np.add.at(GX, i, -4.0 * c * r)
         GP = np.einsum("nij,ni->nj", lift.J[t], GX) + Gb
         return Eq + Eb, GP[free].ravel()
 
@@ -363,9 +390,21 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
     report.update({"panel_optimizer_energy_before": float(E0), "panel_optimizer_energy_after": float(E1),
                    "panel_optimizer_iterations": int(it), "panel_optimizer_reference_length": L,
                    "panel_optimizer_weights": dict(vars(w))})
-    if np.any(quad_validity(P, quads)[0] <= 0):
+    if np.any(quad_validity(P, quads)[0] <= 0) and not allow_invalid:
         raise PanelOptimizationError("ZHANG2021_ONESTRING_PANEL_OPTIMIZER_FLIPPED_A_QUAD")
     return P, X, report
+
+
+def _pull_inside(lift: ChartLift, P: np.ndarray, free: np.ndarray) -> np.ndarray:
+    """Move vertices that left the chart to the nearest chart-triangle centroid (report-only modes)."""
+    P = P.copy()
+    tri = lift.locate(P)
+    out = np.flatnonzero(tri < 0)
+    if len(out):
+        cen = lift.uv[lift.f2].mean(axis=1)
+        for i in out:
+            P[i] = cen[int(np.argmin(np.linalg.norm(cen - P[i], axis=1)))]
+    return P
 
 
 __all__ = ["ChartLift", "PanelOptimizerWeights", "PanelOptimizationError", "optimize_panel_quality",

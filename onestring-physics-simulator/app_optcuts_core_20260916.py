@@ -95,6 +95,7 @@ def _install_optcuts_selector() -> None:
             "optcuts_grid_seam_native",
             "optcuts_planar_quad_20261026",
             "optcuts_zhang2021_quad_20261027",
+            "optcuts_structured_grid_20261028",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -108,6 +109,9 @@ def _install_optcuts_selector() -> None:
             if mode=="optcuts_zhang2021_quad_20261027":
                 return ("2026-10-27 | OptCuts → Zhang et al. 2021 Quad M2D "
                         "(authors' reference code) + OneString seam/3D adapter")
+            if mode=="optcuts_structured_grid_20261028":
+                return ("2026-10-28 | OptCuts → piecewise smooth Ω (line+spline) → structured quad grid "
+                        "(Brackbill–Saltzman, interior valence 4) + 09-18 K3D…T2D")
             if mode=="optcuts_grid_aware":
                 return "2026-10-23 | Grid-aware OptCuts Ω + paper-aligned K3D/K2D (UV refinement)"
             if mode=="optcuts_area_grid_boundary":
@@ -134,11 +138,14 @@ def _install_optcuts_selector() -> None:
             value == "optcuts_area_grid_boundary" or (
                 value in experimental
                 and value not in {"optcuts_planar_quad_20261026",
-                                  "optcuts_zhang2021_quad_20261027"})
+                                  "optcuts_zhang2021_quad_20261027",
+                                  "optcuts_structured_grid_20261028"})
         )
         st.session_state["_onestring_planar_quad_20261026_selected"] = (value == "optcuts_planar_quad_20261026")
         st.session_state["_onestring_zhang2021_quad_20261027_selected"] = (
             value == "optcuts_zhang2021_quad_20261027")
+        st.session_state["_onestring_structured_grid_20261028_selected"] = (
+            value == "optcuts_structured_grid_20261028")
         st.session_state["_onestring_grid_seam_native_selected"] = (
             value == "optcuts_grid_seam_native")
         st.session_state["_onestring_area_grid_optimizations"] = {
@@ -317,6 +324,32 @@ def _install_optcuts_selector() -> None:
                      "09-18 route's alternating corner linkage additionally needs every interior vertex to have "
                      "even valence (checked in Phase 1).",
             )
+        elif value == "optcuts_structured_grid_20261028":
+            st.caption(
+                "2026-10-28: official OptCuts chart Ω → Ω boundary replaced by straight lines / smoothing "
+                "splines between features (seam nodes, sharp corners), bijective SLIM inside → regular quad "
+                "grid of an orthogonal logical domain (corners = features, cut tips = reflex corners; interior "
+                "valence 4, no T-junctions; seam copies get equal counts) → boundary points by 3D arc length, "
+                "interior harmonic + Brackbill–Saltzman-type optimisation (orthogonality, size, smoothness in "
+                "the 3D metric) → M3D → unchanged 2026-09-18 K3D…T2D with OptCuts seams closed exactly. "
+                "Initial Ω CSF Split stays OFF. Quality is reported (console, metrics, "
+                "output/structured_grid_diagnostics), never a reason to stop."
+            )
+            st.number_input("Target 3D panel edge length (0 = from panel count below)",
+                            min_value=0.0, value=0.0, step=0.01, format="%.4f",
+                            key="onestring_structured_grid_panel_edge")
+            st.number_input("Approximate panel count when edge length = 0 (sets the edge as sqrt(area/N))",
+                            min_value=4, max_value=100000, value=150, step=10,
+                            key="onestring_structured_grid_auto_panels")
+            st.text_input("Ω boundary smoothing tolerances tried in order (× bbox diagonal; 0 = no smoothing)",
+                          value="0.01,0.005,0", key="onestring_structured_grid_smoothing_tolerances")
+            st.number_input("Corner detection scale (× bbox diagonal)", min_value=0.005, max_value=0.5,
+                            value=0.04, step=0.005, format="%.3f", key="onestring_structured_grid_corner_scale")
+            st.number_input("Grid-line smoothness weight (Brackbill–Saltzman smoothness term)",
+                            min_value=0.0, max_value=100.0, value=1.0, step=0.1, format="%.2f",
+                            key="onestring_structured_grid_smoothness_weight")
+            st.checkbox("Close OptCuts seams exactly in K3D (seam vertices as shared variables)",
+                        value=True, key="onestring_structured_grid_seam_closure")
         elif value in experimental:
             st.caption(
                 "Isolated 10/23 OptCuts area-grid experiment; exact 50% mask, "

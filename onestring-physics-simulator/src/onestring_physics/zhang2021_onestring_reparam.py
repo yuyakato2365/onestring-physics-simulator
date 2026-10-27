@@ -589,7 +589,8 @@ def progressive_boundary_slim(prob: "_SDProblem", uv: np.ndarray, faces: np.ndar
 
 
 def _hard_seam_correspondence(src: SourceBoundary, init, quad_uv: np.ndarray, quads: np.ndarray, *,
-                              repair_node_valence: bool, max_node_valence: int = 8):
+                              repair_node_valence: bool, max_node_valence: int = 8,
+                              strict_node_valence: bool = True):
     """Node-valence repair + matched/nested seam alignment (see zhang2021_seam_alignment)."""
     from .zhang2021_onestring_boundary import InitialCorrespondence, _fraction_3d, run_interval
     from .zhang2021_onestring_seam_matching import seam_constraints
@@ -610,7 +611,7 @@ def _hard_seam_correspondence(src: SourceBoundary, init, quad_uv: np.ndarray, qu
                                          snapped_nodes=init.snapped_nodes, unsnapped_nodes=init.unsnapped_nodes)
     valence = node_valence_report(src, init.q_loop, init.s, quads, max_interior_valence=max_node_valence)
     bad = [r for r in valence if not r["ok"]]
-    if bad:
+    if bad and strict_node_valence:
         raise SeamConformingReparamError(
             "ZHANG2021_ONESTRING_SEAM_NODE_VALENCE_INVALID: an OptCuts cut tip / junction needs 3..."
             f"{max_node_valence} panels around it in 3D (cut/open transition >= 2); offending nodes "
@@ -642,7 +643,8 @@ def _hard_seam_correspondence(src: SourceBoundary, init, quad_uv: np.ndarray, qu
                           branch_report=al.branches, regularized_points=regularized,
                           unsnapped_nodes=list(init.unsnapped_nodes))
     report = {"repair_log": repair_log, "node_valence": valence, "alignment": al.branches,
-              "pairs": len(al.pairs), "t_vertices": len(al.t_vertices), "pair_alignment_error": worst}
+              "pairs": len(al.pairs), "t_vertices": len(al.t_vertices), "pair_alignment_error": worst,
+              "node_valence_violations": bad}
     return quad_uv, quads, init, corr, report
 
 
@@ -662,7 +664,8 @@ def seam_conforming_reparameterization(xyz, f3, uv, f2, quad_uv, quads, *,
                                        max_steps: int = 2000, step_slim_iters: int = 4,
                                        final_iters: int = 80, hard_seams: bool = False,
                                        repair_node_valence: bool = True,
-                                       boundary_arc3d: bool | None = None) -> ReparamResult:
+                                       boundary_arc3d: bool | None = None,
+                                       strict_node_valence: bool = True) -> ReparamResult:
     """OneString extension; see module docstring.  Raises on any failure.
 
     ``hard_seams=True`` (2026-10-27 revision): every cut branch is sampled as a
@@ -696,7 +699,8 @@ def seam_conforming_reparameterization(xyz, f3, uv, f2, quad_uv, quads, *,
         if not snap_nodes:
             raise SeamConformingReparamError("ZHANG2021_ONESTRING_HARD_SEAMS_REQUIRE_NODE_SNAPPING")
         quad_uv, quads, init, corr, hard_report = _hard_seam_correspondence(
-            src, init, quad_uv, quads, repair_node_valence=repair_node_valence)
+            src, init, quad_uv, quads, repair_node_valence=repair_node_valence,
+            strict_node_valence=strict_node_valence)
     else:
         corr = finalize_correspondence(src, init, align_pairs=align_pairs)
     sp = split_for_correspondence(xyz, f3, uv, f2, src, corr)

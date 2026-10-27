@@ -121,4 +121,46 @@ def write_verification_diagnostics(log: list[dict], state: Any, params: Any) -> 
         return f"(diagnostics not written: {type(exc).__name__}: {exc})"
 
 
-__all__ = ["write_candidate_diagnostics", "write_verification_diagnostics", "plot_panels"]
+def write_structured_grid_diagnostics(state: Any, summary: dict, params: Any) -> str:
+    """2026-10-28 structured grid: numbers (JSON) and pictures (M2D/M3D, K3D) of every run."""
+    try:
+        base = str(getattr(params, "zhang2021_diagnostics_dir", "") or "").strip()
+        root = Path(base) if base else Path(__file__).resolve().parents[2] / "output" / "structured_grid_diagnostics"
+        d = root / time.strftime("%Y%m%d-%H%M%S")
+        k = 0
+        while d.exists():
+            k += 1
+            d = root / (time.strftime("%Y%m%d-%H%M%S") + f"-{k}")
+        d.mkdir(parents=True, exist_ok=True)
+        from .zhang2021_panel_quality import panel_quality
+        from .optcuts_zhang2021_quad_20261027 import stage_thresholds
+        pm = dict(getattr(getattr(state, "surface_parameterization", None), "metrics", {}) or {})
+        plan = getattr(getattr(state, "surface_parameterization", None), "_zhang2021_plan", None)
+        keep = {k: v for k, v in pm.items() if k.startswith(("structured_grid", "zhang2021_m2d_", "zhang2021_m3d_",
+                                                             "zhang2021_seam", "zhang2021_onestring_sd",
+                                                             "panel_optimizer"))}
+        out = {"summary": summary, "m2d_m3d": keep}
+        k3d = getattr(state, "mesh_3d_optimized", None)
+        if k3d is not None:
+            rep = panel_quality(np.asarray(k3d.vertices, float), np.asarray(k3d.faces, int), stage="K3D",
+                                thresholds=stage_thresholds(params, "k3d"))
+            out["k3d"] = {"metrics": rep.metrics, "limits_not_met": rep.failures}
+        (d / "structured_grid_report.json").write_text(json.dumps(_jsonable(out), indent=1), encoding="utf-8")
+        try:
+            if plan is not None:
+                plot_panels(d / "m2d_m3d.png", plan.quad_uv, plan.m3d_preview, plan.quads, plan.m3d_report,
+                            f"M3D structured grid ({len(plan.quads)} quads) - red: limits not met (display only)")
+            if k3d is not None:
+                m2d = getattr(state, "mesh_2d_initial", None)
+                uv = (np.asarray(m2d.vertices, float)[:, :2]
+                      if m2d is not None and len(m2d.vertices) == len(k3d.vertices) else None)
+                plot_panels(d / "k3d.png", uv, k3d.vertices, k3d.faces, rep,
+                            "K3D - red: limits not met (display only)")
+        except ImportError as exc:
+            (d / "figure_skipped.txt").write_text(f"figure not drawn: {exc} (pip install matplotlib)")
+        return str(d)
+    except Exception as exc:  # noqa: BLE001
+        return f"(diagnostics not written: {type(exc).__name__}: {exc})"
+
+
+__all__ = ["write_structured_grid_diagnostics", "write_candidate_diagnostics", "write_verification_diagnostics", "plot_panels"]

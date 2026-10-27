@@ -1108,6 +1108,17 @@ class PipelineParameters(_original.PipelineParameters):
     zhang2021_candidate_hausdorff_ratios: str = "0.02,0.03,0.05"
     zhang2021_precondition_sd_mean_ratio_max: float = 1.08
     zhang2021_precondition_sd_p95_ratio_max: float = 1.30
+    # 2026-10-28 structured-grid mode (structured_grid_20261028): OptCuts ->
+    # piecewise line/spline Omega -> regular quad grid of an orthogonal logical
+    # domain (interior valence 4) -> Brackbill-Saltzman-type optimisation in the
+    # 3D metric -> unchanged 2026-09-18 K3D...T2D.  Quality is reported only.
+    optcuts_structured_grid_20261028_enabled: bool = False
+    structured_grid_smoothing_tolerances: str = "0.01,0.005,0"
+    structured_grid_corner_scale: float = 0.04
+    structured_grid_panel_edge: float = 0.0
+    structured_grid_auto_panels: int = 150
+    structured_grid_smoothness_weight: float = 1.0
+    structured_grid_seam_closure: bool = True
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",

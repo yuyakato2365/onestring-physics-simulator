@@ -64,8 +64,13 @@ class Zhang2021QuadModeError(RuntimeError):
     """Explicit failure of the 2026-10-27 mode (never a silent fallback)."""
 
 
+def structured_grid_enabled(params: Any) -> bool:
+    """2026-10-28 structured-grid mode (structured_grid_20261028); reuses this module's hooks."""
+    return bool(getattr(params, "optcuts_structured_grid_20261028_enabled", False))
+
+
 def mode_enabled(params: Any) -> bool:
-    return bool(getattr(params, FLAG, False))
+    return bool(getattr(params, FLAG, False)) or structured_grid_enabled(params)
 
 
 def _configure_initial_csf_split(domain: Any, params: Any) -> bool:
@@ -123,6 +128,8 @@ DEFAULT_DOWNSTREAM_ROUTE = ROUTE_PAPER_LOCAL_GLOBAL
 
 
 def downstream_route(params: Any) -> str:
+    if structured_grid_enabled(params):
+        return ROUTE_PAPER_LOCAL_GLOBAL     # the unchanged 2026-09-18 K3D...T2D route
     route = str(getattr(params, "zhang2021_downstream_route", DEFAULT_DOWNSTREAM_ROUTE) or DEFAULT_DOWNSTREAM_ROUTE)
     if route not in DOWNSTREAM_ROUTES:
         raise Zhang2021QuadModeError(
@@ -179,6 +186,12 @@ def _paper_local_global_k3d(pipeline: Any, target: Any, mesh: Any, parameterizat
 
     metrics_in = dict(getattr(mesh, "metrics", {}) or {})
     reduction = _seam_reduction_from_metrics(len(mesh.vertices), metrics_in)
+    seam_closure = not (structured_grid_enabled(params)
+                        and not bool(getattr(params, "structured_grid_seam_closure", True)))
+    if not seam_closure:
+        reduction = None
+        print("[SG-K3D] structured_grid_seam_closure=False: OptCuts seams are NOT closed in K3D "
+              "(2026-09-18 behaviour)", flush=True)
     print("[ZHANG2021-20261027] downstream=paper_local_global_0918: Eq.(1) local/global K3D (the 2026-09-18 "
           "Grid-route solver) with the OptCuts seams as exact shared / T-vertex variables "
           f"({'none' if reduction is None else f'{reduction.n} -> {reduction.m} unknowns'})", flush=True)
@@ -385,7 +398,9 @@ def _seam_preflight(rp: Any, quad_uv: np.ndarray, faces: np.ndarray) -> dict:
     }
 
 
-def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None) -> Zhang2021M2DPlan:
+def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None,
+                       panel_line_triples: Any = None, strict_node_valence: bool = True,
+                       panel_weights: Any = None, report_only: bool = False) -> Zhang2021M2DPlan:
     """Paper stage + OneString adapter on one chart (raises on failure).
 
     1. [paper]     Zhang et al. 2021 reference programs -> Q (``zhang_result`` may
@@ -434,7 +449,8 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
             align_pairs=bool(getattr(params, "zhang2021_align_seam_pairs", True)),
             seam_matching=bool(getattr(params, "zhang2021_seam_matching", False)),
             hard_seams=hard,
-            repair_node_valence=bool(getattr(params, "zhang2021_repair_node_valence", True)))
+            repair_node_valence=bool(getattr(params, "zhang2021_repair_node_valence", True)),
+            strict_node_valence=strict_node_valence)
     except (SeamConformingReparamError, BoundaryCorrespondenceError) as exc:
         raise Zhang2021QuadModeError(str(exc)) from exc
     paper_quads = int(len(quads))
@@ -451,7 +467,7 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
         pts = quv[q]
         quad_area += 0.5 * abs(float(np.sum(pts[:, 0] * np.roll(pts[:, 1], -1) - pts[:, 1] * np.roll(pts[:, 0], -1))))
     rel = max(abs(chart_area - poly_area), abs(quad_area - poly_area)) / max(poly_area, 1e-300)
-    if rel > 1e-8:
+    if rel > 1e-8 and not report_only:
         raise Zhang2021QuadModeError(
             f"ZHANG2021_ONESTRING_CHART_DOES_NOT_TILE_QUAD_REGION: chart={chart_area:.12g} "
             f"quads={quad_area:.12g} polygon={poly_area:.12g}")
@@ -473,8 +489,9 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
     if bool(getattr(params, "zhang2021_panel_optimization", True)):
         try:
             quv, m3d, opt_report = optimize_panel_quality(
-                lift, quv, faces_ccw, fixed, weights=PanelOptimizerWeights(),
-                max_iter=int(getattr(params, "zhang2021_panel_optimization_iterations", 300)))
+                lift, quv, faces_ccw, fixed, weights=panel_weights or PanelOptimizerWeights(),
+                max_iter=int(getattr(params, "zhang2021_panel_optimization_iterations", 300)),
+                line_triples=panel_line_triples, allow_invalid=report_only)
         except PanelOptimizationError as exc:
             raise Zhang2021QuadModeError(str(exc)) from exc
         opt_report["panel_optimizer_enabled"] = True
@@ -529,6 +546,7 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
         **rp.metrics,
         **{k: v for k, v in opt_report.items()},
         "zhang2021_onestring_chart_injective": True,
+        "zhang2021_initial_grid_area_relative_error": float(rel),
         "zhang2021_m2d_topology_valid": bool(topology_ok),
         "zhang2021_m2d_topology_detail": topology_detail,
         "zhang2021_m2d_invalid_quads": int(np.sum(validity <= 0)),
@@ -870,8 +888,14 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
         route = downstream_route(params)
         if not isinstance(run_cache, dict):
             run_cache = _MODULE_PLAN_CACHE
-        plan = plan_zhang2021_m2d_coordinated(result.surface_vertices_3d, result.surface_faces,
-                                              result.uv_vertices_2d, result.uv_faces, params, cache=run_cache)
+        structured = structured_grid_enabled(params)
+        if structured:
+            from .structured_grid_20261028 import plan_structured_grid
+            plan = plan_structured_grid(result.surface_vertices_3d, result.surface_faces,
+                                        result.uv_vertices_2d, result.uv_faces, params)
+        else:
+            plan = plan_zhang2021_m2d_coordinated(result.surface_vertices_3d, result.surface_faces,
+                                                  result.uv_vertices_2d, result.uv_faces, params, cache=run_cache)
         rp = plan.chart
         # OptCuts multi-start (closed genus-0 inputs) attaches alternative
         # charts that the Split stage may swap in by Split count.  The Zhang
@@ -898,6 +922,15 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
         result.metrics.update(plan.metrics)
         result.metrics["zhang2021_source_chart_vertices"] = int(len(plan.source.uv))
         result.metrics["zhang2021_final_chart_vertices"] = int(len(rp.uv))
+        if structured:
+            m = plan.metrics
+            print(f"[SG-20261028] M2D {len(plan.quads)} quads (structured, interior valence 4: "
+                  f"{m.get('structured_grid_interior_valence_all_4')}) | chart SD "
+                  f"{m.get('zhang2021_onestring_sd_mean_before', float('nan')):.4f}->"
+                  f"{m.get('zhang2021_onestring_sd_mean_after', float('nan')):.4f} | seam preflight "
+                  f"{m.get('zhang2021_seam_preflight_mode')} | unresolved: "
+                  f"{m.get('structured_grid_unresolved') or 'none'}", flush=True)
+            return result
         print(f"[ZHANG2021-20261027] paper output {plan.metrics['zhang2021_paper_output_quads']} quads "
               f"(density input N_tar={plan.metrics['zhang2021_density_input_n_tar']}, not a goal) -> M2D "
               f"{len(plan.quads)} quads, patches={plan.metrics['zhang2021_n_patches']} "
@@ -933,7 +966,9 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
             raise Zhang2021QuadModeError("ZHANG2021_DOMAIN_CSF_THRESHOLD_INVALID")
         result = cls(np.asarray(parameterization.omega_boundary, float).copy(),
                      np.asarray(parameterization.uv_vertices_2d, float).copy(),
-                     f"{parameterization.method} + Zhang2021 quad M2D (OneString chart adapter)",
+                     f"{parameterization.method} + "
+                     + ("structured grid M2D (2026-10-28)" if structured_grid_enabled(params)
+                        else "Zhang2021 quad M2D (OneString chart adapter)"),
                      vertex.copy(), [])
         result.parameterization = parameterization
         result._zhang2021_plan = plan
@@ -974,10 +1009,14 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
         uv = np.asarray(plan.quad_uv, float)
         faces = np.asarray(plan.quads, int)
         from .optcuts_planar_quad_refine_20261026 import validate_disk_mesh
+        structured = structured_grid_enabled(params)
+        unresolved: list[str] = []
         try:
             validate_disk_mesh(uv, faces)
         except ValueError as exc:
-            raise Zhang2021QuadModeError("ZHANG2021_M2D_TOPOLOGY_INVALID: " + str(exc)) from exc
+            if not structured:
+                raise Zhang2021QuadModeError("ZHANG2021_M2D_TOPOLOGY_INVALID: " + str(exc)) from exc
+            unresolved.append("M2D topology: " + str(exc)[:300])
         edges = np.linalg.norm(np.roll(uv[faces], -1, axis=1) - uv[faces], axis=2)
         effective_size = float(np.median(edges))
         original_size = max(float(getattr(grid, "tile_size", 1.0)), 1e-12)
@@ -988,7 +1027,9 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
             "zhang2021_m2d_faces": int(len(faces)),
             "zhang2021_effective_uv_tile_size": effective_size,
             "zhang2021_effective_uv_gap_size": effective_gap,
-            "planar_quad_engine": "Zhang et al. 2021 reference implementation (authors' code); NOT Gmsh",
+            "planar_quad_engine": ("OneString structured grid (orthogonal-polygon lattice + Brackbill-Saltzman-type "
+                                   "optimisation)" if structured else
+                                   "Zhang et al. 2021 reference implementation (authors' code); NOT Gmsh"),
         })
         xyz = np.column_stack((uv, np.zeros(len(uv))))
         mesh = pipeline._original.QuadMesh(xyz, faces.copy(), irregular, "M2D", report, [])
@@ -996,7 +1037,10 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
         try:
             seam = discover_exact_seam_topology(parameterization, uv, faces)
         except SeamTopologyMismatch as exc:
-            raise Zhang2021QuadModeError("ZHANG2021_SEAM_PREFLIGHT_FAILED: " + str(exc)) from exc
+            if not structured:
+                raise Zhang2021QuadModeError("ZHANG2021_SEAM_PREFLIGHT_FAILED: " + str(exc)) from exc
+            seam = {"status": "mismatch"}
+            unresolved.append("seam preflight: " + str(exc)[:300])
         mesh.metrics.update({
             "zhang2021_seam_preflight_status": str(seam["status"]),
             "zhang2021_seam_stitch_mode": str(seam.get("seam_stitch_mode", "none")),
@@ -1006,11 +1050,20 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
             "zhang2021_seam_mixed_cut_open_edges": int(seam.get("mixed_seam_open_grid_edges", 0)),
             "zhang2021_seam_affine_rows": int(len(seam.get("affine_rows", []))),
         })
-        if str(seam["status"]) == "nonconforming":
+        if structured:
+            if str(seam["status"]) == "nonconforming":
+                unresolved.append("seam not conforming: unclassified M2D boundary edges="
+                                  f"{seam.get('unclassified_boundary_edges')}")
+            elif str(seam["status"]) == "conforming" and str(seam.get("seam_stitch_mode")) != "hard":
+                unresolved.append(f"seam not exactly closable ({seam.get('seam_stitch_mode')})")
+            mesh.metrics["structured_grid_m2d_unresolved"] = unresolved
+            if unresolved:
+                print("[SG-M2D] UNRESOLVED (run continues): " + "; ".join(unresolved), flush=True)
+        elif str(seam["status"]) == "nonconforming":
             raise Zhang2021QuadModeError(
                 "ZHANG2021_SEAM_NOT_CONFORMING: M2D boundary edges are not covered by the "
                 f"re-parameterised source boundary; unclassified={seam.get('unclassified_boundary_edges')}")
-        if str(seam["status"]) == "conforming" and str(seam.get("seam_stitch_mode")) != "hard":
+        if (not structured and str(seam["status"]) == "conforming" and str(seam.get("seam_stitch_mode")) != "hard"):
             raise Zhang2021QuadModeError(
                 "ZHANG2021_SEAM_NOT_HARD_CLOSABLE: the M2D samples the OptCuts cut as a "
                 f"{seam.get('seam_stitch_mode')!r} seam; only exact (hard) closure is accepted")
@@ -1084,7 +1137,12 @@ def _install_route_hooks(pipeline: Any) -> None:
         from .zhang2021_verification import k3d_gate
         out.metrics["zhang2021_seam_preflight_mode"] = str(
             (getattr(parameterization, "metrics", {}) or {}).get("zhang2021_seam_preflight_mode", ""))
-        k3d_gate(out, params, route=route)
+        if structured_grid_enabled(params) and not bool(getattr(params, "structured_grid_seam_closure", True)):
+            out.metrics["zhang2021_seam_preflight_mode"] = "no_cut"   # closure disabled: not gated
+        if structured_grid_enabled(params):
+            k3d_gate(out, params, route=route, raise_on_failure=False)   # report only
+        else:
+            k3d_gate(out, params, route=route)
         return out, report
 
     def zhang2021_route_k2d(mesh_2d, mesh_3d, params, progress_callback=None):

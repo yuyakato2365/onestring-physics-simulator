@@ -717,6 +717,9 @@ with st.sidebar:
                 # programs + OneString seam/3D chart adapter (separate mode;
                 # the 10-26 Gmsh prototype above is kept for comparison).
                 "optcuts_zhang2021_quad_20261027",
+                # 2026-10-28: piecewise smooth Omega + structured quad grid
+                # (interior valence 4) + the unchanged 09-18 K3D...T2D route.
+                "optcuts_structured_grid_20261028",
             ],
             format_func=lambda mode: {
                 "bff":"bff — LEGACY harmonic, NOT official BFF",
@@ -727,6 +730,9 @@ with st.sidebar:
                 "optcuts_zhang2021_quad_20261027":
                     "2026-10-27 | OptCuts → Zhang et al. 2021 Quad M2D "
                     "(authors' reference code) + OneString seam/3D adapter",
+                "optcuts_structured_grid_20261028":
+                    "2026-10-28 | OptCuts → piecewise smooth Ω (line+spline) → structured quad grid "
+                    "(Brackbill–Saltzman, interior valence 4) + 09-18 K3D…T2D",
             }.get(mode,mode),
             index=2 if (paper_fidelity_enabled
                         or selected_model_version["id"]=="0.2.0-paper-reference-bff") else 0,
@@ -805,8 +811,29 @@ with st.sidebar:
                     "_onestring_zhang2021_quad_20261027_selected", False)
             )
         ))
-    if optcuts_planar_quad_20261026_enabled or optcuts_zhang2021_quad_20261027_enabled:
+    optcuts_structured_grid_20261028_enabled = bool(
+        not paper_fidelity_enabled
+        and not optcuts_planar_quad_20261026_enabled
+        and not optcuts_zhang2021_quad_20261027_enabled
+        and (
+            omega_parameterization_mode == "optcuts_structured_grid_20261028"
+            or (
+                omega_parameterization_mode == "optcuts_test"
+                and st.session_state.get(
+                    "_onestring_structured_grid_20261028_selected", False)
+            )
+        ))
+    if (optcuts_planar_quad_20261026_enabled or optcuts_zhang2021_quad_20261027_enabled
+            or optcuts_structured_grid_20261028_enabled):
         omega_parameterization_mode = "optcuts_test"
+    structured_grid_panel_edge = float(st.session_state.get("onestring_structured_grid_panel_edge", 0.0))
+    structured_grid_auto_panels = int(st.session_state.get("onestring_structured_grid_auto_panels", 150))
+    structured_grid_smoothing_tolerances = str(st.session_state.get(
+        "onestring_structured_grid_smoothing_tolerances", "0.01,0.005,0") or "0")
+    structured_grid_corner_scale = float(st.session_state.get("onestring_structured_grid_corner_scale", 0.04))
+    structured_grid_smoothness_weight = float(st.session_state.get(
+        "onestring_structured_grid_smoothness_weight", 1.0))
+    structured_grid_seam_closure = bool(st.session_state.get("onestring_structured_grid_seam_closure", True))
     zhang2021_target_quads = int(st.session_state.get("onestring_zhang2021_target_quads", 35))
     zhang2021_hausdorff_ratio = float(st.session_state.get("onestring_zhang2021_hausdorff_ratio", 0.05))
     zhang2021_collapse_width_ratio = float(st.session_state.get("onestring_zhang2021_collapse_width_ratio", 0.05))
@@ -2176,6 +2203,13 @@ def current_pipeline_key() -> tuple:
         zhang2021_compare_verified_candidates,
         zhang2021_t2d_max_hinge_error_ratio,
         zhang2021_t3d_max_panel_collisions,
+        optcuts_structured_grid_20261028_enabled,
+        structured_grid_panel_edge,
+        structured_grid_auto_panels,
+        structured_grid_smoothing_tolerances,
+        structured_grid_corner_scale,
+        structured_grid_smoothness_weight,
+        structured_grid_seam_closure,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
@@ -2378,6 +2412,13 @@ pipeline_params = PipelineParameters(
     zhang2021_compare_verified_candidates=zhang2021_compare_verified_candidates,
     zhang2021_t2d_max_hinge_error_ratio=zhang2021_t2d_max_hinge_error_ratio,
     zhang2021_t3d_max_panel_collisions=zhang2021_t3d_max_panel_collisions,
+    optcuts_structured_grid_20261028_enabled=optcuts_structured_grid_20261028_enabled,
+    structured_grid_panel_edge=structured_grid_panel_edge,
+    structured_grid_auto_panels=structured_grid_auto_panels,
+    structured_grid_smoothing_tolerances=structured_grid_smoothing_tolerances,
+    structured_grid_corner_scale=structured_grid_corner_scale,
+    structured_grid_smoothness_weight=structured_grid_smoothness_weight,
+    structured_grid_seam_closure=structured_grid_seam_closure,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,

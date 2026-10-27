@@ -170,9 +170,99 @@ def simplified_boundary(src, tol: float, *, node_keep_radius: float = 0.0) -> tu
     return targets, corners_sorted
 
 
+def boundary_features(src, scale: float, angle_deg: float = 35.0) -> list[int]:
+    """Seam nodes + sharp corners of open-boundary runs (turning >= angle at the given scale).
+
+    Cut runs carry no extra corners (both UV copies of a cut must stay
+    parameterised identically); their only features are the seam nodes.
+    """
+    n, P = src.n, src.perimeter
+    cum = np.asarray(src.cum[:-1], float)
+    feats = set(int(j) for j in src.nodes)
+    uv = src.uv
+
+    def point_at(s):
+        return src.point_at(s % P)[2]
+
+    turning = np.zeros(n)
+    for j in range(n):
+        a = point_at(cum[j] - scale) - uv[j]
+        b = point_at(cum[j] + scale) - uv[j]
+        ang = np.degrees(np.arctan2(a[0] * b[1] - a[1] * b[0], a @ b)) % 360.0   # interior angle (CCW)
+        turning[j] = 180.0 - ang
+    open_v = [j for j in range(n) if src.edge_kind[j] == "open" and src.edge_kind[(j - 1) % n] == "open"]
+    cand = sorted((-abs(turning[j]), j) for j in open_v if abs(turning[j]) >= angle_deg)
+    for _, j in cand:            # non-maximum suppression along the boundary
+        if all(min(abs(cum[j] - cum[k]), P - abs(cum[j] - cum[k])) > scale for k in feats):
+            feats.add(int(j))
+    return sorted(feats)
+
+
+def _fair_polyline(P: np.ndarray, tol: float) -> np.ndarray:
+    """Discrete smoothing spline with fixed ends: min |D2 x|^2 + w |x - P|^2, max deviation <= tol.
+
+    A run whose chord already stays within tol becomes a straight line.
+    """
+    m = len(P)
+    if m <= 2:
+        return P.copy()
+    a, b = P[0], P[-1]
+    t = np.linspace(0.0, 1.0, m)
+    d = b - a
+    L = float(np.linalg.norm(d))
+    if L > 0:
+        dist = np.abs((P[:, 0] - a[0]) * d[1] - (P[:, 1] - a[1]) * d[0]) / L
+        if float(np.max(dist)) <= tol:
+            seg = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(P, axis=0), axis=1))]
+            u = seg / max(seg[-1], 1e-300)
+            return a + u[:, None] * d
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+    D = sparse.diags([np.ones(m - 2), -2 * np.ones(m - 2), np.ones(m - 2)], [0, 1, 2], shape=(m - 2, m))
+    DtD = (D.T @ D).tocsr()
+    inner = np.arange(1, m - 1)
+
+    def solve(w):
+        A = (DtD + w * sparse.identity(m)).tocsr()
+        rhs = w * P.copy()
+        X = P.copy()
+        Ai = A[inner][:, inner].tocsc()
+        corr = A[inner][:, [0, m - 1]] @ P[[0, m - 1]]
+        for c in range(2):
+            X[inner, c] = spsolve(Ai, rhs[inner, c] - corr[:, c])
+        return X
+
+    lo, hi = 1e-8, 1e8          # w small = smooth, large = close to P
+    best = P.copy()
+    for _ in range(40):
+        w = np.sqrt(lo * hi)
+        X = solve(w)
+        if float(np.max(np.linalg.norm(X - P, axis=1))) <= tol:
+            best, hi = X, w
+        else:
+            lo = w
+    return best
+
+
+def faired_boundary(src, tol: float, *, corner_scale: float) -> tuple[np.ndarray, list[int]]:
+    """Piecewise smooth boundary: per run between features a straight line or a smoothing spline."""
+    feats = boundary_features(src, corner_scale)
+    if len(feats) < 2:
+        far = int(np.argmax(np.linalg.norm(src.uv - src.uv[0], axis=1)))
+        feats = sorted({0, far} | set(feats))
+    n = src.n
+    targets = src.uv.copy()
+    for r, a in enumerate(feats):
+        b = feats[(r + 1) % len(feats)]
+        idx = [(a + k) % n for k in range((b - a) % n + 1)] if b != a else list(range(n)) + [a]
+        X = _fair_polyline(src.uv[idx], tol)
+        targets[idx] = X
+    return targets, feats
+
+
 def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: float = 1.08,
                        sd_p95_ratio_max: float = 1.25, max_steps: int = 2000,
-                       node_keep_ratio: float = 0.0) -> PreconditionResult:
+                       node_keep_ratio: float = 0.0, boundary_model: str = "polyline") -> PreconditionResult:
     xyz = np.asarray(xyz, float)
     f3 = np.asarray(f3, int)
     uv = np.asarray(uv, float)
@@ -203,7 +293,10 @@ def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: 
         return reject(str(exc))
     diag = float(np.linalg.norm(np.ptp(uv, axis=0)))
     tol = tol_ratio * diag
-    targets, corners = simplified_boundary(src, tol, node_keep_radius=float(node_keep_ratio) * diag)
+    if boundary_model == "spline":
+        targets, corners = faired_boundary(src, tol, corner_scale=max(float(node_keep_ratio), 0.02) * diag)
+    else:
+        targets, corners = simplified_boundary(src, tol, node_keep_radius=float(node_keep_ratio) * diag)
     m = {"zhang2021_precondition_tol_ratio": tol_ratio,
          "zhang2021_precondition_node_keep_ratio": float(node_keep_ratio),
          "zhang2021_precondition_identity": False,
@@ -252,4 +345,4 @@ def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: 
     return PreconditionResult(tol_ratio, True, xyz, f3, out, f2, "accepted", m)
 
 
-__all__ = ["PreconditionResult", "precondition_omega", "simplified_boundary"]
+__all__ = ["PreconditionResult", "precondition_omega", "simplified_boundary", "faired_boundary", "boundary_features"]
