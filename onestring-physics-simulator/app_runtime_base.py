@@ -805,6 +805,10 @@ with st.sidebar:
         "onestring_zhang2021_author_wine_cmd", "")).strip()
     zhang2021_independent_solver_dll = str(st.session_state.get(
         "onestring_zhang2021_independent_solver_dll", "")).strip()
+    zhang2021_author_hausdorff_bound = float(st.session_state.get(
+        "onestring_zhang2021_native_hausdorff_bound", 0.01))
+    zhang2021_author_sheet_width = float(st.session_state.get(
+        "onestring_zhang2021_native_sheet_width", 0.05))
     optcuts_zhang2021_experimental_enabled = bool(
         optcuts_planar_quad_20261026_enabled and (
             omega_parameterization_mode == "optcuts_zhang2021_coarse_layout_experiment"
@@ -2121,6 +2125,8 @@ def current_pipeline_key() -> tuple:
         zhang2021_author_exe_root,
         zhang2021_author_wine_command,
         zhang2021_independent_solver_dll,
+        zhang2021_author_hausdorff_bound,
+        zhang2021_author_sheet_width,
         planar_quad_target_faces,
         planar_quad_refine_m3d,
         planar_quad_uv_reparam,
@@ -2299,6 +2305,8 @@ pipeline_params = PipelineParameters(
     zhang2021_author_exe_root=zhang2021_author_exe_root,
     zhang2021_author_wine_command=zhang2021_author_wine_command,
     zhang2021_independent_solver_dll=zhang2021_independent_solver_dll,
+    zhang2021_author_hausdorff_bound=zhang2021_author_hausdorff_bound,
+    zhang2021_author_sheet_width=zhang2021_author_sheet_width,
     planar_quad_target_faces=planar_quad_target_faces,
     planar_quad_refine_m3d=planar_quad_refine_m3d,
     planar_quad_uv_reparam=planar_quad_uv_reparam,
