@@ -4,6 +4,7 @@ on:
     branches: [agent/zhang2021-independent-20261027]
     paths:
       - .github/workflows/zhang2021-original-small-domain-20261027.yml
+      - onestring-physics-simulator/scripts/install_zhang2021_qt_platform.py
   workflow_dispatch:
 jobs:
   original-authors-square:
