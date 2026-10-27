@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(onestring_eigen_sparse_direct LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT DEFINED EIGEN_INCLUDE_DIR OR NOT EXISTS "${EIGEN_INCLUDE_DIR}/Eigen/SparseLU")
   message(FATAL_ERROR "Set EIGEN_INCLUDE_DIR to an independently licensed Eigen distribution")
