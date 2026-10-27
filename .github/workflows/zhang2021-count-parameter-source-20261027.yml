@@ -1,0 +1,35 @@
+name: Inspect original author's actual quad budget semantics
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-count-parameter-source-20261027.yml]
+  workflow_dispatch:
+jobs:
+  author-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Obtain genuine author C++ source and inspect input budget arguments
+        run: |
+          python onestring-physics-simulator/scripts/download_zhang2021_authors.py --directory /tmp/zhang2021_budget
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          root=Path('/tmp/zhang2021_budget/authors_source/Code')
+          for stage in ('Segment','QuadMeshSimplify'):
+              file=root/stage/stage/'main.cpp'
+              raw=file.read_bytes()
+              code=raw.decode('utf-16',errors='replace') if raw[:30].count(b'\x00')>3 or raw.startswith((b'\xff\xfe',b'\xfe\xff')) else raw.decode('utf-8',errors='replace')
+              lines=code.splitlines()
+              print('ORIGINAL_AUTHOR_MAIN',stage,'lines',len(lines))
+              for i,line in enumerate(lines):
+                  if any(term in line for term in ('argv[','atoi(','atof(','numberQuad','NumberQuad','quadNum','QuadNum','numQuad','NumQuad','target','Target','simplify','Simplify')):
+                      print('BUDGET_MEANING',stage,i+1,repr(line.strip()[:220]))
+              print('MAIN_TAIL',stage)
+              for i,line in enumerate(lines[max(0,len(lines)-120):],max(0,len(lines)-120)+1):
+                  print(f'SOURCE_{stage}:{i}: {line[:180]}')
+          PY
