@@ -614,6 +614,10 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
             report["planar_quad_target_faces"] = int(
                 domain._planar_quad_target_faces)
             report["planar_quad_faces"] = int(len(faces))
+            report["planar_quad_count_target_met"] = bool(
+                len(faces) <= int(domain._planar_quad_target_faces))
+            report["planar_quad_count_target_excess"] = int(max(
+                0, len(faces) - int(domain._planar_quad_target_faces)))
             report["planar_quad_reference_identity_verified"] = False
             q2 = _quad_quality(
                 np.column_stack((uv, np.zeros(len(uv)))), faces)
