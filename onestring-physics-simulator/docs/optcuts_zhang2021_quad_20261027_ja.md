@@ -5,18 +5,23 @@ Omega parameterization mode: `optcuts_zhang2021_quad_20261027`
 
 ```
 S → 公式OptCuts（3Dカットと UV↔3D 三角形対応は変更しない）
-  → [OneString拡張 ⑤] Ω の前処理 h: 境界の単純化（Hausdorff ≤ tol、Seam 節点固定）+ 全単射 SLIM → Ω₁
-  → [論文] Zhang, Chai, Liu, Fu, "Quad meshing with coarse layouts for planar domains",
-           CAD 140 (2021) 103084 — 著者の参照実装 Straighten / Segment / QMSim を
-           著者の WholePipeline.bat と同じコマンドラインで実行（移植ビルド、アルゴリズム無変更）
-  → [OneString拡張] (a) 境界対応: Q の境界頂点を ∂Ω（カット・開境界）上の点へ順序保存で対応付け
-                   (b) Seam 節点（カット先端・分岐・カット/開境界の切替点）を Q の頂点に割当て
-                   (c) 任意: カット両側の頂点数を poly-chord 挿入でそろえる（hard seam 化）
-                   (d) 境界辺の分割（カットの双子辺も同時に分割し3Dメッシュを conforming に保つ）
-                   (e) 境界を Q の境界多角形に固定した全単射 SLIM（対称ディリクレ）で Ω を再パラメータ化
-  → M2D = 論文の Q（(c) を適用した場合のみ chord が追加される）
-  → M3D = 再パラメータ化 Ω 上の厳密な三角形包含 + 重心座標リフト
-  → 既存 K3D / T3D / K2D / T2D
+  → [OneString] Ω の前処理 h: 境界の単純化（Hausdorff ≤ tol、Seam 節点とその近傍の向きを保持）
+               + 全単射 SLIM → Ω₁（tol は候補パラメータ、0 = 前処理なし）
+  → [論文] Zhang, Chai, Liu, Fu, CAD 140 (2021) 103084 — 著者の参照実装 Straighten / Segment / QMSim を
+           WholePipeline.bat と同じコマンドラインで実行（移植ビルド、アルゴリズム無変更）。
+           N_tar は論文の密度入力（l_tar = √(A/N_tar)）としてだけ使い、ε とともに候補パラメータにする
+  → [OneString] Seam を hard に閉じられる標本化:
+               (a) Q の境界頂点を ∂Ω へ順序保存で対応付け、Seam 節点（先端・分岐・切替点）を頂点に割当て
+               (b) 内部点である節点（カット先端・分岐）の 3D 価数 ≥ 3 を局所修復（対角 collapse / 辺回転）
+               (c) 各カット枝の両側を同じ 3D 弧長分率で標本化（一致分割、または入れ子分割 = T 頂点）
+               (d) 境界辺の分割（双子辺も同時）+ 境界を Q の境界多角形に固定した全単射 SLIM、
+                   境界上の点の配置は 3D 弧長比例（両側で同じ物理点が同じパラメータになる）
+               (e) M3D のサイズ・形状一様性を目的とする M2D 内部頂点の最適化（反転禁止）
+  → Phase 1: 硬い制約（UV 全単射・四角形位相・被覆・Seam hard 閉合可能・M2D/M3D ゲート・ルート連結）
+  → Phase 2: 品質スコア E(c)（枚数項なし）で順位付け
+  → Phase 3: 1 位から順に K3D（Seam 厳密拘束 + 品質ゲート）→ T3D → K2D → T2D → 最終検証、
+             不合格なら次の候補で再実行（OptCuts と候補評価はキャッシュ）
+  → Phase 4: （任意）検証を通った候補の最終品質を比較して採用。全滅なら診断付きで明示的に失敗
 ```
 
 論文の段階と OneString 独自の段階はメトリクス名で分離しています
@@ -67,9 +72,11 @@ Gmsh や切り抜き正方格子への fallback はありません。失敗は�
 セットアップ:
 
 ```bash
-# macOS (Apple Silicon)
-brew install cmake eigen cgal libomp
-python3 scripts/setup_zhang2021_quad_official.py --cmake-arg=-DOpenMP_ROOT=$(brew --prefix libomp)
+# macOS (Apple Silicon)。eigen は 3 系（eigen@3）が必要。Homebrew の libomp / eigen@3 の場所と
+# Apple Clang 17（libc++）向けの互換フラグはスクリプトが自動で付けます（--no-macos-flags で無効化）
+brew install cmake eigen@3 cgal libomp
+python3 scripts/setup_zhang2021_quad_official.py
+# アプリ用の仮想環境は Python 3.10 以上（例: /opt/homebrew/bin/python3.12 -m venv .venv）
 # Ubuntu
 sudo apt install cmake g++ libeigen3-dev libcgal-dev
 python3 scripts/setup_zhang2021_quad_official.py
@@ -89,73 +96,142 @@ Seam 節点をQの頂点へ割当て、必要な境界点で境界辺（とカ�
 結果として最終チャートの領域 = Q の領域（面積誤差 0）、かつチャートは S 全体への全単射なので、
 **M3D は S を隙間なく・はみ出しなく覆います**（切り抜き方式にはない性質）。代償としてチャートの SD 歪みが増えます（報告値）。
 
-### ② M3D 品質
-M2D/M3D の最小・最大角、辺長比、面積比、scaled Jacobian、平面性を出力し、最悪面のインデックスも記録します。
+### ② パネル品質（M2D / M3D / K3D）— 修正 B
+`zhang2021_panel_quality.py`。すべてスケール非依存です（長さは比か、メッシュ自身の幾何平均辺長に対する対数でだけ使う）。
 
-### ③ Seam 整合性
-* 節点（先端・分岐・切替）は必ず Q の頂点に割当て（先端は必須。辺の内部に先端があると 3D で辺が折れる）。
-* カットの両側で Q の頂点数が等しければ 3D の位置をそろえて hard seam（既存の厳密 Seam 閉合が使える）。
-* 異なる場合は soft（既存の affine 制約による近似閉合、隙間が残る）。
-* 任意の poly-chord 挿入（`zhang2021_seam_matching`）: 全カットの頂点数（スリットは偶奇＋先端割当て）を
-  Dijkstra で最小追加 quad 数になるよう合わせる。全カットが整合し、かつ各カット先端の頂点が 3 枚以上の quad に属する場合のみ採用します
-  （2 枚以下だと hard 閉合で先端のパネルが 3D で約 180° に開くか潰れる）。そうでなければ論文の Q のまま soft で続行し、理由を
-  `zhang2021_onestring_seam_matching_rejection_reason` に記録します。
-* 節点の 3D 価数（各 UV コピーの quad 数の和、内部点の理想 ≈ 4、開境界上 ≈ 2）を報告します。
-  先端の価数 2 は 3D で約 180° の角、1 は折り畳みを意味します。
+| 指標 | 定義 |
+|---|---|
+| E_size | 全辺の mean log²(l_e / l_ref)、l_ref = 辺長の幾何平均 |
+| 辺長比 r_q | 各パネルの最長辺 / 最短辺（scaled Jacobian では細長い長方形を検出できないため別に測る） |
+| E_angle | 全コーナーの mean cos²θ |
+| 面積 CV | パネル面積の標準偏差 / 平均 |
+| サイズ比 | 最大/最小パネル（√面積）、p95/p5 |
+| 最悪パネル | 各基準の最悪パネル番号、パーセンタイル、パネル偏差の smooth max（log-sum-exp） |
+| 退化 / 反転・非凸 | 0 であること |
 
-### ④ 下流との接続
-`UnstructuredQuadGrid`（2026-10-26 と共通）で既存の K3D/T3D/K2D/T2D に接続します。既存ソルバーは書き換えず、
-どの既存ルートへ渡すかだけを選べます（`zhang2021_downstream_route`、UI「OneString downstream route for the Zhang M2D」）。
+ゲートは段ごとに独立です（`zhang2021_m2d_gate` / `zhang2021_m3d_gate` / `zhang2021_k3d_gate`、`name=value,...`、空欄は既定値）。
+既定値はユーザー設定であって「公式」な値ではありません。
 
-| ルート | K3D | K2D | T2D | Seam |
-|---|---|---|---|---|
-| `optcuts_test2`（既定） | AL K3D（optcuts_test2） | 運動学的 K2D | 従来の Dual Hinge | 認証済み Seam 閉合（hard/soft） |
-| `paper_local_global_0918` | Eq.(1) local/global（09-18 Grid ルートと同一関数） | Eq.(5) local/global + Sec. 4.3 交互コーナー連結 | 論文 Dual Hinge（硬い非貫通） | 閉合しない（09-18 Grid ルートと同じ。残差は `zhang2021_route_seam_gap_*` に計測値として出力） |
+| 段 | 既定のゲート |
+|---|---|
+| M2D（UV） | 妥当性のみ: 退化・反転なし、角 3°〜177°、辺長比 ≤ 25（カット先端付近では、3D で良いパネルにするために UV 側を細い楔形にする必要がある） |
+| M3D | 角 30°〜150°、辺長比 ≤ 3、サイズ比 ≤ 4、p95/p5 ≤ 2.5、E_size ≤ 0.15、E_angle ≤ 0.15、面積 CV ≤ 0.75 |
+| K3D | M3D と同じ + 非平面性 ≤ 1e-3 × 平均辺長 |
 
-* K3D の Seam 閉合は `optcuts_seam_exact_closure` の条件に本モードのフラグを追加しただけで、ソルバーは変更していません。
-* `paper_local_global_0918` の交互コーナー連結は四角形の隣接グラフが二部グラフ（= 全内部頂点の価数が偶数）であることを要します。
-  Zhang の粗いレイアウトには価数 3/5 の特異頂点があるため、その場合は
-  `ZHANG2021_PAPER_LG_LINKAGE_NON_BIPARTITE`（奇数価数の内部頂点数を含む）で明示的に停止し、別ルートへの自動切替はしません。
-* **暫定変更（2026-10-27）: Zhang2021 モードの初期 Ω CSF Split は既定で OFF です。** 旧方式の固定UV/完全格子線に基づく Split を、Zhang の不規則四角形 M2D にそのまま適用しないためです。OptCuts が S を円板状チャートへ展開するためのカット（Seam）、Zhang の Quad Meshing、境界対応・Seam のためのメッシュ辺分割は **無効化しません**。M2D の四角形は初期 CSF Split による切断を受けず、通常の M3D/K3D/T3D/K2D/T2D へ渡されます。CSF 値は診断用に記録しますが上限達成・製造可能性を保証しません。
-* 再有効化は `PipelineParameters(zhang2021_initial_csf_split_enabled=True)`（かつ `enable_csf_splits=True`）で明示的に行えます。現在のアプリUIでは事故防止のため `False` に固定し、「初期 Ω CSF Split OFF」と表示します。再有効化すると、既存の `csf_split_bound_certified=False` の扱いにより `ZHANG2021_CSF_SPLIT_UNCERTIFIED` が再発し得ます。旧 Split の修復ではなく、初期 Split のバイパスです。
-* 再有効化されたときのみ Simple Split ラッパーが1回の初期 CSF Split を実行します。旧方式の Split 後チェックは従来のまま残します（2026-10-26 Gmsh モードは未変更）。
-* OptCuts のマルチスタート（閉じた種数0の入力）で付く代替チャートは、Split 段で Split 数により差し替えられることがあります。
-  Zhang の M2D と再パラメータ化チャートは選ばれた1つの OptCuts 結果に対して計算されるため、本モードではこの差し替えを無効化し、
-  `zhang2021_optcuts_split_count_candidates_dropped` に記録します。
+### ③ Seam の hard 閉合 — 修正 C
+* Seam 節点（先端・分岐・切替点）は必ず四角形の頂点に割り当てます（割り当てられなければ失敗）。
+* **節点の 3D 価数**: カット先端と分岐は S の内部点なので、全 UV コピーの価数の和が 3 以上必要です
+  （1 枚だと折り畳み、2 枚だと 180° の角になる）。不足している場合は局所修復を行います
+  （`zhang2021_seam_alignment.repair_node_valences`）。
+  - 対角 collapse: 節点の四角形の対角を節点へ統合
+  - 辺回転: 節点に面した辺を回転し、節点の周りに 1 枚足す
 
-### ⑤ Quad Meshing 前の Ω の前処理と候補探索（2026-10-26 設計 Step 2〜6）
-Zhang の Straighten は分割線を決めるための作業用の座標系を作るだけで、Ω を置き換えません。そこで設計どおり、Zhang の**前に** Ω 自体を変形する段を置きました
-（`zhang2021_precondition_enabled`、既定 ON）。
+  どちらも境界頂点を変えず、ダブレットを作らないことを確認してから適用します。修復できない場合は候補を不採用にします。
+* **標本化**（`align_branches`）: カット枝ごとに、両側の頂点を 3D 弧長分率で順序保存のまま対応付けます（DP）。
+  - 個数が等しい場合は一致分割（頂点 ↔ 頂点）です。
+  - 等しくない場合は、少ない側を多い側の部分集合に合わせる入れ子分割です。余った頂点は、相手側の辺上の固定パラメータに置く T 頂点（頂点 ↔ 辺パラメータ）になります。
+  - 交互配置（枝全体を直線にしないと閉じられない配置）は作りません。
+* チャートの境界点は四角形の各辺に沿って 3D 弧長に比例して配置します。両側で同じ物理点が同じパラメータになるので、
+  `source_cut_affine_rows` のすべての行が、頂点の等式と T 頂点の等式から導かれます。
+* 判定: `discover_exact_seam_topology` は、本モードに限り入れ子分割を `hard` と判定します。この判定は
+  `zhang2021_seam_reduction.nested_partition_audit` で全行を明示的に消去できた場合だけです（他モードの判定は不変）。
+  soft は採用不可で、M2D の段で `ZHANG2021_SEAM_NOT_HARD_CLOSABLE` を出して停止します。
+* 真の開境界（S の穴）は拘束しません（`source_open_grid_edges`）。
+* poly-chord 挿入（`zhang2021_seam_matching`）は任意で、既定は OFF です。入れ子分割で閉じられるため、四角形の追加は必須ではありません。
 
-呼び出し順（`with_parameterization` → `plan_zhang2021_m2d_coordinated`、`optcuts_zhang2021_quad_20261027.py`）:
+### ④ 3D パネル品質最適化 — 修正 B / E
+`zhang2021_panel_optimizer.py`。最終チャートの中で M2D の内部頂点を動かし、厳密リフトした M3D について
+次の E を最小化します（L-BFGS）。
 
-1. 候補 tol ごとに `precondition_omega`（`zhang2021_onestring_precondition.py`）
-   1. `split_boundary_chords`: 境界頂点どうしを結ぶ内部辺を中点で分割（UV と 3D の同じ辺上。直線化で潰れる三角形を防ぐ）
-   2. `build_source_boundary`: ∂Ω を Seam 節点（カット先端・分岐・切替点）で区切る
-   3. `simplified_boundary`: 区間ごとに Douglas–Peucker（許容 tol × bbox 対角）。節点は固定の角、tol を超えて曲がる点だけを角として残し、
-      他の境界頂点は順序を保って直線区間上に弧長比で再配置（E_line = E_smooth = 0、E_deviation は Hausdorff ≤ tol のハード制約）
-   4. 目標多角形の自己交差と両側 Hausdorff 距離を検査
-   5. `progressive_boundary_slim`（`zhang2021_onestring_reparam.py`、既存の後合わせと共通化）: 反転なしで境界を目標へ動かし、内部は S の 3D 三角形に対する対称ディリクレ SLIM
-   6. SD 平均比 ≤ `zhang2021_precondition_sd_mean_ratio_max`（既定 1.08）、p95 比 ≤ `..._sd_p95_ratio_max`（既定 1.30）でなければ理由付きで不採用
-2. 採用された Ω₁ ごと、候補 ε ごとに `plan_zhang2021_m2d`（Zhang → 既存アダプタ → M3D）
-3. 各候補を採点（`SELECTION_WEIGHTS`）: |ln(実数/目標)|、奇数価数の内部頂点数、価数不足の Seam 節点数、M3D 最小角、J_min、最終チャートの SD 増加。
-   09-18 ルートでは奇数価数の内部頂点がある候補は不適格。全候補と内訳を `zhang2021_coordinated_candidates` に記録し、最良を採用
-4. 境界誤差や SD は**元の** OptCuts チャート Ω₀ に対して報告（`plan.source` = Ω₀）
+E = mean b_q + α·LSE(b)
 
-3D 位置は動かさない（分割点も S の辺上）ので、S との全単射対応と OptCuts のカット位相は保たれます。
-h と Q の連続的な同時最適化や Quad 頂点の再配置は行っていません（候補探索による協調）。
+b_q は角の項 cos²θ、サイズの項 log²(l/L)、パネル内アスペクトの項、角の和の項 (Σθ − 2π)² の和です。
+L は開始時の M3D 辺長の幾何平均で、枚数目標ではありません。
+
+* 境界頂点（Seam 標本）は固定するので、Seam の対応は崩れません。
+* UV の四角形が単純かつ正向き（反転なし）であることを障壁で保証します。価数修復の直後などで絡んでいる場合は、先に untangle します。
+* 位相は変えません。
+
+### ⑤ 下流との接続と K3D
+`UnstructuredQuadGrid` で既存の K3D/T3D/K2D/T2D に接続します（`zhang2021_downstream_route`）。
+
+| ルート | K3D | K2D / T2D | Seam |
+|---|---|---|---|
+| `paper_local_global_0918`（既定） | Eq.(1) local/global（09-18 Grid と同一関数）。`seam_reduction` で x = E z とし、全反復と平面化 polish を z について解く | Eq.(5) + Sec. 4.3 交互連結、論文 Dual Hinge（硬い非貫通） | 共有変数と T 頂点代入による厳密閉合 |
+| `optcuts_test2` | AL K3D（hard Seam の射影子）+ 既存の閉合監査 | 運動学的 K2D、従来の Dual Hinge | 同上（射影子） |
+
+* 09-18 ルートの関数（`optimize_paper_local_global_k3d`、`minimum_displacement_planarity_polish`、`_solve_constraints`）には、
+  任意引数 `seam_reduction` / `reduction` を追加しました。既定は None で、他モードの挙動は同一です。
+* どちらのルートでも、K3D 直後に K3D ゲート（`zhang2021_verification.k3d_gate`）を通します。品質ゲートと Seam の hard 閉合
+  （残差 / 平均辺長 ≤ `zhang2021_seam_closure_tolerance`）を確認し、失敗したら `ZHANG2021_K3D_GATE_FAILED` で停止します。
+* 09-18 ルートの交互連結には、内部頂点の価数がすべて偶数であることが必要です（Phase 1 の C7 で事前に判定）。
+* 初期 Ω CSF Split は既定 OFF のままです（下記）。
+* **暫定変更（2026-10-27）: Zhang2021 モードの初期 Ω CSF Split は既定で OFF です。** 旧方式の固定UV/完全格子線に基づく Split を、Zhang の不規則四角形 M2D にそのまま適用しないためです。OptCuts のカット（Seam）、Zhang の Quad Meshing、境界対応・Seam のためのメッシュ辺分割は **無効化しません**。CSF 値は診断用に記録しますが、上限の達成や製造可能性は保証しません。
+* 再有効化は `PipelineParameters(zhang2021_initial_csf_split_enabled=True)`（かつ `enable_csf_splits=True`）で明示的に行えます。現在のアプリUIでは `False` に固定しています。
+* OptCuts のマルチスタートで付く代替チャートによる差し替えは、本モードでは無効化します（`zhang2021_optcuts_split_count_candidates_dropped`）。
+
+### ⑥ 前処理と候補の段階的選定 — 修正 A / D / E
+呼び出し順は `with_parameterization` → `plan_zhang2021_m2d_coordinated` → `plan_zhang2021_m2d`
+（`optcuts_zhang2021_quad_20261027.py`）。選定の部品は `zhang2021_candidate_selection.py` にあります。
+
+1. 候補 tol ごとに `precondition_omega` を実行します。
+   - Douglas–Peucker（Hausdorff ≤ tol）
+   - Seam 節点の両側を `zhang2021_precondition_node_keep_ratio` × 対角の長さだけ残し、節点での境界の向きを保持します。
+     旧版は先端の反射角（例: 245°）を鋭い凸角（例: 96°）に潰しており、先端周りに 3 枚以上置けなくなっていました。
+   - 全単射 SLIM と SD 比の上限を確認し、超えた場合は理由付きで不採用にします。
+2. (tol × ε × 密度 N_tar) のすべての候補で Zhang を実行します（並列、`zhang2021_parallel_workers`、0 = 自動）。
+   密度は `zhang2021_target_quads` × `zhang2021_candidate_density_factors`（既定 1,2,4）です。
+   `zhang2021_target_edge_length` > 0 なら、N_tar = 面積(S) / l² で決めます。
+3. 各候補について `plan_zhang2021_m2d` を実行します（③④ と M2D/M3D ゲート、Seam の preflight）。
+4. **Phase 1**（`feasibility`）: 次の制約を一つでも満たさない候補は不採用です。
+   - C1: UV 全単射
+   - C2: 四角形の位相
+   - C3: S の被覆
+   - C4: Seam を hard に閉合できる
+   - C6: M2D と M3D のゲート
+   - C7: ルートの連結条件
+5. **Phase 2**（`candidate_score`）: E(c) = w_size·E_size + w_shape·(E_angle + E_aspect) + w_area·CV² + w_dist·(SD 比 − 1)
+   + w_fit·(境界 Hausdorff / 対角) + w_worst·smooth max を、M3D の値に w_m2d × M2D の同じ項を加えて計算します。
+   **枚数の項はありません**（`count=` を指定するとエラー）。重みは `zhang2021_selection_weights` で指定します。
+6. **Phase 3**（`zhang2021_verification`）: 1 位から順にパイプライン全体を実行します。K3D ゲートで止まった場合や、
+   最終検証で不合格の場合は次の候補を試します（上限 `zhang2021_verification_attempts`、既定 3）。2 回目以降は OptCuts と候補評価をキャッシュから再利用します。最終検証の内容:
+   - T3D: Seam が hard で、隙間が許容内であること。パネル衝突 ≤ `zhang2021_t3d_max_panel_collisions`（既定 0）
+   - K2D: パネル数が K3D と一致すること
+   - T2D: 2D 衝突 0、3D 立体衝突 0、`hard_collision_status = verified_feasible`、
+     ヒンジ接続誤差 / 平均辺長 ≤ `zhang2021_t2d_max_hinge_error_ratio`（既定 0.05）
+   - `fabrication_feasible` は既存の 09-18 Grid の結果でも False なので、ゲートには使わず値だけを記録します。
+7. **Phase 4**: `zhang2021_compare_verified_candidates` を ON にすると、検証を通った候補をすべて実行し、K3D 品質とヒンジ誤差で比較して採用します。
+8. 全滅した場合（Phase 1 で 0 件、または Phase 3 で全試行が不合格）は、`ZHANG2021_NO_FEASIBLE_CANDIDATE` /
+   `ZHANG2021_NO_CANDIDATE_PASSED_VERIFICATION` で明示的に失敗します。メッセージには候補ごとの却下理由が入り、診断フォルダも出力します。
+
+**診断出力**（`zhang2021_diagnostics.py`）は `output/zhang2021_diagnostics/<時刻>/` に書き出します。
+- `candidates.json` / `candidates.txt`（全候補の状態、スコアの内訳、却下理由）
+- `best_rejected_candidate_m3d.png`（違反パネルを赤で表示）
+- `best_rejected_candidate_quality.json`
+- `verification.json`
+- `k3d_bad_panels.png`
+
+成功時も、候補表を `zhang2021_coordinated_candidates`、検証ログを `zhang2021_verification_log` としてメトリクスに残します。
 
 ## 4. 比較結果
 
-`docs/optcuts_zhang2021_quad_20261027_results_ja.md` に、単純な平面領域・Bunny（代替メッシュ）・ドームでの
-従来 Grid / Gmsh 10-26 / Zhang の比較（実パネル数、被覆率、境界誤差、M2D/M3D/K3D 品質、SD 歪み、Seam、T2D、実行時間）をまとめています。
-要点（前処理なし）: Bunny 由来 Ω では 30/35 枚は得られず（117 枚以上）、Seam は soft、09-18 ルートの交互連結は特異頂点のため構成できません。
-要点（⑤ の前処理あり、結果編 §8）: Bunny で 63 枚・奇数価数の内部頂点 0 となり、09-18 ルートで T2D まで成功（Split 既定値）。
-Seam の閉合と K3D の最小角は未解決です。ドームでは前処理の有無にかかわらず T2D まで成功します。
+`docs/optcuts_zhang2021_quad_20261027_results_ja.md` は、**修正前（35 枚誘導・soft Seam を許した版）** の計測結果です。
+今回の修正版での確認はドームの通し実行だけです（同ファイル §9）。Bunny での確認はユーザー側で行う前提です。
 
 ## 5. テスト
 
 ```bash
-python -m pytest -q tests/test_zhang2021_quad_20261027.py
+python -m pytest -q tests/test_zhang2021_quad_20261027.py tests/test_zhang2021_quality_seam_20261027.py
 ```
 参照プログラム未ビルドの環境では、それを必要とするテストのみ skip されます。
+
+## 6. 2026-10-27 修正指導書への対応表
+
+| 要件 | 実装（関数・制約・評価項） |
+|---|---|
+| A: 35 枚誘導の撤廃 | `DEFAULT_TARGET_QUADS` を廃止して `DEFAULT_DENSITY_N_TAR`（密度入力）に変更。旧 `SELECTION_WEIGHTS["count"]` を削除。`candidate_densities`（複数密度、l_target からの換算）。UI の表記を「density input, NOT a panel-count goal」に変更 |
+| B: サイズ・形状の一様性 | `panel_quality`（E_size、辺長比、E_angle、面積 CV、最悪パネル、smooth max）。M2D/M3D/K3D の独立ゲート。`optimize_panel_quality`（M3D の一様化） |
+| C: Seam の 3D 閉合（全ルート） | `align_branches`（一致・入れ子分割）、`repair_node_valences`、3D 弧長による境界配置、`nested_partition_audit`、`build_seam_reduction` + `optimize_paper_local_global_k3d(seam_reduction=…)`、test2 は既存 AL の hard 射影子、`k3d_gate`（soft は失敗）、T3D の監査 |
+| D: 段階的選定 | `feasibility`（C1〜C4、C6、C7）、`candidate_score`（枚数項なし）、`install_zhang2021_verification_loop`（Phase 3/4） |
+| E: 3D 品質と閉合可能性のフィードバック | M3D ゲートと Seam preflight を Phase 1 に、K3D/T2D の結果を Phase 3 の採否に反映。前処理（節点の向きを保持）、価数修復、内部頂点最適化 |
+| §9 禁止事項 | S は変更しない（分割点も S の辺上）。OptCuts のカット位相は不変。soft の採用、警告だけでの通過、Grid/Gmsh への fallback はいずれも無し。初期 CSF Split は OFF のまま。他モードの挙動は不変（全テスト比較で新規失敗 0） |

@@ -479,6 +479,18 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
         and len(paired)>0
         and rank_allows_hard
     )
+    # 2026-10-27 Zhang2021 mode only: a NESTED partition (one UV side sampled
+    # at a subset of the other side's 3D points, the extra vertices being
+    # T-vertices on the coarse side's edge) is also exactly closable without
+    # forcing the seam straight.  Certified by explicit elimination of every
+    # row (zhang2021_seam_reduction); interleaved partitions stay non-hard.
+    nested_audit=None
+    if (tip_pairs_allowed and not fully_matching and can_stitch
+            and len(mixed_cut_open_edges)==0 and rank_audit["rank_evaluated"]):
+        from .zhang2021_seam_reduction import nested_partition_audit
+        nested_audit=nested_partition_audit(len(uv),[sorted(x) for x in groups],affine_rows)
+        if nested_audit.get("eliminable"):
+            fully_matching=True
     mode="hard" if fully_matching else "soft" if can_stitch else "unavailable"
     return {
         "status":("conforming" if can_stitch else "nonconforming"),
@@ -509,6 +521,7 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
         "seam_grid_vertices":len(vertex_keys),
         "original_cut_segments":len(segments)//2,
         "source_xyz_tolerance":qtol,
+        "nested_partition_audit":nested_audit,
     }
 
 

@@ -104,7 +104,41 @@ def _douglas_peucker(P: np.ndarray, tol: float) -> list[int]:
     return sorted(keep)
 
 
-def simplified_boundary(src, tol: float) -> tuple[np.ndarray, list[int]]:
+def _node_neighbourhood_corners(src, nodes: list[int], radius: float) -> set[int]:
+    """Loop vertices at arc distance ~radius on both sides of every node.
+
+    Keeping them as corners preserves the boundary direction on both sides of
+    an OptCuts seam node at the panel scale.  Without them the simplified
+    chords node->node can turn a reflex cut-tip corner (the 3D neighbourhood of
+    a tip is a full turn) into a sharp convex corner, which leaves no room for
+    the >= 3 panels a tip needs after hard seam closure.
+    """
+    if radius <= 0 or not nodes:
+        return set()
+    n, P = src.n, src.perimeter
+    cum = np.asarray(src.cum[:-1], float)
+    out: set[int] = set()
+    ordered = sorted(nodes)
+    for r, j in enumerate(ordered):
+        nxt = ordered[(r + 1) % len(ordered)]
+        prv = ordered[(r - 1) % len(ordered)]
+        gap_next = (cum[nxt] - cum[j]) % P or P
+        gap_prev = (cum[j] - cum[prv]) % P or P
+        for direction, gap in ((+1, gap_next), (-1, gap_prev)):
+            reach = min(float(radius), 0.45 * gap)
+            k = j
+            for _ in range(n):
+                k2 = (k + direction) % n
+                d = (cum[k2] - cum[j]) % P if direction > 0 else (cum[j] - cum[k2]) % P
+                if d >= reach or k2 in (nxt, prv):
+                    if k2 not in (nxt, prv):
+                        out.add(int(k2))
+                    break
+                k = k2
+    return out
+
+
+def simplified_boundary(src, tol: float, *, node_keep_radius: float = 0.0) -> tuple[np.ndarray, list[int]]:
     """Target position of every source loop vertex + the retained corner positions."""
     n = src.n
     P = src.uv
@@ -115,6 +149,7 @@ def simplified_boundary(src, tol: float) -> tuple[np.ndarray, list[int]]:
     if len(mandatory) == 1:
         far = int(np.argmax(np.linalg.norm(P - P[mandatory[0]], axis=1)))
         mandatory = sorted({mandatory[0], far})
+    mandatory = sorted(set(mandatory) | _node_neighbourhood_corners(src, list(src.nodes), node_keep_radius))
     corners: set[int] = set(mandatory)
     for r, a in enumerate(mandatory):
         b = mandatory[(r + 1) % len(mandatory)]
@@ -136,7 +171,8 @@ def simplified_boundary(src, tol: float) -> tuple[np.ndarray, list[int]]:
 
 
 def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: float = 1.08,
-                       sd_p95_ratio_max: float = 1.25, max_steps: int = 2000) -> PreconditionResult:
+                       sd_p95_ratio_max: float = 1.25, max_steps: int = 2000,
+                       node_keep_ratio: float = 0.0) -> PreconditionResult:
     xyz = np.asarray(xyz, float)
     f3 = np.asarray(f3, int)
     uv = np.asarray(uv, float)
@@ -167,8 +203,9 @@ def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: 
         return reject(str(exc))
     diag = float(np.linalg.norm(np.ptp(uv, axis=0)))
     tol = tol_ratio * diag
-    targets, corners = simplified_boundary(src, tol)
+    targets, corners = simplified_boundary(src, tol, node_keep_radius=float(node_keep_ratio) * diag)
     m = {"zhang2021_precondition_tol_ratio": tol_ratio,
+         "zhang2021_precondition_node_keep_ratio": float(node_keep_ratio),
          "zhang2021_precondition_identity": False,
          "zhang2021_precondition_boundary_vertices": int(src.n),
          "zhang2021_precondition_corners": int(len(corners)),

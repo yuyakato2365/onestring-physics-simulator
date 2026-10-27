@@ -51,11 +51,12 @@ MODE_LABEL = ("2026-10-27 | OptCuts → Zhang et al. 2021 Quad M2D "
               "(authors' reference code) + OneString seam/3D adapter")
 FLAG = "optcuts_zhang2021_quad_20261027_enabled"
 
-# OneString defaults.  N_tar = 35 is OneString's panel target, NOT the paper's
-# default (4000).  eps = 0.05 relaxes the paper's 0.01 bbox-diagonal Hausdorff
-# bound, without which a coarse target cannot be approached at all (the
-# paper's Hausdorff constraint dominates N_tar); both are reported.
-DEFAULT_TARGET_QUADS = 35
+# OneString defaults.  N_tar is ONLY the paper's density input (its target edge
+# length l_tar = sqrt(area / N_tar); the paper's own default is 4000).  It is
+# not a panel-count goal: no selection term depends on the resulting count,
+# several densities are tried (``zhang2021_candidate_density_factors``) and the
+# final count is whatever the quality-ranked feasible candidate has.
+DEFAULT_DENSITY_N_TAR = 35
 DEFAULT_HAUSDORFF_RATIO = 0.05
 
 
@@ -88,7 +89,7 @@ def _configure_initial_csf_split(domain: Any, params: Any) -> bool:
 
 def zhang2021_parameters_from(params: Any) -> Zhang2021Parameters:
     zp = Zhang2021Parameters(
-        target_quads=int(getattr(params, "zhang2021_target_quads", DEFAULT_TARGET_QUADS)),
+        target_quads=int(getattr(params, "zhang2021_target_quads", DEFAULT_DENSITY_N_TAR)),
         hausdorff_ratio=float(getattr(params, "zhang2021_hausdorff_ratio", DEFAULT_HAUSDORFF_RATIO)),
         collapse_width_ratio=float(getattr(params, "zhang2021_collapse_width_ratio",
                                            PAPER_DEFAULT_COLLAPSE_WIDTH_RATIO)),
@@ -102,22 +103,27 @@ def zhang2021_parameters_from(params: Any) -> Zhang2021Parameters:
 # ---------------------------------------------------------- downstream
 # Which EXISTING OneString K3D/K2D/T2D stack consumes the Zhang M2D.  This is
 # a OneString choice; neither route is part of Zhang et al. (2021).
-#   optcuts_test2           : AL K3D with the certified OptCuts Seam closure
-#                             (hard/soft), kinematic K2D, legacy Dual Hinge T2D.
-#   paper_local_global_0918 : the SAME solvers as the 2026-09-18 Grid route
-#                             (Eq.(1) local/global K3D, Eq.(5) local/global K2D
-#                             on the Sec. 4.3 corner linkage, paper Dual Hinge
-#                             T2D with hard non-penetration).  Like the Grid
-#                             route it does NOT close OptCuts seams, and its
-#                             alternating linkage needs a bipartite quad
-#                             adjacency (every interior vertex of even valence).
+#   paper_local_global_0918 : (default) the solvers of the 2026-09-18 Grid
+#                             route (Eq.(1) local/global K3D, Eq.(5) K2D on the
+#                             Sec. 4.3 corner linkage, paper Dual Hinge T2D with
+#                             hard non-penetration).  In this mode the OptCuts
+#                             seams are exact K3D variables (shared vertices /
+#                             T-vertex substitution, zhang2021_seam_reduction);
+#                             the linkage needs every interior vertex of even
+#                             valence (Phase-1 constraint C7).
+#   optcuts_test2           : AL K3D with the hard OptCuts seam projector,
+#                             kinematic K2D, legacy Dual Hinge T2D.
+# Both routes are followed by the K3D gate (quality + exact seam closure).
 ROUTE_OPTCUTS_TEST2 = "optcuts_test2"
 ROUTE_PAPER_LOCAL_GLOBAL = "paper_local_global_0918"
 DOWNSTREAM_ROUTES = (ROUTE_OPTCUTS_TEST2, ROUTE_PAPER_LOCAL_GLOBAL)
 
 
+DEFAULT_DOWNSTREAM_ROUTE = ROUTE_PAPER_LOCAL_GLOBAL
+
+
 def downstream_route(params: Any) -> str:
-    route = str(getattr(params, "zhang2021_downstream_route", ROUTE_OPTCUTS_TEST2) or ROUTE_OPTCUTS_TEST2)
+    route = str(getattr(params, "zhang2021_downstream_route", DEFAULT_DOWNSTREAM_ROUTE) or DEFAULT_DOWNSTREAM_ROUTE)
     if route not in DOWNSTREAM_ROUTES:
         raise Zhang2021QuadModeError(
             f"ZHANG2021_DOWNSTREAM_ROUTE_INVALID: {route!r}; expected one of {DOWNSTREAM_ROUTES}")
@@ -149,42 +155,47 @@ def odd_valence_interior_vertices(faces: np.ndarray) -> list[int]:
     return [int(v) for v in np.unique(faces) if int(v) not in boundary and valence[v] % 2 == 1]
 
 
-def _route_seam_report(vertices: np.ndarray, metrics: dict) -> dict:
-    """Measured (not enforced) OptCuts Seam discrepancy of a K3D result."""
+def _seam_reduction_from_metrics(n_vertices: int, metrics: dict):
+    """Exact OptCuts seam constraints of the M3D (certified at the lift) as x = E z."""
+    from .zhang2021_seam_reduction import SeamReductionError, build_seam_reduction
+
     rows = list(metrics.get("seam_exact_affine_rows") or [])
-    report = {"zhang2021_route_seam_rows": int(len(rows)),
-              "zhang2021_route_seam_groups": int(len(metrics.get("seam_exact_vertex_groups") or []))}
-    if rows:
-        from .optcuts_seam_soft_constraints import residual_stats
-        stats = residual_stats(np.asarray(vertices, float), rows)
-        report["zhang2021_route_seam_gap_max"] = float(stats["max"])
-        report["zhang2021_route_seam_gap_rms"] = float(stats["rms"])
-    return report
+    groups = list(metrics.get("seam_exact_vertex_groups") or [])
+    mode = str(metrics.get("seam_stitch_mode", "none"))
+    if not rows and not groups:
+        return None
+    if mode != "hard":
+        raise Zhang2021QuadModeError(
+            f"ZHANG2021_SEAM_NOT_HARD_CLOSABLE: the M3D seam preflight is {mode!r}; the Zhang2021 mode never "
+            "optimises K3D with a soft or missing OptCuts seam")
+    try:
+        return build_seam_reduction(n_vertices, groups, rows)
+    except SeamReductionError as exc:
+        raise Zhang2021QuadModeError(str(exc)) from exc
 
 
 def _paper_local_global_k3d(pipeline: Any, target: Any, mesh: Any, parameterization: Any, params: Any):
     from .paper_local_global_solvers import optimize_paper_local_global_k3d
 
-    print("[ZHANG2021-20261027] downstream=paper_local_global_0918: Eq.(1) local/global K3D "
-          "(the 2026-09-18 Grid-route solver); OptCuts seams are NOT closed in this route", flush=True)
-    out, report = optimize_paper_local_global_k3d(target, mesh, parameterization, params, pipeline=pipeline)
-    seam = _route_seam_report(out.vertices, dict(getattr(mesh, "metrics", {}) or {}))
-    # The 09-18 route has no Seam closure.  Remove the inherited M3D Seam
-    # constraints so T3D does not enforce equalities K3D never satisfied; the
-    # remaining discrepancy is reported, not hidden.
-    out.metrics["seam_exact_vertex_groups"] = []
-    out.metrics["seam_exact_affine_rows"] = []
-    out.metrics["seam_stitch_mode"] = "none (paper_local_global_0918 route)"
-    out.metrics.update(seam)
+    metrics_in = dict(getattr(mesh, "metrics", {}) or {})
+    reduction = _seam_reduction_from_metrics(len(mesh.vertices), metrics_in)
+    print("[ZHANG2021-20261027] downstream=paper_local_global_0918: Eq.(1) local/global K3D (the 2026-09-18 "
+          "Grid-route solver) with the OptCuts seams as exact shared / T-vertex variables "
+          f"({'none' if reduction is None else f'{reduction.n} -> {reduction.m} unknowns'})", flush=True)
+    out, report = optimize_paper_local_global_k3d(target, mesh, parameterization, params, pipeline=pipeline,
+                                                  seam_reduction=reduction)
     out.metrics.update({
         "zhang2021_downstream_route": ROUTE_PAPER_LOCAL_GLOBAL,
-        "zhang2021_route_k3d_solver": "paper_local_global_solvers.optimize_paper_local_global_k3d",
-        "zhang2021_route_seam_closure_enforced": False,
+        "zhang2021_route_k3d_solver": ("paper_local_global_solvers.optimize_paper_local_global_k3d "
+                                       "(seam_reduction: exact OptCuts seam variables)"),
+        "zhang2021_route_seam_closure_enforced": reduction is not None,
     })
-    if seam.get("zhang2021_route_seam_rows"):
-        print(f"[ZHANG2021-20261027] route seam discrepancy (measured, not enforced): "
-              f"max={seam['zhang2021_route_seam_gap_max']:.4g} rms={seam['zhang2021_route_seam_gap_rms']:.4g} "
-              f"rows={seam['zhang2021_route_seam_rows']}", flush=True)
+    if reduction is not None:
+        out.metrics["seam_exact_vertex_groups"] = [list(map(int, g)) for g in metrics_in.get("seam_exact_vertex_groups", [])]
+        out.metrics["seam_exact_affine_rows"] = list(metrics_in.get("seam_exact_affine_rows", []))
+        out.metrics["seam_stitch_mode"] = "hard"
+        out.metrics["seam_exact_closure_enabled"] = True
+        out.metrics["seam_exact_closure_model"] = "eliminated variables inside every local/global iterate"
     return out, report
 
 
@@ -315,16 +326,82 @@ def _polygon_metrics(source_loop_uv: np.ndarray, quad_loop_uv: np.ndarray) -> di
 
 @dataclass
 class Zhang2021M2DPlan:
-    quad_uv: np.ndarray            # M2D vertices (UV of the final chart == Q of the paper)
+    quad_uv: np.ndarray            # M2D vertices (UV of the final chart)
     quads: np.ndarray              # counter-clockwise in UV (OneString grid convention)
     m3d_preview: np.ndarray        # exact barycentric lift through the final chart
     chart: Any                     # ReparamResult (final chart)
     source: SimpleNamespace        # original OptCuts chart
     metrics: dict = field(default_factory=dict)
+    m2d_report: Any = None         # PanelQualityReport (M2D, UV)
+    m3d_report: Any = None         # PanelQualityReport (M3D, lifted)
 
 
-def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any) -> Zhang2021M2DPlan:
-    """Paper stage + OneString adapter on one OptCuts chart (raises on failure)."""
+_MODULE_PLAN_CACHE: dict = {}
+
+
+class Zhang2021CandidatesExhausted(Zhang2021QuadModeError):
+    """No further feasible candidate for the requested rank (Phase-3 loop end)."""
+
+
+def stage_thresholds(params: Any, stage: str):
+    """Scale-free acceptance limits of one stage ('m2d', 'm3d', 'k3d') from the params text."""
+    from .zhang2021_panel_quality import (
+        DEFAULT_K3D_THRESHOLDS, DEFAULT_M2D_THRESHOLDS, DEFAULT_M3D_THRESHOLDS, PanelQualityThresholds)
+    defaults = {"m2d": DEFAULT_M2D_THRESHOLDS, "m3d": DEFAULT_M3D_THRESHOLDS, "k3d": DEFAULT_K3D_THRESHOLDS}[stage]
+    text = getattr(params, f"zhang2021_{stage}_gate", "") if params is not None else ""
+    try:
+        return PanelQualityThresholds.from_text(text, **defaults)
+    except ValueError as exc:
+        raise Zhang2021QuadModeError(f"ZHANG2021_{stage.upper()}_GATE_INVALID: {exc}") from exc
+
+
+def _seam_preflight(rp: Any, quad_uv: np.ndarray, faces: np.ndarray) -> dict:
+    """The downstream source-seam classifier on this candidate (before any K3D)."""
+    from .optcuts_seam_exact_closure import SeamTopologyMismatch, discover_exact_seam_topology
+
+    param_like = SimpleNamespace(surface_vertices_3d=rp.xyz, surface_faces=rp.f3, uv_vertices_2d=rp.uv,
+                                 uv_faces=rp.f2, metrics={"zhang2021_quad_20261027_enabled": True})
+    try:
+        topo = discover_exact_seam_topology(param_like, quad_uv, faces)
+    except SeamTopologyMismatch as exc:
+        return {"zhang2021_seam_preflight_status": "error", "zhang2021_seam_preflight_mode": "unavailable",
+                "zhang2021_seam_preflight_reason": str(exc)[:400]}
+    status = str(topo.get("status"))
+    mode = str(topo.get("seam_stitch_mode", "none"))
+    if status in ("no_boundary", "source_open_boundary_only"):
+        mode = "no_cut"
+    audit = topo.get("nested_partition_audit") or {}
+    return {
+        "zhang2021_seam_preflight_status": status,
+        "zhang2021_seam_preflight_mode": mode,
+        "zhang2021_seam_preflight_reason": ("" if mode in ("hard", "no_cut") else
+                                            f"stitch mode {mode}: {audit.get('reason', '')}"),
+        "zhang2021_seam_preflight_vertex_groups": int(len(topo.get("groups", []))),
+        "zhang2021_seam_preflight_paired_edges": int(len(topo.get("paired_edges", []))),
+        "zhang2021_seam_preflight_affine_rows": int(len(topo.get("affine_rows", []))),
+        "zhang2021_seam_preflight_t_vertices": int(audit.get("t_vertices", 0) or 0),
+        "zhang2021_seam_preflight_open_boundary_edges": int(topo.get("source_open_grid_edges", 0)),
+        "zhang2021_seam_preflight_rank": dict(topo.get("affine_rank_diagnostics") or {}),
+    }
+
+
+def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None) -> Zhang2021M2DPlan:
+    """Paper stage + OneString adapter on one chart (raises on failure).
+
+    1. [paper]     Zhang et al. 2021 reference programs -> Q (``zhang_result`` may
+                   pass a precomputed run of exactly this chart and parameters).
+    2. [OneString] seam-node snapping, cut-tip / junction valence repair, matched /
+                   nested 3D sampling of every cut branch (exact closure), conforming
+                   splits + bijective SLIM chart re-parameterisation.
+    3. [OneString] 3D panel-quality optimisation of the interior M2D vertices
+                   inside the final chart (boundary = exact seam samples, fixed).
+    4. M2D (UV validity) and M3D (size/shape uniformity) gates, seam preflight.
+    """
+    from .optcuts_planar_quad_refine_20261026 import validate_disk_mesh
+    from .zhang2021_panel_optimizer import (
+        ChartLift, PanelOptimizationError, PanelOptimizerWeights, optimize_panel_quality, quad_validity)
+    from .zhang2021_panel_quality import panel_quality
+
     started = time.perf_counter()
     xyz = np.asarray(xyz, float)
     f3 = np.asarray(f3, int)
@@ -332,10 +409,12 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any) -> Zhang2021M2DPlan:
     f2 = np.asarray(f2, int)
     zp = zhang2021_parameters_from(params)
     bin_dir = str(getattr(params, "zhang2021_bin_dir", "") or "").strip() or None
-    try:
-        res = run_reference_pipeline(xyz, f3, uv, f2, zp, bin_dir=bin_dir)
-    except Zhang2021Error as exc:
-        raise Zhang2021QuadModeError(str(exc)) from exc
+    res = zhang_result
+    if res is None:
+        try:
+            res = run_reference_pipeline(xyz, f3, uv, f2, zp, bin_dir=bin_dir)
+        except Zhang2021Error as exc:
+            raise Zhang2021QuadModeError(str(exc)) from exc
     quv = np.asarray(res.quad_vertices, float)
     quads = np.asarray(res.quads, int)
     if len(quads) == 0:
@@ -347,19 +426,20 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any) -> Zhang2021M2DPlan:
     if int(res.metrics.get("zhang2021_quad_boundary_loops", 1)) != 1:
         raise Zhang2021QuadModeError(
             f"ZHANG2021_QUAD_MESH_NOT_A_DISK: boundary loops={res.metrics.get('zhang2021_quad_boundary_loops')}")
+    hard = bool(getattr(params, "zhang2021_hard_seams", True))
     try:
         rp = seam_conforming_reparameterization(
             xyz, f3, uv, f2, quv, quads,
-            snap_nodes=bool(getattr(params, "zhang2021_snap_seam_nodes", True)),
+            snap_nodes=bool(getattr(params, "zhang2021_snap_seam_nodes", True)) or hard,
             align_pairs=bool(getattr(params, "zhang2021_align_seam_pairs", True)),
-            seam_matching=bool(getattr(params, "zhang2021_seam_matching", True)))
+            seam_matching=bool(getattr(params, "zhang2021_seam_matching", False)),
+            hard_seams=hard,
+            repair_node_valence=bool(getattr(params, "zhang2021_repair_node_valence", True)))
     except (SeamConformingReparamError, BoundaryCorrespondenceError) as exc:
         raise Zhang2021QuadModeError(str(exc)) from exc
     paper_quads = int(len(quads))
-    # The paper's Q unless OneString seam matching inserted poly-chords.
     quv = np.asarray(rp.quad_uv, float)
     quads = np.asarray(rp.quads, int)
-    sj = scaled_jacobians(quv, quads)
     # The final chart's boundary IS the quad boundary polygon: verify areas.
     q_loop = quad_boundary_loop(quads)
     q_poly = quv[q_loop]
@@ -376,13 +456,41 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any) -> Zhang2021M2DPlan:
             f"ZHANG2021_ONESTRING_CHART_DOES_NOT_TILE_QUAD_REGION: chart={chart_area:.12g} "
             f"quads={quad_area:.12g} polygon={poly_area:.12g}")
     span = float(np.max(np.ptp(rp.uv, axis=0)))
-    tri, bary = _locate(rp.uv, rp.f2, quv, 1e-9)
-    m3d = np.einsum("ij,ijk->ik", bary, rp.xyz[rp.f3[tri]])
     # OneString's M2D convention is counter-clockwise quads in UV (as QuadGrid).
     orient = float(np.sum(signed_uv_areas(quv, quads[:, [0, 1, 2]])) + np.sum(signed_uv_areas(quv, quads[:, [0, 2, 3]])))
     faces_ccw = quads[:, ::-1].copy() if orient < 0 else quads.copy()
-    q2 = _quad_quality(np.column_stack((quv, np.zeros(len(quv)))), faces_ccw)
-    q3 = _quad_quality(m3d, faces_ccw)
+    try:
+        validate_disk_mesh(quv, faces_ccw)
+        topology_ok, topology_detail = True, "all-quad disk"
+    except ValueError as exc:
+        topology_ok, topology_detail = False, str(exc)[:300]
+    # [OneString] 3D panel-quality optimisation of the interior vertices.
+    lift = ChartLift(rp.uv, rp.f2, rp.xyz, rp.f3)
+    fixed = np.zeros(len(quv), bool)
+    fixed[quad_boundary_loop(faces_ccw)] = True
+    quv_in = quv.copy()
+    opt_report: dict = {"panel_optimizer_enabled": False}
+    if bool(getattr(params, "zhang2021_panel_optimization", True)):
+        try:
+            quv, m3d, opt_report = optimize_panel_quality(
+                lift, quv, faces_ccw, fixed, weights=PanelOptimizerWeights(),
+                max_iter=int(getattr(params, "zhang2021_panel_optimization_iterations", 300)))
+        except PanelOptimizationError as exc:
+            raise Zhang2021QuadModeError(str(exc)) from exc
+        opt_report["panel_optimizer_enabled"] = True
+    else:
+        tri = lift.locate(quv)
+        if np.any(tri < 0):
+            raise Zhang2021QuadModeError(
+                f"ZHANG2021_ONESTRING_QUAD_VERTEX_OUTSIDE_CHART: {int(np.sum(tri < 0))} vertices")
+        m3d = lift.lift(quv, tri)
+    validity = quad_validity(quv, faces_ccw)[0]
+    q2 = panel_quality(quv, faces_ccw, stage="M2D", thresholds=stage_thresholds(params, "m2d"),
+                       planar_2d_orientation=1.0)
+    q3 = panel_quality(m3d, faces_ccw, stage="M3D", thresholds=stage_thresholds(params, "m3d"))
+    legacy2 = _quad_quality(np.column_stack((quv, np.zeros(len(quv)))), faces_ccw)
+    legacy3 = _quad_quality(m3d, faces_ccw)
+    sj = scaled_jacobians(quv, faces_ccw)
     sj3 = _scaled_jacobian_3d(m3d, faces_ccw)
     src_loop = oriented_boundary_loops(f2)
     if len(src_loop) != 1:
@@ -391,18 +499,26 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any) -> Zhang2021M2DPlan:
     dh, _dh_q_to_src, _dh_src_to_q = two_sided_boundary_hausdorff(
         src_loop_uv, [list(range(len(src_loop_uv)))], q_poly, [list(range(len(q_poly)))])
     bbox_diag = float(np.linalg.norm(np.ptp(uv, axis=0)))
+    seam = _seam_preflight(rp, quv, faces_ccw)
+    odd = odd_valence_interior_vertices(faces_ccw)
+    moved = float(np.max(np.linalg.norm(quv - quv_in, axis=1))) if len(quv) else 0.0
     metrics: dict[str, Any] = {
         "requested_omega_parameterization_mode": MODE,
         "zhang2021_quad_20261027_enabled": True,
         "zhang2021_mode_label": MODE_LABEL,
         "zhang2021_paper_doi": PAPER_DOI,
         **{k: v for k, v in res.metrics.items()},
-        "zhang2021_requested_vs_actual_quads": (
-            f"requested {zp.target_quads}; paper output {paper_quads}; final M2D {len(quads)}"),
-        "zhang2021_target_reached": bool(paper_quads == zp.target_quads),
+        "zhang2021_density_input_n_tar": int(zp.target_quads),
+        "zhang2021_density_input_note": (
+            "N_tar is only the paper's density input (l_tar = sqrt(area / N_tar)); it is not a panel-count "
+            "goal and no selection term depends on it"),
         "zhang2021_paper_output_quads": paper_quads,
-        "zhang2021_final_m2d_quads": int(len(quads)),
-        "zhang2021_m2d_is_unmodified_paper_output": bool(len(quads) == paper_quads),
+        "zhang2021_final_m2d_quads": int(len(faces_ccw)),
+        "zhang2021_m2d_is_unmodified_paper_output": bool(len(faces_ccw) == paper_quads and moved == 0.0
+                                                         and not rp.metrics.get("zhang2021_onestring_node_valence_repairs")),
+        "zhang2021_onestring_m2d_topology_modified": bool(len(faces_ccw) != paper_quads
+                                                          or rp.metrics.get("zhang2021_onestring_node_valence_repairs")),
+        "zhang2021_onestring_m2d_interior_max_move": moved,
         "zhang2021_m2d_scaled_jacobian_min": float(np.min(sj)),
         "zhang2021_m2d_scaled_jacobian_mean": float(np.mean(sj)),
         "zhang2021_m3d_scaled_jacobian_min": float(np.min(sj3)),
@@ -411,6 +527,12 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any) -> Zhang2021M2DPlan:
         "zhang2021_boundary_hausdorff_vs_source_omega_percent_bbox": 100.0 * float(dh) / max(bbox_diag, 1e-300),
         **_polygon_metrics(src_loop_uv, q_poly),
         **rp.metrics,
+        **{k: v for k, v in opt_report.items()},
+        "zhang2021_onestring_chart_injective": True,
+        "zhang2021_m2d_topology_valid": bool(topology_ok),
+        "zhang2021_m2d_topology_detail": topology_detail,
+        "zhang2021_m2d_invalid_quads": int(np.sum(validity <= 0)),
+        "zhang2021_m2d_quads_valid": bool(np.all(validity > 0)),
         "zhang2021_onestring_final_chart_equals_quad_region": True,
         "zhang2021_onestring_final_chart_area_relative_error": float(rel),
         "zhang2021_onestring_surface_coverage": (
@@ -418,35 +540,27 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any) -> Zhang2021M2DPlan:
             "boundary polygon, so the lifted M2D covers S without gaps or outside area"),
         "zhang2021_onestring_m2d_faces_reversed_to_ccw": bool(orient < 0),
         "zhang2021_onestring_lift_model": "strict containing triangle of the final chart + barycentric",
-        **{"zhang2021_m2d_" + k: (int(v) if k.endswith("_face_index") else float(v)) for k, v in q2.items()},
-        **{"zhang2021_m3d_" + k: (int(v) if k.endswith("_face_index") else float(v)) for k, v in q3.items()},
+        **{"zhang2021_m2d_" + k: (int(v) if k.endswith("_face_index") else float(v)) for k, v in legacy2.items()},
+        **{"zhang2021_m3d_" + k: (int(v) if k.endswith("_face_index") else float(v)) for k, v in legacy3.items()},
+        **q2.prefixed("zhang2021_m2d"),
+        **q3.prefixed("zhang2021_m3d"),
+        **seam,
+        "zhang2021_odd_valence_interior_vertices": int(len(odd)),
         "zhang2021_total_seconds": float(time.perf_counter() - started),
         "zhang2021_uv_span": span,
     }
     source = SimpleNamespace(xyz=xyz.copy(), f3=f3.copy(), uv=uv.copy(), f2=f2.copy())
     return Zhang2021M2DPlan(quad_uv=quv, quads=faces_ccw, m3d_preview=m3d, chart=rp,
-                            source=source, metrics=metrics)
+                            source=source, metrics=metrics, m2d_report=q2, m3d_report=q3)
 
 
 # ------------------------------------------- coordinated Omega + quad search
-# OneString extension implementing the 2026-10-26 design order
-#   OptCuts -> [h: boundary simplification + bijective SLIM of Omega]
-#           -> Zhang et al. 2021 quad meshing of Omega_1
-#           -> seam/boundary adapter -> M2D/M3D quality evaluation
-# Omega and Q are coordinated by an explicit candidate search (pre-conditioning
-# tolerance x Zhang epsilon) scored with M2D/M3D and downstream criteria; every
-# candidate and its score is reported.  No candidate is accepted that violates a
-# hard constraint (inverted UV, unaccepted distortion, failed adapter).
-SELECTION_WEIGHTS = {
-    "count": 1.0,          # |ln(actual / target)|
-    "odd_valence": 1.0,    # per odd-valence interior vertex (Sec. 4.3 linkage, C6)
-    "low_tip_valence": 0.5,  # per seam node below its ideal 3D valence (C7)
-    "m3d_angle": 1.0,      # max(0, 45 deg - min M3D angle) / 45 deg
-    "j_min": 0.5,          # 1 - min scaled Jacobian of Q
-    "distortion": 5.0,     # final chart SD mean / OptCuts SD mean - 1
-}
-
-
+# OneString extension (2026-10-26 design order, revised 2026-10-27):
+#   OptCuts -> [h: boundary simplification preserving seam-node directions +
+#               bijective SLIM of Omega] -> Zhang et al. 2021 quad meshing of
+#   Omega_1 (density N_tar and Hausdorff eps are candidate parameters) ->
+#   hard seam adapter -> 3D panel optimisation -> phased selection
+#   (zhang2021_candidate_selection).  There is NO panel-count term anywhere.
 def _float_list(text: Any, default: list[float]) -> list[float]:
     if text is None or (isinstance(text, str) and not text.strip()):
         return list(default)
@@ -455,9 +569,68 @@ def _float_list(text: Any, default: list[float]) -> list[float]:
     return [float(x) for x in str(text).replace(";", ",").split(",") if x.strip()]
 
 
-def plan_zhang2021_m2d_coordinated(xyz, f3, uv, f2, params: Any) -> Zhang2021M2DPlan:
-    """Pre-condition Omega (h) BEFORE quad meshing, then pick the best (h, Q) candidate."""
-    from dataclasses import replace as _dc_replace
+def candidate_densities(params: Any, surface_area: float) -> list[int]:
+    """Density inputs N_tar of the paper (never a goal).
+
+    ``zhang2021_target_edge_length`` > 0 converts a desired 3D panel edge length
+    into the paper's density input N_tar = area(S) / l^2; otherwise
+    ``zhang2021_target_quads`` is used.  ``zhang2021_candidate_density_factors``
+    multiplies it to explore several densities; quality decides.
+    """
+    l_tar = float(getattr(params, "zhang2021_target_edge_length", 0.0) or 0.0)
+    if l_tar > 0:
+        base = max(4, int(round(float(surface_area) / (l_tar * l_tar))))
+    else:
+        base = int(getattr(params, "zhang2021_target_quads", DEFAULT_DENSITY_N_TAR))
+    factors = _float_list(getattr(params, "zhang2021_candidate_density_factors", None), [1.0])
+    out: list[int] = []
+    for f in factors:
+        if not np.isfinite(f) or f <= 0:
+            raise Zhang2021QuadModeError(f"ZHANG2021_CANDIDATE_DENSITY_FACTOR_INVALID: {f}")
+        n = max(4, int(round(base * f)))
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _params_with(params: Any, **changes) -> Any:
+    from dataclasses import is_dataclass, replace as _dc_replace
+    if is_dataclass(params):
+        try:
+            return _dc_replace(params, **changes)
+        except TypeError:
+            pass
+    import copy as _copy
+    out = _copy.copy(params)
+    for k, v in changes.items():
+        setattr(out, k, v)
+    return out
+
+
+def _planner_cache_key(xyz, f3, uv, f2, params) -> str:
+    import hashlib
+    h = hashlib.sha1()
+    for a in (xyz, f3, uv, f2):
+        h.update(np.ascontiguousarray(a).tobytes())
+    for name in sorted(n for n in dir(params) if n.startswith("zhang2021_") and n not in (
+            "zhang2021_candidate_rank", "zhang2021_verification_attempts", "zhang2021_compare_verified_candidates")):
+        try:
+            h.update(f"{name}={getattr(params, name)!r};".encode())
+        except Exception:  # noqa: BLE001 - only hashing
+            pass
+    return h.hexdigest()
+
+
+def plan_zhang2021_m2d_coordinated(xyz, f3, uv, f2, params: Any, *, cache: dict | None = None) -> Zhang2021M2DPlan:
+    """Phases 1 + 2: evaluate every (tol, eps, N_tar) candidate, rank the feasible ones.
+
+    Returns the candidate of rank ``zhang2021_candidate_rank`` (0 = best quality
+    score); Phase 3 (downstream verification) asks for the next rank when a
+    candidate fails K3D / T3D / K2D / T2D.  Raises with the full candidate table
+    when no candidate satisfies the hard constraints.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from .zhang2021_candidate_selection import candidate_score, feasibility, parse_weights, summarize_row
     from .zhang2021_onestring_precondition import precondition_omega
     from .zhang2021_onestring_reparam import _SDProblem
 
@@ -466,95 +639,154 @@ def plan_zhang2021_m2d_coordinated(xyz, f3, uv, f2, params: Any) -> Zhang2021M2D
     f3 = np.asarray(f3, int)
     uv = np.asarray(uv, float)
     f2 = np.asarray(f2, int)
-    tols = _float_list(getattr(params, "zhang2021_precondition_tolerances", None), [0.0, 0.02, 0.04, 0.06, 0.1])
-    epss = _float_list(getattr(params, "zhang2021_candidate_hausdorff_ratios", None),
-                       [float(getattr(params, "zhang2021_hausdorff_ratio", DEFAULT_HAUSDORFF_RATIO))])
-    mean_lim = float(getattr(params, "zhang2021_precondition_sd_mean_ratio_max", 1.08))
-    p95_lim = float(getattr(params, "zhang2021_precondition_sd_p95_ratio_max", 1.30))
-    target = int(getattr(params, "zhang2021_target_quads", DEFAULT_TARGET_QUADS))
     route = downstream_route(params)
-    sa = signed_uv_areas(uv, f2)
-    mirror = np.array([-1.0, 1.0]) if np.all(sa < 0) else np.array([1.0, 1.0])
-    sd0_mean = float(_SDProblem(xyz, f3, f2, len(uv)).energy(uv * mirror)[0])
-    rows: list[dict] = []
-    best: tuple[float, Zhang2021M2DPlan, dict] | None = None
-    for tol in tols:
-        pre = precondition_omega(xyz, f3, uv, f2, tol, sd_mean_ratio_max=mean_lim, sd_p95_ratio_max=p95_lim)
-        if not pre.accepted:
-            rows.append({"precondition_tol": tol, "status": "precondition_rejected", "reason": pre.reason,
-                         **{k: v for k, v in pre.metrics.items() if isinstance(v, (int, float))}})
-            continue
-        for eps in epss:
-            row: dict[str, Any] = {"precondition_tol": tol, "zhang_eps": eps}
-            row.update({k: v for k, v in pre.metrics.items() if isinstance(v, (int, float))})
+    key = _planner_cache_key(xyz, f3, uv, f2, params)
+    entry = cache.get(key) if cache is not None else None
+    if entry is None:
+        weights = parse_weights(getattr(params, "zhang2021_selection_weights", ""))
+        tols = (_float_list(getattr(params, "zhang2021_precondition_tolerances", None), [0.0, 0.02])
+                if bool(getattr(params, "zhang2021_precondition_enabled", True)) else [0.0])
+        epss = _float_list(getattr(params, "zhang2021_candidate_hausdorff_ratios", None),
+                           [float(getattr(params, "zhang2021_hausdorff_ratio", DEFAULT_HAUSDORFF_RATIO))])
+        area3d = float(0.5 * np.sum(np.linalg.norm(np.cross(xyz[f3[:, 1]] - xyz[f3[:, 0]],
+                                                             xyz[f3[:, 2]] - xyz[f3[:, 0]]), axis=1)))
+        densities = candidate_densities(params, area3d)
+        keep = float(getattr(params, "zhang2021_precondition_node_keep_ratio", 0.06))
+        mean_lim = float(getattr(params, "zhang2021_precondition_sd_mean_ratio_max", 1.08))
+        p95_lim = float(getattr(params, "zhang2021_precondition_sd_p95_ratio_max", 1.30))
+        sa = signed_uv_areas(uv, f2)
+        mirror = np.array([-1.0, 1.0]) if np.all(sa < 0) else np.array([1.0, 1.0])
+        sd0_mean = float(_SDProblem(xyz, f3, f2, len(uv)).energy(uv * mirror)[0])
+        diag = float(np.linalg.norm(np.ptp(uv, axis=0)))
+        src_loop = oriented_boundary_loops(f2)[0]
+        rows: list[dict] = []
+        jobs = []
+        for tol in tols:
+            pre = precondition_omega(xyz, f3, uv, f2, tol, sd_mean_ratio_max=mean_lim, sd_p95_ratio_max=p95_lim,
+                                     node_keep_ratio=keep)
+            if not pre.accepted:
+                rows.append({"precondition_tol": tol, "zhang_eps": None, "n_tar": None,
+                             "status": "precondition_rejected", "reason": pre.reason,
+                             "rejections": ["h: " + pre.reason]})
+                continue
+            for eps in epss:
+                for n_tar in densities:
+                    p = _params_with(params, zhang2021_hausdorff_ratio=float(eps), zhang2021_target_quads=int(n_tar))
+                    jobs.append((tol, eps, n_tar, pre, p))
+        bin_dir = str(getattr(params, "zhang2021_bin_dir", "") or "").strip() or None
+
+        def run_job(job):
+            tol, eps, n_tar, pre, p = job
             try:
-                p = _dc_replace(params, zhang2021_hausdorff_ratio=eps) if hasattr(params, "__dataclass_fields__") \
-                    else SimpleNamespace(**{**vars(params), "zhang2021_hausdorff_ratio": eps})
-                plan = plan_zhang2021_m2d(pre.xyz, pre.f3, pre.uv, pre.f2, p)
+                return run_reference_pipeline(pre.xyz, pre.f3, pre.uv, pre.f2, zhang2021_parameters_from(p),
+                                              bin_dir=bin_dir)
+            except Exception as exc:  # noqa: BLE001 - recorded per candidate
+                return exc
+
+        workers = max(1, int(getattr(params, "zhang2021_parallel_workers", 0) or 0)) or None
+        if workers is None:
+            import os
+            workers = max(1, min(4, (os.cpu_count() or 2)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(run_job, jobs))
+        feasible: list[tuple[float, int, Zhang2021M2DPlan]] = []
+        for (tol, eps, n_tar, pre, p), zres in zip(jobs, results):
+            row: dict[str, Any] = {"precondition_tol": tol, "zhang_eps": eps, "n_tar": n_tar}
+            row.update({k: v for k, v in pre.metrics.items() if isinstance(v, (int, float)) and "sd_" in k})
+            if isinstance(zres, Exception):
+                row.update(status="failed", reason=str(zres)[:300], rejections=["paper stage: " + str(zres)[:200]])
+                rows.append(row)
+                continue
+            try:
+                plan = plan_zhang2021_m2d(pre.xyz, pre.f3, pre.uv, pre.f2, p, zhang_result=zres)
             except Zhang2021QuadModeError as exc:
-                row.update(status="failed", reason=str(exc)[:300])
+                row.update(status="failed", reason=str(exc)[:300], paper_quads=int(len(zres.quads)),
+                           rejections=["adapter: " + str(exc)[:240]])
                 rows.append(row)
                 continue
             m = plan.metrics
-            n = int(len(plan.quads))
-            odd = len(odd_valence_interior_vertices(plan.quads))
-            low_tip = int(m.get("zhang2021_onestring_seam_nodes_low_3d_valence", 0))
-            ang3 = float(m.get("zhang2021_m3d_angle_min_degrees", 0.0))
-            jmin = float(m.get("zhang2021_j_min", 0.0))
-            sd_ratio = float(m.get("zhang2021_onestring_sd_mean_after", sd0_mean)) / max(sd0_mean, 1e-300)
-            W = SELECTION_WEIGHTS
-            terms = {
-                "count": W["count"] * abs(float(np.log(max(n, 1) / max(target, 1)))),
-                "odd_valence": W["odd_valence"] * odd,
-                "low_tip_valence": W["low_tip_valence"] * low_tip,
-                "m3d_angle": W["m3d_angle"] * max(0.0, 45.0 - ang3) / 45.0,
-                "j_min": W["j_min"] * max(0.0, 1.0 - jmin),
-                "distortion": W["distortion"] * max(0.0, sd_ratio - 1.0),
-            }
-            score = float(sum(terms.values()))
-            feasible = not (route == ROUTE_PAPER_LOCAL_GLOBAL and odd > 0)
-            row.update(status="ok" if feasible else "infeasible_for_route", quads=n, patches=m.get("zhang2021_n_patches"),
-                       odd_valence_interior=odd, low_tip_valence=low_tip, m3d_angle_min=ang3, j_min=jmin,
-                       final_sd_mean_ratio_vs_optcuts=sd_ratio, score=score,
-                       **{"score_" + k: float(v) for k, v in terms.items()})
+            checks = feasibility(m, route_needs_even_valence=(route == ROUTE_PAPER_LOCAL_GLOBAL))
+            q_loop = quad_boundary_loop(plan.quads)
+            dh, _, _ = two_sided_boundary_hausdorff(uv[src_loop], [list(range(len(src_loop)))],
+                                                    plan.quad_uv[q_loop], [list(range(len(q_loop)))])
+            distortion = float(m.get("zhang2021_onestring_sd_mean_after", sd0_mean)) / max(sd0_mean, 1e-300) - 1.0
+            fit = float(dh) / max(diag, 1e-300)
+            score, terms = candidate_score(plan.m3d_report.metrics, plan.m2d_report.metrics, distortion, fit, weights)
+            ok = all(c["ok"] for c in checks)
+            row.update(
+                status="feasible" if ok else "infeasible", quads=int(len(plan.quads)),
+                paper_quads=int(m.get("zhang2021_paper_output_quads", 0)), score=score,
+                **{"score_" + k: float(v) for k, v in terms.items()},
+                rejections=[f"{c['constraint']}: {c['detail']}" for c in checks if not c["ok"]],
+                m3d_angle_min=float(plan.m3d_report.metrics["angle_min_deg"]),
+                m3d_angle_max=float(plan.m3d_report.metrics["angle_max_deg"]),
+                m3d_edge_ratio_max=float(plan.m3d_report.metrics["edge_ratio_max"]),
+                m3d_e_size=float(plan.m3d_report.metrics["e_size"]),
+                m3d_e_angle=float(plan.m3d_report.metrics["e_angle"]),
+                m3d_size_ratio=float(plan.m3d_report.metrics["size_ratio_max_min"]),
+                seam_mode=str(m.get("zhang2021_seam_preflight_mode")),
+                seam_t_vertices=int(m.get("zhang2021_onestring_seam_t_vertices", 0)),
+                node_repairs=int(m.get("zhang2021_onestring_node_valence_repairs", 0)),
+                odd_valence_interior=int(m.get("zhang2021_odd_valence_interior_vertices", 0)),
+                final_sd_mean_ratio_vs_optcuts=distortion + 1.0, boundary_fit=fit)
             rows.append(row)
-            print(f"[ZHANG2021-COORD] tol={tol} eps={eps}: quads={n} odd={odd} lowtip={low_tip} "
-                  f"M3Dmin={ang3:.1f} SDx{sd_ratio:.3f} score={score:.3f} {'' if feasible else '(infeasible)'}",
-                  flush=True)
-            if feasible and (best is None or score < best[0]):
-                best = (score, plan, {"tol": tol, "eps": eps, "pre": pre.metrics})
-    if best is None:
+            plan.metrics["zhang2021_candidate_row"] = dict(row)
+            if ok:
+                feasible.append((score, len(rows) - 1, plan))
+            else:
+                # keep the best infeasible plan for the diagnostics figure
+                row["_plan"] = plan
+            print("[ZHANG2021-CAND] " + summarize_row(row), flush=True)
+        feasible.sort(key=lambda t: (t[0], t[1]))
+        for rank, (_, idx, _plan) in enumerate(feasible):
+            rows[idx]["rank"] = rank
+        entry = {"rows": rows, "feasible": feasible, "weights": weights, "sd0_mean": sd0_mean,
+                 "densities": densities, "tols": tols, "epss": epss,
+                 "seconds": float(time.perf_counter() - started)}
+        if cache is not None:
+            if cache is _MODULE_PLAN_CACHE and len(cache) >= 4:
+                cache.clear()
+            cache[key] = entry
+    rows, feasible = entry["rows"], entry["feasible"]
+    public_rows = [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows]
+    rank = int(getattr(params, "zhang2021_candidate_rank", 0) or 0)
+    if not feasible:
+        from .zhang2021_diagnostics import write_candidate_diagnostics
+        best_bad = min((r for r in rows if r.get("_plan") is not None), key=lambda r: r.get("score", np.inf),
+                       default=None)
+        where = write_candidate_diagnostics(public_rows, best_bad.get("_plan") if best_bad else None, params)
         raise Zhang2021QuadModeError(
-            "ZHANG2021_NO_FEASIBLE_COORDINATED_CANDIDATE: " +
-            "; ".join(f"tol={r.get('precondition_tol')} eps={r.get('zhang_eps')}: {r.get('status')} "
-                      f"{str(r.get('reason', ''))[:80]}" for r in rows))
-    _, plan, chosen = best
-    # Report against the ORIGINAL OptCuts chart Omega_0 (not Omega_1).
-    src_loop = oriented_boundary_loops(f2)[0]
-    q_loop = quad_boundary_loop(plan.quads)
-    dh, _, _ = two_sided_boundary_hausdorff(uv[src_loop], [list(range(len(src_loop)))],
-                                            plan.quad_uv[q_loop], [list(range(len(q_loop)))])
-    diag = float(np.linalg.norm(np.ptp(uv, axis=0)))
+            "ZHANG2021_NO_FEASIBLE_CANDIDATE: no (tol, eps, N_tar) candidate satisfies the hard constraints "
+            "(UV bijective, quad topology, coverage, hard OptCuts seam closure, M2D/M3D quality gates, route "
+            f"linkage). Diagnostics: {where}\n" + "\n".join(summarize_row(r) for r in public_rows))
+    if rank >= len(feasible):
+        raise Zhang2021CandidatesExhausted(
+            f"ZHANG2021_CANDIDATES_EXHAUSTED: rank {rank} requested, {len(feasible)} feasible candidate(s)")
+    import copy as _copy
+    score, idx, plan = feasible[rank]
+    plan = _copy.deepcopy(plan)
+    chosen = rows[idx]
     plan.metrics.update({
         "zhang2021_coordinated_search": True,
         "zhang2021_coordinated_model": (
-            "OneString (not Zhang 2021): Omega_1 = h(Omega_0) by boundary simplification "
-            "(Douglas-Peucker per seam run, Hausdorff <= tol, seam nodes fixed) + bijective SLIM; "
-            "Zhang 2021 meshes Omega_1; candidates (tol x eps) scored on count / C6 / C7 / M3D / distortion"),
-        "zhang2021_coordinated_candidates": rows,
-        "zhang2021_coordinated_selection_weights": dict(SELECTION_WEIGHTS),
-        "zhang2021_coordinated_chosen_precondition_tol": float(chosen["tol"]),
-        "zhang2021_coordinated_chosen_hausdorff_ratio": float(chosen["eps"]),
-        "zhang2021_coordinated_seconds": float(time.perf_counter() - started),
-        "zhang2021_boundary_hausdorff_vs_preconditioned_omega_percent_bbox":
-            plan.metrics.get("zhang2021_boundary_hausdorff_vs_source_omega_percent_bbox"),
-        "zhang2021_boundary_hausdorff_vs_source_omega": float(dh),
-        "zhang2021_boundary_hausdorff_vs_source_omega_percent_bbox": 100.0 * float(dh) / max(diag, 1e-300),
-        "zhang2021_optcuts_sd_mean": sd0_mean,
-        **{k: v for k, v in chosen["pre"].items()},
+            "OneString (not Zhang 2021): Omega_1 = h(Omega_0) (Douglas-Peucker per seam run with seam-node "
+            "directions kept, Hausdorff <= tol, bijective SLIM) -> Zhang 2021 with density input N_tar and "
+            "Hausdorff eps -> hard-seam adapter -> 3D panel optimisation; Phase 1 hard constraints, Phase 2 "
+            "quality score without any panel-count term"),
+        "zhang2021_coordinated_candidates": public_rows,
+        "zhang2021_coordinated_feasible_candidates": int(len(feasible)),
+        "zhang2021_coordinated_selection_weights": dict(entry["weights"]),
+        "zhang2021_coordinated_chosen_rank": int(rank),
+        "zhang2021_coordinated_chosen_score": float(score),
+        "zhang2021_coordinated_chosen_precondition_tol": float(chosen["precondition_tol"]),
+        "zhang2021_coordinated_chosen_hausdorff_ratio": float(chosen["zhang_eps"]),
+        "zhang2021_coordinated_chosen_density_n_tar": int(chosen["n_tar"]),
+        "zhang2021_coordinated_seconds": float(entry["seconds"]),
+        "zhang2021_optcuts_sd_mean": float(entry["sd0_mean"]),
     })
-    print(f"[ZHANG2021-COORD] chosen tol={chosen['tol']} eps={chosen['eps']} quads={len(plan.quads)} "
-          f"(target {target}); {len(rows)} candidates", flush=True)
+    print(f"[ZHANG2021-COORD] rank {rank}/{len(feasible)} chosen: tol={chosen['precondition_tol']} "
+          f"eps={chosen['zhang_eps']} N_tar(density)={chosen['n_tar']} -> {len(plan.quads)} quads, "
+          f"E={score:.4g}; {len(rows)} candidates evaluated", flush=True)
     plan.source = SimpleNamespace(xyz=xyz.copy(), f3=f3.copy(), uv=uv.copy(), f2=f2.copy())
     return plan
 
@@ -595,18 +827,32 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
     base_m2d = pipeline._build_m2d
 
     def with_parameterization(surface, target, grid, params):
-        result = base_parameterization(surface, target, grid, params)
         if not mode_enabled(params):
-            return result
+            return base_parameterization(surface, target, grid, params)
+        import copy as _copy
+        run_cache = getattr(params, "_zhang2021_run_cache", None)
+        cached = run_cache.get("optcuts_parameterization") if isinstance(run_cache, dict) else None
+        if cached is not None:
+            # Phase-3 retry with the next candidate: the OptCuts chart of this
+            # surface is unchanged, reuse it instead of re-running OptCuts.
+            result = _copy.deepcopy(cached)
+            print("[ZHANG2021-20261027] reusing the OptCuts chart of this run (candidate retry)", flush=True)
+        else:
+            result = base_parameterization(surface, target, grid, params)
+            if isinstance(run_cache, dict):
+                try:
+                    run_cache["optcuts_parameterization"] = _copy.deepcopy(result)
+                except Exception:  # noqa: BLE001 - caching is only an optimisation
+                    pass
         if str(getattr(result, "method", "")) not in ("optcuts_test", "optcuts"):
             raise Zhang2021QuadModeError(
                 "ZHANG2021_MODE_REQUIRES_OPTCUTS_CHART: parameterization method="
                 f"{getattr(result, 'method', None)!r}")
         route = downstream_route(params)
-        planner = (plan_zhang2021_m2d_coordinated if bool(getattr(params, "zhang2021_precondition_enabled", True))
-                   else plan_zhang2021_m2d)
-        plan = planner(result.surface_vertices_3d, result.surface_faces,
-                       result.uv_vertices_2d, result.uv_faces, params)
+        if not isinstance(run_cache, dict):
+            run_cache = _MODULE_PLAN_CACHE
+        plan = plan_zhang2021_m2d_coordinated(result.surface_vertices_3d, result.surface_faces,
+                                              result.uv_vertices_2d, result.uv_faces, params, cache=run_cache)
         rp = plan.chart
         # OptCuts multi-start (closed genus-0 inputs) attaches alternative
         # charts that the Split stage may swap in by Split count.  The Zhang
@@ -633,13 +879,17 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
         result.metrics.update(plan.metrics)
         result.metrics["zhang2021_source_chart_vertices"] = int(len(plan.source.uv))
         result.metrics["zhang2021_final_chart_vertices"] = int(len(rp.uv))
-        print(f"[ZHANG2021-20261027] paper quads={len(plan.quads)} "
-              f"(requested {plan.metrics['zhang2021_target_quads']}) patches={plan.metrics['zhang2021_n_patches']} "
+        print(f"[ZHANG2021-20261027] paper output {plan.metrics['zhang2021_paper_output_quads']} quads "
+              f"(density input N_tar={plan.metrics['zhang2021_density_input_n_tar']}, not a goal) -> M2D "
+              f"{len(plan.quads)} quads, patches={plan.metrics['zhang2021_n_patches']} "
               f"J_min={plan.metrics['zhang2021_j_min']:.3f} dH={plan.metrics['zhang2021_d_h_percent_bbox']:.3f}% "
-              f"| OneString chart SD {plan.metrics['zhang2021_onestring_sd_mean_before']:.4f}->"
-              f"{plan.metrics['zhang2021_onestring_sd_mean_after']:.4f} "
-              f"hard/soft seam branches={plan.metrics['zhang2021_onestring_hard_seam_branches']}/"
-              f"{plan.metrics['zhang2021_onestring_soft_seam_branches']}", flush=True)
+              f"| chart SD {plan.metrics['zhang2021_onestring_sd_mean_before']:.4f}->"
+              f"{plan.metrics['zhang2021_onestring_sd_mean_after']:.4f} | seam preflight "
+              f"{plan.metrics.get('zhang2021_seam_preflight_mode')} (matched/nested branches "
+              f"{plan.metrics.get('zhang2021_onestring_seam_matched_branches')}/"
+              f"{plan.metrics.get('zhang2021_onestring_seam_nested_branches')}, T-vertices "
+              f"{plan.metrics.get('zhang2021_onestring_seam_t_vertices')}) | M3D gate "
+              f"{'passed' if plan.metrics.get('zhang2021_m3d_quality_passed') else 'FAILED'}", flush=True)
         return result
 
     def with_domain(parameterization, grid, params=None):
@@ -741,6 +991,10 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
             raise Zhang2021QuadModeError(
                 "ZHANG2021_SEAM_NOT_CONFORMING: M2D boundary edges are not covered by the "
                 f"re-parameterised source boundary; unclassified={seam.get('unclassified_boundary_edges')}")
+        if str(seam["status"]) == "conforming" and str(seam.get("seam_stitch_mode")) != "hard":
+            raise Zhang2021QuadModeError(
+                "ZHANG2021_SEAM_NOT_HARD_CLOSABLE: the M2D samples the OptCuts cut as a "
+                f"{seam.get('seam_stitch_mode')!r} seam; only exact (hard) closure is accepted")
         print(f"[ZHANG2021-20261027] M2D {len(faces)} quads; seam={seam['status']}/"
               f"{seam.get('seam_stitch_mode')}; min M2D angle={report['zhang2021_m2d_angle_min_degrees']:.2f}; "
               f"min M3D angle={report['zhang2021_m3d_angle_min_degrees']:.2f}", flush=True)
@@ -773,6 +1027,8 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
     _wire(pipeline, "_build_m2d", with_m2d)
     _install_route_hooks(pipeline)
     _register_post_simple_split_hooks()
+    from .zhang2021_verification import install_zhang2021_verification_loop
+    install_zhang2021_verification_loop(pipeline)
     pipeline._zhang2021_quad_20261027_installed = True
 
 
@@ -795,9 +1051,22 @@ def _install_route_hooks(pipeline: Any) -> None:
     inner_k2d = pipeline._optimize_k2d
 
     def zhang2021_route_k3d(target, mesh, parameterization, params):
-        if _route_active(params, ROUTE_PAPER_LOCAL_GLOBAL):
-            return _paper_local_global_k3d(pipeline, target, mesh, parameterization, params)
-        return inner_k3d(target, mesh, parameterization, params)
+        if params is None or not mode_enabled(params):
+            return inner_k3d(target, mesh, parameterization, params)
+        route = downstream_route(params)
+        if route == ROUTE_PAPER_LOCAL_GLOBAL:
+            out, report = _paper_local_global_k3d(pipeline, target, mesh, parameterization, params)
+        else:
+            if str((getattr(mesh, "metrics", {}) or {}).get("seam_stitch_mode", "none")) == "soft":
+                raise Zhang2021QuadModeError(
+                    "ZHANG2021_SEAM_NOT_HARD_CLOSABLE: the M3D seam preflight is 'soft'; the optcuts_test2 K3D "
+                    "would only approximate the OptCuts seam, which the Zhang2021 mode never accepts")
+            out, report = inner_k3d(target, mesh, parameterization, params)
+        from .zhang2021_verification import k3d_gate
+        out.metrics["zhang2021_seam_preflight_mode"] = str(
+            (getattr(parameterization, "metrics", {}) or {}).get("zhang2021_seam_preflight_mode", ""))
+        k3d_gate(out, params, route=route)
+        return out, report
 
     def zhang2021_route_k2d(mesh_2d, mesh_3d, params, progress_callback=None):
         if _route_active(params, ROUTE_PAPER_LOCAL_GLOBAL):
@@ -851,7 +1120,7 @@ def _register_post_simple_split_hooks() -> None:
 
 
 __all__ = [
-    "MODE", "MODE_LABEL", "FLAG", "DEFAULT_TARGET_QUADS", "DEFAULT_HAUSDORFF_RATIO",
+    "MODE", "MODE_LABEL", "FLAG", "DEFAULT_DENSITY_N_TAR", "DEFAULT_HAUSDORFF_RATIO",
     "Zhang2021QuadModeError", "Zhang2021M2DPlan", "mode_enabled", "zhang2021_parameters_from",
     "plan_zhang2021_m2d", "plan_zhang2021_m2d_coordinated", "install_zhang2021_quad_20261027",
 ]

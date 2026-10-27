@@ -813,10 +813,10 @@ with st.sidebar:
     zhang2021_keep_features = bool(st.session_state.get("onestring_zhang2021_keep_features", True))
     zhang2021_snap_seam_nodes = bool(st.session_state.get("onestring_zhang2021_snap_seam_nodes", True))
     zhang2021_align_seam_pairs = bool(st.session_state.get("onestring_zhang2021_align_seam_pairs", True))
-    zhang2021_seam_matching = bool(st.session_state.get("onestring_zhang2021_seam_matching", True))
+    zhang2021_seam_matching = bool(st.session_state.get("onestring_zhang2021_seam_matching", False))
     zhang2021_bin_dir = str(st.session_state.get("onestring_zhang2021_bin_dir", "") or "")
     zhang2021_downstream_route = str(st.session_state.get(
-        "onestring_zhang2021_downstream_route", "optcuts_test2") or "optcuts_test2")
+        "onestring_zhang2021_downstream_route", "paper_local_global_0918") or "paper_local_global_0918")
     zhang2021_initial_csf_split_enabled = False  # temporary Zhang2021-only bypass
     if optcuts_zhang2021_quad_20261027_enabled:
         st.caption(
@@ -826,13 +826,27 @@ with st.sidebar:
         )
     zhang2021_precondition_enabled = bool(st.session_state.get("onestring_zhang2021_precondition_enabled", True))
     zhang2021_precondition_tolerances = str(st.session_state.get(
-        "onestring_zhang2021_precondition_tolerances", "0,0.02,0.04,0.06,0.1") or "0")
+        "onestring_zhang2021_precondition_tolerances", "0,0.02") or "0")
     zhang2021_candidate_hausdorff_ratios = str(st.session_state.get(
-        "onestring_zhang2021_candidate_hausdorff_ratios", "0.02,0.05,0.08") or "")
+        "onestring_zhang2021_candidate_hausdorff_ratios", "0.02,0.03,0.05") or "")
     zhang2021_precondition_sd_mean_ratio_max = float(st.session_state.get(
         "onestring_zhang2021_precondition_sd_mean_ratio_max", 1.08))
     zhang2021_precondition_sd_p95_ratio_max = float(st.session_state.get(
         "onestring_zhang2021_precondition_sd_p95_ratio_max", 1.30))
+    zhang2021_target_edge_length = float(st.session_state.get("onestring_zhang2021_target_edge_length", 0.0))
+    zhang2021_candidate_density_factors = str(st.session_state.get("onestring_zhang2021_candidate_density_factors", "1,2,4") or "1,2,4")
+    zhang2021_hard_seams = bool(st.session_state.get("onestring_zhang2021_hard_seams", True))
+    zhang2021_repair_node_valence = bool(st.session_state.get("onestring_zhang2021_repair_node_valence", True))
+    zhang2021_panel_optimization = bool(st.session_state.get("onestring_zhang2021_panel_optimization", True))
+    zhang2021_precondition_node_keep_ratio = float(st.session_state.get("onestring_zhang2021_precondition_node_keep_ratio", 0.06))
+    zhang2021_m2d_gate = str(st.session_state.get("onestring_zhang2021_m2d_gate", "") or "")
+    zhang2021_m3d_gate = str(st.session_state.get("onestring_zhang2021_m3d_gate", "") or "")
+    zhang2021_k3d_gate = str(st.session_state.get("onestring_zhang2021_k3d_gate", "") or "")
+    zhang2021_selection_weights = str(st.session_state.get("onestring_zhang2021_selection_weights", "") or "")
+    zhang2021_verification_attempts = int(st.session_state.get("onestring_zhang2021_verification_attempts", 3))
+    zhang2021_compare_verified_candidates = bool(st.session_state.get("onestring_zhang2021_compare_verified_candidates", False))
+    zhang2021_t2d_max_hinge_error_ratio = float(st.session_state.get("onestring_zhang2021_t2d_max_hinge_error_ratio", 0.05))
+    zhang2021_t3d_max_panel_collisions = int(st.session_state.get("onestring_zhang2021_t3d_max_panel_collisions", 0))
     planar_quad_target_faces = int(st.session_state.get("onestring_planar_quad_target_faces", 35))
     planar_quad_refine_m3d = bool(st.session_state.get("onestring_planar_quad_refine_m3d", True))
     planar_quad_uv_reparam = bool(st.session_state.get("onestring_planar_quad_uv_reparam", True))
@@ -2148,6 +2162,20 @@ def current_pipeline_key() -> tuple:
         zhang2021_candidate_hausdorff_ratios,
         zhang2021_precondition_sd_mean_ratio_max,
         zhang2021_precondition_sd_p95_ratio_max,
+        zhang2021_target_edge_length,
+        zhang2021_candidate_density_factors,
+        zhang2021_hard_seams,
+        zhang2021_repair_node_valence,
+        zhang2021_panel_optimization,
+        zhang2021_precondition_node_keep_ratio,
+        zhang2021_m2d_gate,
+        zhang2021_m3d_gate,
+        zhang2021_k3d_gate,
+        zhang2021_selection_weights,
+        zhang2021_verification_attempts,
+        zhang2021_compare_verified_candidates,
+        zhang2021_t2d_max_hinge_error_ratio,
+        zhang2021_t3d_max_panel_collisions,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
@@ -2336,6 +2364,20 @@ pipeline_params = PipelineParameters(
     zhang2021_candidate_hausdorff_ratios=zhang2021_candidate_hausdorff_ratios,
     zhang2021_precondition_sd_mean_ratio_max=zhang2021_precondition_sd_mean_ratio_max,
     zhang2021_precondition_sd_p95_ratio_max=zhang2021_precondition_sd_p95_ratio_max,
+    zhang2021_target_edge_length=zhang2021_target_edge_length,
+    zhang2021_candidate_density_factors=zhang2021_candidate_density_factors,
+    zhang2021_hard_seams=zhang2021_hard_seams,
+    zhang2021_repair_node_valence=zhang2021_repair_node_valence,
+    zhang2021_panel_optimization=zhang2021_panel_optimization,
+    zhang2021_precondition_node_keep_ratio=zhang2021_precondition_node_keep_ratio,
+    zhang2021_m2d_gate=zhang2021_m2d_gate,
+    zhang2021_m3d_gate=zhang2021_m3d_gate,
+    zhang2021_k3d_gate=zhang2021_k3d_gate,
+    zhang2021_selection_weights=zhang2021_selection_weights,
+    zhang2021_verification_attempts=zhang2021_verification_attempts,
+    zhang2021_compare_verified_candidates=zhang2021_compare_verified_candidates,
+    zhang2021_t2d_max_hinge_error_ratio=zhang2021_t2d_max_hinge_error_ratio,
+    zhang2021_t3d_max_panel_collisions=zhang2021_t3d_max_panel_collisions,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,

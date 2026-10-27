@@ -1055,18 +1055,47 @@ class PipelineParameters(_original.PipelineParameters):
     # authors' reference programs + OneString seam/3D chart adapter.  OFF by
     # default; independent of the 2026-10-26 Gmsh prototype above.
     optcuts_zhang2021_quad_20261027_enabled: bool = False
+    # N_tar is ONLY the paper's density input (l_tar = sqrt(area/N_tar)); it is
+    # not a panel-count goal.  zhang2021_target_edge_length > 0 derives it from
+    # a 3D panel edge length instead; the density factors try several values.
     zhang2021_target_quads: int = 35
+    zhang2021_target_edge_length: float = 0.0
+    zhang2021_candidate_density_factors: str = "1,2,4"
     zhang2021_hausdorff_ratio: float = 0.05
     zhang2021_collapse_width_ratio: float = 0.05
     zhang2021_keep_features: bool = True
     zhang2021_snap_seam_nodes: bool = True
     zhang2021_align_seam_pairs: bool = True
-    zhang2021_seam_matching: bool = True
+    zhang2021_seam_matching: bool = False
     zhang2021_bin_dir: str = ""
     zhang2021_timeout_seconds: float = 3600.0
-    # OneString downstream for the Zhang M2D: "optcuts_test2" (Seam closure)
-    # or "paper_local_global_0918" (the 2026-09-18 Grid-route K3D/K2D/T2D).
-    zhang2021_downstream_route: str = "optcuts_test2"
+    # Hard OptCuts seams (matched / nested 3D sampling, exact K3D constraints),
+    # cut-tip / junction valence repair and 3D panel optimisation of M2D.
+    zhang2021_hard_seams: bool = True
+    zhang2021_repair_node_valence: bool = True
+    zhang2021_panel_optimization: bool = True
+    zhang2021_panel_optimization_iterations: int = 300
+    # Scale-free acceptance gates "name=value,..." (empty = documented
+    # defaults of zhang2021_panel_quality); user settings, not official values.
+    zhang2021_m2d_gate: str = ""
+    zhang2021_m3d_gate: str = ""
+    zhang2021_k3d_gate: str = ""
+    # Phase-2 quality score weights "size=1,shape=1,area=0.5,distortion=1,
+    # fit=2,worst=0.5,m2d=0.1" (there is no panel-count term).
+    zhang2021_selection_weights: str = ""
+    zhang2021_seam_closure_tolerance: float = 1e-6
+    zhang2021_t3d_max_panel_collisions: int = 0
+    zhang2021_t2d_max_hinge_error_ratio: float = 0.05
+    # Phase 3/4: downstream verification of the quality-ranked candidates.
+    zhang2021_verification_attempts: int = 3
+    zhang2021_compare_verified_candidates: bool = False
+    zhang2021_candidate_rank: int = 0
+    zhang2021_parallel_workers: int = 0
+    zhang2021_diagnostics_dir: str = ""
+    # OneString downstream for the Zhang M2D: "paper_local_global_0918" (the
+    # 2026-09-18 Grid-route K3D/K2D/T2D, seams as exact K3D variables) or
+    # "optcuts_test2" (AL K3D with hard seam projector, legacy Dual Hinge T2D).
+    zhang2021_downstream_route: str = "paper_local_global_0918"
     # Temporarily OFF for Zhang2021: the legacy initial Omega CSF Split
     # assumes regular-grid cuts and its physical bound is not certified.
     # Does not affect OptCuts cutting, Zhang quad meshing or later collision cuts.
@@ -1074,8 +1103,9 @@ class PipelineParameters(_original.PipelineParameters):
     # 2026-10-26 design order: pre-condition Omega (boundary simplification +
     # bijective SLIM) BEFORE Zhang quad meshing, then pick the best candidate.
     zhang2021_precondition_enabled: bool = True
-    zhang2021_precondition_tolerances: str = "0,0.02,0.04,0.06,0.1"
-    zhang2021_candidate_hausdorff_ratios: str = "0.02,0.05,0.08"
+    zhang2021_precondition_tolerances: str = "0,0.02"
+    zhang2021_precondition_node_keep_ratio: float = 0.06
+    zhang2021_candidate_hausdorff_ratios: str = "0.02,0.03,0.05"
     zhang2021_precondition_sd_mean_ratio_max: float = 1.08
     zhang2021_precondition_sd_p95_ratio_max: float = 1.30
     bff_boundary_policy: Literal[

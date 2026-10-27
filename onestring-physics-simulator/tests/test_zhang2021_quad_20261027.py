@@ -186,11 +186,17 @@ def test_plan_reports_requested_versus_actual_and_ccw_faces(monkeypatch):
             "zhang2021_j_min": 1.0, "zhang2021_d_h_percent_bbox": 0.0, "zhang2021_target_quads": zp.target_quads})
 
     monkeypatch.setattr(mode, "run_reference_pipeline", fake_runner)
-    plan = mode.plan_zhang2021_m2d(xyz, f3, uv, f2, SimpleNamespace(zhang2021_target_quads=35))
+    plan = mode.plan_zhang2021_m2d(xyz, f3, uv, f2, SimpleNamespace(zhang2021_target_quads=35,
+                                                                    zhang2021_panel_optimization=False))
     m = plan.metrics
-    assert m["zhang2021_target_reached"] is False
+    # N_tar is only reported as the paper's density input; no target/goal flag exists
+    assert "zhang2021_target_reached" not in m and "zhang2021_requested_vs_actual_quads" not in m
+    assert m["zhang2021_density_input_n_tar"] == 35
     assert m["zhang2021_paper_output_quads"] == 18 and m["zhang2021_final_m2d_quads"] == 18
-    assert "requested 35" in m["zhang2021_requested_vs_actual_quads"]
+    # the cylinder cut is sampled identically on both sides -> exact (hard) seam
+    assert m["zhang2021_seam_preflight_mode"] == "hard"
+    assert m["zhang2021_onestring_seam_matched_branches"] >= 1
+    assert "zhang2021_m3d_quality_passed" in m and "zhang2021_m2d_quality_passed" in m
     sa = signed_uv_areas(plan.quad_uv, plan.quads[:, [0, 1, 2]])
     assert np.all(sa > 0), "M2D faces follow OneString's counter-clockwise QuadGrid convention"
     assert np.isfinite(plan.m3d_preview).all()
@@ -208,7 +214,8 @@ def test_pipeline_parameters_default_off():
     p = PipelineParameters()
     assert p.optcuts_zhang2021_quad_20261027_enabled is False
     assert p.optcuts_planar_quad_20261026_enabled is False
-    assert p.zhang2021_downstream_route == "optcuts_test2"
+    assert p.zhang2021_downstream_route == "paper_local_global_0918"
+    assert p.zhang2021_hard_seams is True and p.zhang2021_seam_matching is False
     assert p.zhang2021_initial_csf_split_enabled is False
 
 
@@ -297,7 +304,11 @@ def test_odd_valence_interior_vertices():
 
 def test_downstream_route_validation():
     from onestring_physics import optcuts_zhang2021_quad_20261027 as mode
-    assert mode.downstream_route(SimpleNamespace()) == mode.ROUTE_OPTCUTS_TEST2
+    from onestring_physics.onestring_pipeline import PipelineParameters
+    assert mode.downstream_route(SimpleNamespace()) == mode.ROUTE_PAPER_LOCAL_GLOBAL
+    assert PipelineParameters().zhang2021_downstream_route == mode.ROUTE_PAPER_LOCAL_GLOBAL
+    assert mode.downstream_route(SimpleNamespace(
+        zhang2021_downstream_route="optcuts_test2")) == mode.ROUTE_OPTCUTS_TEST2
     assert mode.downstream_route(SimpleNamespace(
         zhang2021_downstream_route="paper_local_global_0918")) == mode.ROUTE_PAPER_LOCAL_GLOBAL
     with pytest.raises(mode.Zhang2021QuadModeError, match="ZHANG2021_DOWNSTREAM_ROUTE_INVALID"):
@@ -306,25 +317,33 @@ def test_downstream_route_validation():
 
 def test_route_hooks_dispatch_only_for_the_selected_route(monkeypatch):
     from onestring_physics import optcuts_zhang2021_quad_20261027 as mode
+    from onestring_physics import zhang2021_verification as verification
     calls = []
+
+    def k3d_result(tag):
+        return SimpleNamespace(tag=tag, metrics={}), None
+
     pipe = SimpleNamespace(
-        _optimize_k3d=lambda *a: calls.append("inner_k3d") or ("k3d", None),
+        _optimize_k3d=lambda *a: calls.append("inner_k3d") or k3d_result("k3d"),
         _optimize_k2d=lambda *a, progress_callback=None: calls.append("inner_k2d") or ("k2d", None))
-    monkeypatch.setattr(mode, "_paper_local_global_k3d", lambda *a: calls.append("lg_k3d") or ("lg", None))
+    monkeypatch.setattr(mode, "_paper_local_global_k3d", lambda *a: calls.append("lg_k3d") or k3d_result("lg"))
     monkeypatch.setattr(mode, "_paper_local_global_k2d", lambda *a: calls.append("lg_k2d") or ("lg", None))
+    monkeypatch.setattr(verification, "k3d_gate", lambda out, params, route: calls.append("gate:" + route))
     mode._install_route_hooks(pipe)
     off = SimpleNamespace(zhang2021_downstream_route="paper_local_global_0918")      # mode flag off
-    test2 = SimpleNamespace(optcuts_zhang2021_quad_20261027_enabled=True)
+    test2 = SimpleNamespace(optcuts_zhang2021_quad_20261027_enabled=True,
+                            zhang2021_downstream_route="optcuts_test2")
     lg = SimpleNamespace(optcuts_zhang2021_quad_20261027_enabled=True,
                          zhang2021_downstream_route="paper_local_global_0918")
     for params in (off, test2):
         pipe._optimize_k3d(None, None, None, params)
         pipe._optimize_k2d(None, None, params)
-    assert calls == ["inner_k3d", "inner_k2d", "inner_k3d", "inner_k2d"]
+    # the K3D gate runs after every Zhang2021 K3D, never for other modes
+    assert calls == ["inner_k3d", "inner_k2d", "inner_k3d", "gate:optcuts_test2", "inner_k2d"]
     calls.clear()
     pipe._optimize_k3d(None, None, None, lg)
     pipe._optimize_k2d(None, None, lg)
-    assert calls == ["lg_k3d", "lg_k2d"]
+    assert calls == ["lg_k3d", "gate:paper_local_global_0918", "lg_k2d"]
 
 
 def test_paper_route_k2d_fails_explicitly_on_odd_valence_vertices():
@@ -495,10 +514,14 @@ def test_coordinated_planner_reports_every_candidate(monkeypatch):
     params = SimpleNamespace(zhang2021_target_quads=35, zhang2021_precondition_tolerances="0,0.06",
                              zhang2021_candidate_hausdorff_ratios="0.02,0.05",
                              zhang2021_precondition_sd_mean_ratio_max=2.0,
-                             zhang2021_precondition_sd_p95_ratio_max=3.0)
-    plan = mode.plan_zhang2021_m2d_coordinated(xyz, f3, uv, f2, params)
+                             zhang2021_precondition_sd_p95_ratio_max=3.0,
+                             zhang2021_downstream_route="optcuts_test2", zhang2021_parallel_workers=1)
+    plan = mode.plan_zhang2021_m2d_coordinated(xyz, f3, uv, f2, params, cache={})
     rows = plan.metrics["zhang2021_coordinated_candidates"]
     assert len(rows) == 4 and len(calls) == 4
-    assert plan.metrics["zhang2021_coordinated_chosen_hausdorff_ratio"] == 0.05, "36 quads beat 100 for N=35"
-    assert all("score" in r for r in rows if r["status"] == "ok")
+    feasible = [r for r in rows if r["status"] == "feasible"]
+    assert feasible and all("score" in r and "score_count" not in r for r in feasible)
+    best = min(feasible, key=lambda r: r["score"])
+    assert plan.metrics["zhang2021_coordinated_chosen_score"] == pytest.approx(best["score"])
+    assert "count" not in plan.metrics["zhang2021_coordinated_selection_weights"]
     assert np.array_equal(plan.source.uv, uv), "metrics are reported against the original OptCuts chart"

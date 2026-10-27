@@ -221,20 +221,28 @@ def _install_optcuts_selector() -> None:
                 "python3 scripts/setup_zhang2021_quad_official.py"
             )
             st.number_input(
-                "Zhang 2021: target quad count N_tar (paper default 4000)",
+                "Zhang 2021: density input N_tar (paper default 4000; NOT a panel-count goal)",
                 min_value=4, max_value=200000, value=35, step=1,
                 key="onestring_zhang2021_target_quads",
-                help="The paper's target number of quads. The Hausdorff bound and "
-                     "boundary feature points take precedence; the ACTUAL count is reported "
-                     "and is not relabelled as the target.",
+                help="Only the paper's density input: its target edge length is l_tar = sqrt(area / N_tar). "
+                     "Several densities are tried (factors below) and the final panel count is whatever the "
+                     "best feasible candidate (by panel quality, never by count) has.",
             )
+            st.number_input(
+                "Zhang 2021: or 3D panel edge length → N_tar = area(S)/l² (0 = use N_tar)",
+                min_value=0.0, value=0.0, step=0.01, format="%.4f",
+                key="onestring_zhang2021_target_edge_length",
+            )
+            st.text_input("Density factors tried (× N_tar)", value="1,2,4",
+                          key="onestring_zhang2021_candidate_density_factors")
             st.number_input(
                 "Zhang 2021: Hausdorff bound ε (× bbox diagonal; paper default 0.01)",
                 min_value=0.001, max_value=0.5, value=0.05, step=0.005, format="%.3f",
                 key="onestring_zhang2021_hausdorff_ratio",
-                help="Two-sided Hausdorff bound between the quad mesh and Ω. "
-                     "0.01 (paper) gives thousands of quads on typical OptCuts charts.",
+                help="Used when the ε candidate list below is empty.",
             )
+            st.text_input("Zhang ε candidates (× bbox diagonal)",
+                          value="0.02,0.03,0.05", key="onestring_zhang2021_candidate_hausdorff_ratios")
             st.number_input(
                 "Zhang 2021: poly-chord collapse width limit l_collapse (× bbox diagonal; paper default 0.05)",
                 min_value=0.001, max_value=0.5, value=0.05, step=0.005, format="%.3f",
@@ -242,46 +250,72 @@ def _install_optcuts_selector() -> None:
             )
             st.checkbox("Zhang 2021: keep boundary feature points (paper default)",
                         value=True, key="onestring_zhang2021_keep_features")
-            st.checkbox("OneString: snap quad corners to OptCuts seam nodes",
-                        value=True, key="onestring_zhang2021_snap_seam_nodes")
-            st.checkbox("OneString: align both sides of a cut when their quad counts match (hard seam)",
-                        value=True, key="onestring_zhang2021_align_seam_pairs")
-            st.checkbox("OneString: equalize quad counts on both sides of every cut by poly-chord insertion "
-                        "(adds quads to the paper's mesh; applied only if every cut becomes matchable)",
-                        value=True, key="onestring_zhang2021_seam_matching")
             st.text_input("Zhang 2021 reference binaries directory (optional)",
                           value="", key="onestring_zhang2021_bin_dir",
                           placeholder="third_party/Zhang2021_QuadCoarseLayout_official/build/onestring_port")
+            st.markdown("**OneString extension (not part of Zhang 2021)**")
             st.checkbox(
-                "OneString: pre-condition Ω before Zhang (simplify ∂Ω + bijective SLIM), then pick the best candidate",
+                "Hard OptCuts seams: sample both sides of every cut at the same 3D points (matched / nested), "
+                "exact closure in K3D (never soft)",
+                value=True, key="onestring_zhang2021_hard_seams")
+            st.checkbox("Repair cut-tip / junction valence (≥ 3 panels around an interior seam node in 3D)",
+                        value=True, key="onestring_zhang2021_repair_node_valence")
+            st.checkbox("3D panel-quality optimisation of the interior M2D vertices (size/shape uniformity)",
+                        value=True, key="onestring_zhang2021_panel_optimization")
+            st.checkbox("Equalize quad counts on both sides of every cut by poly-chord insertion (optional; "
+                        "adds quads, otherwise unequal counts are closed exactly as nested partitions)",
+                        value=False, key="onestring_zhang2021_seam_matching")
+            st.checkbox(
+                "Pre-condition Ω before Zhang (simplify ∂Ω keeping seam-node directions + bijective SLIM)",
                 value=True, key="onestring_zhang2021_precondition_enabled",
-                help="2026-10-26 design order: OptCuts → h (boundary simplification with Hausdorff ≤ tol, "
-                     "seam nodes fixed, symmetric-Dirichlet SLIM inside) → Zhang 2021 → adapter. Candidates "
-                     "(tol × ε) are scored on panel count, odd-valence vertices, cut-tip valence, M3D angle and "
-                     "UV distortion; all candidates are reported. Not part of Zhang et al. 2021.",
+                help="OptCuts → h (Douglas–Peucker per seam run with Hausdorff ≤ tol, seam nodes and their "
+                     "local directions kept, symmetric-Dirichlet SLIM inside) → Zhang 2021 → adapter. "
+                     "Candidates (tol × ε × density) are filtered by hard constraints and ranked by panel "
+                     "quality (no panel-count term); all candidates are reported.",
             )
             st.text_input("Pre-conditioning tolerances (× bbox diagonal, 0 = none)",
-                          value="0,0.02,0.04,0.06,0.1", key="onestring_zhang2021_precondition_tolerances")
-            st.text_input("Zhang ε candidates (× bbox diagonal)",
-                          value="0.02,0.05,0.08", key="onestring_zhang2021_candidate_hausdorff_ratios")
+                          value="0,0.02", key="onestring_zhang2021_precondition_tolerances")
+            st.number_input("Pre-conditioning: keep seam-node directions over (× bbox diagonal)",
+                            min_value=0.0, max_value=0.5, value=0.06, step=0.01, format="%.3f",
+                            key="onestring_zhang2021_precondition_node_keep_ratio")
             st.number_input("Pre-conditioning limit: SD mean ratio (design 1.035 / 1.08)",
                             min_value=1.0, max_value=3.0, value=1.08, step=0.01, format="%.3f",
                             key="onestring_zhang2021_precondition_sd_mean_ratio_max")
             st.number_input("Pre-conditioning limit: SD p95 ratio",
                             min_value=1.0, max_value=5.0, value=1.30, step=0.05, format="%.2f",
                             key="onestring_zhang2021_precondition_sd_p95_ratio_max")
+            st.text_input("M3D gate (empty = defaults: min_angle_deg=30, max_angle_deg=150, max_edge_ratio=3, "
+                          "max_size_ratio=4, max_size_spread_p95_p5=2.5, max_e_size=0.15, max_e_angle=0.15, "
+                          "max_area_cv=0.75)", value="", key="onestring_zhang2021_m3d_gate")
+            st.text_input("K3D gate (empty = M3D defaults + max_nonplanarity=0.001)", value="",
+                          key="onestring_zhang2021_k3d_gate")
+            st.text_input("M2D (UV) validity gate (empty = min_angle_deg=3, max_angle_deg=177, max_edge_ratio=25)",
+                          value="", key="onestring_zhang2021_m2d_gate")
+            st.text_input("Quality score weights (empty = size=1,shape=1,area=0.5,distortion=1,fit=2,worst=0.5,"
+                          "m2d=0.1; no count term)", value="", key="onestring_zhang2021_selection_weights")
+            st.number_input("Downstream verification attempts (next-ranked candidate after a K3D/T2D failure)",
+                            min_value=1, max_value=20, value=3, step=1,
+                            key="onestring_zhang2021_verification_attempts")
+            st.checkbox("Compare all verified candidates (Phase 4) instead of adopting the first that passes",
+                        value=False, key="onestring_zhang2021_compare_verified_candidates")
+            st.number_input("T2D limit: hinge connection error / mean K3D edge",
+                            min_value=0.0, max_value=1.0, value=0.05, step=0.01, format="%.3f",
+                            key="onestring_zhang2021_t2d_max_hinge_error_ratio")
+            st.number_input("T3D limit: panel collisions", min_value=0, max_value=100000, value=0, step=1,
+                            key="onestring_zhang2021_t3d_max_panel_collisions")
             st.selectbox(
                 "OneString downstream route for the Zhang M2D (K3D/K2D/T2D)",
-                ["optcuts_test2", "paper_local_global_0918"],
+                ["paper_local_global_0918", "optcuts_test2"],
                 index=0, key="onestring_zhang2021_downstream_route",
                 format_func=lambda r: {
-                    "optcuts_test2": "optcuts_test2: AL K3D + certified OptCuts Seam closure, kinematic K2D, legacy Dual Hinge T2D",
-                    "paper_local_global_0918": "paper_local_global_0918: same K3D/K2D/T2D solvers as the 2026-09-18 Grid route "
-                                               "(Sec. 4.3 linkage; no Seam closure; needs even interior valences)",
+                    "optcuts_test2": "optcuts_test2: AL K3D with the hard OptCuts seam projector, kinematic K2D, "
+                                     "legacy Dual Hinge T2D",
+                    "paper_local_global_0918": "paper_local_global_0918: K3D/K2D/T2D solvers of the 2026-09-18 Grid "
+                                               "route, OptCuts seams as exact K3D variables; needs even interior valences",
                 }[r],
-                help="Not part of Zhang et al. 2021. The 09-18 route uses the alternating corner "
-                     "linkage, which fails explicitly (no fallback) when the quad mesh has odd-valence "
-                     "interior vertices.",
+                help="Not part of Zhang et al. 2021. Both routes close the OptCuts seams exactly in K3D; the "
+                     "09-18 route's alternating corner linkage additionally needs every interior vertex to have "
+                     "even valence (checked in Phase 1).",
             )
         elif value in experimental:
             st.caption(

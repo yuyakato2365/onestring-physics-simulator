@@ -173,8 +173,13 @@ def _surface_project(points,target,parameterization=None):
     return out
 
 
-def _solve_constraints(n,dim,constraints,anchor=None,anchor_weight=1e-8):
-    """Solve sum w ||A x-b||^2. Constraint=(ids, coeffs, target, weight)."""
+def _solve_constraints(n,dim,constraints,anchor=None,anchor_weight=1e-8,reduction=None):
+    """Solve sum w ||A x-b||^2. Constraint=(ids, coeffs, target, weight).
+
+    ``reduction`` (optional, 2026-10-27 Zhang2021 hard OptCuts seams): an
+    object with ``kron(dim)`` returning R so that x = R z.  The global step is
+    then solved for z, i.e. exactly inside the seam-closed linear subspace.
+    """
     rows=[]; cols=[]; data=[]; rhs=[]; row=0
     for ids,coeff,target,weight in constraints:
         sw=math.sqrt(max(float(weight),0.0))
@@ -190,12 +195,16 @@ def _solve_constraints(n,dim,constraints,anchor=None,anchor_weight=1e-8):
             for d in range(dim):
                 rows.append(row);cols.append(i*dim+d);data.append(sw);rhs.append(sw*p[d]);row+=1
     A=sparse.coo_matrix((data,(rows,cols)),shape=(row,n*dim)).tocsr()
+    if reduction is not None:
+        R=reduction.kron(dim)
+        z=lsqr((A@R).tocsr(),np.asarray(rhs),atol=1e-10,btol=1e-10,iter_lim=max(500,4*n))[0]
+        return np.asarray(R@z).reshape(n,dim)
     x=lsqr(A,np.asarray(rhs),atol=1e-10,btol=1e-10,iter_lim=max(500,4*n))[0]
     return x.reshape(n,dim)
 
 
 
-def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_iterations=300):
+def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_iterations=300,reduction=None):
     """Sparse minimum-displacement quad planarization.
 
     Uses an augmented-residual continuation solve instead of dense SLSQP.
@@ -215,6 +224,7 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
     scale=max(float(np.linalg.norm(np.ptp(x0,axis=0))),1e-12)
     y0=(x0-center)/scale
     flat0=y0.ravel()
+    R=reduction.kron(3) if reduction is not None else None
 
     # Normalize the scalar triple product by a characteristic local edge scale^3
     # so rho has a stable meaning across mesh resolutions.
@@ -245,8 +255,15 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
         (np.ones(len(rows),dtype=float),(rows,cols)),
         shape=(3*n+len(faces),3*n),
     ).tocsr()
+    if R is not None:
+        # Optimise the reduced coordinates z (x = R z): hard seam equalities
+        # hold at every iterate; the sparsity pattern follows R.
+        pattern_R=R.copy(); pattern_R.data[:]=1.0
+        jac_pattern=(jac_pattern@pattern_R).tocsr()
+        jac_pattern.data[:]=1.0
+        z0=np.asarray(reduction.fit(y0)).ravel()
 
-    current=flat0.copy()
+    current=flat0.copy() if R is None else z0.copy()
     total_nfev=0
     stages=0
     message=""
@@ -262,6 +279,9 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
     for rho in rhos:
         sr=math.sqrt(max(w_ref,1e-16)); sp=math.sqrt(rho)
         def residual(flat):
+            if R is not None:
+                full=np.asarray(R@flat)
+                return np.concatenate((sr*(full-flat0),sp*coplanarity(full)))
             return np.concatenate((sr*(flat-flat0),sp*coplanarity(flat)))
 
         result=least_squares(
@@ -272,7 +292,7 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
         )
         current=result.x
         total_nfev+=int(getattr(result,"nfev",0)); stages+=1
-        candidate=current.reshape((-1,3))*scale+center
+        candidate=(np.asarray(R@current) if R is not None else current).reshape((-1,3))*scale+center
         dev=[]
         for f in faces:
             q=candidate[f]
@@ -287,7 +307,7 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
         if max_plan<=max(float(tolerance),1e-10):
             break
 
-    polished=current.reshape((-1,3))*scale+center
+    polished=(np.asarray(R@current) if R is not None else current).reshape((-1,3))*scale+center
     deviations=[]
     for f in faces:
         q=polished[f]
@@ -322,12 +342,23 @@ def minimum_displacement_planarity_polish(vertices,faces,*,tolerance=1e-8,max_it
     }
 
 
-def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeline=None):
-    """Paper-aligned Eq.(1) local/global K3D."""
+def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeline=None,seam_reduction=None):
+    """Paper-aligned Eq.(1) local/global K3D.
+
+    ``seam_reduction`` (optional; only the 2026-10-27 Zhang2021 route passes
+    it): exact linear OptCuts-seam constraints x = E z.  Every global step and
+    the planarity polish then solve for z, so the seam stays closed at every
+    iterate (shared variables / T-vertex substitution, no penalty, no welding).
+    Without it the solver is unchanged.
+    """
     start=time.perf_counter()
     x=np.asarray(mesh.vertices,float).copy()
     faces=np.asarray(mesh.faces,int)
     edges=_edges(faces)
+    if seam_reduction is not None:
+        if int(seam_reduction.n)!=len(x):
+            raise RuntimeError("K3D seam reduction vertex count mismatch")
+        x=np.asarray(seam_reduction.project(x),float)
     # Use the weights selected in the Streamlit UI / PipelineParams.  The
     # previous paper-aligned route ignored these values and silently fell back
     # to environment defaults (1, 1, 0.01), so changing the UI had no effect on
@@ -580,7 +611,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                 f"max_weight={deg_max_weight:.6g}",
                 flush=True,
             )
-        new=_solve_constraints(len(x),3,constraints,anchor=x,anchor_weight=1e-9)
+        new=_solve_constraints(len(x),3,constraints,anchor=x,anchor_weight=1e-9,reduction=seam_reduction)
         step=float(np.linalg.norm(new-x)/max(math.sqrt(len(x)),1.))
         x=new
         records.append(_checkpoint(x,it+1,step))
@@ -589,6 +620,10 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     from .extrusion_aware import enabled as extrusion_enabled, refine_k3d
     if extrusion_enabled(params) and params.use_extrusion_aware_k3d:
         x, extrusion_metrics = refine_k3d(x, faces, mesh.vertices, target, parameterization, params, edge_target, barrier_constraints)
+        if seam_reduction is not None:
+            raise RuntimeError(
+                "K3D_SEAM_REDUCTION_UNSUPPORTED_WITH_EXTRUSION_AWARE_REFINE: the extrusion-aware refine "
+                "does not keep the exact OptCuts seam constraints; disable it for the Zhang2021 route")
         records.append(_checkpoint(x, len(records), 0.0))
     # Optional exact hard-planarity solve with analytic sparse constraint Jacobian.
     # Hard mode solves the requested constrained problem directly:
@@ -708,6 +743,15 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                         rows.append(fi); cols.append(base+d); data.append(float(grad[d]*inv))
             return sparse.csr_matrix((data,(rows,cols)),shape=(len(faces),3*nverts))
 
+        x0_flat=flat0
+        if seam_reduction is not None:
+            R3=seam_reduction.kron(3)
+            _full_fun,_full_jac,_full_cop,_full_cop_jac=_hard_fun,_hard_jac,_coplanarity,_coplanarity_jac
+            def _hard_fun(z): return _full_fun(np.asarray(R3@z))
+            def _hard_jac(z): return np.asarray(R3.T@_full_jac(np.asarray(R3@z)))
+            def _coplanarity(z): return _full_cop(np.asarray(R3@z))
+            def _coplanarity_jac(z): return (_full_cop_jac(np.asarray(R3@z))@R3).tocsr()
+            x0_flat=np.asarray(seam_reduction.fit(y0)).ravel()
         nlc=NonlinearConstraint(_coplanarity,0.0,0.0,jac=_coplanarity_jac)
         print(
             f"[K3D-HARD-SPARSE] start formulation='min wSquare*ESquare+wSurface*ESurface+wDeploy*EDeployability s.t. coplanarity=0' "
@@ -717,7 +761,7 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
             flush=True,
         )
         hard_result=minimize(
-            _hard_fun,flat0,jac=_hard_jac,method="trust-constr",
+            _hard_fun,x0_flat,jac=_hard_jac,method="trust-constr",
             constraints=[nlc],
             options={
                 "maxiter":max(50,_env_int("ONESTRING_K3D_HARD_CONSTRAINED_ITERATIONS",150)),
@@ -725,13 +769,15 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
                 "sparse_jacobian":True,
             },
         )
-        x_hard=np.asarray(hard_result.x,float).reshape((-1,3))*bbox_diag+center
+        x_hard_flat=(np.asarray(seam_reduction.kron(3)@np.asarray(hard_result.x,float))
+                     if seam_reduction is not None else np.asarray(hard_result.x,float))
+        x_hard=x_hard_flat.reshape((-1,3))*bbox_diag+center
         dev=[]
         for f in faces:
             q=x_hard[f]
             dev.extend(np.linalg.norm(q-_best_fit_plane_projection(q),axis=1))
         hard_max=float(np.max(dev)) if dev else 0.0
-        constraint_inf=float(np.max(np.abs(_coplanarity(np.asarray(hard_result.x,float))))) if len(faces) else 0.0
+        constraint_inf=float(np.max(np.abs(_coplanarity(np.asarray(hard_result.x,float))))) if len(faces) else 0.0  # reduced or full
         accepted=bool(np.all(np.isfinite(x_hard)) and hard_max<=hard_abs_tol)
         hard_planarity_report={
             "success":accepted,
@@ -825,7 +871,8 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     polish_iters=_env_int("ONESTRING_K3D_POLISH_MAX_ITERATIONS",300)
     if polish_enabled:
         polished,polish=minimum_displacement_planarity_polish(
-            x_pre_polish,faces,tolerance=polish_tol,max_iterations=polish_iters
+            x_pre_polish,faces,tolerance=polish_tol,max_iterations=polish_iters,
+            reduction=seam_reduction,
         )
         if polish["success"]:
             x=polished
@@ -863,6 +910,16 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
         last=records[-1]
         records[-1]=_checkpoint(x,last["iteration"],last["step"])
         metrics["k3d_surface_residual"]=records[-1]["ESurface"]
+    if seam_reduction is not None:
+        seam_residual=float(seam_reduction.residual(x))
+        seam_scale=max(1.0,float(np.max(np.abs(x))))
+        metrics["k3d_seam_reduction_applied"]=True
+        metrics["k3d_seam_reduction_unknowns"]=int(seam_reduction.m)
+        metrics["k3d_seam_reduction_max_row_residual"]=seam_residual
+        if seam_residual>1e-9*seam_scale:
+            raise RuntimeError(
+                "K3D_SEAM_REDUCTION_CLOSURE_LOST: max seam row residual "
+                f"{seam_residual:.3e} > {1e-9*seam_scale:.3e}")
     span=np.ptp(x,axis=0)
     metrics["k3d_bbox_span"]=[float(v) for v in span]
     metrics["k3d_vertex_min"]=[float(v) for v in np.min(x,axis=0)]

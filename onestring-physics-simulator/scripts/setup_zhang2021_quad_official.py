@@ -21,9 +21,15 @@ no license file).  This script
 Requirements: CMake >= 3.16, a C++17 compiler (GCC or Clang), Eigen 3.3+,
 CGAL 5+ (with Boost/GMP/MPFR), OpenMP (recommended), git or patch.
 
-macOS (Homebrew):  brew install cmake eigen cgal libomp
-                   python3 scripts/setup_zhang2021_quad_official.py \\
-                       --cmake-arg=-DOpenMP_ROOT=$(brew --prefix libomp)
+macOS (Homebrew):  brew install cmake eigen@3 cgal libomp
+                   python3 scripts/setup_zhang2021_quad_official.py
+                   (on macOS the script adds the Homebrew flags itself: Eigen3_DIR of
+                   eigen@3 - Homebrew's default eigen 5 does not satisfy "Eigen3 3.3" -,
+                   OpenMP_ROOT of libomp, and for Apple Clang >= 17 / libc++ the
+                   _LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION /
+                   _LIBCPP_ENABLE_CXX17_REMOVED_BINDERS defines plus
+                   -Wno-missing-template-arg-list-after-template-kw; pass --no-macos-flags
+                   to disable, or --cmake-arg=... to override)
 Ubuntu/Debian:     sudo apt install cmake g++ libeigen3-dev libcgal-dev
                    python3 scripts/setup_zhang2021_quad_official.py
 Windows:           use WSL (Ubuntu) with the Linux instructions.
@@ -176,6 +182,39 @@ def apply_patch(src: Path) -> str:
 
 
 # ----------------------------------------------------------------- build
+def _brew_prefix(formula: str) -> str | None:
+    try:
+        out = subprocess.run(["brew", "--prefix", formula], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    path = out.stdout.strip()
+    return path if out.returncode == 0 and path and Path(path).exists() else None
+
+
+def macos_cmake_args(user_args: list[str]) -> list[str]:
+    """Homebrew / Apple Clang flags needed by the authors' code on macOS (build only)."""
+    if platform.system() != "Darwin":
+        return []
+    given = " ".join(user_args)
+    extra: list[str] = []
+    eigen3 = _brew_prefix("eigen@3")
+    if "Eigen3_DIR" not in given and eigen3:
+        cfg = Path(eigen3) / "share" / "eigen3" / "cmake"
+        if cfg.is_dir():
+            extra.append(f"-DEigen3_DIR={cfg}")
+    omp = _brew_prefix("libomp")
+    if "OpenMP_ROOT" not in given and omp:
+        extra.append(f"-DOpenMP_ROOT={omp}")
+    if "CMAKE_CXX_FLAGS" not in given:
+        # libc++ (Apple Clang 17) removed std::unary_function / binder1st / binder2nd,
+        # still used by the authors' code; re-enable them and silence the new
+        # template-keyword diagnostic.  No algorithmic change.
+        extra.append("-DCMAKE_CXX_FLAGS=-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION "
+                     "-D_LIBCPP_ENABLE_CXX17_REMOVED_BINDERS "
+                     "-Wno-missing-template-arg-list-after-template-kw -Wno-deprecated-declarations")
+    return extra
+
+
 def build(src: Path, build_dir: Path, build_type: str, jobs: int, cmake_args: list[str]) -> dict:
     build_dir.mkdir(parents=True, exist_ok=True)
     configure = ["cmake", "-S", str(src), "-B", str(build_dir), f"-DCMAKE_BUILD_TYPE={build_type}", *cmake_args]
@@ -240,6 +279,8 @@ def main() -> int:
     ap.add_argument("--cmake-arg", action="append", default=[], help="extra CMake argument (repeatable)")
     ap.add_argument("--force", action="store_true", help="delete an existing install root first")
     ap.add_argument("--skip-smoke-test", action="store_true")
+    ap.add_argument("--no-macos-flags", action="store_true",
+                    help="do not add the Homebrew/Apple-Clang CMake flags automatically on macOS")
     args = ap.parse_args()
 
     root = args.install_root.resolve()
@@ -266,7 +307,13 @@ def main() -> int:
     log(f"extracted {n} files to {src} (C/C++/.txt encodings normalised)")
     tool = apply_patch(src)
     log(f"applied {PATCH.name} with {tool}")
-    info = build(src, root / "build", args.build_type, args.jobs, list(args.cmake_arg))
+    cmake_args = list(args.cmake_arg)
+    if not args.no_macos_flags:
+        auto = macos_cmake_args(cmake_args)
+        if auto:
+            log("macOS: adding " + " ".join(auto))
+        cmake_args = auto + cmake_args
+    info = build(src, root / "build", args.build_type, args.jobs, cmake_args)
     manifest = {
         "paper": "Zhang, Chai, Liu, Fu, Quad meshing with coarse layouts for planar domains, CAD 140 (2021) 103084",
         "source_share": SHARE_URL,

@@ -261,8 +261,17 @@ def split_for_correspondence(xyz, f3, uv, f2, src: SourceBoundary, corr: Corresp
 
 # -------------------------------------------------------- boundary targets
 def chord_boundary_targets(uv: np.ndarray, loop: list[int], anchors: list[int],
-                           quad_uv: np.ndarray, q_loop: list[int]) -> dict[int, np.ndarray]:
-    """Place every source boundary vertex on Q's boundary polygon."""
+                           quad_uv: np.ndarray, q_loop: list[int],
+                           loop_xyz: np.ndarray | None = None) -> dict[int, np.ndarray]:
+    """Place every source boundary vertex on Q's boundary polygon.
+
+    The position along each straight Q edge is proportional to UV arc length,
+    or - when ``loop_xyz`` (3D positions of the loop vertices) is given - to
+    3D arc length.  The 3D variant gives the two UV copies of a cut the same
+    parameter for the same physical point, so the exact seam rows between two
+    panel-edge interiors are implied by the vertex / T-vertex equalities
+    (hard closure without forcing seam branches straight).
+    """
     pos = {v: i for i, v in enumerate(loop)}
     try:
         idx = [pos[a] for a in anchors]
@@ -270,7 +279,11 @@ def chord_boundary_targets(uv: np.ndarray, loop: list[int], anchors: list[int],
         raise SeamConformingReparamError("anchor is not a boundary vertex of the split chart") from exc
     n = len(loop)
     P = np.asarray(uv, float)[loop]
-    seg = np.linalg.norm(np.roll(P, -1, axis=0) - P, axis=1)
+    if loop_xyz is not None:
+        X = np.asarray(loop_xyz, float)
+        seg = np.linalg.norm(np.roll(X, -1, axis=0) - X, axis=1)
+    else:
+        seg = np.linalg.norm(np.roll(P, -1, axis=0) - P, axis=1)
     targets: dict[int, np.ndarray] = {}
     k_count = len(anchors)
     covered = 0
@@ -575,12 +588,88 @@ def progressive_boundary_slim(prob: "_SDProblem", uv: np.ndarray, faces: np.ndar
                      "slim_iterations": int(slim_total)}
 
 
+def _hard_seam_correspondence(src: SourceBoundary, init, quad_uv: np.ndarray, quads: np.ndarray, *,
+                              repair_node_valence: bool, max_node_valence: int = 8):
+    """Node-valence repair + matched/nested seam alignment (see zhang2021_seam_alignment)."""
+    from .zhang2021_onestring_boundary import InitialCorrespondence, _fraction_3d, run_interval
+    from .zhang2021_onestring_seam_matching import seam_constraints
+    from .zhang2021_seam_alignment import (
+        SeamAlignmentError, align_branches, compact_vertices, node_valence_report, repair_node_valences)
+
+    repair_log: list[dict] = []
+    if init.unsnapped_nodes:
+        raise SeamConformingReparamError(
+            "ZHANG2021_ONESTRING_SEAM_NODE_NOT_A_QUAD_CORNER: hard seam closure needs every seam node "
+            f"(tip / junction / cut-open transition) at a quad corner; unsnapped={init.unsnapped_nodes}")
+    if repair_node_valence:
+        new_quads, repair_log = repair_node_valences(src, init.q_loop, init.s, quads,
+                                                     max_interior_valence=max_node_valence)
+        if len(new_quads) != len(quads) or not np.array_equal(new_quads, quads):
+            quad_uv, quads, q_loop, _remap = compact_vertices(quad_uv, new_quads, init.q_loop)
+            init = InitialCorrespondence(q_loop=q_loop, s=init.s, projection_distance=init.projection_distance,
+                                         snapped_nodes=init.snapped_nodes, unsnapped_nodes=init.unsnapped_nodes)
+    valence = node_valence_report(src, init.q_loop, init.s, quads, max_interior_valence=max_node_valence)
+    bad = [r for r in valence if not r["ok"]]
+    if bad:
+        raise SeamConformingReparamError(
+            "ZHANG2021_ONESTRING_SEAM_NODE_VALENCE_INVALID: an OptCuts cut tip / junction needs 3..."
+            f"{max_node_valence} panels around it in 3D (cut/open transition >= 2); offending nodes "
+            f"{bad[:6]}; repair log {repair_log}")
+    cons = seam_constraints(src)
+    try:
+        al = align_branches(src, cons, init.s)
+    except SeamAlignmentError as exc:
+        raise SeamConformingReparamError(str(exc)) from exc
+    s = al.s
+    regularized = _regularize_split_points_hard(src, s, 0.1, al.pairs)
+    if not _cyclic_strictly_increasing_s(s, src.perimeter):
+        raise SeamConformingReparamError("ZHANG2021_ONESTRING_REGULARIZATION_BROKE_ORDER")
+    # Audit: every matched pair is at one 3D point (identical arc-length fraction).
+    worst = 0.0
+    for c in cons:
+        lo_a, hi_a = run_interval(src, c.run_a)
+        lo_b, hi_b = run_interval(src, c.run_b)
+        P = src.perimeter
+        for ka, kb in al.pairs:
+            va = s[ka] if s[ka] >= lo_a else s[ka] + P
+            vb = s[kb] if s[kb] >= lo_b else s[kb] + P
+            if lo_a < va < hi_a and lo_b < vb < hi_b:
+                worst = max(worst, abs(_fraction_3d(src, lo_a, hi_a, va) - (1.0 - _fraction_3d(src, lo_b, hi_b, vb))))
+    if worst > 1e-9:
+        raise SeamConformingReparamError(f"ZHANG2021_ONESTRING_SEAM_PAIR_MISALIGNED: {worst:.3e}")
+    corr = Correspondence(q_loop=list(init.q_loop), s=s, projection_distance=init.projection_distance,
+                          snapped_nodes=init.snapped_nodes, aligned_pairs=len(al.pairs), misaligned_branches=0,
+                          branch_report=al.branches, regularized_points=regularized,
+                          unsnapped_nodes=list(init.unsnapped_nodes))
+    report = {"repair_log": repair_log, "node_valence": valence, "alignment": al.branches,
+              "pairs": len(al.pairs), "t_vertices": len(al.t_vertices), "pair_alignment_error": worst}
+    return quad_uv, quads, init, corr, report
+
+
+def _cyclic_strictly_increasing_s(s, perimeter):
+    from .zhang2021_onestring_boundary import _cyclic_strictly_increasing
+    return _cyclic_strictly_increasing(np.asarray(s, float), perimeter)
+
+
+def _regularize_split_points_hard(src, s, gamma, pairs):
+    from .zhang2021_onestring_boundary import _regularize_split_points
+    return _regularize_split_points(src, s, float(gamma), pairs)
+
+
 def seam_conforming_reparameterization(xyz, f3, uv, f2, quad_uv, quads, *,
                                        snap_nodes: bool = True, align_pairs: bool = True,
                                        seam_matching: bool = False, seam_matching_max_insertions: int = 24,
                                        max_steps: int = 2000, step_slim_iters: int = 4,
-                                       final_iters: int = 80) -> ReparamResult:
-    """OneString extension; see module docstring.  Raises on any failure."""
+                                       final_iters: int = 80, hard_seams: bool = False,
+                                       repair_node_valence: bool = True,
+                                       boundary_arc3d: bool | None = None) -> ReparamResult:
+    """OneString extension; see module docstring.  Raises on any failure.
+
+    ``hard_seams=True`` (2026-10-27 revision): every cut branch is sampled as a
+    matched or nested partition (exact closure), deficient cut tips / junctions
+    are repaired by diagonal collapse, and the chart boundary is parameterised
+    by 3D arc length along every quad edge.  Never falls back to a soft seam.
+    """
     started = time.perf_counter()
     xyz = np.asarray(xyz, float)
     f3 = np.asarray(f3, int)
@@ -588,6 +677,8 @@ def seam_conforming_reparameterization(xyz, f3, uv, f2, quad_uv, quads, *,
     f2 = np.asarray(f2, int)
     quad_uv = np.asarray(quad_uv, float)
     quads = np.asarray(quads, int)
+    if boundary_arc3d is None:
+        boundary_arc3d = bool(hard_seams)
     sa_in = signed_uv_areas(uv, f2)
     if not (np.all(sa_in > 0) or np.all(sa_in < 0)):
         raise SeamConformingReparamError("ZHANG2021_ONESTRING_SOURCE_CHART_NOT_INJECTIVE")
@@ -600,7 +691,14 @@ def seam_conforming_reparameterization(xyz, f3, uv, f2, quad_uv, quads, *,
         from .zhang2021_onestring_seam_matching import match_seam_counts
         matching = match_seam_counts(src, quad_uv, quads, init, max_insertions=seam_matching_max_insertions)
         quad_uv, quads, init = matching.quad_uv, matching.quads, matching.init
-    corr = finalize_correspondence(src, init, align_pairs=align_pairs)
+    hard_report: dict = {}
+    if hard_seams:
+        if not snap_nodes:
+            raise SeamConformingReparamError("ZHANG2021_ONESTRING_HARD_SEAMS_REQUIRE_NODE_SNAPPING")
+        quad_uv, quads, init, corr, hard_report = _hard_seam_correspondence(
+            src, init, quad_uv, quads, repair_node_valence=repair_node_valence)
+    else:
+        corr = finalize_correspondence(src, init, align_pairs=align_pairs)
     sp = split_for_correspondence(xyz, f3, uv, f2, src, corr)
     xyz2, f32, f22 = sp.xyz, sp.f3, sp.f2
     sa = signed_uv_areas(sp.uv, f22)
@@ -617,7 +715,8 @@ def seam_conforming_reparameterization(xyz, f3, uv, f2, quad_uv, quads, *,
         raise SeamConformingReparamError("split chart is not a disk")
     u2x2 = uv_to_xyz_vertex_map(f32, f22, len(uv2))
     src2 = build_source_boundary(sp.uv, f22, u2x2, xyz2)
-    targets = chord_boundary_targets(uv2, src2.loop, sp.anchors, qm, corr.q_loop)
+    targets = chord_boundary_targets(uv2, src2.loop, sp.anchors, qm, corr.q_loop,
+                                     loop_xyz=(xyz2[u2x2[np.asarray(src2.loop, int)]] if boundary_arc3d else None))
     bverts = np.asarray(src2.loop, int)
     b_target = np.asarray([targets[v] for v in bverts])
     free = np.setdiff1d(np.arange(len(uv2)), bverts)
@@ -687,7 +786,26 @@ def seam_conforming_reparameterization(xyz, f3, uv, f2, quad_uv, quads, *,
         "zhang2021_onestring_seam_node_3d_valence": node_valence,
         "zhang2021_onestring_seam_nodes_low_3d_valence": int(sum(
             1 for v in node_valence if v["valence_sum"] < v["ideal"] - 1)),
+        "zhang2021_onestring_hard_seam_sampling": bool(hard_seams),
+        "zhang2021_onestring_boundary_parameterisation": "3D arc length" if boundary_arc3d else "UV arc length",
     }
+    if hard_seams:
+        branches = hard_report.get("alignment", [])
+        metrics.update({
+            "zhang2021_onestring_seam_partition_model": (
+                "every cut branch sampled as a matched (vertex<->vertex) or nested (vertex<->edge parameter, "
+                "T-vertex) partition of 3D arc length; exact closure is a linear constraint, never soft"),
+            "zhang2021_onestring_seam_matched_branches": int(sum(1 for b in branches if b["partition"] == "matched")),
+            "zhang2021_onestring_seam_nested_branches": int(sum(1 for b in branches if b["partition"] == "nested")),
+            "zhang2021_onestring_seam_t_vertices": int(hard_report.get("t_vertices", 0)),
+            "zhang2021_onestring_seam_vertex_pairs": int(hard_report.get("pairs", 0)),
+            "zhang2021_onestring_seam_pair_alignment_error": float(hard_report.get("pair_alignment_error", 0.0)),
+            "zhang2021_onestring_seam_alignment": branches,
+            "zhang2021_onestring_node_valence_repair": hard_report.get("repair_log", []),
+            "zhang2021_onestring_node_valence_repairs": int(sum(
+                1 for r in hard_report.get("repair_log", []) if r.get("status") == "repaired")),
+            "zhang2021_onestring_node_valence_3d": hard_report.get("node_valence", []),
+        })
     return ReparamResult(xyz=xyz2, f3=f32, uv=out_uv, f2=f22, parent_face=sp.parent_face,
                          anchors=list(map(int, sp.anchors)), q_loop=list(map(int, corr.q_loop)),
                          quad_uv=np.asarray(quad_uv, float), quads=np.asarray(quads, int),

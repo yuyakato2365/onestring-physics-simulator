@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/zhang2021-quad-20261027
+      - fix/zhang2021-quality-seam-closure-20261027
   pull_request:
   workflow_dispatch:
 
@@ -26,10 +27,15 @@ jobs:
             src/onestring_physics/zhang2021_quad_reference.py src/onestring_physics/zhang2021_quad_metrics.py \
             src/onestring_physics/zhang2021_onestring_boundary.py src/onestring_physics/zhang2021_onestring_reparam.py \
             src/onestring_physics/zhang2021_onestring_seam_matching.py src/onestring_physics/zhang2021_onestring_precondition.py \
+            src/onestring_physics/zhang2021_panel_quality.py src/onestring_physics/zhang2021_panel_optimizer.py \
+            src/onestring_physics/zhang2021_seam_alignment.py src/onestring_physics/zhang2021_seam_reduction.py \
+            src/onestring_physics/zhang2021_candidate_selection.py src/onestring_physics/zhang2021_verification.py \
+            src/onestring_physics/zhang2021_diagnostics.py src/onestring_physics/paper_local_global_solvers.py \
+            src/onestring_physics/optcuts_seam_exact_closure.py \
             scripts/setup_zhang2021_quad_official.py \
             app_optcuts_core_20260916.py app_runtime_base.py
       - name: Adapter, seam and UI tests (reference programs skipped)
-        run: python -m pytest -q tests/test_zhang2021_quad_20261027.py tests/test_optcuts_planar_quad_ui_20261026.py
+        run: python -m pytest -q tests/test_zhang2021_quad_20261027.py tests/test_zhang2021_quality_seam_20261027.py tests/test_optcuts_planar_quad_ui_20261026.py
 
   reference-build:
     # Downloads the authors' code from their public share at run time (it is
@@ -51,4 +57,4 @@ jobs:
       - name: Download, patch and build the reference programs
         run: python scripts/setup_zhang2021_quad_official.py --jobs 4
       - name: Tests including the reference programs
-        run: python -m pytest -q tests/test_zhang2021_quad_20261027.py
+        run: python -m pytest -q tests/test_zhang2021_quad_20261027.py tests/test_zhang2021_quality_seam_20261027.py
