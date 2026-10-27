@@ -817,6 +817,13 @@ with st.sidebar:
     zhang2021_bin_dir = str(st.session_state.get("onestring_zhang2021_bin_dir", "") or "")
     zhang2021_downstream_route = str(st.session_state.get(
         "onestring_zhang2021_downstream_route", "optcuts_test2") or "optcuts_test2")
+    zhang2021_initial_csf_split_enabled = False  # temporary Zhang2021-only bypass
+    if optcuts_zhang2021_quad_20261027_enabled:
+        st.caption(
+            "Zhang2021: initial Omega CSF Split is temporarily OFF. "
+            "OptCuts cuts and quad meshing remain enabled; the initial CSF bound "
+            "is measured but not certified."
+        )
     zhang2021_precondition_enabled = bool(st.session_state.get("onestring_zhang2021_precondition_enabled", True))
     zhang2021_precondition_tolerances = str(st.session_state.get(
         "onestring_zhang2021_precondition_tolerances", "0,0.02,0.04,0.06,0.1") or "0")
@@ -2135,6 +2142,7 @@ def current_pipeline_key() -> tuple:
         zhang2021_seam_matching,
         zhang2021_bin_dir,
         zhang2021_downstream_route,
+        zhang2021_initial_csf_split_enabled,
         zhang2021_precondition_enabled,
         zhang2021_precondition_tolerances,
         zhang2021_candidate_hausdorff_ratios,
@@ -2322,6 +2330,7 @@ pipeline_params = PipelineParameters(
     zhang2021_seam_matching=zhang2021_seam_matching,
     zhang2021_bin_dir=zhang2021_bin_dir,
     zhang2021_downstream_route=zhang2021_downstream_route,
+    zhang2021_initial_csf_split_enabled=zhang2021_initial_csf_split_enabled,
     zhang2021_precondition_enabled=zhang2021_precondition_enabled,
     zhang2021_precondition_tolerances=zhang2021_precondition_tolerances,
     zhang2021_candidate_hausdorff_ratios=zhang2021_candidate_hausdorff_ratios,

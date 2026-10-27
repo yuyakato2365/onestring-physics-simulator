@@ -209,6 +209,69 @@ def test_pipeline_parameters_default_off():
     assert p.optcuts_zhang2021_quad_20261027_enabled is False
     assert p.optcuts_planar_quad_20261026_enabled is False
     assert p.zhang2021_downstream_route == "optcuts_test2"
+    assert p.zhang2021_initial_csf_split_enabled is False
+
+
+def test_initial_omega_csf_split_policy_default_off_and_opt_in():
+    from onestring_physics import optcuts_zhang2021_quad_20261027 as mode
+    from onestring_physics.onestring_pipeline import PipelineParameters
+
+    domain = SimpleNamespace()
+    params = PipelineParameters(optcuts_zhang2021_quad_20261027_enabled=True)
+    assert mode._configure_initial_csf_split(domain, params) is False
+    assert domain.paper_split_policy is False
+    assert domain.csf_split_enabled is False
+
+    params.zhang2021_initial_csf_split_enabled = True
+    params.enable_csf_splits = False
+    assert mode._configure_initial_csf_split(domain, params) is False
+    assert domain.paper_split_policy is False
+
+    params.enable_csf_splits = True
+    assert mode._configure_initial_csf_split(domain, params) is True
+    assert domain.paper_split_policy is True
+    assert domain.csf_split_enabled is True
+
+
+def test_disabled_initial_split_preserves_m2d_through_simple_split_wrapper(monkeypatch):
+    from onestring_physics import optcuts_zhang2021_quad_20261027 as mode
+    from onestring_physics import simple_split_panel_patch as split_module
+
+    uv, faces = grid_quads(2, 1)
+    original_xyz = np.column_stack((uv, np.zeros(len(uv))))
+    grid = mode.UnstructuredQuadGrid(uv, faces, 0.5, 0.04)
+
+    def quadmesh(xyz, quads, actual_grid, stage, metrics, split_lines):
+        return SimpleNamespace(vertices=np.asarray(xyz).copy(), faces=np.asarray(quads).copy(),
+                               grid=actual_grid, stage=stage, metrics=dict(metrics),
+                               split_lines=list(split_lines))
+
+    initial = quadmesh(original_xyz, faces, grid, "M2D", {}, [])
+    fake = SimpleNamespace(
+        _original=SimpleNamespace(QuadMesh=quadmesh),
+        _build_m2d=lambda *args: initial,
+        _lift_m2d_to_m3d=lambda *args: (None, None),
+        _optimize_k2d=lambda *args, **kwargs: (None, None),
+        # The 2026-09-14 LSCM K2D installer wraps Simple Split on import.
+        # Supply its independent layout dependency in the test fixture.
+        _make_flat_tile_layout=lambda *args, **kwargs: None,
+    )
+    debug = SimpleNamespace()
+    monkeypatch.setattr(
+        split_module, "apply_paper_split",
+        lambda *args: pytest.fail("legacy initial Omega CSF Split must not run"),
+    )
+    split_module.install_simple_split_panel_patch(fake, debug)
+
+    domain = SimpleNamespace(split_lines=[], localized_split_segments=[])
+    params = SimpleNamespace(zhang2021_initial_csf_split_enabled=False,
+                             enable_csf_splits=True)
+    assert mode._configure_initial_csf_split(domain, params) is False
+    result = fake._build_m2d(grid, domain, params)
+    assert np.array_equal(result.vertices, original_xyz)
+    assert np.array_equal(result.faces, faces)
+    assert result.metrics["csf_split_applied"] is False
+    assert result.metrics["number_of_splits"] == 0
 
 
 # ------------------------------------------------------- downstream route

@@ -116,9 +116,9 @@ M2D/M3D の最小・最大角、辺長比、面積比、scaled Jacobian、平面
 * `paper_local_global_0918` の交互コーナー連結は四角形の隣接グラフが二部グラフ（= 全内部頂点の価数が偶数）であることを要します。
   Zhang の粗いレイアウトには価数 3/5 の特異頂点があるため、その場合は
   `ZHANG2021_PAPER_LG_LINKAGE_NON_BIPARTITE`（奇数価数の内部頂点数を含む）で明示的に停止し、別ルートへの自動切替はしません。
-* CSF Split は1回だけ行います。Simple Split ラッパーが外側にある通常のアプリ構成ではそれが唯一の Split 実行者で、
-  本モードの M2D フックは Split せず、外側の事後フックが Split 後の格子再構築と CSF 上限の認証確認を行います
-  （2026-10-26 の Gmsh 版は内側でも Split するため二重適用になり得ます。Gmsh 版は比較用に変更していません）。
+* **暫定変更（2026-10-27）: Zhang2021 モードの初期 Ω CSF Split は既定で OFF です。** 旧方式の固定UV/完全格子線に基づく Split を、Zhang の不規則四角形 M2D にそのまま適用しないためです。OptCuts が S を円板状チャートへ展開するためのカット（Seam）、Zhang の Quad Meshing、境界対応・Seam のためのメッシュ辺分割は **無効化しません**。M2D の四角形は初期 CSF Split による切断を受けず、通常の M3D/K3D/T3D/K2D/T2D へ渡されます。CSF 値は診断用に記録しますが上限達成・製造可能性を保証しません。
+* 再有効化は `PipelineParameters(zhang2021_initial_csf_split_enabled=True)`（かつ `enable_csf_splits=True`）で明示的に行えます。現在のアプリUIでは事故防止のため `False` に固定し、「初期 Ω CSF Split OFF」と表示します。再有効化すると、既存の `csf_split_bound_certified=False` の扱いにより `ZHANG2021_CSF_SPLIT_UNCERTIFIED` が再発し得ます。旧 Split の修復ではなく、初期 Split のバイパスです。
+* 再有効化されたときのみ Simple Split ラッパーが1回の初期 CSF Split を実行します。旧方式の Split 後チェックは従来のまま残します（2026-10-26 Gmsh モードは未変更）。
 * OptCuts のマルチスタート（閉じた種数0の入力）で付く代替チャートは、Split 段で Split 数により差し替えられることがあります。
   Zhang の M2D と再パラメータ化チャートは選ばれた1つの OptCuts 結果に対して計算されるため、本モードではこの差し替えを無効化し、
   `zhang2021_optcuts_split_count_candidates_dropped` に記録します。

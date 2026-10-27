@@ -67,6 +67,25 @@ def mode_enabled(params: Any) -> bool:
     return bool(getattr(params, FLAG, False))
 
 
+def _configure_initial_csf_split(domain: Any, params: Any) -> bool:
+    """Temporarily skip legacy Omega CSF cuts in the Zhang2021 route.
+
+    OptCuts topology cuts, Zhang quad meshing, boundary seam conformity and
+    any *later* collision-driven splitting are not controlled by this switch.
+    Both the local opt-in and the global CSF switch must be enabled to run
+    the legacy initial CSF Split.  The default is deliberately OFF.
+    """
+    enabled = (
+        bool(getattr(params, "zhang2021_initial_csf_split_enabled", False))
+        and bool(getattr(params, "enable_csf_splits", True))
+    )
+    domain.paper_split_policy = enabled
+    domain.csf_split_enabled = enabled
+    domain.zhang2021_initial_csf_split_enabled = enabled
+    return enabled
+
+
+
 def zhang2021_parameters_from(params: Any) -> Zhang2021Parameters:
     zp = Zhang2021Parameters(
         target_quads=int(getattr(params, "zhang2021_target_quads", DEFAULT_TARGET_QUADS)),
@@ -649,24 +668,29 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
                      vertex.copy(), [])
         result.parameterization = parameterization
         result._zhang2021_plan = plan
-        result.paper_split_policy = True
+        initial_split_enabled = _configure_initial_csf_split(result, params)
         result.csf_before = float(np.max(triangle))
         result.csf_after_split = result.csf_before
         result.csf_split_threshold = threshold
         result.max_csf_splits = max(0, int(getattr(params, "max_csf_splits", 64)))
-        result.csf_split_enabled = bool(getattr(params, "enable_csf_splits", True))
         result.csf_model = "final (re-parameterised) paired UV/3D triangle area Jacobian"
-        result.csf_split_exactness_label = "pending unstructured M2D Split audit"
+        result.csf_split_exactness_label = (
+            "pending unstructured M2D Split audit" if initial_split_enabled
+            else "initial Omega CSF Split disabled; no distortion bound certified"
+        )
         result.paper_split_diagnostics = {
-            "status": "pending_unstructured_m2d",
+            "status": ("pending_unstructured_m2d" if initial_split_enabled
+                       else "disabled_in_zhang2021_mode"),
             "area_expansion_bound": threshold,
             "lambda_max": result.csf_before,
-            "split_rule": "complete existing quad-edge-chain only",
+            "split_rule": ("complete existing quad-edge-chain only" if initial_split_enabled
+                           else "not run: retain the unsplit Zhang2021 M2D"),
         }
         result.localize_csf_splits = False
         result.localized_split_segments = []
         result.reference_mode = False
         parameterization.metrics["split_diagnostics"] = dict(result.paper_split_diagnostics)
+        parameterization.metrics["zhang2021_initial_csf_split_enabled"] = bool(initial_split_enabled)
         parameterization.metrics["zhang2021_independent_domain"] = True
         parameterization.metrics["zhang2021_legacy_regular_overlay_bypassed"] = True
         return result
@@ -732,6 +756,16 @@ def install_zhang2021_quad_20261027(pipeline: Any) -> None:
                 mesh = apply_paper_split(pipeline, mesh, domain, params)
                 mesh.metrics["zhang2021_csf_split_owner"] = "zhang2021_m2d_hook"
                 mesh = _finalize_split(mesh, domain, params)
+        else:
+            # Preserve Zhang's M2D exactly: the outer Simple Split wrapper
+            # sees paper_split_policy=False and an empty split_lines list,
+            # so it cannot run the legacy curvature/CSF cutting algorithm.
+            mesh.metrics.update({
+                "zhang2021_csf_split_owner": "disabled_before_m2d",
+                "zhang2021_initial_csf_split_enabled": False,
+                "zhang2021_csf_split_certified": False,
+                "zhang2021_csf_split_status": "disabled_in_zhang2021_mode",
+            })
         return mesh
 
     _wire(pipeline, "_build_surface_parameterization", with_parameterization)
