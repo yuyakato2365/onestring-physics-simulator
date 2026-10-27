@@ -28,11 +28,13 @@ jobs:
       - name: Find Eigen headers in authors source release
         run: |
           $root="$env:RUNNER_TEMP\zhang_source\authors_source\Code"
-          $hits=@(Get-ChildItem $root -Recurse -File -Filter SparseLU -ErrorAction SilentlyContinue | Where-Object {$_.FullName -match '\\Eigen\\SparseLU$'})
-          Write-Output "EIGEN_HEADER_CANDIDATES=$($hits.Count)"
-          $hits | Select-Object -First 5 | ForEach-Object { Write-Output "EIGEN_HEADER=$($_.FullName)" }
-          if($hits.Count -eq 0){throw "Eigen/SparseLU not found in author C++ ZIP"}
-          $root2=Split-Path (Split-Path $hits[0].FullName -Parent) -Parent
+          # Authors' Straighten bundles the modern Eigen tree; QuadMeshSimplify
+          # bundles a much older Eigen that uses removed std::binder1st/binder2nd.
+          $root2=Join-Path $root 'Straighten\Straighten\include\Eigen'
+          if(!(Test-Path (Join-Path $root2 'Eigen\SparseLU'))){
+            throw "Eigen/SparseLU absent from the original Straighten headers"
+          }
+          Write-Output "EIGEN_INCLUDE_DIR=$root2"
           "EIGEN_INCLUDE_DIR=$root2" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build licensed independent symmetric indefinite Eigen numerical library
         run: |
