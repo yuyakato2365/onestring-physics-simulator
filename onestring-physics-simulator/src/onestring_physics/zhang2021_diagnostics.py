@@ -83,14 +83,17 @@ def write_candidate_diagnostics(rows: list[dict], plan: Any, params: Any) -> str
         from .zhang2021_candidate_selection import summarize_row
         (d / "candidates.txt").write_text("\n".join(summarize_row(r) for r in rows), encoding="utf-8")
         if plan is not None:
-            t = plan.metrics.get("zhang2021_onestring_seam_t_vertices", 0)
-            plot_panels(d / "best_rejected_candidate_m3d.png", plan.quad_uv, plan.m3d_preview, plan.quads,
-                        plan.m3d_report,
-                        f"M3D of the best-scoring rejected candidate ({len(plan.quads)} quads, {t} seam T-vertices)")
             (d / "best_rejected_candidate_quality.json").write_text(json.dumps(_jsonable({
                 "m2d": plan.m2d_report.metrics, "m2d_failures": plan.m2d_report.failures,
                 "m3d": plan.m3d_report.metrics, "m3d_failures": plan.m3d_report.failures}), indent=1),
                 encoding="utf-8")
+            t = plan.metrics.get("zhang2021_onestring_seam_t_vertices", 0)
+            try:
+                plot_panels(d / "best_rejected_candidate_m3d.png", plan.quad_uv, plan.m3d_preview, plan.quads,
+                        plan.m3d_report,
+                        f"M3D of the best-scoring rejected candidate ({len(plan.quads)} quads, {t} seam T-vertices)")
+            except ImportError as exc:
+                (d / "figure_skipped.txt").write_text(f"figure not drawn: {exc} (pip install matplotlib)")
         return str(d)
     except Exception as exc:  # noqa: BLE001 - diagnostics must not mask the real failure
         return f"(diagnostics not written: {type(exc).__name__}: {exc})"
@@ -108,8 +111,11 @@ def write_verification_diagnostics(log: list[dict], state: Any, params: Any) -> 
                                 thresholds=stage_thresholds(params, "k3d"))
             m2d = getattr(state, "mesh_2d_initial", None)
             uv = np.asarray(m2d.vertices, float)[:, :2] if m2d is not None and len(m2d.vertices) == len(k3d.vertices) else None
-            plot_panels(d / "k3d_bad_panels.png", uv, k3d.vertices, k3d.faces, rep,
-                        "K3D - red: panels violating a per-panel limit")
+            try:
+                plot_panels(d / "k3d_bad_panels.png", uv, k3d.vertices, k3d.faces, rep,
+                            "K3D - red: panels violating a per-panel limit")
+            except ImportError as exc:
+                (d / "figure_skipped.txt").write_text(f"figure not drawn: {exc} (pip install matplotlib)")
         return str(d)
     except Exception as exc:  # noqa: BLE001
         return f"(diagnostics not written: {type(exc).__name__}: {exc})"

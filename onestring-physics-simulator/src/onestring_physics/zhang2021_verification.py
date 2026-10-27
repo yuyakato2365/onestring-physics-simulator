@@ -186,6 +186,7 @@ def install_zhang2021_verification_loop(pipeline: Any) -> None:
             p = copy.copy(params)
             p.zhang2021_candidate_rank = rank
             p._zhang2021_run_cache = cache
+            p._zhang2021_progress = progress_callback
             started = time.perf_counter()
             try:
                 state = inner(target, p, run_simulation=run_simulation, deployment_params=deployment_params,

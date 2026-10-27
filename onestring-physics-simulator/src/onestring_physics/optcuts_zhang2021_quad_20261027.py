@@ -613,7 +613,8 @@ def _planner_cache_key(xyz, f3, uv, f2, params) -> str:
     for a in (xyz, f3, uv, f2):
         h.update(np.ascontiguousarray(a).tobytes())
     for name in sorted(n for n in dir(params) if n.startswith("zhang2021_") and n not in (
-            "zhang2021_candidate_rank", "zhang2021_verification_attempts", "zhang2021_compare_verified_candidates")):
+            "zhang2021_candidate_rank", "zhang2021_verification_attempts", "zhang2021_compare_verified_candidates")
+            and not n.startswith("_")):
         try:
             h.update(f"{name}={getattr(params, name)!r};".encode())
         except Exception:  # noqa: BLE001 - only hashing
@@ -687,10 +688,28 @@ def plan_zhang2021_m2d_coordinated(xyz, f3, uv, f2, params: Any, *, cache: dict 
         if workers is None:
             import os
             workers = max(1, min(4, (os.cpu_count() or 2)))
+        progress = getattr(params, "_zhang2021_progress", None)
+
+        def report(done: int, stage: str):
+            print(f"[ZHANG2021-CAND] {stage} {done}/{len(jobs)}", flush=True)
+            if callable(progress):
+                try:
+                    progress(f"S -> Omega: Zhang 2021 candidates ({stage} {done}/{len(jobs)})",
+                             0.02 + 0.06 * done / max(len(jobs), 1), "")
+                except Exception:  # noqa: BLE001 - progress display only
+                    pass
+
+        report(0, "reference runs")
+        results = [None] * len(jobs)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(run_job, jobs))
+            futures = {pool.submit(run_job, job): i for i, job in enumerate(jobs)}
+            from concurrent.futures import as_completed
+            for k, fut in enumerate(as_completed(futures), 1):
+                results[futures[fut]] = fut.result()
+                report(k, "reference runs")
         feasible: list[tuple[float, int, Zhang2021M2DPlan]] = []
-        for (tol, eps, n_tar, pre, p), zres in zip(jobs, results):
+        for k_job, ((tol, eps, n_tar, pre, p), zres) in enumerate(zip(jobs, results), 1):
+            report(k_job, "seam adapter + panel optimisation")
             row: dict[str, Any] = {"precondition_tol": tol, "zhang_eps": eps, "n_tar": n_tar}
             row.update({k: v for k, v in pre.metrics.items() if isinstance(v, (int, float)) and "sd_" in k})
             if isinstance(zres, Exception):

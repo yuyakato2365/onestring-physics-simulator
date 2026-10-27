@@ -93,7 +93,7 @@ class PanelQualityThresholds:
 # tips the UV quads must be thin wedges so that the lifted panels are good,
 # so M2D is gated for validity/non-degeneracy only; M3D and K3D carry the
 # size/shape uniformity gates.
-DEFAULT_M2D_THRESHOLDS = dict(min_angle_deg=3.0, max_angle_deg=177.0, max_edge_ratio=25.0,
+DEFAULT_M2D_THRESHOLDS = dict(min_angle_deg=3.0, max_angle_deg=180.0, max_edge_ratio=25.0,
                               max_size_ratio=1e6, max_size_spread_p95_p5=1e6, max_e_size=1e6,
                               max_e_angle=1e6, max_area_cv=1e6)
 DEFAULT_M3D_THRESHOLDS: dict = {}
@@ -208,7 +208,14 @@ def panel_quality(points: np.ndarray, faces: np.ndarray, *, stage: str,
     area_cv = float(np.std(area) / area_mean) if area_mean > 0 else float("inf")
     tiny = max(l_ref, 1e-300) ** 2 * 1e-8
     degenerate = (area <= tiny) | (lmin <= 1e-6 * max(l_ref, 1e-300)) | (np.min(angles, axis=1) < 0.5)
-    flipped = np.any(g["corner_orientation"] <= 0.0, axis=1) & ~degenerate
+    if planar_2d_orientation is not None:
+        # UV: a quad is valid iff it is simple and positively oriented (one diagonal
+        # splits it into two positive triangles); non-convex UV quads are allowed
+        # because the chart is distorted near cut tips.  3D panels must be convex.
+        o = g["corner_orientation"]
+        flipped = ~(((o[:, 1] > 0) & (o[:, 3] > 0)) | ((o[:, 0] > 0) & (o[:, 2] > 0))) & ~degenerate
+    else:
+        flipped = np.any(g["corner_orientation"] <= 0.0, axis=1) & ~degenerate
     # per-panel deviation used by the smooth maximum: angle + aspect + size
     with np.errstate(divide="ignore", invalid="ignore"):
         size_dev = np.log(np.maximum(size, 1e-300) / max(float(np.exp(np.mean(np.log(np.maximum(size, 1e-300))))), 1e-300))
