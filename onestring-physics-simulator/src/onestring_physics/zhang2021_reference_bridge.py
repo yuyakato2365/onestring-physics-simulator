@@ -72,7 +72,7 @@ def export_source_chart(source: Any, file_path: str | Path) -> None:
 
 def audit_reference_quads(
     source: Any, vertices_uv: np.ndarray, quad_faces: np.ndarray, *,
-    max_undercoverage_fraction: float = 0.02,
+    max_undercoverage_fraction: float = 1e-7,
     max_overcoverage_fraction: float = 1e-7,
     require_seam_correspondence: bool = True,
 ) -> AuditedQuadMesh:
