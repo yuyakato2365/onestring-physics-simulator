@@ -1,0 +1,53 @@
+name: Audit legal replacement solver ABI of original Zhang Segment
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-numerical-solver-abi-20261027.yml]
+  workflow_dispatch:
+jobs:
+  original-solver-abi:
+    runs-on: windows-2022
+    timeout-minutes: 9
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Fetch authors' source and unmodified binaries
+        run: |
+          python scripts/download_zhang2021_authors.py --directory "$env:RUNNER_TEMP\zhang_solver"
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_solver"
+          python -m pip install pefile
+      - name: Inspect authors' sparse linear solver ABI and proprietary library exports
+        run: |
+          $env:ROOT="$env:RUNNER_TEMP\zhang_solver"
+          @'
+          import os,pefile
+          from pathlib import Path
+          root=Path(os.environ["ROOT"])
+          path=root/"authors_source/Code/Segment/Segment/PardisoSolver.cpp"
+          raw=path.read_bytes()
+          code=raw.decode("utf-16") if raw[:90].count(b"\x00")>6 else raw.decode("utf-8",errors="replace")
+          print("=== ORIGINAL PARDISO SOLVER BEGIN ===")
+          for i,l in enumerate(code.splitlines()[:280],1):
+              print(f"ZPARDISO {i}: {l[:230]}")
+          for p in [root/"authors_source/Code/Segment/Segment/PardisoSolver.h"]:
+              raw=p.read_bytes();code=raw.decode("utf-16") if raw[:90].count(b"\x00")>6 else raw.decode(errors="replace")
+              for i,l in enumerate(code.splitlines()[:150],1): print(f"ZPARDISO_HEADER {i}: {l[:230]}")
+          binary=root/"authors_executables/ExeProgram/Segment.exe"
+          pe=pefile.PE(str(binary),fast_load=True)
+          pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT']])
+          for entry in getattr(pe,"DIRECTORY_ENTRY_IMPORT",[]):
+              name=entry.dll.decode(errors="replace")
+              if "pardiso" in name.lower() or "mkl" in name.lower():
+                  print("PARDISO_NATIVE_IMPORT",name,[x.name.decode(errors="replace") if x.name else x.ordinal for x in entry.imports])
+          lib=root/"authors_executables/ExeProgram/libpardiso600-WIN-X86-64.dll"
+          pe=pefile.PE(str(lib),fast_load=True)
+          pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+          names=[x.name.decode(errors="replace") if x.name else x.ordinal for x in pe.DIRECTORY_ENTRY_EXPORT.symbols]
+          print("PARDISO_NATIVE_EXPORTS",len(names),names[:130])
+          '@ | python -
