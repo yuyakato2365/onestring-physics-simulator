@@ -252,6 +252,9 @@ def test_disabled_initial_split_preserves_m2d_through_simple_split_wrapper(monke
         _build_m2d=lambda *args: initial,
         _lift_m2d_to_m3d=lambda *args: (None, None),
         _optimize_k2d=lambda *args, **kwargs: (None, None),
+        # The 2026-09-14 LSCM K2D installer wraps Simple Split on import.
+        # Supply its independent layout dependency in the test fixture.
+        _make_flat_tile_layout=lambda *args, **kwargs: None,
     )
     debug = SimpleNamespace()
     monkeypatch.setattr(
