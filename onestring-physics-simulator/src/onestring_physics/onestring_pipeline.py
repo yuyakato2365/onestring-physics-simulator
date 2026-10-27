@@ -1055,6 +1055,8 @@ class PipelineParameters(_original.PipelineParameters):
     zhang2021_author_exe_root: str = ""
     zhang2021_author_wine_command: str = ""
     zhang2021_independent_solver_dll: str = ""
+    zhang2021_author_hausdorff_bound: float = 0.01
+    zhang2021_author_sheet_width: float = 0.05
     planar_quad_target_faces: int = 35
     planar_quad_refine_m3d: bool = True
     planar_quad_uv_reparam: bool = True
