@@ -431,9 +431,18 @@ def discover_exact_seam_topology(parameterization, uv_vertices, quad_faces):
         edge_keys[tuple(sorted((ka,kb)))].append((a,b))
     paired=[]
     unmatched=[]
+    # 2026-10-27 Zhang2021 mode only: at a slit tip the two UV sides of a cut
+    # legitimately share the tip vertex; the edges (a,tip) and (tip,b) with
+    # a, b at the same source point are the two copies of the same seam edge.
+    tip_pairs_allowed=bool(getattr(parameterization,"metrics",{}).get(
+        "zhang2021_quad_20261027_enabled",False))
     for key,copies in edge_keys.items():
         # Two distinct UV sides must have distinct vertex IDs.
         if len(copies)==2 and set(copies[0]).isdisjoint(copies[1]):
+            paired.append(copies)
+        elif (tip_pairs_allowed and len(copies)==2
+              and len(set(copies[0])&set(copies[1]))==1
+              and len(set(copies[0])|set(copies[1]))==3):
             paired.append(copies)
         else:
             unmatched.extend(copies)
@@ -997,8 +1006,13 @@ def install_optcuts_exact_seam_closure(pipeline):
     def lift(target,mesh,parameterization,params):
         out,report=old_lift(target,mesh,parameterization,params)
         if (str(getattr(parameterization,"method",""))=="optcuts_test"
-                and bool(parameterization.metrics.get(
-                    "optcuts_area_grid_boundary_enabled",False))):
+                and (bool(parameterization.metrics.get(
+                    "optcuts_area_grid_boundary_enabled",False))
+                     # 2026-10-27 Zhang2021 mode: its OneString chart adapter
+                     # realises every M2D boundary vertex on the source cut,
+                     # so the same certified seam closure applies.
+                     or bool(parameterization.metrics.get(
+                         "zhang2021_quad_20261027_enabled",False)))):
             uv=np.asarray(mesh.vertices,float)[:,:2].copy()
             out._seam_original_m2d_uv=uv
             # Certify the FULL M2D boundary topology *before* K3D. A

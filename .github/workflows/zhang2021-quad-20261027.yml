@@ -1,0 +1,54 @@
+name: Zhang 2021 quad Omega 2026-10-27
+
+on:
+  push:
+    branches:
+      - feature/zhang2021-quad-20261027
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and tests
+        run: python -m pip install -e . pytest shapely
+      - name: Compile new and changed entrypoints
+        run: |
+          python -m py_compile src/onestring_physics/optcuts_zhang2021_quad_20261027.py \
+            src/onestring_physics/zhang2021_quad_reference.py src/onestring_physics/zhang2021_quad_metrics.py \
+            src/onestring_physics/zhang2021_onestring_boundary.py src/onestring_physics/zhang2021_onestring_reparam.py \
+            src/onestring_physics/zhang2021_onestring_seam_matching.py src/onestring_physics/zhang2021_onestring_precondition.py \
+            scripts/setup_zhang2021_quad_official.py \
+            app_optcuts_core_20260916.py app_runtime_base.py
+      - name: Adapter, seam and UI tests (reference programs skipped)
+        run: python -m pytest -q tests/test_zhang2021_quad_20261027.py tests/test_optcuts_planar_quad_ui_20261026.py
+
+  reference-build:
+    # Downloads the authors' code from their public share at run time (it is
+    # not redistributed), applies the portability patch, builds and tests it.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y cmake g++ libeigen3-dev libcgal-dev
+      - name: Install package and tests
+        run: python -m pip install -e . pytest shapely
+      - name: Download, patch and build the reference programs
+        run: python scripts/setup_zhang2021_quad_official.py --jobs 4
+      - name: Tests including the reference programs
+        run: python -m pytest -q tests/test_zhang2021_quad_20261027.py

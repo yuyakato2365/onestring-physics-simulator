@@ -713,6 +713,10 @@ with st.sidebar:
                 # to append it dynamically: direct launches and Streamlit
                 # widget reruns must render the same stable options.
                 "optcuts_planar_quad_20261026",
+                # 2026-10-27: Zhang et al. (CAD 2021) authors' reference
+                # programs + OneString seam/3D chart adapter (separate mode;
+                # the 10-26 Gmsh prototype above is kept for comparison).
+                "optcuts_zhang2021_quad_20261027",
             ],
             format_func=lambda mode: {
                 "bff":"bff — LEGACY harmonic, NOT official BFF",
@@ -720,6 +724,9 @@ with st.sidebar:
                 "rectangular_harmonic_legacy":"rectangular_harmonic_legacy — NOT BFF",
                 "optcuts_planar_quad_20261026":
                     "2026-10-26 | OptCuts → boundary-conforming Planar Quad M2D (Gmsh prototype)",
+                "optcuts_zhang2021_quad_20261027":
+                    "2026-10-27 | OptCuts → Zhang et al. 2021 Quad M2D "
+                    "(authors' reference code) + OneString seam/3D adapter",
             }.get(mode,mode),
             index=2 if (paper_fidelity_enabled
                         or selected_model_version["id"]=="0.2.0-paper-reference-bff") else 0,
@@ -729,7 +736,8 @@ with st.sidebar:
     )
     if paper_fidelity_enabled:
         st.caption(
-            "To select the 2026-10-26 OptCuts → Planar Quad mode, "
+            "To select the 2026-10-26 OptCuts → Planar Quad mode or the "
+            "2026-10-27 OptCuts → Zhang 2021 Quad mode, "
             "turn OFF 'Paper-oriented computation mode (2025 Sec.4–5)' above."
         )
     if omega_parameterization_mode in {"bff", "rectangular_harmonic_legacy"}:
@@ -786,8 +794,38 @@ with st.sidebar:
     # pipeline still uses the proven optcuts_test carrier. The launcher
     # normally handles this conversion; enforce it here too so the mode
     # cannot silently fall back to an unsupported parameterization name.
-    if optcuts_planar_quad_20261026_enabled:
+    optcuts_zhang2021_quad_20261027_enabled = bool(
+        not paper_fidelity_enabled
+        and not optcuts_planar_quad_20261026_enabled
+        and (
+            omega_parameterization_mode == "optcuts_zhang2021_quad_20261027"
+            or (
+                omega_parameterization_mode == "optcuts_test"
+                and st.session_state.get(
+                    "_onestring_zhang2021_quad_20261027_selected", False)
+            )
+        ))
+    if optcuts_planar_quad_20261026_enabled or optcuts_zhang2021_quad_20261027_enabled:
         omega_parameterization_mode = "optcuts_test"
+    zhang2021_target_quads = int(st.session_state.get("onestring_zhang2021_target_quads", 35))
+    zhang2021_hausdorff_ratio = float(st.session_state.get("onestring_zhang2021_hausdorff_ratio", 0.05))
+    zhang2021_collapse_width_ratio = float(st.session_state.get("onestring_zhang2021_collapse_width_ratio", 0.05))
+    zhang2021_keep_features = bool(st.session_state.get("onestring_zhang2021_keep_features", True))
+    zhang2021_snap_seam_nodes = bool(st.session_state.get("onestring_zhang2021_snap_seam_nodes", True))
+    zhang2021_align_seam_pairs = bool(st.session_state.get("onestring_zhang2021_align_seam_pairs", True))
+    zhang2021_seam_matching = bool(st.session_state.get("onestring_zhang2021_seam_matching", True))
+    zhang2021_bin_dir = str(st.session_state.get("onestring_zhang2021_bin_dir", "") or "")
+    zhang2021_downstream_route = str(st.session_state.get(
+        "onestring_zhang2021_downstream_route", "optcuts_test2") or "optcuts_test2")
+    zhang2021_precondition_enabled = bool(st.session_state.get("onestring_zhang2021_precondition_enabled", True))
+    zhang2021_precondition_tolerances = str(st.session_state.get(
+        "onestring_zhang2021_precondition_tolerances", "0,0.02,0.04,0.06,0.1") or "0")
+    zhang2021_candidate_hausdorff_ratios = str(st.session_state.get(
+        "onestring_zhang2021_candidate_hausdorff_ratios", "0.02,0.05,0.08") or "")
+    zhang2021_precondition_sd_mean_ratio_max = float(st.session_state.get(
+        "onestring_zhang2021_precondition_sd_mean_ratio_max", 1.08))
+    zhang2021_precondition_sd_p95_ratio_max = float(st.session_state.get(
+        "onestring_zhang2021_precondition_sd_p95_ratio_max", 1.30))
     planar_quad_target_faces = int(st.session_state.get("onestring_planar_quad_target_faces", 35))
     planar_quad_refine_m3d = bool(st.session_state.get("onestring_planar_quad_refine_m3d", True))
     planar_quad_uv_reparam = bool(st.session_state.get("onestring_planar_quad_uv_reparam", True))
@@ -2087,6 +2125,21 @@ def current_pipeline_key() -> tuple:
         planar_quad_target_faces,
         planar_quad_refine_m3d,
         planar_quad_uv_reparam,
+        optcuts_zhang2021_quad_20261027_enabled,
+        zhang2021_target_quads,
+        zhang2021_hausdorff_ratio,
+        zhang2021_collapse_width_ratio,
+        zhang2021_keep_features,
+        zhang2021_snap_seam_nodes,
+        zhang2021_align_seam_pairs,
+        zhang2021_seam_matching,
+        zhang2021_bin_dir,
+        zhang2021_downstream_route,
+        zhang2021_precondition_enabled,
+        zhang2021_precondition_tolerances,
+        zhang2021_candidate_hausdorff_ratios,
+        zhang2021_precondition_sd_mean_ratio_max,
+        zhang2021_precondition_sd_p95_ratio_max,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
         bff_nonpaper_tutte_rescue_enabled,
@@ -2259,6 +2312,21 @@ pipeline_params = PipelineParameters(
     planar_quad_target_faces=planar_quad_target_faces,
     planar_quad_refine_m3d=planar_quad_refine_m3d,
     planar_quad_uv_reparam=planar_quad_uv_reparam,
+    optcuts_zhang2021_quad_20261027_enabled=optcuts_zhang2021_quad_20261027_enabled,
+    zhang2021_target_quads=zhang2021_target_quads,
+    zhang2021_hausdorff_ratio=zhang2021_hausdorff_ratio,
+    zhang2021_collapse_width_ratio=zhang2021_collapse_width_ratio,
+    zhang2021_keep_features=zhang2021_keep_features,
+    zhang2021_snap_seam_nodes=zhang2021_snap_seam_nodes,
+    zhang2021_align_seam_pairs=zhang2021_align_seam_pairs,
+    zhang2021_seam_matching=zhang2021_seam_matching,
+    zhang2021_bin_dir=zhang2021_bin_dir,
+    zhang2021_downstream_route=zhang2021_downstream_route,
+    zhang2021_precondition_enabled=zhang2021_precondition_enabled,
+    zhang2021_precondition_tolerances=zhang2021_precondition_tolerances,
+    zhang2021_candidate_hausdorff_ratios=zhang2021_candidate_hausdorff_ratios,
+    zhang2021_precondition_sd_mean_ratio_max=zhang2021_precondition_sd_mean_ratio_max,
+    zhang2021_precondition_sd_p95_ratio_max=zhang2021_precondition_sd_p95_ratio_max,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
     paper_split_criterion=paper_split_criterion,

@@ -51,6 +51,7 @@ from onestring_physics.optcuts_grid_native_lift_patch import install_native_grid
 from onestring_physics.optcuts_grid_constrained_m2d_patch import install_optcuts_grid_constrained_m2d_patch  # noqa: E402
 from onestring_physics.optcuts_planar_quad_20261026 import install_planar_quad_20261026  # noqa: E402
 from onestring_physics.optcuts_planar_quad_downstream_20261026 import install_unstructured_quad_downstream_20261026  # noqa: E402
+from onestring_physics.optcuts_zhang2021_quad_20261027 import install_zhang2021_quad_20261027  # noqa: E402
 from onestring_physics.optcuts_grid_consistency_patch import install_optcuts_grid_consistency_patch  # noqa: E402
 from onestring_physics.optcuts_test_k3d_augmented_lagrangian_patch import (  # noqa: E402
     install_optcuts_test_k3d_augmented_lagrangian_patch,
@@ -93,6 +94,7 @@ def _install_optcuts_selector() -> None:
             "optcuts_area_grid_combined",
             "optcuts_grid_seam_native",
             "optcuts_planar_quad_20261026",
+            "optcuts_zhang2021_quad_20261027",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -103,6 +105,9 @@ def _install_optcuts_selector() -> None:
         def label_for_mode(mode):
             if mode=="optcuts_planar_quad_20261026":
                 return "2026-10-26 | OptCuts → boundary-conforming Planar Quad M2D (Gmsh prototype)"
+            if mode=="optcuts_zhang2021_quad_20261027":
+                return ("2026-10-27 | OptCuts → Zhang et al. 2021 Quad M2D "
+                        "(authors' reference code) + OneString seam/3D adapter")
             if mode=="optcuts_grid_aware":
                 return "2026-10-23 | Grid-aware OptCuts Ω + paper-aligned K3D/K2D (UV refinement)"
             if mode=="optcuts_area_grid_boundary":
@@ -126,9 +131,14 @@ def _install_optcuts_selector() -> None:
             value == "optcuts_grid_aware"
         )
         st.session_state["_onestring_area_grid_boundary_omega_selected"] = (
-            value == "optcuts_area_grid_boundary" or (value in experimental and value != "optcuts_planar_quad_20261026")
+            value == "optcuts_area_grid_boundary" or (
+                value in experimental
+                and value not in {"optcuts_planar_quad_20261026",
+                                  "optcuts_zhang2021_quad_20261027"})
         )
         st.session_state["_onestring_planar_quad_20261026_selected"] = (value == "optcuts_planar_quad_20261026")
+        st.session_state["_onestring_zhang2021_quad_20261027_selected"] = (
+            value == "optcuts_zhang2021_quad_20261027")
         st.session_state["_onestring_grid_seam_native_selected"] = (
             value == "optcuts_grid_seam_native")
         st.session_state["_onestring_area_grid_optimizations"] = {
@@ -198,6 +208,81 @@ def _install_optcuts_selector() -> None:
             st.checkbox("M3D-aware quad refinement when panels are distorted", value=True,
                         key="onestring_planar_quad_refine_m3d")
             st.caption("Optional dependencies: python3 -m pip install gmsh shapely")
+        elif value == "optcuts_zhang2021_quad_20261027":
+            st.caption(
+                "2026-10-27: official OptCuts UV chart → Zhang, Chai, Liu, Fu, "
+                "'Quad meshing with coarse layouts for planar domains' (CAD 2021) — "
+                "the AUTHORS' reference programs Straighten/Segment/QMSim, run exactly "
+                "as their WholePipeline.bat (portable build, no algorithmic change). "
+                "OneString extension (separate, reported as zhang2021_onestring_*): "
+                "seam-aware boundary correspondence + bijective SLIM chart so every "
+                "quad corner lifts exactly onto S and the OptCuts cut. No Gmsh, no "
+                "cropped grid, no silent fallback. Setup: "
+                "python3 scripts/setup_zhang2021_quad_official.py"
+            )
+            st.number_input(
+                "Zhang 2021: target quad count N_tar (paper default 4000)",
+                min_value=4, max_value=200000, value=35, step=1,
+                key="onestring_zhang2021_target_quads",
+                help="The paper's target number of quads. The Hausdorff bound and "
+                     "boundary feature points take precedence; the ACTUAL count is reported "
+                     "and is not relabelled as the target.",
+            )
+            st.number_input(
+                "Zhang 2021: Hausdorff bound ε (× bbox diagonal; paper default 0.01)",
+                min_value=0.001, max_value=0.5, value=0.05, step=0.005, format="%.3f",
+                key="onestring_zhang2021_hausdorff_ratio",
+                help="Two-sided Hausdorff bound between the quad mesh and Ω. "
+                     "0.01 (paper) gives thousands of quads on typical OptCuts charts.",
+            )
+            st.number_input(
+                "Zhang 2021: poly-chord collapse width limit l_collapse (× bbox diagonal; paper default 0.05)",
+                min_value=0.001, max_value=0.5, value=0.05, step=0.005, format="%.3f",
+                key="onestring_zhang2021_collapse_width_ratio",
+            )
+            st.checkbox("Zhang 2021: keep boundary feature points (paper default)",
+                        value=True, key="onestring_zhang2021_keep_features")
+            st.checkbox("OneString: snap quad corners to OptCuts seam nodes",
+                        value=True, key="onestring_zhang2021_snap_seam_nodes")
+            st.checkbox("OneString: align both sides of a cut when their quad counts match (hard seam)",
+                        value=True, key="onestring_zhang2021_align_seam_pairs")
+            st.checkbox("OneString: equalize quad counts on both sides of every cut by poly-chord insertion "
+                        "(adds quads to the paper's mesh; applied only if every cut becomes matchable)",
+                        value=True, key="onestring_zhang2021_seam_matching")
+            st.text_input("Zhang 2021 reference binaries directory (optional)",
+                          value="", key="onestring_zhang2021_bin_dir",
+                          placeholder="third_party/Zhang2021_QuadCoarseLayout_official/build/onestring_port")
+            st.checkbox(
+                "OneString: pre-condition Ω before Zhang (simplify ∂Ω + bijective SLIM), then pick the best candidate",
+                value=True, key="onestring_zhang2021_precondition_enabled",
+                help="2026-10-26 design order: OptCuts → h (boundary simplification with Hausdorff ≤ tol, "
+                     "seam nodes fixed, symmetric-Dirichlet SLIM inside) → Zhang 2021 → adapter. Candidates "
+                     "(tol × ε) are scored on panel count, odd-valence vertices, cut-tip valence, M3D angle and "
+                     "UV distortion; all candidates are reported. Not part of Zhang et al. 2021.",
+            )
+            st.text_input("Pre-conditioning tolerances (× bbox diagonal, 0 = none)",
+                          value="0,0.02,0.04,0.06,0.1", key="onestring_zhang2021_precondition_tolerances")
+            st.text_input("Zhang ε candidates (× bbox diagonal)",
+                          value="0.02,0.05,0.08", key="onestring_zhang2021_candidate_hausdorff_ratios")
+            st.number_input("Pre-conditioning limit: SD mean ratio (design 1.035 / 1.08)",
+                            min_value=1.0, max_value=3.0, value=1.08, step=0.01, format="%.3f",
+                            key="onestring_zhang2021_precondition_sd_mean_ratio_max")
+            st.number_input("Pre-conditioning limit: SD p95 ratio",
+                            min_value=1.0, max_value=5.0, value=1.30, step=0.05, format="%.2f",
+                            key="onestring_zhang2021_precondition_sd_p95_ratio_max")
+            st.selectbox(
+                "OneString downstream route for the Zhang M2D (K3D/K2D/T2D)",
+                ["optcuts_test2", "paper_local_global_0918"],
+                index=0, key="onestring_zhang2021_downstream_route",
+                format_func=lambda r: {
+                    "optcuts_test2": "optcuts_test2: AL K3D + certified OptCuts Seam closure, kinematic K2D, legacy Dual Hinge T2D",
+                    "paper_local_global_0918": "paper_local_global_0918: same K3D/K2D/T2D solvers as the 2026-09-18 Grid route "
+                                               "(Sec. 4.3 linkage; no Seam closure; needs even interior valences)",
+                }[r],
+                help="Not part of Zhang et al. 2021. The 09-18 route uses the alternating corner "
+                     "linkage, which fails explicitly (no fallback) when the quad mesh has odd-valence "
+                     "interior vertices.",
+            )
         elif value in experimental:
             st.caption(
                 "Isolated 10/23 OptCuts area-grid experiment; exact 50% mask, "
@@ -480,6 +565,8 @@ install_optcuts_test2_acceleration_patch(pipeline)
 install_optcuts_exact_seam_closure(pipeline)
 # Outermost adapter: intercept only the explicit 2026-10-26 mode.
 install_planar_quad_20261026(pipeline)
+# Independent 2026-10-27 Zhang2021 mode (inactive unless selected).
+install_zhang2021_quad_20261027(pipeline)
 install_unstructured_quad_downstream_20261026()
 package.onestring_pipeline = pipeline
 package.build_onestring_design = pipeline.build_onestring_design

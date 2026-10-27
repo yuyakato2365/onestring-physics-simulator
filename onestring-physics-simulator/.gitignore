@@ -82,3 +82,7 @@ third_party/affine-body-dynamics/CONTRIBUTION.md
 .onestring_history/
 .paper_cache/
 .onestring_optcuts_binary
+
+# Zhang et al. 2021 reference code: downloaded + patched + built by
+# scripts/setup_zhang2021_quad_official.py (no license file; never commit)
+third_party/Zhang2021_QuadCoarseLayout_official/

@@ -1051,6 +1051,29 @@ class PipelineParameters(_original.PipelineParameters):
     planar_quad_refine_m3d: bool = True
     planar_quad_uv_reparam: bool = True
     planar_quad_uv_reparam_intensity: float = 0.12
+    # 2026-10-27 mode: OptCuts -> Zhang et al. (CAD 2021) quad M2D via the
+    # authors' reference programs + OneString seam/3D chart adapter.  OFF by
+    # default; independent of the 2026-10-26 Gmsh prototype above.
+    optcuts_zhang2021_quad_20261027_enabled: bool = False
+    zhang2021_target_quads: int = 35
+    zhang2021_hausdorff_ratio: float = 0.05
+    zhang2021_collapse_width_ratio: float = 0.05
+    zhang2021_keep_features: bool = True
+    zhang2021_snap_seam_nodes: bool = True
+    zhang2021_align_seam_pairs: bool = True
+    zhang2021_seam_matching: bool = True
+    zhang2021_bin_dir: str = ""
+    zhang2021_timeout_seconds: float = 3600.0
+    # OneString downstream for the Zhang M2D: "optcuts_test2" (Seam closure)
+    # or "paper_local_global_0918" (the 2026-09-18 Grid-route K3D/K2D/T2D).
+    zhang2021_downstream_route: str = "optcuts_test2"
+    # 2026-10-26 design order: pre-condition Omega (boundary simplification +
+    # bijective SLIM) BEFORE Zhang quad meshing, then pick the best candidate.
+    zhang2021_precondition_enabled: bool = True
+    zhang2021_precondition_tolerances: str = "0,0.02,0.04,0.06,0.1"
+    zhang2021_candidate_hausdorff_ratios: str = "0.02,0.05,0.08"
+    zhang2021_precondition_sd_mean_ratio_max: float = 1.08
+    zhang2021_precondition_sd_p95_ratio_max: float = 1.30
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",

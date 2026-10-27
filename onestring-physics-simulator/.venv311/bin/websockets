@@ -1,0 +1,6 @@
+#!/Users/yuyakato/Documents/onestring-postcut-rebff/onestring-planar-quad-audit-20261026/onestring-physics-simulator/.venv311/bin/python3
+import sys
+from websockets.cli import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

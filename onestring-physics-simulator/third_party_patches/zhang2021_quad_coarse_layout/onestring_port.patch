@@ -1,0 +1,1873 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 0000000..fd70d8a
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,60 @@
++# OneString portability build for the authors' reference implementation of
++#   C. Zhang, S. Chai, L. Liu, X.-M. Fu,
++#   "Quad meshing with coarse layouts for planar domains", CAD 140 (2021) 103084.
++# Only build-system / platform-compatibility files live in onestring_port/.
++cmake_minimum_required(VERSION 3.16)
++project(zhang2021_quad_coarse_layout CXX C)
++
++set(CMAKE_CXX_STANDARD 14)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++if(NOT CMAKE_BUILD_TYPE)
++  set(CMAKE_BUILD_TYPE Release)
++endif()
++
++find_package(Eigen3 3.3 REQUIRED NO_MODULE)
++find_package(OpenMP)
++# CGAL (header-only >= 5.0; needs Boost, GMP, MPFR) is used by the authors'
++# CGAL_AABBTree.h in Segment and QMSim.
++find_package(CGAL REQUIRED)
++if(NOT OpenMP_CXX_FOUND)
++  message(WARNING "OpenMP not found: Segment is built WITHOUT OpenMP, unlike the "
++                  "authors' Release|x64 build (results stay valid but may differ "
++                  "in floating-point summation order). On macOS: brew install libomp "
++                  "and pass -DOpenMP_ROOT=$(brew --prefix libomp).")
++endif()
++
++set(Z21_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
++set(Z21_PORT ${Z21_ROOT}/onestring_port)
++
++# ---------------------------------------------------------------- OpenMesh 7.1
++# The authors bundle OpenMesh 7.1 sources; compile its Core as a static lib.
++set(OM_ROOT ${Z21_ROOT}/Segment/ThirdParty/include)
++file(GLOB_RECURSE OM_CC ${OM_ROOT}/OpenMesh/Core/*.cc)
++list(FILTER OM_CC EXCLUDE REGEX ".*T\\.cc$")
++list(FILTER OM_CC EXCLUDE REGEX ".*/Templates/.*")
++add_library(z21_openmesh STATIC ${OM_CC})
++target_include_directories(z21_openmesh PUBLIC ${OM_ROOT})
++target_compile_definitions(z21_openmesh PUBLIC _USE_MATH_DEFINES OM_STATIC_BUILD)
++set_target_properties(z21_openmesh PROPERTIES POSITION_INDEPENDENT_CODE ON)
++
++# --------------------------------------------------------------------- ANN 1.1
++file(GLOB ANN_CPP ${OM_ROOT}/ANN/*.cpp)
++add_library(z21_ann STATIC ${ANN_CPP})
++target_include_directories(z21_ann PUBLIC ${OM_ROOT} ${OM_ROOT}/ANN)
++
++function(z21_common target)
++  target_include_directories(${target} PRIVATE ${Z21_PORT}/include)
++  target_link_libraries(${target} PRIVATE z21_openmesh z21_ann Eigen3::Eigen)
++  target_compile_definitions(${target} PRIVATE _USE_MATH_DEFINES NDEBUG Z21_ONESTRING_PORT)
++  target_compile_options(${target} PRIVATE -include ${Z21_PORT}/include/z21_compat.h)
++endfunction()
++
++# OpenMP is enabled exactly where the authors' Release|x64 projects enable it:
++# Segment.vcxproj (OpenMPSupport=true); QuadMeshSimplify.vcxproj and
++# Straighten.vcxproj build without OpenMP (pragmas ignored -> serial,
++# deterministic reductions).  Floating-point contraction is disabled to match
++# MSVC /fp:precise without /arch:AVX2 (no FMA).
++add_compile_options(-ffp-contract=off)
++add_subdirectory(onestring_port/segment)
++add_subdirectory(onestring_port/qmsim)
++add_subdirectory(onestring_port/straighten)
+diff --git a/QuadMeshSimplify/QuadMeshSimplify/AssistFunc.cpp b/QuadMeshSimplify/QuadMeshSimplify/AssistFunc.cpp
+index 2bb454d..7270a2c 100644
+--- a/QuadMeshSimplify/QuadMeshSimplify/AssistFunc.cpp
++++ b/QuadMeshSimplify/QuadMeshSimplify/AssistFunc.cpp
+@@ -26,3 +26,3 @@ namespace AssistFunctions
+ 		s2 = std::sqrt((tempS1 - tempS2)*0.5);
+-		long double tempValue = 4 * (long double(a)*long double(d) - long double(b) * long double(c)) * (long double(a)*long double(d) - long double(b) * long double(c));
++		long double tempValue = 4 * ((long double)(a)*(long double)(d) - (long double)(b) * (long double)(c)) * ((long double)(a)*(long double)(d) - (long double)(b) * (long double)(c));
+ 		s2 = std::sqrt((tempValue/(tempS1 + tempS2))*0.5);
+diff --git a/QuadMeshSimplify/QuadMeshSimplify/CrossfieldDesign.h b/QuadMeshSimplify/QuadMeshSimplify/CrossfieldDesign.h
+index 8086715..5b9b93b 100644
+--- a/QuadMeshSimplify/QuadMeshSimplify/CrossfieldDesign.h
++++ b/QuadMeshSimplify/QuadMeshSimplify/CrossfieldDesign.h
+@@ -4,4 +4,4 @@
+ 
+-#include <Eigen\Eigen>
+-#include <Eigen\Sparse>
++#include <Eigen/Eigen>
++#include <Eigen/Sparse>
+ #include <Eigen/OrderingMethods>
+diff --git a/QuadMeshSimplify/QuadMeshSimplify/Parafun.h b/QuadMeshSimplify/QuadMeshSimplify/Parafun.h
+index 8e1aa45..e1cba2a 100644
+--- a/QuadMeshSimplify/QuadMeshSimplify/Parafun.h
++++ b/QuadMeshSimplify/QuadMeshSimplify/Parafun.h
+@@ -8,6 +8,6 @@
+ #include<fstream>
+-#include"Eigen\src\Eigenvalues\EigenSolver.h"
++#include"Eigen/src/Eigenvalues/EigenSolver.h"
+ #include"Eigen/Dense"
+ #include"Eigen/Sparse"
+-#include <Eigen\SparseCholesky>
++#include <Eigen/SparseCholesky>
+ #include "Eigen/SVD"
+diff --git a/QuadMeshSimplify/QuadMeshSimplify/SplicePipeline.h b/QuadMeshSimplify/QuadMeshSimplify/SplicePipeline.h
+index c572da1..af47059 100644
+--- a/QuadMeshSimplify/QuadMeshSimplify/SplicePipeline.h
++++ b/QuadMeshSimplify/QuadMeshSimplify/SplicePipeline.h
+@@ -232,4 +232,4 @@ namespace DataOperation
+ 
+-		MyMesh *triBefore_, *triAfter_;
+-		ANNkd_tree *afterKDTree_;
++		MyMesh *triBefore_ = NULL, *triAfter_ = NULL;	// portability: were uninitialised (UB in ~SplicePipeline)
++		ANNkd_tree *afterKDTree_ = NULL;
+ 
+diff --git a/QuadMeshSimplify/QuadMeshSimplify/main.cpp b/QuadMeshSimplify/QuadMeshSimplify/main.cpp
+index 61cf954..f8464d5 100644
+--- a/QuadMeshSimplify/QuadMeshSimplify/main.cpp
++++ b/QuadMeshSimplify/QuadMeshSimplify/main.cpp
+@@ -149,3 +149,3 @@ void UpdateTriMeshProperties(MyMesh &mesh)
+ 
+-void main(int argc, char *argv[])
++int main(int argc, char *argv[]) // portability: ISO C++ requires int main
+ {
+diff --git a/Segment/Segment/AssistFunc.cpp b/Segment/Segment/AssistFunc.cpp
+index 75f1520..57d8b0d 100644
+--- a/Segment/Segment/AssistFunc.cpp
++++ b/Segment/Segment/AssistFunc.cpp
+@@ -28,3 +28,3 @@ namespace AssistFunctions
+ 		s2 = std::sqrt((tempS1 - tempS2)*0.5);
+-		long double tempValue = 4 * (long double(a)*long double(d) - long double(b) * long double(c)) * (long double(a)*long double(d) - long double(b) * long double(c));
++		long double tempValue = 4 * ((long double)(a)*(long double)(d) - (long double)(b) * (long double)(c)) * ((long double)(a)*(long double)(d) - (long double)(b) * (long double)(c));
+ 		s2 = std::sqrt((tempValue/(tempS1 + tempS2))*0.5);
+diff --git a/Segment/Segment/CrossfieldDesign.cpp b/Segment/Segment/CrossfieldDesign.cpp
+index a166037..ad4cbc3 100644
+--- a/Segment/Segment/CrossfieldDesign.cpp
++++ b/Segment/Segment/CrossfieldDesign.cpp
+@@ -151,3 +151,3 @@ void CrossfieldDesign::solve_complex4()
+ 	x1 = complex_solver.solve(b);
+-	if (!complex_solver.m_factorizationIsOk)
++	if (complex_solver.info() != Eigen::Success) // portability: m_factorizationIsOk is protected in Eigen 3.3/3.4; info() is set together with it
+ 	{
+diff --git a/Segment/Segment/CrossfieldDesign.h b/Segment/Segment/CrossfieldDesign.h
+index 3c7a7af..f651ae8 100644
+--- a/Segment/Segment/CrossfieldDesign.h
++++ b/Segment/Segment/CrossfieldDesign.h
+@@ -4,4 +4,4 @@
+ 
+-#include <Eigen\Eigen>
+-#include <Eigen\Sparse>
++#include <Eigen/Eigen>
++#include <Eigen/Sparse>
+ #include <Eigen/OrderingMethods>
+diff --git a/Segment/Segment/MyPCA.cpp b/Segment/Segment/MyPCA.cpp
+index de459e4..c562917 100644
+--- a/Segment/Segment/MyPCA.cpp
++++ b/Segment/Segment/MyPCA.cpp
+@@ -2,3 +2,3 @@
+ #include "MyPCA.h"
+-#include <Eigen/EigenValues>
++#include <Eigen/Eigenvalues>
+ 
+diff --git a/Segment/Segment/Parafun.h b/Segment/Segment/Parafun.h
+index 01093b5..d9ee9c6 100644
+--- a/Segment/Segment/Parafun.h
++++ b/Segment/Segment/Parafun.h
+@@ -8,6 +8,6 @@
+ #include<fstream>
+-#include"Eigen\src\Eigenvalues\EigenSolver.h"
++#include"Eigen/src/Eigenvalues/EigenSolver.h"
+ #include"Eigen/Dense"
+ #include"Eigen/Sparse"
+-#include <Eigen\SparseCholesky>
++#include <Eigen/SparseCholesky>
+ #include "Eigen/SVD"
+diff --git a/Segment/Segment/main.cpp b/Segment/Segment/main.cpp
+index ba0dcb3..9324e99 100644
+--- a/Segment/Segment/main.cpp
++++ b/Segment/Segment/main.cpp
+@@ -35,3 +35,3 @@ bool BEFORE_FIELD = false;
+ 
+-void main(int argc, char *argv[])
++int main(int argc, char *argv[]) // portability: ISO C++ requires int main
+ {
+@@ -61,3 +61,3 @@ void main(int argc, char *argv[])
+ 		std::cout << "Mesh Problem! " << std::endl;
+-		return;
++		return 1;
+ 	}
+diff --git a/Straighten/Straighten/ChartDeformation.cpp b/Straighten/Straighten/ChartDeformation.cpp
+index 9d1d82f..9bfd06a 100644
+--- a/Straighten/Straighten/ChartDeformation.cpp
++++ b/Straighten/Straighten/ChartDeformation.cpp
+@@ -7,5 +7,5 @@
+ 
+-#include "Common\CommonFunctions.h"
+-#include "Optimization\Numeric\FastMath.h"
+-#include "Mosek\ConvexQuadOptimization.h"
++#include "Common/CommonFunctions.h"
++#include "Optimization/Numeric/FastMath.h"
++#include "Mosek/ConvexQuadOptimization.h"
+ 
+diff --git a/Straighten/Straighten/ChartDeformation.h b/Straighten/Straighten/ChartDeformation.h
+index 0236989..5734b6b 100644
+--- a/Straighten/Straighten/ChartDeformation.h
++++ b/Straighten/Straighten/ChartDeformation.h
+@@ -5,4 +5,4 @@
+ 
+-#include "Eigen\Eigen"
+-#include "Eigen\Sparse"
++#include "Eigen/Eigen"
++#include "Eigen/Sparse"
+ 
+@@ -78,13 +78,13 @@ public:
+ 
+-	void rotating_angle_evalfunc(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>());
+-	void rotating_angle_evalfunc_with_hole(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>());
++	void rotating_angle_evalfunc(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
++	void rotating_angle_evalfunc_with_hole(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
+ 
+ 	template <bool GRADIENT>
+-	double align_energy_evalfunc_with_hole(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>());
++	double align_energy_evalfunc_with_hole(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
+ 	template <bool GRADIENT>
+-	double align_energy_evalfunc(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>());
++	double align_energy_evalfunc(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
+ 	template <bool EXP_ENERGY, bool GRADIENT, bool FIX_POINTS>
+-	double amips_energy_evalfunc(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>());
++	double amips_energy_evalfunc(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
+ 	template <bool GRADIENT, bool HESSIAN_P, bool FIX_POINTS>
+-	double dirichlet_energy_evalfunc(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>(), Eigen::SparseMatrix<double>& h = Eigen::SparseMatrix<double>());
++	double dirichlet_energy_evalfunc(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()), Eigen::SparseMatrix<double>& h = z21_lvalue(Eigen::SparseMatrix<double>()));
+ 
+@@ -103,5 +103,5 @@ public:
+ 	template <bool EXP_ENERGY, bool GRADIENT, bool FIX_POINTS>
+-	double amips_energy_evalfunc1(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>());
++	double amips_energy_evalfunc1(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
+ 	template <bool GRADIENT, bool HESSIAN_P, bool FIX_POINTS>
+-	double dirichlet_energy_evalfunc1(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>(), Eigen::SparseMatrix<double>& h = Eigen::SparseMatrix<double>());
++	double dirichlet_energy_evalfunc1(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()), Eigen::SparseMatrix<double>& h = z21_lvalue(Eigen::SparseMatrix<double>()));
+ 	Mesh mesh_temp;	
+@@ -143,5 +143,5 @@ public:
+ 	template <bool GRADIENT>
+-	double align_energy_evalfunc1_with_hole(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>());
++	double align_energy_evalfunc1_with_hole(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
+ 	template <bool GRADIENT>
+-	double align_energy_evalfunc1(const std::vector<double>& x, double& f, std::vector<double>& g = std::vector<double>());
++	double align_energy_evalfunc1(const std::vector<double>& x, double& f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
+ 	void get_align_direction_corner_with_hole();
+@@ -156,3 +156,3 @@ public:
+ 	template <bool GRADIENT>
+-	double line_energy_evalfunc(const std::vector<double>& x, double & f, std::vector<double>& g = std::vector<double>());
++	double line_energy_evalfunc(const std::vector<double>& x, double & f, std::vector<double>& g = z21_lvalue(std::vector<double>()));
+ 	template <bool EXP_ENERGY>
+diff --git a/Straighten/Straighten/ChartDeformation_Deform.cpp b/Straighten/Straighten/ChartDeformation_Deform.cpp
+index e6f92f8..67338c6 100644
+--- a/Straighten/Straighten/ChartDeformation_Deform.cpp
++++ b/Straighten/Straighten/ChartDeformation_Deform.cpp
+@@ -4,5 +4,5 @@
+ 
+-#include "Optimization\Numeric\fmath.hpp"
+-#include "Common\CommonFunctions.h"
+-#include "Optimization\HLBFGS\HLBFGS.h"
++#include "Optimization/Numeric/fmath.hpp"
++#include "Common/CommonFunctions.h"
++#include "Optimization/HLBFGS/HLBFGS.h"
+ 
+diff --git a/Straighten/Straighten/ChartUntangle.h b/Straighten/Straighten/ChartUntangle.h
+index 2d445b5..8f8a670 100644
+--- a/Straighten/Straighten/ChartUntangle.h
++++ b/Straighten/Straighten/ChartUntangle.h
+@@ -55,3 +55,3 @@ private:
+ 	template <bool GRADIENT>
+-	double calc_energy(const solution& sol, solution& grad = solution());
++	double calc_energy(const solution& sol, solution& grad = z21_lvalue(solution()));
+ 
+diff --git a/Straighten/Straighten/MeshViewer/Auxiliary_Function_Mesh.cpp b/Straighten/Straighten/MeshViewer/Auxiliary_Function_Mesh.cpp
+index 3176359..6fee458 100644
+--- a/Straighten/Straighten/MeshViewer/Auxiliary_Function_Mesh.cpp
++++ b/Straighten/Straighten/MeshViewer/Auxiliary_Function_Mesh.cpp
+@@ -1,4 +1,4 @@
+ #include "InteractiveViewerWidget.h"
+-#include "..\Common\TimeProfiler.h"
+-#include <Eigen\Dense>
++#include "../Common/TimeProfiler.h"
++#include <Eigen/Dense>
+ 
+diff --git a/Straighten/Straighten/MeshViewer/InteractiveViewerWidget.h b/Straighten/Straighten/MeshViewer/InteractiveViewerWidget.h
+index 91fcda2..2a20129 100644
+--- a/Straighten/Straighten/MeshViewer/InteractiveViewerWidget.h
++++ b/Straighten/Straighten/MeshViewer/InteractiveViewerWidget.h
+@@ -4,3 +4,3 @@
+ #include "MeshViewerWidget.h"
+-#include "ANN\ANN.h"
++#include "ANN/ANN.h"
+ 
+diff --git a/Straighten/Straighten/MeshViewer/MeshParamDialog.cpp b/Straighten/Straighten/MeshViewer/MeshParamDialog.cpp
+index 0c79eff..eb4053e 100644
+--- a/Straighten/Straighten/MeshViewer/MeshParamDialog.cpp
++++ b/Straighten/Straighten/MeshViewer/MeshParamDialog.cpp
+@@ -4,3 +4,3 @@
+ 
+-#include "Common\CommonDefinitions.h"
++#include "Common/CommonDefinitions.h"
+ 
+diff --git a/Straighten/Straighten/MeshViewer/Mesh_doubleIO.cpp b/Straighten/Straighten/MeshViewer/Mesh_doubleIO.cpp
+index f3d58de..e7c9ea6 100644
+--- a/Straighten/Straighten/MeshViewer/Mesh_doubleIO.cpp
++++ b/Straighten/Straighten/MeshViewer/Mesh_doubleIO.cpp
+@@ -134,2 +134,3 @@ bool Mesh_doubleIO::load_obj(Mesh& _mesh, const char* _filename, bool load_textu
+ 		std::getline(obj_file, line);
++		if (!line.empty() && line.back() == '\r') line.pop_back(); // portability: Windows text-mode CRLF translation
+ 		if (line == "") continue;
+diff --git a/Straighten/Straighten/MeshViewer/QGLViewerWidget.h b/Straighten/Straighten/MeshViewer/QGLViewerWidget.h
+index 2d38374..731dfac 100644
+--- a/Straighten/Straighten/MeshViewer/QGLViewerWidget.h
++++ b/Straighten/Straighten/MeshViewer/QGLViewerWidget.h
+@@ -5,3 +5,3 @@
+ #include "OpenglHeaders.h"
+-#include "..\Common\CommonDefinitions.h"
++#include "../Common/CommonDefinitions.h"
+ 
+diff --git a/Straighten/Straighten/MyParafun.h b/Straighten/Straighten/MyParafun.h
+index 5372ff6..0c3cb18 100644
+--- a/Straighten/Straighten/MyParafun.h
++++ b/Straighten/Straighten/MyParafun.h
+@@ -8,11 +8,11 @@
+ #include<fstream>
+-#include"Eigen\src\Eigenvalues\EigenSolver.h"
++#include"Eigen/src/Eigenvalues/EigenSolver.h"
+ #include"Eigen/Dense"
+ #include"Eigen/Sparse"
+-#include <Eigen\SparseCholesky>
++#include <Eigen/SparseCholesky>
+ #include "Eigen/SVD"
+-#include "MeshViewer\MeshDefinition.h"
++#include "MeshViewer/MeshDefinition.h"
+ #include <OpenMesh/Core/IO/MeshIO.hh>
+ 
+-#include "Scaffold\PardisoSolver.h"
++#include "Scaffold/PardisoSolver.h"
+ #include "MyAnderson.h"
+diff --git a/Straighten/Straighten/Optimization/Numeric/fmath.hpp b/Straighten/Straighten/Optimization/Numeric/fmath.hpp
+index 66c6012..be89b92 100644
+--- a/Straighten/Straighten/Optimization/Numeric/fmath.hpp
++++ b/Straighten/Straighten/Optimization/Numeric/fmath.hpp
+@@ -35,2 +35,11 @@
+ #include <string.h> // for memcpy
++// OneString portability (non-x86 hosts, e.g. Apple Silicon): x86 intrinsics are
++// compiled only on x86.  Elsewhere the authors' own scalar #else branches of
++// exp()/expd() are used; they perform the same IEEE operations (bitwise equal
++// results).  SSE/AVX-only helpers are not compiled there (unused by the authors).
++#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
++#define Z21_FMATH_X86 1
++#else
++#define Z21_FMATH_X86 0
++#endif
+ #if defined(_WIN32) && !defined(__GNUC__)
+@@ -44,3 +53,5 @@
+ 	#endif
+-	#if __GNUC_PREREQ(4, 4) || !defined(__GNUC__)
++	#if !Z21_FMATH_X86
++		/* no x86 intrinsics */
++	#elif __GNUC_PREREQ(4, 4) || !defined(__GNUC__)
+ 		/* GCC >= 4.4 and non-GCC compilers */
+@@ -414,3 +425,3 @@ inline float exp(float x)
+ 
+-#if 1
++#if Z21_FMATH_X86
+ 	__m128 x1 = _mm_set_ss(x);
+@@ -453,3 +464,3 @@ inline double expd(double x)
+ 	const ExpdVar<>& c = C<>::expdVar;
+-#if 1
++#if Z21_FMATH_X86
+ 	const double _b = double(uint64_t(3) << 51);
+@@ -531,2 +542,3 @@ __m128i iaxL = _mm_castpd_si128(_mm_load_sd((const double*)&c.tbl[adr0]));
+ */
++#if Z21_FMATH_X86
+ inline void expd_v(double *px, size_t n)
+@@ -615,3 +627,5 @@ inline void expd_v(double *px, size_t n)
+ }
++#endif // Z21_FMATH_X86
+ 
++#if Z21_FMATH_X86
+ #ifdef FMATH_USE_XBYAK
+@@ -724,2 +738,3 @@ inline __m256 exp_ps256(__m256 x)
+ #endif
++#endif // Z21_FMATH_X86 (exp_ps, exp_ps256)
+ 
+@@ -741,2 +756,3 @@ inline float log(float x)
+ 
++#if Z21_FMATH_X86
+ inline __m128 log_ps(__m128 x)
+@@ -784,2 +800,3 @@ inline __m128 log_ps(__m128 x)
+ }
++#endif // Z21_FMATH_X86 (log_ps)
+ 
+diff --git a/Straighten/Straighten/ParaQuadChartDecomposition.h b/Straighten/Straighten/ParaQuadChartDecomposition.h
+index b4cc2b6..a7af77e 100644
+--- a/Straighten/Straighten/ParaQuadChartDecomposition.h
++++ b/Straighten/Straighten/ParaQuadChartDecomposition.h
+@@ -5,3 +5,3 @@
+ #include "MeshViewer/MeshDefinition.h"
+-#include "viewer2d_segments.h"
++#include "Viewer2D_Segments.h"
+ 
+diff --git a/Straighten/Straighten/ParaQuadCutting.cpp b/Straighten/Straighten/ParaQuadCutting.cpp
+index 5bb73cd..7ce9428 100644
+--- a/Straighten/Straighten/ParaQuadCutting.cpp
++++ b/Straighten/Straighten/ParaQuadCutting.cpp
+@@ -18,6 +18,6 @@
+ 
+-#include "Common\CommonFunctions.h"
+-#include "Optimization\Numeric\FastMath.h"
+-#include "Mosek\ConvexQuadOptimization.h"
+-#include "Optimization\HLBFGS\HLBFGS.h"
++#include "Common/CommonFunctions.h"
++#include "Optimization/Numeric/FastMath.h"
++#include "Mosek/ConvexQuadOptimization.h"
++#include "Optimization/HLBFGS/HLBFGS.h"
+ 
+diff --git a/Straighten/Straighten/ParaQuadCutting.h b/Straighten/Straighten/ParaQuadCutting.h
+index 244cf88..d5a7e70 100644
+--- a/Straighten/Straighten/ParaQuadCutting.h
++++ b/Straighten/Straighten/ParaQuadCutting.h
+@@ -7,5 +7,5 @@
+ #include <Eigen/Eigen>
+-#include "Eigen\Dense"
++#include "Eigen/Dense"
+ 
+-#include "Eigen\Sparse"
++#include "Eigen/Sparse"
+ #include <memory>
+diff --git a/Straighten/Straighten/ProcessContainer.h b/Straighten/Straighten/ProcessContainer.h
+index 19a5e41..c5848f7 100644
+--- a/Straighten/Straighten/ProcessContainer.h
++++ b/Straighten/Straighten/ProcessContainer.h
+@@ -2,3 +2,3 @@
+ 
+-#include "ANN\ANN.h"
++#include "ANN/ANN.h"
+ 
+diff --git a/Straighten/Straighten/Scaffold/TriangleInterface.h b/Straighten/Straighten/Scaffold/TriangleInterface.h
+index 5b4c977..9e81c8e 100644
+--- a/Straighten/Straighten/Scaffold/TriangleInterface.h
++++ b/Straighten/Straighten/Scaffold/TriangleInterface.h
+@@ -2,3 +2,3 @@
+ #include <Eigen/Core>
+-#include <triangle\triangle.h>
++#include <triangle/triangle.h>
+ void triangulate(const Eigen::MatrixXd &bnd_pts,const double& area_threshold,Eigen::MatrixXd & pts,Eigen::MatrixXi & FV);
+diff --git a/Straighten/Straighten/Viewer2D.cpp b/Straighten/Straighten/Viewer2D.cpp
+index 47b5312..b0bdbd0 100644
+--- a/Straighten/Straighten/Viewer2D.cpp
++++ b/Straighten/Straighten/Viewer2D.cpp
+@@ -1,19 +1,5 @@
++// OneString portability: headless Viewer2D (see Viewer2D.h).  para_scale is
++// copied verbatim from the authors' Viewer2D.cpp.
+ #include "Viewer2D.h"
+ 
+-#include <QKeyEvent>
+-#include <QWheelEvent>
+-
+-#include "MeshViewer/OpenglHeaders.h"
+-#include <iostream>
+-
+-Viewer2D::Viewer2D(QWidget *parent)
+-	: QGLWidget(parent)
+-{
+-}
+-
+-Viewer2D::Viewer2D(QGLFormat& fmt, QWidget* parent /*= 0*/)
+-	: QGLWidget(fmt, parent)
+-{
+-}
+-
+ void Viewer2D::para_scale(double factor)
+@@ -25,91 +11 @@ void Viewer2D::para_scale(double factor)
+ }
+-
+-void Viewer2D::initializeGL()
+-{
+-	setGeometry(200, 200, 800, 800);
+-	glShadeModel(GL_FLAT);
+-	glClearColor(0.0, 0.0, 0.0, 0.0);
+-	glClearDepth(1.0);
+-
+-	glEnable(GL_DEPTH_TEST);
+-	glDepthFunc(GL_LEQUAL);
+-}
+-
+-void Viewer2D::resizeGL(int width, int height)
+-{
+-	glLoadIdentity();
+-
+-	glViewport(0, 0, width, height);
+-	setOrtho2D(width, height);
+-}
+-
+-void Viewer2D::keyPressEvent(QKeyEvent *e)
+-{
+-	switch (e->key())
+-	{
+-	case Qt::Key_R:
+-		para_origin = para_origin_0;
+-		para_range = para_range_0;
+-		updateGL();
+-		break;
+-	case Qt::Key_Escape:
+-		close();
+-	}
+-}
+-
+-void Viewer2D::mousePressEvent(QMouseEvent *e)
+-{
+-	if (e->button() == Qt::LeftButton)
+-	{
+-		last_pos = e->pos();
+-		setCursor(Qt::SizeAllCursor);
+-	}
+-}
+-
+-void Viewer2D::mouseMoveEvent(QMouseEvent *e)
+-{
+-	if (e->buttons() & Qt::LeftButton)
+-	{
+-		QPoint win_move = e->pos() - last_pos;
+-		int win_range = std::min(width(), height());
+-		OpenMesh::Vec2d para_move(win_move.x(), -win_move.y());
+-		para_move *= 2 * para_range / win_range;
+-		para_origin -= para_move;
+-
+-		last_pos = e->pos();
+-		updateGL();
+-	}
+-}
+-
+-void Viewer2D::mouseReleaseEvent(QMouseEvent *e)
+-{
+-	if (e->button() == Qt::LeftButton)
+-	{
+-		last_pos = e->pos();
+-		setCursor(Qt::ArrowCursor);
+-	}
+-}
+-
+-void Viewer2D::wheelEvent(QWheelEvent * e)
+-{
+-	para_range *= std::pow(0.999, e->delta());
+-	updateGL();
+-}
+-
+-void Viewer2D::setOrtho2D(int w, int h)
+-{
+-	double range_x, range_y;
+-
+-	if (w < h)
+-	{
+-		range_x = para_range;
+-		range_y = (double)h / w * para_range;
+-	}
+-	else
+-	{
+-		range_x = (double)w / h * para_range;
+-		range_y = para_range;
+-	}
+-
+-	gluOrtho2D(para_origin[0] - range_x, para_origin[0] + range_x, para_origin[1] - range_y, para_origin[1] + range_y);
+-}
+\ No newline at end of file
+diff --git a/Straighten/Straighten/Viewer2D.h b/Straighten/Straighten/Viewer2D.h
+index 50e4891..472545b 100644
+--- a/Straighten/Straighten/Viewer2D.h
++++ b/Straighten/Straighten/Viewer2D.h
+@@ -1 +1,5 @@
++// OneString portability: headless replacement of the authors' Qt QGLWidget
++// based Viewer2D.  Only the non-rendering state/logic used by the batch
++// pipeline is kept (para_origin/para_range and para_scale); every GUI call
++// is a no-op.  Original file: Straighten/Straighten/Viewer2D.h.
+ #ifndef VIEWER2D_H
+@@ -3,13 +7,9 @@
+ 
+-#include <QGLWidget>
+ #include <OpenMesh/Core/Geometry/VectorT.hh>
++#include "z21_qt_headless.h"
+ 
+-class Viewer2D : public QGLWidget
++class Viewer2D
+ {
+-	Q_OBJECT
+-
+ public:
+-	Viewer2D(QWidget* parent = 0);
+-	Viewer2D(QGLFormat& fmt, QWidget* parent = 0);
+-
++	Viewer2D() {}
+ 	virtual ~Viewer2D() = default;
+@@ -20,21 +20,18 @@ public:
+ 
+-protected:
+-	virtual void initializeGL();
+-	virtual void paintGL() = 0;
+-	virtual void resizeGL(int width, int height);
+-
+-	virtual void keyPressEvent(QKeyEvent *e);
++	// GUI no-ops (headless batch execution).
++	void updateGL() {}
++	void update() {}
++	void show() { hidden_ = false; }
++	void hide() { hidden_ = true; }
++	void close() {}
++	void setWindowTitle(const QString&) {}
++	void setHidden(bool h) { hidden_ = h; }
++	bool isHidden() const { return hidden_; }
+ 
+-	virtual void mousePressEvent(QMouseEvent *e);
+-	virtual void mouseMoveEvent(QMouseEvent *e);
+-	virtual void mouseReleaseEvent(QMouseEvent *e);
+-	virtual void wheelEvent(QWheelEvent * e);
+-
+-	virtual void setOrtho2D(int w, int h);
+-
+-	QPoint last_pos;
++protected:
+ 	OpenMesh::Vec2d para_origin, para_origin_0;
+-	double para_range, para_range_0;
++	double para_range = 0.0, para_range_0 = 0.0;
++	bool hidden_ = true;
+ };
+ 
+-#endif 
++#endif
+diff --git a/Straighten/Straighten/Viewer2D_Parameterization.cpp b/Straighten/Straighten/Viewer2D_Parameterization.cpp
+index 74bfd72..eccd31f 100644
+--- a/Straighten/Straighten/Viewer2D_Parameterization.cpp
++++ b/Straighten/Straighten/Viewer2D_Parameterization.cpp
+@@ -1,33 +1,11 @@
++// OneString portability: headless Viewer2D_Parameterization.  The
++// constructor, clear_widget() and adjust_range() bodies are copied verbatim
++// from the authors' Viewer2D_Parameterization.cpp; paintGL/keyPressEvent
++// (rendering only) are omitted.
+ #include "Viewer2D_Parameterization.h"
+ 
+-#include <QKeyEvent>
+-#include <QWheelEvent>
++#include <cfloat>
+ 
+-#include "MeshViewer/OpenglHeaders.h"
+-#include <iostream>
+-
+-OpenMesh::Vec3uc color_pos[4] =
+-{
+-	{ 0,116,217 },		
+-	{ 57,204,204 },		
+-	{ 0, 250, 0 },		
+-	{ 152, 56, 255 }	
+-};
+-
+-OpenMesh::Vec3uc color_neg[4] =
+-{
+-	{ 255,65,54 },		
+-	{ 255,133,27 },		
+-	{ 255,220,0 },		
+-	{ 240,18,190 }		
+-};
+-
+-Viewer2D_Parameterization::Viewer2D_Parameterization(const Mesh& _mesh, QWidget *parent)
+-	: Viewer2D(parent), mesh(_mesh)
+-{
+-	clear_widget();
+-}
+-
+-Viewer2D_Parameterization::Viewer2D_Parameterization(const Mesh& _mesh, QGLFormat& fmt, QWidget* parent /*= 0*/)
+-	: Viewer2D(fmt, parent), mesh(_mesh)
++Viewer2D_Parameterization::Viewer2D_Parameterization(const Mesh& _mesh)
++	: Viewer2D(), mesh(_mesh)
+ {
+@@ -42,89 +20,2 @@ void Viewer2D_Parameterization::clear_widget()
+ 
+-void Viewer2D_Parameterization::paintGL()
+-{
+-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+-	glLoadIdentity();
+-	setOrtho2D(width(), height());
+-
+-	glColor3f(1.0, 0.5, 1.0);
+-	for (int f : selected_f)
+-	{
+-		glBegin(GL_POLYGON);
+-		for (auto fv : mesh.fv_range(mesh.face_handle(f)))
+-		{
+-			glVertex3dv(mesh.point(fv).data());
+-		}
+-		glEnd();
+-	}
+-
+-	glBegin(GL_LINES);
+-	for (auto e_h : mesh.edges())
+-	{
+-		if (!mesh.is_boundary(e_h) && !show_inner) continue;
+-
+-		glColor3ubv(mesh.color(e_h).data());
+-
+-		auto h_h = mesh.halfedge_handle(e_h, 0);
+-
+-		glVertex3dv(mesh.point(mesh.from_vertex_handle(h_h)).data());
+-		glVertex3dv(mesh.point(mesh.to_vertex_handle(h_h)).data());
+-	}
+-	glEnd();
+-
+-	glPointSize(7.5f);
+-	if (show_k)
+-	{
+-		for (const auto& vk : boundary_vk)
+-		{
+-			int cur = vk.second;
+-			auto v_h = mesh.vertex_handle(vk.first);
+-			if (!mesh.is_boundary(v_h) || cur == 0) continue;
+-
+-			const auto& color_list = (cur > 0) ? color_pos : color_neg;
+-			glColor3ubv(color_list[std::min(3, std::abs(cur) - 1)].data());
+-			glBegin(GL_POINTS);
+-			glVertex3dv(mesh.point(v_h).data());
+-			glEnd();
+-		}
+-	}
+-
+-	glColor3f(1.0, 0.5, 0.0);
+-	glBegin(GL_POINTS);
+-	for (int v : selected_v)
+-	{
+-		glVertex3dv(mesh.point(mesh.vertex_handle(v)).data());
+-	}
+-	glEnd();
+-
+-	glColor3f(1.0, 0.5, 1.0);
+-	glBegin(GL_LINES);
+-	for (int e : selected_e)
+-	{
+-		if (e == -1) continue;
+-
+-		auto h_h = mesh.halfedge_handle(2 * e);
+-
+-		glVertex3dv(mesh.point(mesh.from_vertex_handle(h_h)).data());
+-		glVertex3dv(mesh.point(mesh.to_vertex_handle(h_h)).data());
+-	}
+-	glEnd();
+-}
+-
+-void Viewer2D_Parameterization::keyPressEvent(QKeyEvent *e)
+-{
+-	Viewer2D::keyPressEvent(e);
+-
+-	switch (e->key())
+-	{
+-	case Qt::Key_I:
+-		show_inner = !show_inner;
+-		updateGL();
+-		break;
+-	case Qt::Key_K:
+-		show_k = !show_k;
+-		updateGL();
+-		break;
+-	}
+-}
+-
+ void Viewer2D_Parameterization::adjust_range()
+@@ -157,3 +48,2 @@ void Viewer2D_Parameterization::adjust_range()
+ 	para_range = para_range_0;
+-	
+ }
+diff --git a/Straighten/Straighten/Viewer2D_Parameterization.h b/Straighten/Straighten/Viewer2D_Parameterization.h
+index 49f32ed..0205d13 100644
+--- a/Straighten/Straighten/Viewer2D_Parameterization.h
++++ b/Straighten/Straighten/Viewer2D_Parameterization.h
+@@ -1 +1,5 @@
++// OneString portability: headless replacement of the authors' QGLWidget
++// based Viewer2D_Parameterization.  The data members read/written by the
++// core (mesh, selected_*, boundary_vk, bb_area) and adjust_range() are kept;
++// rendering is removed.
+ #ifndef VIEWER2D_PARAMETERIZATION_H
+@@ -3,4 +7,4 @@
+ 
++#include <map>
+ #include <set>
+-#include <QGLWidget>
+ #include <OpenMesh/Core/Geometry/VectorT.hh>
+@@ -12,7 +16,4 @@ class Viewer2D_Parameterization : public Viewer2D
+ {
+-	Q_OBJECT
+-
+ public:
+-	Viewer2D_Parameterization(const Mesh& _mesh, QWidget* parent = 0);
+-	Viewer2D_Parameterization(const Mesh& _mesh, QGLFormat& fmt, QWidget* parent = 0);
++	Viewer2D_Parameterization(const Mesh& _mesh);
+ 
+@@ -31,9 +32,6 @@ public:
+ 
+-	void paintGL() override;
+-	void keyPressEvent(QKeyEvent *e);
+-
+ 	bool show_inner, show_k;
+-	double bb_area;
++	double bb_area = 0.0;
+ };
+ 
+-#endif 
++#endif
+diff --git a/Straighten/Straighten/Viewer2D_Segments.cpp b/Straighten/Straighten/Viewer2D_Segments.cpp
+index ba5ca62..89983d9 100644
+--- a/Straighten/Straighten/Viewer2D_Segments.cpp
++++ b/Straighten/Straighten/Viewer2D_Segments.cpp
+@@ -1,17 +1,9 @@
++// OneString portability: headless Viewer2D_Segments.  Non-rendering methods
++// are copied verbatim from the authors' Viewer2D_Segments.cpp.
+ #include "Viewer2D_Segments.h"
+ 
+-#include <QKeyEvent>
+-#include <QWheelEvent>
++#include <cfloat>
+ 
+-#include "MeshViewer/OpenglHeaders.h"
+-#include <iostream>
+-
+-Viewer2D_Segments::Viewer2D_Segments(QWidget *parent)
+-	: Viewer2D(parent)
+-{
+-	clear_widget();
+-}
+-
+-Viewer2D_Segments::Viewer2D_Segments(QGLFormat& fmt, QWidget* parent /*= 0*/)
+-	: Viewer2D(fmt, parent)
++Viewer2D_Segments::Viewer2D_Segments()
++	: Viewer2D()
+ {
+@@ -23,36 +15,2 @@ void Viewer2D_Segments::clear_widget()
+ 	segs.clear();
+-}
+-
+-void Viewer2D_Segments::paintGL()
+-{
+-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+-	glLoadIdentity();
+-	setOrtho2D(width(), height());
+-
+-	glColor3f(0.25, 0.25, 0.25);
+-	glBegin(GL_LINES);
+-	for (const auto& seg : mesh_edges)
+-	{
+-		glVertex2dv(seg.p0.data());
+-		glVertex2dv(seg.p1.data());
+-	}
+-	glEnd();
+-
+-	glColor3f(1.0, 1.0, 1.0);
+-	glBegin(GL_LINES);
+-	for (const auto& seg : segs)
+-	{
+-		glVertex2dv(seg.p0.data());
+-		glVertex2dv(seg.p1.data());
+-	}
+-	glEnd();
+-
+-
+-
+-
+-
+-
+-
+-
+-
+ }
+diff --git a/Straighten/Straighten/Viewer2D_Segments.h b/Straighten/Straighten/Viewer2D_Segments.h
+index fbfd18c..903c6e7 100644
+--- a/Straighten/Straighten/Viewer2D_Segments.h
++++ b/Straighten/Straighten/Viewer2D_Segments.h
+@@ -1 +1,3 @@
++// OneString portability: headless replacement of the authors' QGLWidget
++// based Viewer2D_Segments (debug display of chart decomposition segments).
+ #ifndef VIEWER2D_SEGMENTS_H
+@@ -3,3 +5,3 @@
+ 
+-#include <QGLWidget>
++#include <vector>
+ #include <OpenMesh/Core/Geometry/VectorT.hh>
+@@ -11,7 +13,4 @@ class Viewer2D_Segments : public Viewer2D
+ {
+-	Q_OBJECT
+-
+ public:
+-	Viewer2D_Segments(QWidget* parent = 0);
+-	Viewer2D_Segments(QGLFormat& fmt, QWidget* parent = 0);
++	Viewer2D_Segments();
+ 
+@@ -28,4 +27,2 @@ public:
+ protected:
+-	void paintGL() override;
+-	
+ 	struct segment
+@@ -40,2 +37,2 @@ protected:
+ 
+-#endif 
++#endif
+diff --git a/onestring_port/include/windows.h b/onestring_port/include/windows.h
+new file mode 100644
+index 0000000..82f8579
+--- /dev/null
++++ b/onestring_port/include/windows.h
+@@ -0,0 +1,13 @@
++// OneString portability shim: the authors' Segment code includes <windows.h>
++// only for CreateDirectory(path, NULL) when writing results.  This POSIX
++// replacement provides exactly that call (no algorithmic code).
++#pragma once
++#ifndef _WIN32
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <cerrno>
++inline bool CreateDirectory(const char* path, void*)
++{
++	return ::mkdir(path, 0755) == 0;
++}
++#endif
+diff --git a/onestring_port/include/z21_compat.h b/onestring_port/include/z21_compat.h
+new file mode 100644
+index 0000000..8ad7c7e
+--- /dev/null
++++ b/onestring_port/include/z21_compat.h
+@@ -0,0 +1,68 @@
++// OneString portability prelude, force-included (-include) into every
++// translation unit of the authors' Zhang et al. (CAD 2021) reference code.
++//
++// MSVC makes many standard headers transitively available; GCC/Clang do not.
++// This header only adds standard-library declarations and a few Windows CRT
++// spellings.  It contains no algorithmic code.
++#pragma once
++
++#ifdef __cplusplus
++#include <algorithm>
++#include <array>
++#include <cassert>
++#include <cfloat>
++#include <climits>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <functional>
++#include <iostream>
++#include <iterator>
++#include <limits>
++#include <list>
++#include <map>
++#include <memory>
++#include <numeric>
++#include <queue>
++#include <set>
++#include <stack>
++#include <string>
++#include <tuple>
++#include <unordered_map>
++#include <unordered_set>
++#include <utility>
++#include <vector>
++
++// MSVC's <windows.h>/<minwindef.h> provide unqualified min/max that several
++// authors' files call without `std::` (e.g. `max(targetQuadNum, 1)`).
++using std::max;
++using std::min;
++// IMPORTANT numerical portability fix: with MSVC, <cmath> places the
++// floating-point overloads of abs() in the global namespace, so the authors'
++// unqualified `abs(det_u)` on doubles computes |x|.  With libstdc++/libc++,
++// the unqualified call resolves to C's `int abs(int)` and silently truncates
++// (abs(-0.3) == 0).  Re-expose std::abs overloads globally (MSVC semantics).
++using std::abs;
++#endif
++
++#ifndef _WIN32
++#define __int64 long long
++// POSIX <limits.h> defines LINE_MAX; ParaQuadCutting.cpp uses it as a local
++// variable name (valid with the MSVC CRT, which has no such macro).
++#ifdef LINE_MAX
++#undef LINE_MAX
++#endif
++#endif
++
++#ifdef __cplusplus
++// MSVC (non-conforming extension) lets a temporary bind to a non-const lvalue
++// reference, e.g. default arguments `std::vector<double>& g = std::vector<double>()`.
++// z21_lvalue() yields an lvalue designating the same temporary, which lives
++// until the end of the full-expression containing the call -- exactly the
++// lifetime MSVC gives it.  Used only to make such declarations ISO C++.
++template <class T>
++inline T& z21_lvalue(T&& t) { return t; }
++#endif
+diff --git a/onestring_port/qmsim/CMakeLists.txt b/onestring_port/qmsim/CMakeLists.txt
+new file mode 100644
+index 0000000..1a0acd4
+--- /dev/null
++++ b/onestring_port/qmsim/CMakeLists.txt
+@@ -0,0 +1,16 @@
++set(QM_DIR ${Z21_ROOT}/QuadMeshSimplify/QuadMeshSimplify)
++set(QM_SOURCES
++  AESolver.cpp AESolverSquare.cpp Anderson.cpp AssistFunc.cpp BaseComplex.cpp
++  CheckPolyProperty.cpp CrossfieldDesign.cpp ExtraFieldEnergy.cpp
++  ExtraFieldEnergyAlone.cpp ExtraFunc.cpp FieldLBFGSOptimize.cpp GenQMFromSBC.cpp
++  GeoPolyReadWrite.cpp HLBFGS.cpp HLBFGS_BLAS.cpp ICFS.cpp LineSearch.cpp
++  Lite_Sparse_Matrix.cpp main.cpp MeshDefinition.cpp MetroDis.cpp MyPoly.cpp
++  Parafun.cpp Pipeline.cpp PolyConDecom.cpp PolyHausdorff.cpp PolySplit.cpp
++  PolyTriangulation.cpp PP.cpp QuadMesh.cpp QuadMeshIO.cpp SourceMesh.cpp
++  SpliceBaseComplex.cpp SplicePipeline.cpp SplicePolys.cpp)
++list(TRANSFORM QM_SOURCES PREPEND ${QM_DIR}/)
++add_executable(z21_qmsim ${QM_SOURCES} ${Z21_PORT}/src/PardisoSolverEigen.cpp)
++target_include_directories(z21_qmsim PRIVATE ${QM_DIR}
++  ${Z21_ROOT}/QuadMeshSimplify/ThirdParty/include/vcgLib)
++z21_common(z21_qmsim)
++target_link_libraries(z21_qmsim PRIVATE CGAL::CGAL)
+diff --git a/onestring_port/segment/CMakeLists.txt b/onestring_port/segment/CMakeLists.txt
+new file mode 100644
+index 0000000..f8b36a0
+--- /dev/null
++++ b/onestring_port/segment/CMakeLists.txt
+@@ -0,0 +1,26 @@
++set(SEG_DIR ${Z21_ROOT}/Segment/Segment)
++set(SEG_SOURCES
++  AESolver.cpp AESolverSquare.cpp AdaptiveQuad.cpp Anderson.cpp AssistFunc.cpp
++  BaseComplex.cpp CheckPolyProperty.cpp CrossfieldDesign.cpp EdgeGraphNode.cpp
++  ExternItems.cpp ExtraFieldEnergy.cpp ExtraFieldEnergyAlone.cpp ExtraFunc.cpp
++  GenQMFromSBC.cpp GeoPolyReadWrite.cpp LayoutAssistFunc.cpp MainGlobalFunction.cpp
++  MeshDefinition.cpp MetroDis.cpp MyPCA.cpp PP.cpp Parafun.cpp Pipeline.cpp
++  PolyHausdorff.cpp PolySplit.cpp QuadMesh.cpp QuadMeshIO.cpp
++  QuadMoreThan4Strategy.cpp QuadStrategy.cpp SpliceBaseComplex.cpp main.cpp)
++list(TRANSFORM SEG_SOURCES PREPEND ${SEG_DIR}/)
++# PardisoSolver.cpp (proprietary, licensed PARDISO 6.0) is replaced by an
++# Eigen direct solver with the identical class interface.
++add_executable(z21_segment ${SEG_SOURCES} ${Z21_PORT}/src/PardisoSolverEigen.cpp)
++target_include_directories(z21_segment PRIVATE ${SEG_DIR}
++  ${Z21_ROOT}/QuadMeshSimplify/ThirdParty/include/vcgLib)
++z21_common(z21_segment)
++if(OpenMP_CXX_FOUND)
++  target_link_libraries(z21_segment PRIVATE OpenMP::OpenMP_CXX)
++endif()
++target_link_libraries(z21_segment PRIVATE CGAL::CGAL)
++# Clang rejects the authors' int -> uint32_t brace initialisers
++# (AdaptiveQuad.cpp) as narrowing errors; MSVC/GCC accept them.  The implicit
++# conversion is identical, so only the diagnostic is relaxed.
++if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++  target_compile_options(z21_segment PRIVATE -Wno-c++11-narrowing)
++endif()
+diff --git a/onestring_port/src/PardisoSolverEigen.cpp b/onestring_port/src/PardisoSolverEigen.cpp
+new file mode 100644
+index 0000000..a2a30cf
+--- /dev/null
++++ b/onestring_port/src/PardisoSolverEigen.cpp
+@@ -0,0 +1,144 @@
++// OneString portability replacement for the authors' PardisoSolver.cpp.
++//
++// The reference implementation of Zhang et al. (CAD 2021) links the licensed
++// PARDISO 6.0 library (pardiso-project.org) with mtype = -2 (real symmetric
++// indefinite, upper-triangular CSR input).  That library and its per-user
++// license are not available on macOS/Linux, so this file implements the SAME
++// class interface (PardisoSolver.h is unchanged) with an Eigen sparse direct
++// solver.  A direct factorisation returns the same solution of the same
++// linear system up to floating point round-off; no algorithmic parameter of
++// the paper's pipeline is changed here.
++//
++// Semantics reproduced from the original PardisoSolver.cpp:
++//   * pardiso_init(): mtype=-2, result.resize(num), ia/ja converted to
++//     1-based indices (the original passes Fortran-style indices to PARDISO),
++//     symbolic analysis.
++//   * factorize(): numerical factorisation, returns success flag.
++//   * pardiso_solver(): solve with `rhs`, at most one step of iterative
++//     refinement (original sets iparm[7] = 1).
++//   * free_numerical_factorization_memory(): release the factorisation.
++//
++// The symmetric matrix is given as its upper triangle.  Because the systems
++// assembled by the authors are saddle-point (KKT) systems with a zero block,
++// we use a pivoting LU factorisation (Eigen::SparseLU) of the full symmetric
++// matrix instead of an unpivoted LDLT, which would be unstable on a zero
++// diagonal block.  PARDISO uses Bunch-Kaufman pivoting for the same reason.
++
++#include "PardisoSolver.h"
++
++#include <Eigen/Sparse>
++#include <Eigen/SparseLU>
++#include <Eigen/OrderingMethods>
++
++#include <stdexcept>
++#include <vector>
++
++namespace {
++
++struct EigenPardisoState
++{
++	Eigen::SparseMatrix<double> A;
++	Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> lu;
++	bool analyzed = false;
++	bool factorized = false;
++};
++
++EigenPardisoState* state_of(void* const* pt)
++{
++	return static_cast<EigenPardisoState*>(pt[0]);
++}
++
++// Build the full symmetric matrix from the (1-based) upper-triangular CSR.
++void assemble_full(const std::vector<int>& ia, const std::vector<int>& ja,
++	const std::vector<double>& a, int n, Eigen::SparseMatrix<double>& A)
++{
++	std::vector<Eigen::Triplet<double>> trip;
++	trip.reserve(a.size() * 2);
++	for (int row = 0; row < n; ++row)
++	{
++		for (int k = ia[row] - 1; k < ia[row + 1] - 1; ++k)
++		{
++			int col = ja[k] - 1;
++			double v = a[k];
++			trip.emplace_back(row, col, v);
++			if (col != row) trip.emplace_back(col, row, v);
++		}
++	}
++	A.resize(n, n);
++	A.setFromTriplets(trip.begin(), trip.end());
++	A.makeCompressed();
++}
++
++} // namespace
++
++PardisoSolver::PardisoSolver()
++{
++	// The original constructor leaves mtype uninitialised and the destructor
++	// branches on it; initialise to the documented "not set" value instead.
++	mtype = -1;
++	for (int t = 0; t < 64; ++t) pt[t] = nullptr;
++}
++
++PardisoSolver::~PardisoSolver()
++{
++	delete state_of(pt);
++	pt[0] = nullptr;
++}
++
++void PardisoSolver::pardiso_init()
++{
++	mtype = -2;
++	result.clear();
++	result.resize(num, 0);
++	nrhs = 1;
++	error = 0;
++
++	for (i = 0; i < num + 1; i++) ia[i] += 1;
++	for (i = 0; i < nnz; i++) ja[i] += 1;
++
++	delete state_of(pt);
++	EigenPardisoState* s = new EigenPardisoState();
++	pt[0] = s;
++	assemble_full(ia, ja, a, num, s->A);
++	s->lu.analyzePattern(s->A);
++	s->analyzed = true;
++}
++
++bool PardisoSolver::factorize()
++{
++	if (mtype == -1)
++		throw std::runtime_error("Pardiso mtype not set.");
++	EigenPardisoState* s = state_of(pt);
++	if (s == nullptr) throw std::runtime_error("PardisoSolverEigen: factorize before init");
++	// `a` may have been updated by the caller since pardiso_init().
++	assemble_full(ia, ja, a, num, s->A);
++	if (!s->analyzed) { s->lu.analyzePattern(s->A); s->analyzed = true; }
++	s->lu.factorize(s->A);
++	s->factorized = (s->lu.info() == Eigen::Success);
++	error = s->factorized ? 0 : -4;
++	return s->factorized;
++}
++
++void PardisoSolver::pardiso_solver()
++{
++	EigenPardisoState* s = state_of(pt);
++	if (s == nullptr || !s->factorized)
++	{
++		// PARDISO would return an error code; keep the previous result.
++		error = -4;
++		return;
++	}
++	Eigen::Map<const Eigen::VectorXd> b(rhs.data(), num);
++	Eigen::VectorXd x = s->lu.solve(b);
++	// One step of iterative refinement (original: iparm[7] = 1).
++	Eigen::VectorXd r = b - s->A * x;
++	x += s->lu.solve(r);
++	result.assign(x.data(), x.data() + num);
++	error = 0;
++}
++
++void PardisoSolver::free_numerical_factorization_memory()
++{
++	EigenPardisoState* s = state_of(pt);
++	if (s != nullptr) s->factorized = false;
++}
+diff --git a/onestring_port/straighten/CMakeLists.txt b/onestring_port/straighten/CMakeLists.txt
+new file mode 100644
+index 0000000..b48c309
+--- /dev/null
++++ b/onestring_port/straighten/CMakeLists.txt
+@@ -0,0 +1,57 @@
++set(ST_DIR ${Z21_ROOT}/Straighten/Straighten)
++# Non-GUI translation units of the authors' Straighten.vcxproj.
++# Excluded (GUI only): AAAtlas.cpp, MeshViewer/{InteractiveViewerWidget,
++# MainViewerWidget, MeshParamDialog, MeshViewerWidget, QGLViewerWidget,
++# Auxiliary_Function_Mesh}.cpp, ProcessContainer.cpp, main.cpp,
++# Common/TimeProfiler.cpp.  Replaced: include/Mosek/ConvexQuadOptimization.cpp
++# (commercial MOSEK; unreachable in the straightening path) and
++# Scaffold/PardisoSolver.cpp (MKL PARDISO) by Eigen.  The batch driver
++# onestring_port/straighten/headless_main.cpp replicates main.cpp +
++# ProcessContainer + InteractiveViewerWidget's batch methods.
++set(ST_SOURCES
++  AssistFunc.cpp ChartDeformation.cpp ChartDeformation_Deform.cpp ChartUntangle.cpp
++  Common/CommonDefinitions.cpp Common/VKString.cpp Common/VKStringList.cpp
++  MeshViewer/MeshDefinition.cpp MeshViewer/Mesh_doubleIO.cpp
++  MyAnderson.cpp MyParafun.cpp MyParaQuadCutting.cpp
++  Optimization/HLBFGS/HLBFGS.cpp Optimization/HLBFGS/HLBFGS_BLAS.cpp
++  Optimization/HLBFGS/ICFS.cpp Optimization/HLBFGS/LineSearch.cpp
++  Optimization/HLBFGS/Lite_Sparse_Matrix.cpp Optimization/Numeric/FastMath.cpp
++  ParaQuadChartDecomposition.cpp ParaQuadCutting.cpp PolySquareDeformation.cpp
++  Scaffold/Parafun.cpp Scaffold/ScafCommon.cpp Scaffold/ScafData.cpp
++  Scaffold/StateManager.cpp Scaffold/TriangleInterface.cpp
++  Viewer2D.cpp Viewer2D_Parameterization.cpp Viewer2D_Segments.cpp)
++list(TRANSFORM ST_SOURCES PREPEND ${ST_DIR}/)
++
++file(GLOB ST_ANN_CPP ${ST_DIR}/include/ANN/*.cpp)
++add_library(z21_st_ann STATIC ${ST_ANN_CPP})
++target_include_directories(z21_st_ann PUBLIC ${ST_DIR}/include)
++
++# Shewchuk's Triangle (bundled), compiled as a library like the authors'
++# triangle.lib.
++add_library(z21_triangle STATIC ${ST_DIR}/include/triangle/triangle.c)
++target_compile_definitions(z21_triangle PRIVATE TRILIBRARY ANSI_DECLARATORS REAL=double VOID=int NO_TIMER "__int64=long long")
++set_target_properties(z21_triangle PROPERTIES LINKER_LANGUAGE C)
++
++add_executable(z21_straighten ${ST_SOURCES}
++  ${Z21_PORT}/straighten/headless_main.cpp
++  ${Z21_PORT}/straighten/shim/mosek_stub/ConvexQuadOptimizationStub.cpp
++  ${Z21_PORT}/src/PardisoSolverEigen.cpp)
++# Order matters: shim first (headless Qt, empty CHOLMOD/MKL headers), then
++# the authors' tree and its bundled Eigen 3.3.5 / OpenMesh 7.1.
++target_include_directories(z21_straighten BEFORE PRIVATE
++  ${Z21_PORT}/straighten/shim
++  ${ST_DIR} ${ST_DIR}/Scaffold ${ST_DIR}/include ${ST_DIR}/include/Eigen
++  ${ST_DIR}/Optimization/HLBFGS ${ST_DIR}/Optimization/Numeric ${ST_DIR}/Common
++  ${ST_DIR}/include/rectpack2D/src)
++target_include_directories(z21_straighten PRIVATE ${Z21_PORT}/include)
++target_link_libraries(z21_straighten PRIVATE z21_openmesh z21_st_ann z21_triangle)
++target_compile_definitions(z21_straighten PRIVATE _USE_MATH_DEFINES NDEBUG Z21_ONESTRING_PORT)
++target_compile_options(z21_straighten PRIVATE -include ${Z21_PORT}/include/z21_compat.h)
++# rectpack2D (used by the authors' ParaQuadCutting) requires C++17.
++set_target_properties(z21_straighten PROPERTIES CXX_STANDARD 17)
++# Clang rejects the authors' narrowing brace initialisers (long -> int in
++# ParaQuadChartDecomposition.cpp); MSVC/GCC accept them with the identical
++# implicit conversion, so only the diagnostic is relaxed.
++if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++  target_compile_options(z21_straighten PRIVATE -Wno-c++11-narrowing)
++endif()
+diff --git a/onestring_port/straighten/headless_main.cpp b/onestring_port/straighten/headless_main.cpp
+new file mode 100644
+index 0000000..1052294
+--- /dev/null
++++ b/onestring_port/straighten/headless_main.cpp
+@@ -0,0 +1,403 @@
++// OneString portability: headless driver for the authors' Straighten step.
++//
++// The authors' Straighten.exe (Code/Straighten/Straighten/main.cpp) builds a
++// Qt QApplication and a MainViewerWidget only to host the mesh; the batch
++// pipeline (WholePipeline.bat) never shows a window.  This file replicates,
++// statement by statement, the code that main.cpp executes through
++// ProcessContainer -> MainViewerWidget::MeshViewer (InteractiveViewerWidget):
++//
++//   OpenMesh(argv[1]) : MeshViewerWidget::openMesh + load_parameterization
++//   Preprocess()      : InteractiveViewerWidget::pre_process
++//   saveNewMesh(argv[2])
++//   DoAlgorithm()     : InteractiveViewerWidget::polysquare
++//   DoAlgorithmWithHole() : InteractiveViewerWidget::polysquareWithHole
++//   saveNewMesh(argv[3])
++//
++// The bodies below are copied from MeshViewer/MeshViewerWidget.{h,cpp} and
++// MeshViewer/InteractiveViewerWidget.{h,cpp}; only Qt rendering / signal
++// statements (updateGL, emit, QFileInfo, system("CLS")) are removed or
++// replaced by std equivalents.  The default parameters are those of the
++// InteractiveViewerWidget constructor (kernel_width = 0.08, etc.).
++
++#include "ParaQuadCutting.h"
++#include "PolySquareDeformation.h"
++#include "AssistFunc.h"
++#include "MeshViewer/Mesh_doubleIO.h"
++
++#include <ctime>
++#include <fstream>
++#include <iostream>
++#include <limits>
++#include <memory>
++#include <set>
++#include <string>
++#include <vector>
++
++#include <cstdlib>
++#include <climits>
++
++namespace {
++
++std::string dir_of(const std::string& path)
++{
++	auto p = path.find_last_of("/\\");
++	return p == std::string::npos ? std::string(".") : path.substr(0, p);
++}
++
++std::string absolute_of(const std::string& path)
++{
++	char buf[PATH_MAX];
++	if (::realpath(path.c_str(), buf)) return std::string(buf);
++	return path;
++}
++
++} // namespace
++
++class HeadlessStraightenViewer
++{
++public:
++	// ---- InteractiveViewerWidget defaults (constructor + in-class init) ----
++	double kernel_width = 0.08;
++	double goal_factor = 0.1;
++	double energy_exp_factor = 1.0;
++	double split_thres = 0.02;
++	double pe_bound = 0.8;
++	double input_distortion = 0.0;
++	double chart_gap = 2.0;
++	std::string my_file_name;
++	double M_PE = 0.0;
++
++	std::vector<std::string> para_viewer_titles;
++	std::unique_ptr<ParaQuadCutting> para_cutting = nullptr;
++	std::unique_ptr<PolySquareDeformation> poly_info = nullptr;
++	int current_phase = 0;
++
++	// ---- MeshViewerWidget state ----
++	OpenMesh::Vec3d bbMin, bbMax;
++	std::vector<Mesh> mesh_vector;
++	int mesh_vector_index = -1;
++	std::string str_pathname, str_filepath, str_filename;
++	std::vector<int> new_boundary_vertices;
++	Mesh mesh;
++	Mesh::Scalar mesh_avg_length = 0, edge_offset = 0;
++	OpenMesh::EPropHandleT<bool> e_oncut;
++	std::vector<int> selectedVertex, selectedFace, selectedEdge;
++
++	// MeshViewerWidget::clearAllMesh / InteractiveViewerWidget::clearAllMesh
++	void clearSelectedData()
++	{
++		selectedVertex.clear();
++		selectedFace.clear();
++		selectedEdge.clear();
++	}
++	void clearAllMesh()
++	{
++		clearSelectedData();
++		para_cutting.reset(nullptr);
++		poly_info.reset(nullptr);
++		mesh_vector.clear(); mesh_vector_index = -1;
++		mesh = Mesh();
++	}
++
++	// MeshViewerWidget::init_properties
++	void init_properties()
++	{
++		if (!mesh.get_property_handle(e_oncut, "e_oncut")) mesh.add_property(e_oncut, "e_oncut");
++
++		for (auto e_h : mesh.edges())
++		{
++			mesh.property(e_oncut, e_h) = mesh.is_boundary(e_h);
++		}
++	}
++
++	// MeshViewerWidget::updateMeshCenter (bounding box and edge statistics)
++	void updateMeshCenter()
++	{
++		Mesh::VertexIter vIt = mesh.vertices_begin();
++		Mesh::VertexIter vEnd = mesh.vertices_end();
++		bbMin = bbMax = OpenMesh::vector_cast<OpenMesh::Vec3d>(mesh.point(*vIt));
++		for (; vIt != vEnd; ++vIt)
++		{
++			bbMin.minimize(OpenMesh::vector_cast<OpenMesh::Vec3d>(mesh.point(*vIt)));
++			bbMax.maximize(OpenMesh::vector_cast<OpenMesh::Vec3d>(mesh.point(*vIt)));
++		}
++		double avgLen = 0.0;
++		for (auto e_h : mesh.edges())
++		{
++			avgLen += mesh.calc_edge_length(e_h);
++		}
++		avgLen /= mesh.n_edges();
++		mesh_avg_length = avgLen;
++		edge_offset = 0.01 * avgLen;
++	}
++
++	void updateMesh()
++	{
++		mesh.update_face_normals();
++		mesh.update_vertex_normals();
++		updateMeshCenter();
++	}
++
++	// MeshViewerWidget::initMesh + InteractiveViewerWidget::initMesh
++	void initMesh()
++	{
++		mesh.request_vertex_status();
++		mesh.request_edge_status();
++		mesh.request_face_status();
++
++		mesh.request_face_normals();
++		mesh.request_vertex_normals();
++
++		init_properties();
++		updateMesh();
++
++		selectedVertex = new_boundary_vertices;
++	}
++
++	// MeshViewerWidget::openMesh
++	bool openMesh(const char* filename)
++	{
++		clearAllMesh();
++		bool read_OK = Mesh_doubleIO::load_mesh(mesh, filename, true);
++		if (read_OK)
++		{
++			initMesh();
++			mesh_vector.push_back(mesh);
++			mesh_vector_index = 0;
++			str_pathname = dir_of(filename);
++			str_filename = filename;
++			str_filepath = absolute_of(filename);
++			return true;
++		}
++		return false;
++	}
++
++	// InteractiveViewerWidget::load_parameterization
++	void load_parameterization(bool silence = false)
++	{
++		if (para_cutting == nullptr)
++		{
++			para_cutting = std::make_unique<ParaQuadCutting>(mesh, str_pathname.c_str(), str_filepath.c_str());
++			M_PE = para_cutting->calc_distortion(silence);
++
++			selectedFace.clear();
++			std::set<int> selected_v;
++			for (int f : para_cutting->get_flipped_faces())
++			{
++				selectedFace.push_back(f);
++
++				for (auto fv_h : mesh.fv_range(mesh.face_handle(f))) selected_v.insert(fv_h.idx());
++			}
++
++			selectedVertex = std::vector<int>(selected_v.begin(), selected_v.end());
++		}
++		else
++		{
++			para_cutting->toggle_viewer_window();
++		}
++	}
++
++	// InteractiveViewerWidget::mirror_neg_charts
++	void mirror_neg_charts()
++	{
++		if (para_cutting == nullptr) return;
++
++		para_cutting->flip_neg_charts();
++		para_cutting->get_textured_mesh(mesh);
++		init_properties();
++
++		para_cutting.reset(nullptr);
++		poly_info.reset(nullptr);
++		initMesh();
++
++		load_parameterization(true);
++	}
++
++	// InteractiveViewerWidget::select_cut_bridges
++	void select_cut_bridges()
++	{
++		if (para_cutting == nullptr) return;
++
++		selectedEdge.clear();
++		std::vector<bool> v_oncut(mesh.n_vertices(), false);
++
++		for (auto e_h : mesh.edges())
++		{
++			if (mesh.property(e_oncut, e_h))
++			{
++				v_oncut[mesh.to_vertex_handle(mesh.halfedge_handle(e_h, 0)).idx()] = true;
++				v_oncut[mesh.to_vertex_handle(mesh.halfedge_handle(e_h, 1)).idx()] = true;
++			}
++		}
++
++		for (auto e_h : mesh.edges())
++		{
++			if (!mesh.property(e_oncut, e_h))
++			{
++				if (v_oncut[mesh.to_vertex_handle(mesh.halfedge_handle(e_h, 0)).idx()] && v_oncut[mesh.to_vertex_handle(mesh.halfedge_handle(e_h, 1)).idx()])
++				{
++					selectedEdge.push_back(e_h.idx());
++				}
++			}
++		}
++	}
++
++	// InteractiveViewerWidget::spilt_seleted_edges
++	void spilt_seleted_edges()
++	{
++		if (para_cutting == nullptr) return;
++
++		if (selectedEdge.empty()) return;
++
++		para_cutting->split_edges(selectedEdge);
++		para_cutting->get_textured_mesh(mesh);
++		selectedEdge.clear();
++		init_properties();
++
++		para_cutting.reset(nullptr);
++		poly_info.reset(nullptr);
++		initMesh();
++
++		load_parameterization(true);
++	}
++
++	// InteractiveViewerWidget::pre_process
++	void pre_process()
++	{
++		mirror_neg_charts();
++		select_cut_bridges();
++		spilt_seleted_edges();
++	}
++
++	// InteractiveViewerWidget::saveNewMesh
++	bool saveNewMesh(const char* filename)
++	{
++		return Mesh_doubleIO::save_mesh(para_cutting->viewer->mesh, filename, false);
++	}
++
++	void make_titles(int n_phase)
++	{
++		para_viewer_titles.clear();
++		para_viewer_titles.reserve(n_phase);
++		para_viewer_titles.emplace_back("Initialization");
++		para_viewer_titles.emplace_back("Rotation");
++		for (int i = 0; i < (n_phase - 5) / 2; i++)
++		{
++			para_viewer_titles.emplace_back("Align Deformation " + std::to_string(i + 1));
++			para_viewer_titles.emplace_back("Inner Deformation " + std::to_string(i + 1));
++		}
++		para_viewer_titles.emplace_back("Flattening");
++		para_viewer_titles.emplace_back("Untangle");
++		para_viewer_titles.emplace_back("Final");
++	}
++
++	// InteractiveViewerWidget::polysquareWithHole
++	void polysquareWithHole()
++	{
++		if (para_cutting == nullptr || poly_info != nullptr) return;
++
++		double goal_length = (para_cutting->get_BB_Max() - para_cutting->get_BB_Min()).norm() / 3000.0;
++
++		std::cout << "--------------------------------------------------\nGoal " << goal_length << std::endl;
++		current_phase = 0;
++		poly_info = std::make_unique<PolySquareDeformation>(mesh, para_cutting->get_origin_para(), para_cutting->viewer->boundary_vk);
++		poly_info->set_path(str_pathname.c_str());
++		if (!poly_info->calcWithHole(kernel_width, goal_length, energy_exp_factor, my_file_name))
++		{
++			poly_info.reset(nullptr);
++			return;
++		}
++
++		int n_phase = poly_info->get_n_phase();
++		make_titles(n_phase);
++		change_phase(n_phase - 1);
++	}
++
++	// InteractiveViewerWidget::polysquare
++	void polysquare()
++	{
++		if (para_cutting == nullptr || poly_info != nullptr) return;
++
++		double goal_length = (para_cutting->get_BB_Max() - para_cutting->get_BB_Min()).norm() / 3000.0;
++
++		std::cout << "--------------------------------------------------\nGoal " << goal_length << std::endl;
++		current_phase = 0;
++		poly_info = std::make_unique<PolySquareDeformation>(mesh, para_cutting->get_origin_para(), para_cutting->viewer->boundary_vk);
++		poly_info->set_path(str_pathname.c_str());
++		if (!poly_info->calc(kernel_width, goal_length, energy_exp_factor, my_file_name))
++		{
++			poly_info.reset(nullptr);
++			return;
++		}
++
++		int n_phase = poly_info->get_n_phase();
++		make_titles(n_phase);
++		change_phase(n_phase - 1);
++	}
++
++	// InteractiveViewerWidget::change_phase
++	void change_phase(int phase)
++	{
++		if (poly_info == nullptr) return;
++
++		int n_phases = para_viewer_titles.size();
++		int new_phase = (phase + n_phases) % n_phases;
++
++		para_cutting->set_viewer_title(QString(para_viewer_titles[new_phase]));
++		poly_info->set_phase(new_phase);
++
++		int scale_id = n_phases - 4;
++		double factor = 1.0;
++		if (current_phase <= scale_id && new_phase > scale_id) factor = 1.0 / poly_info->get_goal_length();
++		if (current_phase > scale_id && new_phase <= scale_id) factor = poly_info->get_goal_length();
++		para_cutting->update_para(factor);
++		para_cutting->update_textured_mesh(mesh);
++
++		current_phase = new_phase;
++	}
++
++	bool straightening_succeeded() const { return poly_info != nullptr; }
++};
++
++// Code/Straighten/Straighten/main.cpp (without QApplication)
++int main(int argc, char* argv[])
++{
++	if (argc < 4)
++	{
++		std::cerr << "usage: z21_straighten <input.obj with vt> <before.obj> <after.obj>" << std::endl;
++		return 2;
++	}
++	clock_t startTime = std::clock();
++	HeadlessStraightenViewer v;
++	if (!v.openMesh(argv[1]))
++	{
++		std::cout << "Can't Open Mesh! " << std::endl;
++		return 3;
++	}
++	v.load_parameterization();
++	v.input_distortion = v.para_cutting->get_distortion();
++
++	std::vector<std::vector<int>> boundarys;
++	AssistFunc::FindBoundarys(v.mesh, boundarys);
++	if (boundarys.size() == 1)
++	{
++		v.pre_process();
++		v.saveNewMesh(argv[2]);
++		v.polysquare();
++		v.saveNewMesh(argv[3]);
++	}
++	else
++	{
++		v.pre_process();
++		v.saveNewMesh(argv[2]);
++		v.polysquareWithHole();
++		v.saveNewMesh(argv[3]);
++	}
++	clock_t endTime = std::clock();
++	std::cout << "[z21_straighten] boundary_loops=" << boundarys.size()
++		<< " straightening_succeeded=" << (v.straightening_succeeded() ? 1 : 0)
++		<< " cpu_seconds=" << (endTime - startTime) / double(CLOCKS_PER_SEC) << std::endl;
++	// The authors' program writes the after-mesh even when calc() fails
++	// (it then equals the pre-processed input).  Report this explicitly.
++	return v.straightening_succeeded() ? 0 : 4;
++}
+diff --git a/onestring_port/straighten/shim/Eigen/CholmodSupport b/onestring_port/straighten/shim/Eigen/CholmodSupport
+new file mode 100644
+index 0000000..393bf8c
+--- /dev/null
++++ b/onestring_port/straighten/shim/Eigen/CholmodSupport
+@@ -0,0 +1,2 @@
++// OneString port: Eigen CHOLMOD support is only #included (all uses are commented out); no SuiteSparse needed.
++#pragma once
+diff --git a/onestring_port/straighten/shim/Mosek/ConvexQuadOptimization.h b/onestring_port/straighten/shim/Mosek/ConvexQuadOptimization.h
+new file mode 100644
+index 0000000..204419e
+--- /dev/null
++++ b/onestring_port/straighten/shim/Mosek/ConvexQuadOptimization.h
+@@ -0,0 +1,24 @@
++// OneString portability: declaration-only replacement for the authors'
++// include/Mosek/ConvexQuadOptimization.h.  MOSEK 7.1 (commercial) cannot be
++// linked here; only the identifiers referenced by ChartDeformation.cpp are
++// declared (values from mosek.h 7.1).  The function is defined by
++// mosek_stub/ConvexQuadOptimizationStub.cpp and aborts if ever called; it is
++// not reachable from the Zhang 2021 straightening path.
++#ifndef CONVEX_QUAD_OPRIMIZATION_H
++#define CONVEX_QUAD_OPRIMIZATION_H
++
++#include <vector>
++
++#define MSK_INFINITY 1.0e30
++typedef int MSKidxt;
++typedef int MSKlidxt;
++enum MSKboundkey_enum { MSK_BK_LO = 0, MSK_BK_UP = 1, MSK_BK_FX = 2, MSK_BK_FR = 3, MSK_BK_RA = 4 };
++typedef enum MSKboundkey_enum MSKboundkeye;
++
++bool solveConvexQuadPorgramming_mosek(std::vector<MSKboundkeye>& bkc, std::vector<double>& blc, std::vector<double>& buc,
++	std::vector<MSKboundkeye>& bkx, std::vector<double>& blx, std::vector<double>& bux,
++	std::vector<MSKlidxt>& aptrb, std::vector<MSKidxt>& asub, std::vector<double>& aval,
++	std::vector<MSKidxt>& qsubi, std::vector<MSKidxt>& qsubj, std::vector<double>& qval, std::vector<double>& c,
++	std::vector<double>& XX, bool show_success = true);
++
++#endif
+diff --git a/onestring_port/straighten/shim/QDir b/onestring_port/straighten/shim/QDir
+new file mode 100644
+index 0000000..8fd5fad
+--- /dev/null
++++ b/onestring_port/straighten/shim/QDir
+@@ -0,0 +1,2 @@
++#pragma once
++#include "z21_qt_headless.h"
+diff --git a/onestring_port/straighten/shim/QString b/onestring_port/straighten/shim/QString
+new file mode 100644
+index 0000000..8fd5fad
+--- /dev/null
++++ b/onestring_port/straighten/shim/QString
+@@ -0,0 +1,2 @@
++#pragma once
++#include "z21_qt_headless.h"
+diff --git a/onestring_port/straighten/shim/QStringList b/onestring_port/straighten/shim/QStringList
+new file mode 100644
+index 0000000..8fd5fad
+--- /dev/null
++++ b/onestring_port/straighten/shim/QStringList
+@@ -0,0 +1,2 @@
++#pragma once
++#include "z21_qt_headless.h"
+diff --git a/onestring_port/straighten/shim/QTime b/onestring_port/straighten/shim/QTime
+new file mode 100644
+index 0000000..8fd5fad
+--- /dev/null
++++ b/onestring_port/straighten/shim/QTime
+@@ -0,0 +1,2 @@
++#pragma once
++#include "z21_qt_headless.h"
+diff --git a/onestring_port/straighten/shim/QtCore b/onestring_port/straighten/shim/QtCore
+new file mode 100644
+index 0000000..8fd5fad
+--- /dev/null
++++ b/onestring_port/straighten/shim/QtCore
+@@ -0,0 +1,2 @@
++#pragma once
++#include "z21_qt_headless.h"
+diff --git a/onestring_port/straighten/shim/QtGui b/onestring_port/straighten/shim/QtGui
+new file mode 100644
+index 0000000..8fd5fad
+--- /dev/null
++++ b/onestring_port/straighten/shim/QtGui
+@@ -0,0 +1,2 @@
++#pragma once
++#include "z21_qt_headless.h"
+diff --git a/onestring_port/straighten/shim/io.h b/onestring_port/straighten/shim/io.h
+new file mode 100644
+index 0000000..becdeea
+--- /dev/null
++++ b/onestring_port/straighten/shim/io.h
+@@ -0,0 +1,3 @@
++// OneString portability: <io.h> (Windows CRT) is included but no function of it is used on the batch path.
++#pragma once
++#include <unistd.h>
+diff --git a/onestring_port/straighten/shim/mkl.h b/onestring_port/straighten/shim/mkl.h
+new file mode 100644
+index 0000000..dc48757
+--- /dev/null
++++ b/onestring_port/straighten/shim/mkl.h
+@@ -0,0 +1,2 @@
++// OneString port: MKL PARDISO replaced by onestring_port/src/PardisoSolverEigen.cpp
++#pragma once
+diff --git a/onestring_port/straighten/shim/mkl_pardiso.h b/onestring_port/straighten/shim/mkl_pardiso.h
+new file mode 100644
+index 0000000..dc48757
+--- /dev/null
++++ b/onestring_port/straighten/shim/mkl_pardiso.h
+@@ -0,0 +1,2 @@
++// OneString port: MKL PARDISO replaced by onestring_port/src/PardisoSolverEigen.cpp
++#pragma once
+diff --git a/onestring_port/straighten/shim/mkl_types.h b/onestring_port/straighten/shim/mkl_types.h
+new file mode 100644
+index 0000000..dc48757
+--- /dev/null
++++ b/onestring_port/straighten/shim/mkl_types.h
+@@ -0,0 +1,2 @@
++// OneString port: MKL PARDISO replaced by onestring_port/src/PardisoSolverEigen.cpp
++#pragma once
+diff --git a/onestring_port/straighten/shim/mosek_stub/ConvexQuadOptimizationStub.cpp b/onestring_port/straighten/shim/mosek_stub/ConvexQuadOptimizationStub.cpp
+new file mode 100644
+index 0000000..dd4f19c
+--- /dev/null
++++ b/onestring_port/straighten/shim/mosek_stub/ConvexQuadOptimizationStub.cpp
+@@ -0,0 +1,19 @@
++// OneString portability: MOSEK 7.1 (commercial) is linked by the authors'
++// Straighten.exe only for AAAtlas' axis-aligned PolySquare "segment
++// flattening" (ChartDeformation::mosek_flattening).  Zhang et al.'s boundary
++// straightening path (ChartDeformation::deformation / deformation_with_hole)
++// never calls it.  Fail loudly if that ever changes.
++#include "Mosek/ConvexQuadOptimization.h"
++#include <cstdio>
++#include <cstdlib>
++
++bool solveConvexQuadPorgramming_mosek(std::vector<MSKboundkeye>&, std::vector<double>&, std::vector<double>&,
++	std::vector<MSKboundkeye>&, std::vector<double>&, std::vector<double>&,
++	std::vector<MSKlidxt>&, std::vector<MSKidxt>&, std::vector<double>&,
++	std::vector<MSKidxt>&, std::vector<MSKidxt>&, std::vector<double>&, std::vector<double>&,
++	std::vector<double>&, bool)
++{
++	std::fprintf(stderr, "[z21_straighten] FATAL: MOSEK segment flattening is not part of the "
++		"Zhang 2021 straightening path and is unavailable in the OneString port.\n");
++	std::abort();
++}
+diff --git a/onestring_port/straighten/shim/z21_qt_headless.h b/onestring_port/straighten/shim/z21_qt_headless.h
+new file mode 100644
+index 0000000..d2b121f
+--- /dev/null
++++ b/onestring_port/straighten/shim/z21_qt_headless.h
+@@ -0,0 +1,56 @@
++// OneString portability: the minimum of the Qt API that the authors'
++// Straighten *core* classes touch (timing, a title string, std::string
++// conversion).  The original program links Qt 5 only for its GUI; the
++// batch pipeline (Straighten.exe in WholePipeline.bat) never shows a window.
++#pragma once
++#include <chrono>
++#include <string>
++
++class QByteArray
++{
++public:
++	QByteArray() {}
++	explicit QByteArray(const std::string& s) : s_(s) {}
++	operator const char*() const { return s_.c_str(); }
++	const char* data() const { return s_.c_str(); }
++	const char* constData() const { return s_.c_str(); }
++private:
++	std::string s_;
++};
++
++class QString
++{
++public:
++	QString() {}
++	QString(const char* s) : s_(s ? s : "") {}
++	QString(const std::string& s) : s_(s) {}
++	static QString fromStdString(const std::string& s) { return QString(s); }
++	static QString number(double v) { return QString(std::to_string(v)); }
++	static QString number(int v) { return QString(std::to_string(v)); }
++	static QString number(long v) { return QString(std::to_string(v)); }
++	std::string toStdString() const { return s_; }
++	QByteArray toLocal8Bit() const { return QByteArray(s_); }
++	QByteArray toLatin1() const { return QByteArray(s_); }
++	QString operator+(const QString& o) const { return QString(s_ + o.s_); }
++	QString& operator+=(const QString& o) { s_ += o.s_; return *this; }
++	bool operator<(const QString& o) const { return s_ < o.s_; }
++	bool operator==(const QString& o) const { return s_ == o.s_; }
++	bool isEmpty() const { return s_.empty(); }
++private:
++	std::string s_;
++};
++inline QString operator+(const char* a, const QString& b) { return QString(a) + b; }
++
++class QTime
++{
++public:
++	void start() { t0_ = std::chrono::steady_clock::now(); }
++	int restart() { int e = elapsed(); start(); return e; }
++	int elapsed() const
++	{
++		return (int)std::chrono::duration_cast<std::chrono::milliseconds>(
++			std::chrono::steady_clock::now() - t0_).count();
++	}
++private:
++	std::chrono::steady_clock::time_point t0_ = std::chrono::steady_clock::now();
++};
