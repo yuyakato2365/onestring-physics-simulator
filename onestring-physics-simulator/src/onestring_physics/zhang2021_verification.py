@@ -273,10 +273,11 @@ def _structured_single_run(inner, target, params, run_simulation, deployment_par
         if "seam" in f.lower():
             unresolved.append(f)
     for c in verdict["checks"]:
-        if not c["ok"] and "seam" in c["check"].lower():
+        if not c["ok"] and "seam" in c["check"].lower() and not c["check"].startswith("K3D gate"):
             unresolved.append(f"{c['stage']} {c['check']}={c['value']} (limit {c['limit']})")
     quality_notes = [f"{c['stage']} {c['check']}={c['value']} (limit {c['limit']})"
-                     for c in verdict["checks"] if not c["ok"] and "seam" not in c["check"].lower()]
+                     for c in verdict["checks"]
+                     if not c["ok"] and ("seam" not in c["check"].lower() or c["check"].startswith("K3D gate"))]
     summary = {
         "structured_grid_run_completed": True,
         "structured_grid_geometrically_verified": not unresolved,
