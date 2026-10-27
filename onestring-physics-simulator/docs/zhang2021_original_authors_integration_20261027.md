@@ -1,6 +1,50 @@
 # Original Zhang et al. CAD 2021 Native Integration (2026-10-27)
 
-## 2026-10-27: verified blocker in genuine Segment (not a mesher fallback)
+## Verified original-author algorithm execution (2026-10-27)
+
+PARDISO's old host-bound license blocked the official `Segment.exe`.
+A **separate, independently developed Eigen sparse-direct numerical DLL**
+now provides the original PARDISO 6 six-/seventeen-argument entrypoint ABI.
+It solves the actual sparse **symmetric indefinite** (`mtype=-2`) KKT
+systems, using strict 1-based CSR indexing and solve residual checks.
+This replaces ONLY the numerical linear-system solver in a temporary
+working copy, not the mesh algorithms, and does not spoof PARDISO licensing.
+
+Files:
+- `native/zhang2021_sparse_solver/pardiso_compatible_eigen.cpp`
+- `native/zhang2021_sparse_solver/CMakeLists.txt`
+- `scripts/verify_zhang2021_eigen_abi.py`
+- `scripts/zhang2021_authors_native_adapter.py`
+- `.github/workflows/zhang2021-eigen-original-pipeline-20261027.yml`
+
+**GitHub Actions run 40437716509 is successful.** It compiled the
+independent numerical backend from unmodified Eigen headers in the authors'
+public source archive (using C++14 for their older Eigen version),
+passed an exact indefinite KKT numerical test, and ran all three
+**unmodified original author** executables on author sample `model_15`:
+
+- `Straighten.exe`: exit code 0
+- `Segment.exe`: exit code 0
+- `QMSim.exe`: exit code 0
+- final OBJ: **2,983 quad faces, face arity 4 only** (authors' target=4000)
+
+Exact official executable SHA256 fingerprints:
+- Straighten.exe: `3c88f817ef9ac6bee4da571d78c9d038d7edb1dce545c63548f5c8a3f93c95fc`
+- Segment.exe: `f50287d3b3171bd0c4cab6959d5f7b05d01ae46637dfa8a3e00cdbe0f6ca5b5d`
+- QMSim.exe: `aa73bed0b07446fb20fb25da2035023ccd5e13b073f858f5778387592ce5c4fe`
+
+These fingerprints are now checked at every original-native adapter run.
+**Passing the authors' sample is not equivalent to passing actual OptCuts
+Omega, 35-quad budget, conforming cut seams, Bunny or irregular CSF Split.**
+Those are separate required tests, not yet certified by this result.
+
+Use `ONESTRING_ZHANG2021_INDEPENDENT_EIGEN_DLL` in reference-only
+mode, or pass `--independent-eigen-solver-dll` to the native adapter.
+This optional route must be explicitly chosen; a legally licensed official
+PARDISO installation remains the other valid numerical backend.
+
+
+## Historical blocker: proprietary PARDISO license (now solvable with separate Eigen backend)
 
 Native Windows run now gets through the ORIGINAL `Straighten.exe` using a
 Qt 5.10-matched QPA plugin. Original `Segment.exe` still terminates with
