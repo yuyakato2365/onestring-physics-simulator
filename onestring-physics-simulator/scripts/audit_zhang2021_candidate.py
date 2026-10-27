@@ -46,7 +46,7 @@ def main() -> int:
                    help="Write strict preflight diagnostics JSON")
     p.add_argument("--allow-incomplete-boundary-for-study", action="store_true",
                    help="WARNING: disables seam audit; never use as certification")
-    p.add_argument("--max-missing-fraction", type=float, default=.02)
+    p.add_argument("--max-missing-fraction", type=float, default=1e-7)
     args = p.parse_args()
     source = _load_source(args.source)
     with np.load(args.candidate, allow_pickle=False) as d:
