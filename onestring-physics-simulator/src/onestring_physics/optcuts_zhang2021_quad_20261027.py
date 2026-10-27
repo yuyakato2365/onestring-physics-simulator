@@ -400,7 +400,8 @@ def _seam_preflight(rp: Any, quad_uv: np.ndarray, faces: np.ndarray) -> dict:
 
 def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None,
                        panel_line_triples: Any = None, strict_node_valence: bool = True,
-                       panel_weights: Any = None, report_only: bool = False) -> Zhang2021M2DPlan:
+                       panel_weights: Any = None, report_only: bool = False,
+                       keep_interior_3d: bool = False) -> Zhang2021M2DPlan:
     """Paper stage + OneString adapter on one chart (raises on failure).
 
     1. [paper]     Zhang et al. 2021 reference programs -> Q (``zhang_result`` may
@@ -484,6 +485,10 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
     lift = ChartLift(rp.uv, rp.f2, rp.xyz, rp.f3)
     fixed = np.zeros(len(quv), bool)
     fixed[quad_boundary_loop(faces_ccw)] = True
+    if keep_interior_3d:
+        # The re-parameterisation moved the chart interior; keep every interior grid vertex on the
+        # SAME surface point it had in the input chart (3D closest point on the new chart's triangles).
+        quv = _relocate_on_new_chart(ChartLift(uv, f2, xyz, f3), quv, ~fixed, rp)
     quv_in = quv.copy()
     opt_report: dict = {"panel_optimizer_enabled": False}
     if bool(getattr(params, "zhang2021_panel_optimization", True)):
@@ -570,6 +575,48 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
     source = SimpleNamespace(xyz=xyz.copy(), f3=f3.copy(), uv=uv.copy(), f2=f2.copy())
     return Zhang2021M2DPlan(quad_uv=quv, quads=faces_ccw, m3d_preview=m3d, chart=rp,
                             source=source, metrics=metrics, m2d_report=q2, m3d_report=q3)
+
+
+def _relocate_on_new_chart(old_lift: Any, quv: np.ndarray, which: np.ndarray, rp: Any) -> np.ndarray:
+    from scipy.spatial import cKDTree
+    quv = np.asarray(quv, float).copy()
+    idx = np.flatnonzero(which)
+    if not len(idx):
+        return quv
+    t = old_lift.locate(quv[idx])
+    ok = t >= 0
+    if not np.any(ok):
+        return quv
+    X = old_lift.lift(quv[idx[ok]], t[ok])
+    V = np.asarray(rp.xyz, float)
+    F3 = np.asarray(rp.f3, int)
+    F2 = np.asarray(rp.f2, int)
+    U = np.asarray(rp.uv, float)
+    tree = cKDTree(V[F3].mean(axis=1))
+    _, cand = tree.query(X, k=min(12, len(F3)))
+    cand = np.atleast_2d(cand)
+    for r, (x, cs) in enumerate(zip(X, cand)):
+        best = None
+        for ti in cs:
+            a, b, c = V[F3[ti]]
+            e1, e2, d = b - a, c - a, x - a
+            G = np.array([[e1 @ e1, e1 @ e2], [e1 @ e2, e2 @ e2]])
+            try:
+                l1, l2 = np.linalg.solve(G, np.array([d @ e1, d @ e2]))
+            except np.linalg.LinAlgError:
+                continue
+            l1c, l2c = max(l1, 0.0), max(l2, 0.0)
+            if l1c + l2c > 1.0:
+                ssum = l1c + l2c
+                l1c, l2c = l1c / ssum, l2c / ssum
+            dist = float(np.linalg.norm(a + l1c * e1 + l2c * e2 - x))
+            if best is None or dist < best[0]:
+                best = (dist, ti, l1c, l2c)
+        if best is not None:
+            _, ti, l1c, l2c = best
+            ua, ub, uc = U[F2[ti]]
+            quv[idx[ok][r]] = ua + l1c * (ub - ua) + l2c * (uc - ua)
+    return quv
 
 
 # ------------------------------------------- coordinated Omega + quad search

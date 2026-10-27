@@ -35,6 +35,6 @@ def test_cylinder_structured_grid_is_regular_and_seam_closable():
     assert m["zhang2021_m2d_quads_valid"]
     assert m["zhang2021_seam_preflight_mode"] == "hard"
     assert m["structured_grid_unresolved"] == []
-    # both copies of the cut carry the same number of grid edges
-    sides = m["structured_grid_side_lengths"]
-    assert len(sides) == 4 and sides[0] == sides[2] and sides[1] == sides[3]
+    # a flat open cylinder needs no seam cone: the logical domain is a rectangle
+    assert m["structured_grid_convex_corners"] == 4 and m["structured_grid_reflex_corners"] == 0
+    assert m["structured_grid_seam_cones"] == []

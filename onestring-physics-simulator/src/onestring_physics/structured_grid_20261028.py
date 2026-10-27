@@ -62,7 +62,8 @@ def _turning_angles(src, feats: list[int], scale: float) -> dict[int, float]:
 
 
 def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio: float = 0.7,
-                   max_rounds: int = 12) -> dict:
+                   max_rounds: int = 12, cone_pairs: list | None = None, w_cone: float = 0.5,
+                   w_head: float = 0.5, shape_weight: float = 0.05) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -73,7 +74,14 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
       * cost: |n_k - L_k| / L_k (L_k = 3D run length / target panel edge)
               + w_turn |turning angle / 90 deg - turn_k|
               + w_pos |corner_k - chart position of feature k| (shape term, used when needed).
-    Self-intersecting answers are excluded by no-good cuts and a stronger shape term.
+    Self-intersecting answers are excluded by lazy non-overlap constraints (stage 2).
+
+    Seam cones (``cone_pairs``: the two UV copies of one 3D point of a cut): the turns t_A, t_B of
+    the two copies may add up to -1 / 0 / +1, i.e. the point gets 3D valence 5 / 4 / 3 once the
+    seam is closed (an exceptional valence ON the seam; the M2D interior stays valence 4).  Each
+    cone costs ``w_cone``; the logical heading is kept close to the chart's heading along the whole
+    boundary (``w_head``), so the curvature of caps such as the ears is absorbed by seam cones
+    instead of by bending the interior grid.
     """
     from scipy.optimize import Bounds, LinearConstraint, milp
     from shapely.geometry import Polygon
@@ -83,7 +91,11 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
     m = len(feats)
     if m < 4 and not any(src.node_kind.get(j) for j in feats):
         raise StructuredGridError(f"SG_TOO_FEW_BOUNDARY_FEATURES: {m} (need >= 4 corners)")
-    ang = _turning_angles(src, feats, scale)
+    cone_pairs = list(cone_pairs or [])
+    if cone_pairs:
+        ang = _chord_turning(src, feats)
+    else:
+        ang = _turning_angles(src, feats, scale)
     tips = {k for k, j in enumerate(feats) if src.node_kind.get(j) == "tip"}
     L = []
     run_uv = []
@@ -106,21 +118,21 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
     unit = float(np.sum(L) / max(float(np.sum(run_uv)), 1e-300))
     T = ((uvf - uvf[0]) @ R.T) * unit
     pos = {j: k for k, j in enumerate(feats)}
-    pairs = []
-    for con in seam_constraints(src):
-        ka, kb = pos.get(con.run_a[0]), pos.get(con.run_b[0])
-        if ka is None or kb is None or feats[(ka + 1) % m] != con.run_a[1] or feats[(kb + 1) % m] != con.run_b[1]:
-            raise StructuredGridError("SG_CUT_BRANCH_NOT_A_SINGLE_SIDE: a cut branch contains extra features")
-        pairs.append((ka, kb))
+    pairs = _subside_pairs(src, feats, seam_constraints(src))
+    cones = [(pos[a], pos[b]) for a, b in cone_pairs]
+    P_c = len(cones)
     # variable layout
     iD = lambda k, d: 4 * k + d                     # noqa: E731  delta (binary)
     iX = lambda k, d: 4 * m + 4 * k + d             # noqa: E731  x = n_k * delta (integer)
     iT = lambda k, s: 8 * m + 3 * k + (s + 1)       # noqa: E731  turn one-hot (binary), s in -1, 0, 1
     iE = lambda k: 11 * m + k                       # noqa: E731  |n_k - L_k|
     iF = lambda k, ax: 12 * m + 2 * k + ax          # noqa: E731  |P_k - T_k|
-    nv = 14 * m
+    iZ = lambda q: 14 * m + q                       # noqa: E731  |t_A + t_B| of seam cone candidate q
+    iH = lambda k: 14 * m + P_c + k                 # noqa: E731  heading error after side k
+    iO = 15 * m + P_c                               # free heading offset
+    nv = 15 * m + P_c + 1
     M = int(10 * max(L.max(), 4) + 10)
-    w_turn = 1.0
+    w_turn = 0.3 if cone_pairs else 1.0
     # A side may not be squeezed: n_k >= max(1, floor(min_ratio * L_k)) (protrusions keep their cells).
     n_lo = np.maximum(1, np.floor(min_ratio * L)).astype(int)
     A, lb, ub = [], [], []
@@ -156,13 +168,26 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
         row([(iX(k, d), float(DIRS[d][ax])) for k in range(m) for d in range(4)], 0, 0)
     for ka, kb in pairs:
         row([(iX(ka, d), 1) for d in range(4)] + [(iX(kb, d), -1) for d in range(4)], 0, 0)
-    integrality = np.r_[np.ones(11 * m), np.zeros(3 * m)]
+    for q, (ka, kb) in enumerate(cones):
+        tsum = [(iT(ka, s_), s_) for s_ in (-1, 1)] + [(iT(kb, s_), s_) for s_ in (-1, 1)]
+        row(tsum, -1, 1)                                      # 3D valence 3..5 on the seam
+        row(tsum + [(iZ(q), -1)], -np.inf, 0)
+        row([(i, -v) for i, v in tsum] + [(iZ(q), -1)], -np.inf, 0)
+    if cone_pairs:
+        C = np.cumsum([ang[j] / 90.0 for j in feats])
+        for k in range(m):
+            tk = [(iT(i, s_), s_) for i in range(k + 1) for s_ in (-1, 1)]
+            # h_k >= |C_k - sum_{i<=k} t_i - o|
+            row([(i, -v) for i, v in tk] + [(iO, -1), (iH(k), -1)], -np.inf, -C[k])
+            row(tk + [(iO, 1), (iH(k), -1)], -np.inf, C[k])
+    integrality = np.r_[np.ones(11 * m), np.zeros(4 * m + P_c + 1)]
     lo_b = np.zeros(nv)
-    hi_b = np.r_[np.ones(4 * m), np.full(4 * m, M), np.ones(3 * m), np.full(3 * m, np.inf)]
+    lo_b[iO] = -np.inf
+    hi_b = np.r_[np.ones(4 * m), np.full(4 * m, M), np.ones(3 * m), np.full(4 * m + P_c + 1, np.inf)]
     attempts = []
     nogood: list[list[int]] = []
     chosen = None
-    w_pos = 0.05
+    w_pos = float(shape_weight)
     for _round in range(max_rounds):
         # stage 1: turns / directions (lengths soft, with the hard lower bounds)
         c = np.zeros(nv)
@@ -171,12 +196,16 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             for s_ in (-1, 0, 1):
                 c[iT(k, s_)] = w_turn * abs(ang[feats[k]] / 90.0 - s_)
             c[iF(k, 0)] = c[iF(k, 1)] = w_pos / max(float(np.mean(L)), 1.0)
+            if cone_pairs:
+                c[iH(k)] = w_head
+        for q in range(P_c):
+            c[iZ(q)] = w_cone
         A2, lb2, ub2 = list(A), list(lb), list(ub)
         for ng in nogood:
             r = np.zeros(nv); r[ng] = 1
             A2.append(r); lb2.append(-np.inf); ub2.append(m - 1)
         res = milp(c, constraints=LinearConstraint(np.asarray(A2), lb2, ub2), integrality=integrality,
-                   bounds=Bounds(lo_b, hi_b), options={"time_limit": 8.0})
+                   bounds=Bounds(lo_b, hi_b), options={"time_limit": 30.0 if cone_pairs else 8.0})
         if res.x is None:
             attempts.append({"round": _round, "status": f"no turn assignment: {res.message}"})
             break
@@ -203,10 +232,199 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             "SG_LOGICAL_POLYGON_NOT_FOUND: no simple orthogonal polygon with every side >= "
             f"{min_ratio:g} x its 3D length was found (attempts {attempts})")
     w_pos, dirs, n, turn, poly = chosen
-    return {"features": feats, "turn": turn, "dirs": dirs, "lengths": n.tolist(),
+    cone_report = []
+    for (a, b), (ka, kb) in zip(cone_pairs, cones):
+        ssum = turn[ka] + turn[kb]
+        if ssum:
+            cone_report.append({"xyz_id": int(src.xyz_id[a]), "uv_copies": [int(a), int(b)],
+                                "turns": [int(turn[ka]), int(turn[kb])], "valence_3d": int(4 - ssum)})
+    return {"seam_cones": cone_report, "cone_candidates": len(cone_pairs),
+            "features": feats, "turn": turn, "dirs": dirs, "lengths": n.tolist(),
             "target_lengths": L.tolist(), "polygon": poly, "cut_pairs": pairs,
             "convex": int(sum(1 for t in turn if t == 1)), "reflex": int(sum(1 for t in turn if t == -1)),
             "shape_weight": w_pos, "attempts": attempts, "turning_deg": [float(ang[j]) for j in feats]}
+
+
+def _chord_turning(src, feats: list[int]) -> dict[int, float]:
+    """Turning (deg, + convex / - reflex) of the polygon through the feature points of a CCW loop."""
+    uvf = np.asarray([src.uv[j] for j in feats], float)
+    din = uvf - np.roll(uvf, 1, axis=0)
+    dout = np.roll(uvf, -1, axis=0) - uvf
+    a = np.degrees(np.arctan2(din[:, 0] * dout[:, 1] - din[:, 1] * dout[:, 0], np.sum(din * dout, axis=1)))
+    return {j: float(a[k]) for k, j in enumerate(feats)}
+
+
+def _cyclic_positions(n: int, a: int, b: int) -> list[int]:
+    """Loop positions a, a+1, ..., b (cyclic, inclusive)."""
+    cnt = (b - a) % n
+    return [(a + i) % n for i in range(cnt + 1)]
+
+
+def _subside_pairs(src, feats: list[int], cons) -> list[tuple[int, int]]:
+    """Pairs (side k_A, side k_B) of the two UV copies of every cut branch, split at the features."""
+    n = src.n
+    fset = set(feats)
+    pos = {j: k for k, j in enumerate(feats)}
+    out = []
+    for con in cons:
+        FA = [j for j in _cyclic_positions(n, *con.run_a) if j in fset]
+        FB = [j for j in _cyclic_positions(n, *con.run_b) if j in fset]
+        if len(FA) != len(FB) or len(FA) < 2:
+            raise StructuredGridError("SG_CUT_BRANCH_FEATURES_UNPAIRED: the two copies of a cut branch carry "
+                                      f"different feature counts ({len(FA)} vs {len(FB)})")
+        r = len(FA) - 1
+        for i in range(r):
+            a0, a1 = FA[i], FA[i + 1]
+            b0, b1 = FB[r - 1 - i], FB[r - i]
+            if src.xyz_id[a0] != src.xyz_id[b1] or src.xyz_id[a1] != src.xyz_id[b0]:
+                raise StructuredGridError("SG_CUT_BRANCH_FEATURES_NOT_AT_THE_SAME_3D_POINTS")
+            out.append((pos[a0], pos[b0]))
+    return out
+
+
+def seam_cone_candidates(src, base_feats: list[int], h3d: float, spacing: float = 2.0,
+                         open_spacing: float = 2.0) -> tuple[list[int], list[tuple[int, int]]]:
+    """Extra feature points: paired copies of 3D cut vertices every ~spacing panels along every cut
+    branch (seam cone candidates) and points every ~open_spacing panels on open runs."""
+    from .zhang2021_onestring_seam_matching import seam_constraints
+
+    n = src.n
+    tot3 = float(src.cum3[-1])
+    d3 = lambda a, b: (float(src.cum3[b]) - float(src.cum3[a])) % tot3     # noqa: E731
+    feats = set(int(j) for j in base_feats)
+    pairs = []
+    for con in seam_constraints(src):
+        a0, a1 = con.run_a
+        posB = {int(src.xyz_id[j]): j for j in _cyclic_positions(n, *con.run_b)[1:-1]}
+        length = d3(a0, a1)
+        last = a0
+        for j in _cyclic_positions(n, a0, a1)[1:-1]:
+            if d3(last, j) >= spacing * h3d and d3(j, a1) >= 0.6 * spacing * h3d:
+                q = posB.get(int(src.xyz_id[j]))
+                if q is not None:
+                    pairs.append((int(j), int(q)))
+                    feats.update((int(j), int(q)))
+                    last = j
+        del length
+    base = sorted(feats)
+    for k in range(len(base)):
+        a, b = base[k], base[(k + 1) % len(base)]
+        run = _cyclic_positions(n, a, b)
+        if not all(src.edge_kind[j] == "open" for j in run[:-1]):
+            continue
+        last = a
+        for j in run[1:-1]:
+            if d3(last, j) >= open_spacing * h3d and d3(j, b) >= 0.6 * open_spacing * h3d:
+                feats.add(int(j))
+                last = j
+    return sorted(feats), pairs
+
+
+def _locate_bary(Vsrc: np.ndarray, F: np.ndarray, pts: np.ndarray, Vdst: np.ndarray):
+    """Map points through the piecewise-linear map Vsrc -> Vdst on triangles F (None if any is outside)."""
+    from matplotlib.tri import Triangulation
+    finder = Triangulation(Vsrc[:, 0], Vsrc[:, 1], F).get_trifinder()
+    t = finder(pts[:, 0], pts[:, 1])
+    if np.any(t < 0):
+        return None
+    a, b, c = F[t, 0], F[t, 1], F[t, 2]
+    e1, e2, d = Vsrc[b] - Vsrc[a], Vsrc[c] - Vsrc[a], pts - Vsrc[a]
+    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    l1 = (d[:, 0] * e2[:, 1] - d[:, 1] * e2[:, 0]) / det
+    l2 = (e1[:, 0] * d[:, 1] - e1[:, 1] * d[:, 0]) / det
+    return Vdst[a] + l1[:, None] * (Vdst[b] - Vdst[a]) + l2[:, None] * (Vdst[c] - Vdst[a])
+
+
+def _untangle_triangles(P: np.ndarray, F: np.ndarray, free: np.ndarray, iters: int = 400) -> np.ndarray:
+    """Make every triangle positively oriented: min sum max(0, eps - det)^2 over the free vertices."""
+    from scipy.optimize import minimize
+    P = np.asarray(P, float).copy()
+    e1 = P[F[:, 1]] - P[F[:, 0]]
+    e2 = P[F[:, 2]] - P[F[:, 0]]
+    det0 = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    eps = 1e-3 * float(np.median(np.abs(det0)))
+
+    def fg(z):
+        Q = P.copy()
+        Q[free] = z.reshape(-1, 2)
+        a, b, c = Q[F[:, 0]], Q[F[:, 1]], Q[F[:, 2]]
+        det = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+        v = np.maximum(eps - det, 0.0)
+        E = float(np.sum(v * v))
+        g = -2.0 * v
+        G = np.zeros_like(Q)
+        # d det / d a, b, c
+        np.add.at(G, F[:, 0], g[:, None] * np.c_[b[:, 1] - c[:, 1], c[:, 0] - b[:, 0]])
+        np.add.at(G, F[:, 1], g[:, None] * np.c_[c[:, 1] - a[:, 1], a[:, 0] - c[:, 0]])
+        np.add.at(G, F[:, 2], g[:, None] * np.c_[a[:, 1] - b[:, 1], b[:, 0] - a[:, 0]])
+        return E, G[free].ravel()
+
+    res = minimize(fg, P[free].ravel(), jac=True, method="L-BFGS-B", options={"maxiter": iters})
+    P[free] = res.x.reshape(-1, 2)
+    return P
+
+
+def _slim_polygon_map(Dc, Dg, quads, logical, bset_c, bpoly, cuv, cf, cxyz, cf3, bnd, harmonic_flips):
+    """Bijective chart -> logical polygon map with the least 3D distortion (symmetric Dirichlet, SLIM).
+
+    Start: the composite Tutte map (bijective), then SLIM w.r.t. the 3D triangles with the polygon
+    outline fixed.  The lattice is pulled back through the optimised map, so the unavoidable
+    distortion (chart vs. polygon) is spread over the chart instead of concentrated in fans."""
+    from .zhang2021_onestring_reparam import _SDProblem, _slim_iterations, progressive_boundary_slim
+
+    tris = np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])
+    # the lattice disk image is the polygon inscribed in the circle through its boundary vertices:
+    # pull the chart's disk image radially onto it (a bijection of the disk onto that polygon)
+    bang = np.sort(np.mod(np.arctan2(Dg[bnd, 1], Dg[bnd, 0]), 2 * np.pi))
+    th = np.mod(np.arctan2(Dc[:, 1], Dc[:, 0]), 2 * np.pi)
+    i1 = np.searchsorted(bang, th) % len(bang)
+    i0 = (i1 - 1) % len(bang)
+    a0, a1 = bang[i0], bang[i1]
+    span = np.mod(a1 - a0, 2 * np.pi)
+    mid = a0 + 0.5 * span
+    rho = np.cos(0.5 * span) / np.maximum(np.cos(th - mid), 1e-12)
+    Dc = Dc * (rho * (1.0 - 1e-9))[:, None]
+    P0 = _locate_bary(Dg, tris, Dc, logical)
+    if P0 is None:
+        print("[SG-PHI] composite map: a chart vertex fell outside the lattice disk image", flush=True)
+        return None
+    e1 = P0[cf[:, 1]] - P0[cf[:, 0]]
+    e2 = P0[cf[:, 2]] - P0[cf[:, 0]]
+    nflip = int(np.sum(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0] <= 0))
+    if nflip:
+        P0 = _untangle_triangles(P0, cf, np.setdiff1d(np.arange(len(P0)), bset_c))
+        e1 = P0[cf[:, 1]] - P0[cf[:, 0]]
+        e2 = P0[cf[:, 2]] - P0[cf[:, 0]]
+        nflip = int(np.sum(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0] <= 0))
+    if nflip:
+        print(f"[SG-PHI] composite map has {nflip} flipped/degenerate chart triangles; SLIM skipped", flush=True)
+        return None
+    X = cxyz[cf3]
+    area3d = 0.5 * float(np.sum(np.linalg.norm(np.cross(X[:, 1] - X[:, 0], X[:, 2] - X[:, 0]), axis=1)))
+    Ppoly = logical[tris]
+    parea = 0.5 * float(np.sum(np.abs((Ppoly[:, 1, 0] - Ppoly[:, 0, 0]) * (Ppoly[:, 2, 1] - Ppoly[:, 0, 1])
+                                      - (Ppoly[:, 1, 1] - Ppoly[:, 0, 1]) * (Ppoly[:, 2, 0] - Ppoly[:, 0, 0]))))
+    scale = float(np.sqrt(area3d / max(parea, 1e-300)))
+    prob = _SDProblem(cxyz, cf3, cf, len(cuv))
+    free = np.setdiff1d(np.arange(len(cuv)), bset_c)
+    try:
+        E0 = float(prob.energy(P0 * scale)[0])
+        # composite boundary points already lie on the polygon outline; slide them to the exact
+        # 3D arc-length positions without flips, then optimise the interior
+        cur, _E, _st = progressive_boundary_slim(prob, P0 * scale, cf, bset_c, bpoly * scale, max_steps=400,
+                                                 step_slim_iters=2, final_iters=0, error_prefix="SG_PHI")
+        cur, E1, iters = _slim_iterations(prob, cur, free, iters=200, tol=1e-6)
+    except Exception as exc:  # noqa: BLE001 - fall back to the composite map
+        print(f"[SG-PHI] SLIM failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+    gfree = np.setdiff1d(np.arange(len(logical)), bnd)
+    out = _locate_bary(cur, cf, logical[gfree] * scale, cuv)
+    if out is None:
+        return None
+    return gfree, out, {"phi_model": "bijective SLIM map chart -> logical polygon (3D symmetric Dirichlet), "
+                                     "started from the composite Tutte map",
+                        "phi_sd_before": E0, "phi_sd_after": float(E1), "phi_slim_iterations": int(iters),
+                        "harmonic_direct_flipped_triangles": harmonic_flips}
 
 
 def _lengths_for_directions(dirs, L, n_lo, pairs, T, w_pos, *, max_iter: int = 40):
@@ -395,7 +613,7 @@ def place_grid(src, dom: dict, logical: np.ndarray, quads: np.ndarray, walk,
     if chart_uv is not None and chart_f2 is not None:
         try:
             got = _pullback_interior(src, dom, logical, quads, bnd, walk, np.asarray(chart_uv, float),
-                                     np.asarray(chart_f2, int))
+                                     np.asarray(chart_f2, int), chart_xyz, chart_f3)
         except Exception as exc:  # noqa: BLE001 - reported, falls back below
             got, info = None, {"placement": "grid-graph harmonic", "pullback_failed": f"{type(exc).__name__}: {exc}"}
         if got is not None:
@@ -440,7 +658,7 @@ def _tutte_disk(n: int, edges_w: tuple, bset: np.ndarray, bpos: np.ndarray) -> n
     return X
 
 
-def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf):
+def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, cf3=None):
     """Interior grid points as phi^-1(lattice) with phi = (Tutte disk map of the lattice polygon)^-1 o
     (Tutte disk map of Omega_1).  Both disk maps are bijective (positive weights, convex circle
     boundary, same boundary correspondence: 3D arc length <-> polygon arc length), so the composite
@@ -477,6 +695,32 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf):
             cr = abs(u[0] * v[1] - u[1] * v[0])
             w = max(0.5 * float(u @ v) / max(cr, 1e-15), 1e-6)
             I += [i, j]; J += [j, i]; W += [w, w]
+    # 1st choice: direct harmonic map Omega_1 -> logical polygon (low distortion when the polygon
+    # follows the chart's shape, e.g. with seam cones); used only if it has no flipped triangle.
+    poly = np.asarray(dom["polygon"], float)
+    dirs_v = np.asarray([DIRS[d] for d in dom["dirs"]], float)
+    kk = np.clip(np.searchsorted(cum_n, t_chart[bset_c], side="right") - 1, 0, m - 1)
+    bpoly = poly[kk] + (t_chart[bset_c] - cum_n[kk])[:, None] * dirs_v[kk]
+    Dp = _tutte_disk(len(cuv), (I, J, W), bset_c, bpoly)
+    e1 = Dp[cf[:, 1]] - Dp[cf[:, 0]]
+    e2 = Dp[cf[:, 2]] - Dp[cf[:, 0]]
+    o0 = cuv[cf[:, 1]] - cuv[cf[:, 0]]
+    o1 = cuv[cf[:, 2]] - cuv[cf[:, 0]]
+    flips = int(np.sum((e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]) * np.sign(o0[:, 0] * o1[:, 1] - o0[:, 1] * o1[:, 0]) <= 0))
+    if flips == 0:
+        tri = Triangulation(Dp[:, 0], Dp[:, 1], cf)
+        finder = tri.get_trifinder()
+        gfree = np.setdiff1d(np.arange(len(logical)), bnd)
+        pts = np.asarray(logical, float)[gfree]
+        t = finder(pts[:, 0], pts[:, 1])
+        if np.all(t >= 0):
+            out = np.zeros((len(gfree), 2))
+            for r, (ti, p) in enumerate(zip(t, pts)):
+                a, b, c = cf[ti]
+                T = np.c_[Dp[b] - Dp[a], Dp[c] - Dp[a]]
+                l1, l2 = np.linalg.solve(T, p - Dp[a])
+                out[r] = cuv[a] + l1 * (cuv[b] - cuv[a]) + l2 * (cuv[c] - cuv[a])
+            return gfree, out, {"phi_model": "harmonic map Omega_1 -> logical polygon (no flip)"}
     Dc = _tutte_disk(len(cuv), (I, J, W), bset_c, circ(t_chart[bset_c]))
     # lattice: triangulated quads, uniform weights
     nl = len(logical)
@@ -488,6 +732,11 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf):
     for vtx, k, j in walk:
         t_grid[vtx] = cum_n[k] + j
     Dg = _tutte_disk(nl, (I, J, np.ones(len(I))), bnd, circ(t_grid[bnd]))
+    if cxyz is not None and cf3 is not None:
+        got = _slim_polygon_map(Dc, Dg, quads, np.asarray(logical, float), bset_c, bpoly, cuv, cf,
+                                np.asarray(cxyz, float), np.asarray(cf3, int), bnd, flips)
+        if got is not None:
+            return got
     tri = Triangulation(Dc[:, 0], Dc[:, 1], cf)
     finder = tri.get_trifinder()
     gfree = np.setdiff1d(np.arange(nl), bnd)
@@ -501,7 +750,8 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf):
         T = np.c_[Dc[b] - Dc[a], Dc[c] - Dc[a]]
         l1, l2 = np.linalg.solve(T, p - Dc[a])
         out[r] = cuv[a] + l1 * (cuv[b] - cuv[a]) + l2 * (cuv[c] - cuv[a])
-    return gfree, out, {"phi_model": "composite of two Tutte disk maps (bijective)"}
+    return gfree, out, {"phi_model": "composite of two Tutte disk maps (bijective)",
+                        "harmonic_direct_flipped_triangles": flips}
 
 
 # ------------------------------------------------------------------ planner
@@ -544,9 +794,16 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     feats = boundary_features(src, keep * diag)
     ratio0 = float(getattr(params, "structured_grid_min_side_ratio", 0.7))
     dom, errors = None, []
+    cone_pairs = []
+    if bool(getattr(params, "structured_grid_seam_cones", True)):
+        feats, cone_pairs = seam_cone_candidates(
+            src, feats, h3d, spacing=float(getattr(params, "structured_grid_cone_spacing", 2.0)),
+            open_spacing=float(getattr(params, "structured_grid_cone_spacing", 2.0)))
     for ratio in (ratio0, 0.5 * ratio0):
         try:
-            dom = logical_domain(src, feats, h3d, keep * diag, min_ratio=ratio)
+            dom = logical_domain(src, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
+                                 w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
+                                 shape_weight=float(getattr(params, "structured_grid_shape_weight", 0.05)))
             dom["min_side_ratio"] = ratio
             break
         except StructuredGridError as exc:
@@ -558,6 +815,9 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     grid_uv, placement = place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2,
                                     chart_xyz=pre.xyz, chart_f3=pre.f3)
     grid_uv = grid_uv * mirror
+    print(f"[SG-GRID] seam cones: {len(dom.get('seam_cones', []))} of {dom.get('cone_candidates', 0)} candidates "
+          f"(3D valence 3: {sum(1 for c in dom.get('seam_cones', []) if c['valence_3d'] == 3)}, "
+          f"5: {sum(1 for c in dom.get('seam_cones', []) if c['valence_3d'] == 5)})", flush=True)
     print(f"[SG-GRID] features={len(feats)} convex={dom['convex']} reflex={dom['reflex']} sides={dom['lengths']} "
           f"-> {len(quads)} quads, panel edge target {h3d:.4g}", flush=True)
     p = _params_with(params, zhang2021_repair_node_valence=False, zhang2021_seam_matching=False,
@@ -570,7 +830,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                                   panel_line_triples=grid_line_triples(vid), strict_node_valence=False,
                                   panel_weights=PanelOptimizerWeights(
                                       smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0))),
-                                  report_only=True)
+                                  report_only=True, keep_interior_3d=True)
     except Zhang2021QuadModeError as exc:
         raise StructuredGridError(str(exc)) from exc
     m = plan.metrics
@@ -602,6 +862,10 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         "structured_grid_quads": int(len(quads)),
         "structured_grid_initial_placement": placement,
         "structured_grid_min_side_ratio": dom.get("min_side_ratio"),
+        "structured_grid_seam_cones": dom.get("seam_cones", []),
+        "structured_grid_seam_cone_candidates": int(dom.get("cone_candidates", 0)),
+        "structured_grid_seam_cone_valence3": int(sum(1 for c in dom.get("seam_cones", []) if c["valence_3d"] == 3)),
+        "structured_grid_seam_cone_valence5": int(sum(1 for c in dom.get("seam_cones", []) if c["valence_3d"] == 5)),
         "structured_grid_logical_attempts": dom.get("attempts", []),
         "structured_grid_interior_valence_all_4": bool(_interior_valence_ok(plan.quads)),
         "structured_grid_unresolved": unresolved,
