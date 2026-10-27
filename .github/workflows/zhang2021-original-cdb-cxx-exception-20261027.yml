@@ -1,0 +1,38 @@
+name: Inspect original Zhang Segment C++ thrown exception
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-original-cdb-cxx-exception-20261027.yml]
+  workflow_dispatch:
+jobs:
+  native-first-chance:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: onestring-physics-simulator
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download official Zhang binaries and Qt version-matched QPA
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\native_exception"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\native_exception\authors_executables\ExeProgram"
+      - name: Catch C++ original exception with debugger before Windows fast-fail
+        run: |
+          $root="$env:RUNNER_TEMP\native_exception\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after','Result\finalOut' | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $env:OMP_NUM_THREADS='1'
+          $a=Start-Process -FilePath (Join-Path $root 'Straighten.exe') -ArgumentList @('Source/Input/model_15.obj','Source/before/model_15.obj','Source/after/model_15_axis.obj') -NoNewWindow -PassThru
+          if(!$a.WaitForExit(60000)){$a.Kill();throw 'Straighten timeout'}
+          if(!(Test-Path 'Source/after/model_15_axis.obj')){throw 'Straighten output missing'}
+          $dbg='C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          $exe=Join-Path $root 'Segment.exe'
+          Write-Output '=== FIRST CHANCE C++ THROWN EXCEPTION ==='
+          & $dbg -o -g -G -c 'sxe e06d7363;g;.exr -1;!cppexr -1;kv;!analyze -v;q' $exe 'Source/after/model_15_axis.obj' 'Result/' 'Source/before/model_15.obj' '35' '0.01' 2>&1 | Select-Object -Last 210
+          Pop-Location
