@@ -591,6 +591,18 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
                             raise PlanarQuadMeshingError(
                                 "ZHANG_INDEPENDENT_EIGEN_DLL_NOT_FOUND: " + str(dll))
                         cmd.extend(["--independent-eigen-solver-dll", str(dll)])
+                    haus_bound = float(getattr(
+                        params, "zhang2021_author_hausdorff_bound", .01))
+                    sheet_width = float(getattr(
+                        params, "zhang2021_author_sheet_width", .05))
+                    if (not np.isfinite(haus_bound) or haus_bound <= 0
+                            or not np.isfinite(sheet_width) or sheet_width <= 0):
+                        raise PlanarQuadMeshingError(
+                            "ZHANG_ORIGINAL_NUMERIC_PARAMETERS_INVALID")
+                    cmd.extend([
+                        "--hausdorff-bound", str(haus_bound),
+                        "--sheet-width", str(sheet_width),
+                    ])
             audited = run_reference_adapter(
                 domain._planar_quad_source, cmd,
                 target_quads=int(domain._planar_quad_target_faces),
