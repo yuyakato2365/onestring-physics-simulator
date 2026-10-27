@@ -1,5 +1,38 @@
 # Original Zhang et al. CAD 2021 Native Integration (2026-10-27)
 
+## Verified OneString-style UV/3D numerical integration
+
+**GitHub Actions run 40438316124 PASSED.** A 12×12 paired UV chart
+with 242 triangles and nonflat 3D coordinates was passed to the original
+unmodified `Straighten.exe`, `Segment.exe`, `QMSim.exe`, using the
+independent Eigen sparse numerical solver only.
+
+- Target passed to original algorithms: **35 quadrilaterals**
+- Original actual output: **361 quadrilaterals** (target NOT MET)
+- Full all-quad face topology validated.
+- Strict original Ω undercoverage: `2.263222213090585e-15`.
+- Strict original Ω overcoverage: `1.7927212427471657e-15`.
+- `OneString` exact UV triangle inverse: all **2,205 sample points** passed.
+- Seam status: `source_open_boundary_only` (no test of paired OptCuts cut).
+- Numerical pipeline was the genuine three-author-stage implementation,
+  **not** Gmsh or independent triangle-pair approximation.
+
+`QMSim` genuine C++ `main.cpp` confirms `targetQuadNum=stoi(argv[5])`
+and `hausThre=stod(argv[6])*0.95`, with `SplicePipeline::targetNum_`
+set to target count. Therefore the target is advisory when its error
+and simplification constraints cannot be satisfied; 35 is not a guaranteed
+output count. The reported actual count must always be inspected.
+
+The OneString original-native mode now exposes the AUTHORS' actual
+Hausdorff bound and thin-sheet width, reports
+`planar_quad_count_target_met` and `planar_quad_count_target_excess`,
+and retains a STRICT Ω undercoverage guard of `1e-7` by default.
+Tuning these paper parameters is NOT an algorithm substitution;
+acceptance of any result that violates Ω or OptCuts seams is prohibited.
+
+**NOT YET VERIFIED:** 30–35 panels, real Bunny official OptCuts seam
+matching, irregular CSF Split and final T2D collision-free deployment.
+
 ## Verified original-author algorithm execution (2026-10-27)
 
 PARDISO's old host-bound license blocked the official `Segment.exe`.
