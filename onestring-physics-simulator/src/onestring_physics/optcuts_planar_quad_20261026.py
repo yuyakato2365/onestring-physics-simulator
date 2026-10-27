@@ -581,6 +581,16 @@ def install_planar_quad_20261026(pipeline: Any) -> None:
                             "ONESTRING_ZHANG2021_WINE_COMMAND", "").strip())
                     if wine:
                         cmd.extend(["--wine-command", *shlex.split(wine)])
+                    numeric = (
+                        str(getattr(params, "zhang2021_independent_solver_dll", "")).strip()
+                        or os.environ.get(
+                            "ONESTRING_ZHANG2021_INDEPENDENT_EIGEN_DLL", "").strip())
+                    if numeric:
+                        dll = Path(numeric).expanduser().resolve()
+                        if not dll.is_file():
+                            raise PlanarQuadMeshingError(
+                                "ZHANG_INDEPENDENT_EIGEN_DLL_NOT_FOUND: " + str(dll))
+                        cmd.extend(["--independent-eigen-solver-dll", str(dll)])
             audited = run_reference_adapter(
                 domain._planar_quad_source, cmd,
                 target_quads=int(domain._planar_quad_target_faces),
