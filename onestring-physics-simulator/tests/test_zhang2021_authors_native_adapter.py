@@ -108,3 +108,17 @@ def test_independent_solver_does_not_replace_original_package(tmp_path):
     assert original.read_bytes()==b"original authors software"
     assert (work/"author_license_bound_solver_DO_NOT_LOAD.bak").read_bytes()==original.read_bytes()
     assert len(sha)==64
+
+
+def test_reject_renamed_non_author_executables(tmp_path):
+    # Fake executables with genuine names must not be tagged as paper authors.
+    for name in native.ORIGINAL_AUTHOR_EXE_SHA256:
+        (tmp_path / name).write_bytes(b"fake-not-original")
+    with pytest.raises(native.OriginalZhangExecutionError, match="HASH_MISMATCH"):
+        native._verify_authors_executable_provenance(tmp_path)
+
+
+def test_author_hash_list_is_complete():
+    assert set(native.ORIGINAL_AUTHOR_EXE_SHA256) == {
+        "Straighten.exe", "Segment.exe", "QMSim.exe"}
+    assert all(len(digest)==64 for digest in native.ORIGINAL_AUTHOR_EXE_SHA256.values())
