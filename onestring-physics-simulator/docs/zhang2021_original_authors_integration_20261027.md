@@ -1,5 +1,41 @@
 # Original Zhang et al. CAD 2021 Native Integration (2026-10-27)
 
+## 2026-10-27: verified blocker in genuine Segment (not a mesher fallback)
+
+Native Windows run now gets through the ORIGINAL `Straighten.exe` using a
+Qt 5.10-matched QPA plugin. Original `Segment.exe` still terminates with
+`0xC0000409` on both the authors' original sample and generated flat
+source, with targets 35 and 4000 and with `OMP_NUM_THREADS=1`.
+
+A Windows first-chance C++ exception trace from the *actual* author
+`Segment/SplitPoly.exe` identifies its uncaught exception message:
+
+```text
+Wrong username or hostname .
+```
+
+This is thrown during Segment's solver stage (authored `PardisoSolver`,
+which calls the distributed `libpardiso600-WIN-X86-64.dll`).
+The original authors' README specifies a PARDISO license requirement.
+**This is a solver license/host-validation failure**, not proof the source
+Omega chart, mesh topology, target count or four-direction field is invalid.
+The native published package's `pardiso.lic` does not authorize this CI
+runner. A legitimate license tied to the execution host is needed for
+this binary; do NOT patch host checks or use forged license keys.
+
+Non-circumvention options:
+- Supply a valid PARDISO license for this host and repeat the original three
+  stage test with that authorized license.
+- Build the unmodified mathematical solver calls against an independently
+  licensed compatible sparse linear solver after checking type, indexing,
+  factorization mode and numerical equivalence, with this solver replacement
+  explicitly identified and separately benchmarked. This is not yet done.
+
+**No claim is made that Bunny + OptCuts + seam locks + CSF Split are
+complete or validated.** Python bridge protocol unit tests are separate
+from the authors' native geometric algorithm.
+
+
 **Purpose:** OneString M2D generation via the **genuine authors' original**
 *Quad Meshing with Coarse Layouts for Planar Domains* software, not Gmsh,
 the dated independent triangle-pair heuristic, or regular Grid cropping.
