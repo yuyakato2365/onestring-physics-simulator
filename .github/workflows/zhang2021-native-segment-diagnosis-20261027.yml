@@ -1,0 +1,47 @@
+name: Diagnose genuine Zhang Segment on author sample
+on:
+  push:
+    branches: [agent/zhang2021-independent-20261027]
+    paths: [.github/workflows/zhang2021-native-segment-diagnosis-20261027.yml]
+  workflow_dispatch:
+jobs:
+  author-sample:
+    runs-on: windows-2022
+    timeout-minutes: 9
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: onestring-physics-simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download genuine native implementation and compatible Qt 5.10
+        run: |
+          python scripts/download_zhang2021_executables.py --directory "$env:RUNNER_TEMP\zhang_segment_diag"
+          python scripts/install_zhang2021_qt_platform.py --exe-root "$env:RUNNER_TEMP\zhang_segment_diag\authors_executables\ExeProgram"
+      - name: Run unchanged Straighten and Segment on official author model for two target counts
+        run: |
+          $root="$env:RUNNER_TEMP\zhang_segment_diag\authors_executables\ExeProgram"
+          Push-Location $root
+          New-Item -ItemType Directory -Force -Path 'Source\before','Source\after','Result\finalOut' | Out-Null
+          $env:QT_QPA_PLATFORM='offscreen'
+          $name='model_15'
+          $p=Start-Process -FilePath (Join-Path $root 'Straighten.exe') -ArgumentList @("Source/Input/$name.obj","Source/before/$name.obj","Source/after/${name}_axis.obj") -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $root 'straighten.stdout') -RedirectStandardError (Join-Path $root 'straighten.stderr')
+          if(!$p.WaitForExit(60000)){ $p.Kill(); throw "Original Straighten timed out" }
+          Write-Output "AUTHOR_STRAIGHTEN_EXIT $($p.ExitCode)"
+          foreach($f in @("Source/before/$name.obj","Source/after/${name}_axis.obj")){
+            if(Test-Path $f){Write-Output "AUTHOR_STRAIGHTEN_RESULT $f $((Get-Item $f).Length)"}
+          }
+          if(!(Test-Path "Source/after/${name}_axis.obj")){throw "Straighten failed to generate source"}
+          foreach($count in @(4000,35)){
+            Write-Output "START_ORIGINAL_SEGMENT_TARGET $count"
+            $p=Start-Process -FilePath (Join-Path $root 'Segment.exe') -ArgumentList @("Source/after/${name}_axis.obj","Result/","Source/before/$name.obj","$count","0.01") -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $root "segment_$count.stdout") -RedirectStandardError (Join-Path $root "segment_$count.stderr")
+            if(!$p.WaitForExit(50000)){$p.Kill();$p.WaitForExit();Write-Output "AUTHOR_SEGMENT_TIMEOUT $count"}
+            else{Write-Output "AUTHOR_SEGMENT_EXIT $count $($p.ExitCode) HEX=$('{0:X8}' -f ($p.ExitCode -band 0xffffffff))"}
+            $out="segment_$count.stdout";$err="segment_$count.stderr"
+            foreach($f in @($out,$err)){if(Test-Path $f){Get-Content $f -Tail 30 | ForEach-Object {Write-Output "AUTHOR_SEGMENT_LOG_$count $f $_"}}}
+            Get-ChildItem 'Result' -File -ErrorAction SilentlyContinue | ForEach-Object {Write-Output "AUTHOR_SEGMENT_OUTPUT $($_.Name) $($_.Length)"}
+          }
+          Pop-Location
