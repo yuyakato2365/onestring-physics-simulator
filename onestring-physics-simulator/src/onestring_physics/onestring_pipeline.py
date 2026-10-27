@@ -1126,8 +1126,10 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_cone_weight: float = 0.5
     structured_grid_shape_weight: float = 0.05
     structured_grid_turn_weight: float = 1.0       # local turning fit of every logical corner / cone
-    structured_grid_priority: str = "size"         # "size" (equal M3D panel areas) | "balanced" | "shape"
+    structured_grid_priority: str = "shape"        # "shape" (same-looking panels) | "balanced" | "size" (equal areas)
     structured_grid_area_weight: float = -1.0      # equal-area weight of the grid map (-1 = from priority)
+    structured_grid_curvature_weight: float = 0.0  # >0: seam cones also follow the 3D curvature next to the seam
+    structured_grid_seamless_rounds: int = 1       # re-size the logical polygon to the seamless flattening
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",

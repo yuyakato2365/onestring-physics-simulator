@@ -63,7 +63,8 @@ def _turning_angles(src, feats: list[int], scale: float) -> dict[int, float]:
 
 def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio: float = 0.7,
                    max_rounds: int = 12, cone_pairs: list | None = None, w_cone: float = 0.5,
-                   w_head: float = 0.5, shape_weight: float = 0.05, turn_weight: float = 0.3) -> dict:
+                   w_head: float = 0.5, shape_weight: float = 0.05, turn_weight: float = 0.3,
+                   cone_curvature=None, w_curv: float = 1.0) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -130,7 +131,9 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
     iZ = lambda q: 14 * m + q                       # noqa: E731  |t_A + t_B| of seam cone candidate q
     iH = lambda k: 14 * m + P_c + k                 # noqa: E731  heading error after side k
     iO = 15 * m + P_c                               # free heading offset
-    nv = 15 * m + P_c + 1
+    iR = lambda q: 15 * m + P_c + 1 + q             # noqa: E731  |t_A + t_B - curvature/(pi/2)| of candidate q
+    kq = None if cone_curvature is None else np.asarray(cone_curvature, float)
+    nv = 15 * m + 2 * P_c + 1
     M = int(10 * max(L.max(), 4) + 10)
     w_turn = float(turn_weight) if cone_pairs else 1.0
     # A side may not be squeezed: n_k >= max(1, floor(min_ratio * L_k)) (protrusions keep their cells).
@@ -173,6 +176,10 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
         row(tsum, -1, 1)                                      # 3D valence 3..5 on the seam
         row(tsum + [(iZ(q), -1)], -np.inf, 0)
         row([(i, -v) for i, v in tsum] + [(iZ(q), -1)], -np.inf, 0)
+        if kq is not None:
+            # the 3D surface's own curvature next to this seam point asks for a cone of k_q quarter turns
+            row(tsum + [(iR(q), -1)], -np.inf, float(kq[q]))
+            row([(i, -v) for i, v in tsum] + [(iR(q), -1)], -np.inf, -float(kq[q]))
     if cone_pairs:
         C = np.cumsum([ang[j] / 90.0 for j in feats])
         for k in range(m):
@@ -180,10 +187,10 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             # h_k >= |C_k - sum_{i<=k} t_i - o|
             row([(i, -v) for i, v in tk] + [(iO, -1), (iH(k), -1)], -np.inf, -C[k])
             row(tk + [(iO, 1), (iH(k), -1)], -np.inf, C[k])
-    integrality = np.r_[np.ones(11 * m), np.zeros(4 * m + P_c + 1)]
+    integrality = np.r_[np.ones(11 * m), np.zeros(4 * m + 2 * P_c + 1)]
     lo_b = np.zeros(nv)
     lo_b[iO] = -np.inf
-    hi_b = np.r_[np.ones(4 * m), np.full(4 * m, M), np.ones(3 * m), np.full(4 * m + P_c + 1, np.inf)]
+    hi_b = np.r_[np.ones(4 * m), np.full(4 * m, M), np.ones(3 * m), np.full(4 * m + 2 * P_c + 1, np.inf)]
     attempts = []
     nogood: list[list[int]] = []
     chosen = None
@@ -200,6 +207,8 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
                 c[iH(k)] = w_head
         for q in range(P_c):
             c[iZ(q)] = w_cone
+            if kq is not None:
+                c[iR(q)] = w_curv
         A2, lb2, ub2 = list(A), list(lb), list(ub)
         for ng in nogood:
             r = np.zeros(nv); r[ng] = 1
@@ -238,7 +247,12 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
         if ssum:
             cone_report.append({"xyz_id": int(src.xyz_id[a]), "uv_copies": [int(a), int(b)],
                                 "turns": [int(turn[ka]), int(turn[kb])], "valence_3d": int(4 - ssum)})
-    return {"seam_cones": cone_report, "cone_candidates": len(cone_pairs),
+    # Super-runs: consecutive sides joined at points where the logical boundary goes straight on
+    # (both copies, for seam candidates); grid points are spread by 3D arc length over the whole
+    # run, so integer rounding of short sides does not change boundary edge lengths.
+    sup = _super_runs(src, feats, turn, n, cones)
+    return {"super_runs": sup, "cones_idx": cones, "n_lo": n_lo.tolist(), "T": T.tolist(),
+            "seam_cones": cone_report, "cone_candidates": len(cone_pairs),
             "features": feats, "turn": turn, "dirs": dirs, "lengths": n.tolist(),
             "target_lengths": L.tolist(), "polygon": poly, "cut_pairs": pairs,
             "convex": int(sum(1 for t in turn if t == 1)), "reflex": int(sum(1 for t in turn if t == -1)),
@@ -280,6 +294,37 @@ def _subside_pairs(src, feats: list[int], cons) -> list[tuple[int, int]]:
                 raise StructuredGridError("SG_CUT_BRANCH_FEATURES_NOT_AT_THE_SAME_3D_POINTS")
             out.append((pos[a0], pos[b0]))
     return out
+
+
+def seam_curvature(src, cone_pairs, xyz, f3, h3d: float, radius: float = 1.5) -> np.ndarray:
+    """Integrated Gaussian curvature (angle defect) of the 3D surface next to every seam-cone
+    candidate, in quarter turns: each interior 3D vertex within radius*h3d is credited to its
+    nearest seam site (cone candidates and cut tips, which already carry a valence-3 cone)."""
+    from scipy.spatial import cKDTree
+    X = np.asarray(xyz, float)
+    F = np.asarray(f3, int)
+    n = len(X)
+    angsum = np.zeros(n)
+    for k in range(3):
+        a, b, c = F[:, k], F[:, (k + 1) % 3], F[:, (k + 2) % 3]
+        u, v = X[b] - X[a], X[c] - X[a]
+        cs = np.einsum("ij,ij->i", u, v) / np.maximum(np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1), 1e-300)
+        np.add.at(angsum, a, np.arccos(np.clip(cs, -1, 1)))
+    from collections import Counter
+    ec = Counter(tuple(sorted((int(F[t, k]), int(F[t, (k + 1) % 3])))) for t in range(len(F)) for k in range(3))
+    bnd = {v for e, c in ec.items() if c == 1 for v in e}
+    defect = 2 * np.pi - angsum
+    defect[list(bnd)] = 0.0
+    tips = [j for j, kd in src.node_kind.items() if kd == "tip"]
+    sites = [int(src.xyz_id[a]) for a, _b in cone_pairs] + [int(src.xyz_id[j]) for j in tips]
+    if not sites:
+        return np.zeros(0)
+    tree = cKDTree(X[sites])
+    dist, owner = tree.query(X, distance_upper_bound=radius * h3d)
+    k = np.zeros(len(sites))
+    ok = np.isfinite(dist)
+    np.add.at(k, owner[ok], defect[ok])
+    return k[:len(cone_pairs)] / (0.5 * np.pi)
 
 
 def seam_cone_candidates(src, base_feats: list[int], h3d: float, spacing: float = 2.0,
@@ -409,7 +454,7 @@ def _area_refine(prob, uv, free, w_area: float, iters: int = 400):
 
 
 def _slim_polygon_map(Dc, Dg, quads, logical, bset_c, bpoly, cuv, cf, cxyz, cf3, bnd, harmonic_flips,
-                      area_weight=0.0):
+                      area_weight=0.0, seam_out=None):
     """Bijective chart -> logical polygon map with the least 3D distortion (symmetric Dirichlet, SLIM).
 
     Start: the composite Tutte map (bijective), then SLIM w.r.t. the 3D triangles with the polygon
@@ -459,6 +504,8 @@ def _slim_polygon_map(Dc, Dg, quads, logical, bset_c, bpoly, cuv, cf, cxyz, cf3,
         cur, _E, _st = progressive_boundary_slim(prob, P0 * scale, cf, bset_c, bpoly * scale, max_steps=400,
                                                  step_slim_iters=2, final_iters=0, error_prefix="SG_PHI")
         cur, E1, iters = _slim_iterations(prob, cur, free, iters=200, tol=1e-6)
+        if seam_out is not None:
+            seam_out.update({"phi": cur.copy(), "scale": scale, "prob": prob})
         area_info = {}
         if area_weight > 0:
             # equal-area pull-back: every lattice cell then carries the same 3D surface area
@@ -476,6 +523,166 @@ def _slim_polygon_map(Dc, Dg, quads, logical, bset_c, bpoly, cuv, cf, cxyz, cf3,
                         "phi_sd_before": E0, "phi_sd_after": float(E1), "phi_slim_iterations": int(iters),
                         **area_info,
                         "harmonic_direct_flipped_triangles": harmonic_flips}
+
+
+def _super_runs(src, feats, turn, n, cones):
+    m = len(feats)
+    keep = np.array([turn[k] != 0 or bool(src.node_kind.get(feats[k])) for k in range(m)])
+    for ka, kb in cones:
+        if turn[ka] != 0 or turn[kb] != 0:
+            keep[ka] = keep[kb] = True
+    sup = [None] * m
+    starts = [k for k in range(m) if keep[k]] or [0]
+    for si, k0 in enumerate(starts):
+        k1 = starts[(si + 1) % len(starts)]
+        span = [(k0 + i) % m for i in range(((k1 - k0) % m) or m)]
+        N = int(sum(n[k] for k in span))
+        off = 0
+        for k in span:
+            sup[k] = (int(k0), int(span[-1]), int(off), N)
+            off += int(n[k])
+    return sup
+
+
+def _seamless_slim(prob, uv0, groups, gauge: int, iters: int = 60, tol: float = 1e-6):
+    """Free-boundary SLIM (3D symmetric Dirichlet) under seamless constraints.
+
+    groups: list of (R, [(a0, b0), (a1, b1), ...]): chart vertices a_i (one copy of a cut piece)
+    and b_i (the other copy) with x_b = R x_a + t (same t inside a group).  Every iterate keeps
+    the constraints exactly (KKT solve) and is flip-free (bounded step)."""
+    from scipy import sparse
+    from scipy.sparse.linalg import splu
+    from .zhang2021_onestring_reparam import _max_feasible_step
+    uv = np.asarray(uv0, float).copy()
+    nV = len(uv)
+    rows, cols, vals = [], [], []
+    r = 0
+    for R, prs in groups:
+        a0, b0 = prs[0]
+        for a, b in prs[1:]:
+            # (x_b - R x_a) - (x_b0 - R x_a0) = 0, two rows
+            for i in range(2):
+                for vtx, sgn in ((b, 1.0), (b0, -1.0)):
+                    rows.append(r + i); cols.append(i * nV + vtx); vals.append(sgn)
+                for j in range(2):
+                    if R[i][j]:
+                        for vtx, sgn in ((a, -1.0), (a0, 1.0)):
+                            rows.append(r + i); cols.append(j * nV + vtx); vals.append(sgn * R[i][j])
+            r += 2
+    for i in range(2):
+        rows.append(r); cols.append(i * nV + gauge); vals.append(1.0); r += 1
+    C = sparse.csr_matrix((vals, (rows, cols)), shape=(r, 2 * nV))
+    x0 = np.r_[uv[:, 0], uv[:, 1]]
+    d = C @ x0
+    E, J, _ = prob.energy(uv)
+    if not np.isfinite(E):
+        return uv, {"seamless_status": "start not injective"}
+    E_start = E
+    sw = np.sqrt(prob.area)
+    Dx, Dy = prob.Dx, prob.Dy
+    done = 0
+    for _ in range(int(iters)):
+        U, S, Vt = np.linalg.svd(J)
+        Rt = U @ Vt
+        sv = np.clip(S, 1e-12, None)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w2 = np.where(np.abs(sv - 1) > 1e-8, (sv - sv ** -3) / (sv - 1), 4.0)
+        w = np.sqrt(np.maximum(w2, 1e-12))
+        W = np.einsum("tij,tj,tkj->tik", U, w, U)
+        WR = W @ Rt
+        blocks, rhs = [], []
+        for rr in (0, 1):
+            for c_, D in ((0, Dx), (1, Dy)):
+                Au = sparse.diags(sw * W[:, rr, 0]) @ D
+                Av = sparse.diags(sw * W[:, rr, 1]) @ D
+                blocks.append(sparse.hstack([Au, Av]))
+                rhs.append(sw * WR[:, rr, c_])
+        A = sparse.vstack(blocks).tocsc()
+        b = np.concatenate(rhs)
+        H = (A.T @ A).tocsc()
+        H = H + sparse.identity(H.shape[0], format="csc") * (1e-10 * float(H.diagonal().mean()))
+        K = sparse.bmat([[H, C.T], [C, None]], format="csc")
+        sol = splu(K).solve(np.r_[A.T @ b, d])
+        xn = sol[:2 * nV]
+        x = np.r_[uv[:, 0], uv[:, 1]]
+        dx = xn - x
+        duv = np.c_[dx[:nV], dx[nV:]]
+        dJ = prob.jacobians(duv)
+        amax = _max_feasible_step(J, dJ)
+        alpha = min(1.0, 0.8 * amax)
+        accepted = False
+        while alpha > 1e-12:
+            trial = uv + alpha * duv
+            Et, Jt, _ = prob.energy(trial)
+            if np.isfinite(Et) and Et <= E:
+                accepted = True
+                break
+            alpha *= 0.5
+        if not accepted:
+            break
+        rel = (E - Et) / max(E, 1e-30)
+        uv, E, J = trial, Et, Jt
+        done += 1
+        if rel < tol:
+            break
+    viol = float(np.max(np.abs(C @ np.r_[uv[:, 0], uv[:, 1]] - d))) if C.shape[0] else 0.0
+    return uv, {"seamless_sd_before": float(E_start), "seamless_sd_after": float(E), "seamless_iterations": done,
+                "seamless_constraint_violation": viol}
+
+
+def _rot_between(da, db) -> list:
+    """Integer rotation matrix R (multiple of 90 deg) with R da = db (unit lattice directions)."""
+    for R in ([[1, 0], [0, 1]], [[0, -1], [1, 0]], [[-1, 0], [0, -1]], [[0, 1], [-1, 0]]):
+        if np.allclose(np.asarray(R) @ np.asarray(da), np.asarray(db)):
+            return R
+    raise StructuredGridError("SG_SEAMLESS_ROTATION_NOT_FOUND")
+
+
+def refine_domain_seamless(src, dom: dict, seam_out: dict, w_pos: float = 2.0) -> tuple[dict | None, dict]:
+    """Re-size the logical polygon to the seamless, free-boundary low-distortion flattening.
+
+    The bijective chart -> polygon map phi (seam_out) satisfies, for every cut, copy B = R copy A + t
+    with the rotation R fixed by the chosen turns.  Relaxing the polygon outline under exactly
+    these constraints (free-boundary seamless SLIM) gives the shape the surface itself wants for
+    the chosen cones; its corner positions and side lengths become the new integer side lengths."""
+    feats = dom["features"]
+    m = len(feats)
+    dirs = dom["dirs"]
+    loop = np.asarray(src.loop, int)
+    n = len(loop)
+    groups = []
+    for ka, kb in dom["cut_pairs"]:
+        PA = _cyclic_positions(n, feats[ka], feats[(ka + 1) % m])
+        PB = _cyclic_positions(n, feats[kb], feats[(kb + 1) % m])
+        posB = {int(src.xyz_id[j]): j for j in PB}
+        prs = [(int(loop[a]), int(loop[posB[int(src.xyz_id[a])]])) for a in PA if int(src.xyz_id[a]) in posB]
+        if len(prs) < 2:
+            continue
+        R = _rot_between(DIRS[dirs[ka]], -DIRS[dirs[kb]])
+        groups.append((R, prs))
+    phi, scale, prob = seam_out["phi"], seam_out["scale"], seam_out["prob"]
+    star, info = _seamless_slim(prob, phi, groups, gauge=int(loop[feats[0]]))
+    Tst = star[loop[np.asarray(feats)]] / scale
+    Tst = Tst - Tst[0]
+    Lst = np.array([max(float((Tst[(k + 1) % m] - Tst[k]) @ DIRS[dirs[k]]), 0.3) for k in range(m)])
+    n_lo = np.maximum(1, np.floor(0.7 * Lst)).astype(int)
+    nn, linfo = _lengths_for_directions(dirs, Lst, n_lo, dom["cut_pairs"], Tst, w_pos)
+    info.update({"seamless_relength": linfo.get("status")})
+    if nn is None:
+        return None, info
+    pts = [np.zeros(2, int)]
+    for k in range(m):
+        pts.append(pts[-1] + nn[k] * DIRS[dirs[k]])
+    from shapely.geometry import Polygon
+    poly = np.asarray(pts[:-1])
+    if np.any(pts[-1] != 0) or not Polygon(poly).is_valid:
+        info["seamless_relength"] = "not a simple closed polygon"
+        return None, info
+    new = dict(dom)
+    new.update({"lengths": nn.tolist(), "polygon": poly,
+                "super_runs": _super_runs(src, feats, dom["turn"], nn, dom.get("cones_idx", [])),
+                "seamless_lengths_before": list(dom["lengths"])})
+    return new, info
 
 
 def _lengths_for_directions(dirs, L, n_lo, pairs, T, w_pos, *, max_iter: int = 40):
@@ -638,7 +845,7 @@ def grid_line_triples(vid: dict[tuple[int, int], int]) -> np.ndarray:
 def place_grid(src, dom: dict, logical: np.ndarray, quads: np.ndarray, walk,
                chart_uv: np.ndarray | None = None, chart_f2: np.ndarray | None = None,
                chart_xyz: np.ndarray | None = None, chart_f3: np.ndarray | None = None,
-               area_weight: float = 0.0) -> tuple[np.ndarray, dict]:
+               area_weight: float = 0.0, seam_out: dict | None = None) -> tuple[np.ndarray, dict]:
     """Grid vertices in Omega_1: boundary by 3D arc length; interior pulled back from the logical domain.
 
     phi: Omega_1 -> logical polygon (boundary by the same 3D arc-length correspondence, interior
@@ -655,17 +862,19 @@ def place_grid(src, dom: dict, logical: np.ndarray, quads: np.ndarray, walk,
     P = src.perimeter
     poly = np.asarray(dom["polygon"], float)
     uv = np.full((len(logical), 2), np.nan)
+    sup = dom.get("super_runs") or [(k, k, 0, dom["lengths"][k]) for k in range(m)]
     for vtx, k, j in walk:
-        a, b = feats[k], feats[(k + 1) % m]
+        k0, k1, off, N = sup[k]
+        a, b = feats[k0], feats[(k1 + 1) % m]
         lo, hi = run_interval(src, (a, b))
-        s_ = _param_from_fraction_3d(src, lo, hi, j / dom["lengths"][k]) % P
+        s_ = _param_from_fraction_3d(src, lo, hi, (off + j) / N) % P
         uv[vtx] = src.point_at(s_)[2]
     bnd = np.array(sorted({w[0] for w in walk}))
     info = {"placement": "grid-graph harmonic"}
     if chart_uv is not None and chart_f2 is not None:
         try:
             got = _pullback_interior(src, dom, logical, quads, bnd, walk, np.asarray(chart_uv, float),
-                                     np.asarray(chart_f2, int), chart_xyz, chart_f3, area_weight)
+                                     np.asarray(chart_f2, int), chart_xyz, chart_f3, area_weight, seam_out)
         except Exception as exc:  # noqa: BLE001 - reported, falls back below
             got, info = None, {"placement": "grid-graph harmonic", "pullback_failed": f"{type(exc).__name__}: {exc}"}
         if got is not None:
@@ -710,7 +919,8 @@ def _tutte_disk(n: int, edges_w: tuple, bset: np.ndarray, bpos: np.ndarray) -> n
     return X
 
 
-def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, cf3=None, area_weight=0.0):
+def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, cf3=None, area_weight=0.0,
+                       seam_out=None):
     """Interior grid points as phi^-1(lattice) with phi = (Tutte disk map of the lattice polygon)^-1 o
     (Tutte disk map of Omega_1).  Both disk maps are bijective (positive weights, convex circle
     boundary, same boundary correspondence: 3D arc length <-> polygon arc length), so the composite
@@ -727,15 +937,19 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, 
     loop = np.asarray(src.loop, int)
     cum = np.asarray(src.cum[:-1], float)
     t_chart = np.full(len(cuv), np.nan)
+    sup = dom.get("super_runs") or [(k, k, 0, int(lengths[k])) for k in range(m)]
     for k in range(m):
-        a, b = feats[k], feats[(k + 1) % m]
+        k0, k1, off, N = sup[k]
+        if k != k0:
+            continue
+        a, b = feats[k0], feats[(k1 + 1) % m]
         lo, hi = run_interval(src, (a, b))
         cnt = (b - a) % len(loop) or len(loop)
         for jpos in (np.arange(a, a + cnt) % len(loop)):
             sv = cum[jpos]
             if sv < lo - 1e-12:
                 sv += P
-            t_chart[loop[jpos]] = cum_n[k] + _fraction_3d(src, lo, hi, sv) * lengths[k]
+            t_chart[loop[jpos]] = (cum_n[k0] + _fraction_3d(src, lo, hi, sv) * N) % total
     bset_c = np.flatnonzero(~np.isnan(t_chart))
     circ = lambda t: np.c_[np.cos(2 * np.pi * t / total), np.sin(2 * np.pi * t / total)]   # noqa: E731
     # chart weights: clamped cotangent (positive -> Floater embedding)
@@ -786,7 +1000,7 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, 
     Dg = _tutte_disk(nl, (I, J, np.ones(len(I))), bnd, circ(t_grid[bnd]))
     if cxyz is not None and cf3 is not None:
         got = _slim_polygon_map(Dc, Dg, quads, np.asarray(logical, float), bset_c, bpoly, cuv, cf,
-                                np.asarray(cxyz, float), np.asarray(cf3, int), bnd, flips, area_weight)
+                                np.asarray(cxyz, float), np.asarray(cf3, int), bnd, flips, area_weight, seam_out)
         if got is not None:
             return got
     tri = Triangulation(Dc[:, 0], Dc[:, 1], cf)
@@ -851,9 +1065,13 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         feats, cone_pairs = seam_cone_candidates(
             src, feats, h3d, spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)),
             open_spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)))
+    cone_k = None
+    if cone_pairs and float(getattr(params, "structured_grid_curvature_weight", 1.0)) > 0:
+        cone_k = seam_curvature(src, cone_pairs, pre.xyz, pre.f3, h3d)
     for ratio in (ratio0, 0.5 * ratio0):
         try:
             dom = logical_domain(src, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
+                                 cone_curvature=cone_k, w_curv=float(getattr(params, "structured_grid_curvature_weight", 1.0)),
                                  w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
                                  shape_weight=float(getattr(params, "structured_grid_shape_weight", 0.05)),
                                  turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)))
@@ -865,12 +1083,30 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     if dom is None:
         raise StructuredGridError("; ".join(errors))
     logical, quads, vid, walk = lattice_grid(dom)
-    priority = str(getattr(params, "structured_grid_priority", "size") or "size")
+    priority = str(getattr(params, "structured_grid_priority", "shape") or "shape")
     area_w = float(getattr(params, "structured_grid_area_weight", -1.0))
     if area_w < 0:
         area_w = {"size": 50.0, "balanced": 5.0}.get(priority, 0.0)
+    seamless_log = []
+    for _r in range(int(getattr(params, "structured_grid_seamless_rounds", 1))):
+        so: dict = {}
+        place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2, chart_xyz=pre.xyz,
+                   chart_f3=pre.f3, area_weight=0.0, seam_out=so)
+        if "phi" not in so:
+            break
+        try:
+            new, sinfo = refine_domain_seamless(src, dom, so)
+        except Exception as exc:  # noqa: BLE001 - keep the current polygon
+            new, sinfo = None, {"seamless_error": f"{type(exc).__name__}: {exc}"}
+        seamless_log.append(sinfo)
+        print(f"[SG-SEAMLESS] round {_r}: {sinfo}", flush=True)
+        if new is None:
+            break
+        dom = new
+        logical, quads, vid, walk = lattice_grid(dom)
     grid_uv, placement = place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2,
                                     chart_xyz=pre.xyz, chart_f3=pre.f3, area_weight=area_w)
+    placement["seamless_refinement"] = seamless_log
     grid_uv = grid_uv * mirror
     print(f"[SG-GRID] seam cones: {len(dom.get('seam_cones', []))} of {dom.get('cone_candidates', 0)} candidates "
           f"(3D valence 3: {sum(1 for c in dom.get('seam_cones', []) if c['valence_3d'] == 3)}, "
@@ -945,7 +1181,7 @@ PRIORITY_WEIGHTS = {
 
 def _panel_weights(params: Any):
     from .zhang2021_panel_optimizer import PanelOptimizerWeights
-    pr = str(getattr(params, "structured_grid_priority", "size") or "size")
+    pr = str(getattr(params, "structured_grid_priority", "shape") or "shape")
     w = dict(PRIORITY_WEIGHTS.get(pr, PRIORITY_WEIGHTS["shape"]))
     return PanelOptimizerWeights(smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0)), **w)
 
