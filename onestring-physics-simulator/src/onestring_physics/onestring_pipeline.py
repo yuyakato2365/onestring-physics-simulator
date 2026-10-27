@@ -1119,6 +1119,7 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_auto_panels: int = 150
     structured_grid_smoothness_weight: float = 1.0
     structured_grid_seam_closure: bool = True
+    structured_grid_min_side_ratio: float = 0.7   # every logical side >= ratio x its 3D length / panel edge
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",

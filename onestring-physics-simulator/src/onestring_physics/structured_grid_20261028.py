@@ -54,14 +54,15 @@ def _turning_angles(src, feats: list[int], scale: float) -> dict[int, float]:
     cum = np.asarray(src.cum[:-1], float)
     out = {}
     for j in feats:
-        a = src.point_at((cum[j] - scale) % P)[2] - src.uv[j]
-        b = src.point_at((cum[j] + scale) % P)[2] - src.uv[j]
-        interior = np.degrees(np.arctan2(a[0] * b[1] - a[1] * b[0], a @ b)) % 360.0
-        out[j] = 180.0 - interior
+        # signed turning of a CCW boundary: + convex corner, - reflex corner (cut tips are reflex)
+        din = src.uv[j] - src.point_at((cum[j] - scale) % P)[2]
+        dout = src.point_at((cum[j] + scale) % P)[2] - src.uv[j]
+        out[j] = float(np.degrees(np.arctan2(din[0] * dout[1] - din[1] * dout[0], din @ dout)))
     return out
 
 
-def logical_domain(src, feats: list[int], h3d: float, scale: float) -> dict:
+def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio: float = 0.7,
+                   max_rounds: int = 12) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -120,6 +121,8 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float) -> dict:
     nv = 14 * m
     M = int(10 * max(L.max(), 4) + 10)
     w_turn = 1.0
+    # A side may not be squeezed: n_k >= max(1, floor(min_ratio * L_k)) (protrusions keep their cells).
+    n_lo = np.maximum(1, np.floor(min_ratio * L)).astype(int)
     A, lb, ub = [], [], []
 
     def row(entries, lo, hi):
@@ -132,7 +135,7 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float) -> dict:
         row([(iD(k, d), 1) for d in range(4)], 1, 1)
         for d in range(4):
             row([(iX(k, d), 1), (iD(k, d), -M)], -np.inf, 0)
-        row([(iX(k, d), 1) for d in range(4)], 1, np.inf)
+        row([(iX(k, d), 1) for d in range(4)], float(n_lo[k]), np.inf)
         km = (k - 1) % m
         row([(iT(k, s), 1) for s in (-1, 0, 1)], 1, 1)
         for d in range(4):
@@ -159,7 +162,9 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float) -> dict:
     attempts = []
     nogood: list[list[int]] = []
     chosen = None
-    for w_pos in (0.0, 0.0, 0.0, 0.05, 0.05, 0.2, 0.2, 1.0, 1.0, 5.0):
+    w_pos = 0.05
+    for _round in range(max_rounds):
+        # stage 1: turns / directions (lengths soft, with the hard lower bounds)
         c = np.zeros(nv)
         for k in range(m):
             c[iE(k)] = 1.0 / max(L[k], 1.0)
@@ -173,32 +178,145 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float) -> dict:
         res = milp(c, constraints=LinearConstraint(np.asarray(A2), lb2, ub2), integrality=integrality,
                    bounds=Bounds(lo_b, hi_b), options={"time_limit": 8.0})
         if res.x is None:
-            attempts.append({"w_pos": w_pos, "status": f"no solution: {res.message}"})
-            continue
+            attempts.append({"round": _round, "status": f"no turn assignment: {res.message}"})
+            break
         x = res.x
         dirs = [int(np.argmax([x[iD(k, d)] for d in range(4)])) for k in range(m)]
-        n = np.rint([sum(x[iX(k, d)] for d in range(4)) for k in range(m)]).astype(int)
         turn = [int(round(sum(s_ * x[iT(k, s_)] for s_ in (-1, 1)))) for k in range(m)]
-        pts = [np.zeros(2, int)]
-        for k in range(m):
-            pts.append(pts[-1] + n[k] * DIRS[dirs[k]])
-        poly = np.asarray(pts[:-1])
-        pg = Polygon(poly)
-        ok = bool(np.all(pts[-1] == 0) and pg.is_valid and pg.area > 0)
-        attempts.append({"w_pos": w_pos, "status": "simple" if ok else "self-intersecting",
-                         "lengths": n.tolist(), "turns": turn})
-        if ok:
-            chosen = (w_pos, dirs, n, turn, poly)
-            break
-        nogood.append([iT(k, turn[k]) for k in range(m)])     # rotation-invariant cut
+        # stage 2: integer side lengths for these directions, simple polygon enforced by lazy
+        # non-overlap constraints between non-adjacent sides (never by shortening sides)
+        n, info = _lengths_for_directions(dirs, L, n_lo, pairs, T, w_pos)
+        attempts.append({"round": _round, "turns": turn, **info,
+                         "lengths": None if n is None else n.tolist()})
+        if n is not None:
+            pts = [np.zeros(2, int)]
+            for k in range(m):
+                pts.append(pts[-1] + n[k] * DIRS[dirs[k]])
+            poly = np.asarray(pts[:-1])
+            pg = Polygon(poly)
+            if np.all(pts[-1] == 0) and pg.is_valid and pg.area > 0:
+                chosen = (w_pos, dirs, n, turn, poly)
+                break
+        nogood.append([iT(k, turn[k]) for k in range(m)])     # rotation-invariant cut on the turns
     if chosen is None:
-        raise StructuredGridError("SG_LOGICAL_POLYGON_SELF_INTERSECTS: no simple orthogonal polygon was found for "
-                                  f"the boundary features (attempts {attempts})")
+        raise StructuredGridError(
+            "SG_LOGICAL_POLYGON_NOT_FOUND: no simple orthogonal polygon with every side >= "
+            f"{min_ratio:g} x its 3D length was found (attempts {attempts})")
     w_pos, dirs, n, turn, poly = chosen
     return {"features": feats, "turn": turn, "dirs": dirs, "lengths": n.tolist(),
             "target_lengths": L.tolist(), "polygon": poly, "cut_pairs": pairs,
             "convex": int(sum(1 for t in turn if t == 1)), "reflex": int(sum(1 for t in turn if t == -1)),
             "shape_weight": w_pos, "attempts": attempts, "turning_deg": [float(ang[j]) for j in feats]}
+
+
+def _lengths_for_directions(dirs, L, n_lo, pairs, T, w_pos, *, max_iter: int = 40):
+    """Integer side lengths for fixed directions: closure, equal cut copies, n >= n_lo, simple polygon.
+
+    Non-adjacent sides i, j must be >= 1 lattice unit apart (L-inf) on the integer lattice; the
+    disjunction (left / right / below / above) is added lazily for pairs that touch.
+    """
+    from scipy.optimize import Bounds, LinearConstraint, milp
+
+    m = len(dirs)
+    D = np.asarray([DIRS[d] for d in dirs], float)
+    # vars: n (m, int) | e (m) | f (2m) | 4 binaries per separated pair
+    sep_pairs: list[tuple[int, int]] = []
+    hi_n = np.maximum(n_lo, np.ceil(1.6 * L) + 3)
+
+    def pos_rows(k):          # P_k (start of side k) = sum_{i<k} n_i D_i  -> coefficient rows (2, m)
+        r = np.zeros((2, m))
+        r[:, :k] = D[:k].T
+        return r
+
+    def box(k):               # (xlo, xhi, ylo, yhi) of side k as coefficient rows over n
+        p0 = pos_rows(k)
+        p1 = p0.copy(); p1[:, k] += D[k]
+        out = []
+        for ax in (0, 1):
+            if D[k][ax] >= 0:
+                out += [p0[ax], p1[ax]]
+            else:
+                out += [p1[ax], p0[ax]]
+        return out            # xlo, xhi, ylo, yhi
+
+    Mbig = float(4 * np.sum(hi_n) + 10)
+    n_sol = None
+    for it in range(max_iter):
+        nb = 4 * len(sep_pairs)
+        nv = 4 * m + nb
+        A, lb, ub = [], [], []
+
+        def add(coefs_n, extra, lo, hi):
+            r = np.zeros(nv)
+            r[:m] = coefs_n
+            for i, v in extra:
+                r[i] += v
+            A.append(r); lb.append(lo); ub.append(hi)
+
+        for ax in (0, 1):
+            add(D[:, ax], [], 0.0, 0.0)
+        for ka, kb in pairs:
+            cn = np.zeros(m); cn[ka] = 1; cn[kb] = -1
+            add(cn, [], 0.0, 0.0)
+        for k in range(m):
+            cn = np.zeros(m); cn[k] = 1
+            add(cn, [(m + k, -1)], -np.inf, L[k])
+            add(-cn, [(m + k, -1)], -np.inf, -L[k])
+            pr = pos_rows(k)
+            for ax in (0, 1):
+                fi = 2 * m + 2 * k + ax
+                add(pr[ax], [(fi, -1)], -np.inf, T[k, ax])
+                add(-pr[ax], [(fi, -1)], -np.inf, -T[k, ax])
+        for q, (i, j) in enumerate(sep_pairs):
+            bi = 4 * m + 4 * q
+            xi_lo, xi_hi, yi_lo, yi_hi = box(i)
+            xj_lo, xj_hi, yj_lo, yj_hi = box(j)
+            # b0: xi_hi + 1 <= xj_lo ; b1: xj_hi + 1 <= xi_lo ; b2/b3 same in y
+            for t, (a_hi, b_lo) in enumerate(((xi_hi, xj_lo), (xj_hi, xi_lo), (yi_hi, yj_lo), (yj_hi, yi_lo))):
+                add(a_hi - b_lo, [(bi + t, Mbig)], -np.inf, Mbig - 1.0)
+            r = np.zeros(nv); r[bi:bi + 4] = 1
+            A.append(r); lb.append(1.0); ub.append(np.inf)
+        c = np.zeros(nv)
+        c[m:2 * m] = 1.0 / np.maximum(L, 1.0)
+        c[2 * m:4 * m] = max(w_pos, 1e-3) / max(float(np.mean(L)), 1.0)
+        integ = np.r_[np.ones(m), np.zeros(3 * m), np.ones(nb)]
+        lo = np.r_[n_lo, np.zeros(3 * m + nb)]
+        hi = np.r_[hi_n, np.full(3 * m, np.inf), np.ones(nb)]
+        res = milp(c, constraints=LinearConstraint(np.asarray(A), lb, ub), integrality=integ,
+                   bounds=Bounds(lo, hi), options={"time_limit": 10.0})
+        if res.x is None:
+            return None, {"status": f"infeasible for these turns ({res.message})", "separated_pairs": len(sep_pairs),
+                          "lazy_iterations": it + 1}
+        n_sol = np.rint(res.x[:m]).astype(int)
+        touching = _touching_pairs(dirs, n_sol)
+        new = [pq for pq in touching if pq not in sep_pairs]
+        if not new:
+            return n_sol, {"status": "simple", "separated_pairs": len(sep_pairs), "lazy_iterations": it + 1}
+        sep_pairs.extend(new)
+    return None, {"status": "lazy separation did not converge", "separated_pairs": len(sep_pairs)}
+
+
+def _touching_pairs(dirs, n) -> list[tuple[int, int]]:
+    """Non-adjacent sides closer than 1 lattice unit (L-inf), i.e. touching or crossing."""
+    m = len(dirs)
+    P = [np.zeros(2, int)]
+    for k in range(m):
+        P.append(P[-1] + n[k] * DIRS[dirs[k]])
+    boxes = []
+    for k in range(m):
+        a, b = P[k], P[k + 1]
+        boxes.append((min(a[0], b[0]), max(a[0], b[0]), min(a[1], b[1]), max(a[1], b[1])))
+    out = []
+    for i in range(m):
+        for j in range(i + 2, m):
+            if i == 0 and j == m - 1:
+                continue
+            bi, bj = boxes[i], boxes[j]
+            gx = max(bj[0] - bi[1], bi[0] - bj[1])
+            gy = max(bj[2] - bi[3], bi[2] - bj[3])
+            if max(gx, gy) < 1:
+                out.append((i, j))
+    return out
 
 
 def lattice_grid(dom: dict) -> tuple[np.ndarray, np.ndarray, dict[tuple[int, int], int], list[tuple[int, int, int]]]:
@@ -248,22 +366,44 @@ def grid_line_triples(vid: dict[tuple[int, int], int]) -> np.ndarray:
     return np.asarray(out, int).reshape(-1, 3)
 
 
-def place_grid(src, dom: dict, logical: np.ndarray, quads: np.ndarray, walk) -> np.ndarray:
-    """Boundary grid points by 3D arc length on the smooth chart boundary; interior harmonic."""
+def place_grid(src, dom: dict, logical: np.ndarray, quads: np.ndarray, walk,
+               chart_uv: np.ndarray | None = None, chart_f2: np.ndarray | None = None,
+               chart_xyz: np.ndarray | None = None, chart_f3: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
+    """Grid vertices in Omega_1: boundary by 3D arc length; interior pulled back from the logical domain.
+
+    phi: Omega_1 -> logical polygon (boundary by the same 3D arc-length correspondence, interior
+    harmonic on the chart triangles).  When phi is injective every lattice point is located in
+    phi(Omega_1) and mapped back by barycentric interpolation, so every grid vertex lies inside
+    Omega_1 and the grid follows protrusions.  Otherwise: harmonic grid graph (reported).
+    """
     from scipy import sparse
     from scipy.sparse.linalg import spsolve
-    from .zhang2021_onestring_boundary import _param_from_fraction_3d, run_interval
+    from .zhang2021_onestring_boundary import _fraction_3d, _param_from_fraction_3d, run_interval
 
     feats = dom["features"]
     m = len(feats)
     P = src.perimeter
+    poly = np.asarray(dom["polygon"], float)
     uv = np.full((len(logical), 2), np.nan)
     for vtx, k, j in walk:
         a, b = feats[k], feats[(k + 1) % m]
         lo, hi = run_interval(src, (a, b))
-        s = _param_from_fraction_3d(src, lo, hi, j / dom["lengths"][k]) % P
-        uv[vtx] = src.point_at(s)[2]
+        s_ = _param_from_fraction_3d(src, lo, hi, j / dom["lengths"][k]) % P
+        uv[vtx] = src.point_at(s_)[2]
     bnd = np.array(sorted({w[0] for w in walk}))
+    info = {"placement": "grid-graph harmonic"}
+    if chart_uv is not None and chart_f2 is not None:
+        try:
+            got = _pullback_interior(src, dom, logical, quads, bnd, walk, np.asarray(chart_uv, float),
+                                     np.asarray(chart_f2, int))
+        except Exception as exc:  # noqa: BLE001 - reported, falls back below
+            got, info = None, {"placement": "grid-graph harmonic", "pullback_failed": f"{type(exc).__name__}: {exc}"}
+        if got is not None:
+            free, vals, pinfo = got
+            uv[free] = vals
+            info = {"placement": "pull-back of the lattice through phi: Omega_1 -> logical polygon", **pinfo}
+            return uv, info
+        info.setdefault("pullback_failed", "phi not injective")
     n = len(logical)
     rows, cols = [], []
     for q in quads:
@@ -279,7 +419,89 @@ def place_grid(src, dom: dict, logical: np.ndarray, quads: np.ndarray, walk) -> 
         Lfb = Lap[free][:, bnd]
         for c in range(2):
             uv[free, c] = spsolve(Lff, -Lfb @ uv[bnd, c])
-    return uv
+    return uv, info
+
+
+def _tutte_disk(n: int, edges_w: tuple, bset: np.ndarray, bpos: np.ndarray) -> np.ndarray:
+    """Convex-combination (Tutte/Floater) embedding with the boundary on the unit circle."""
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+    I, J, W = edges_w
+    A = sparse.coo_matrix((W, (I, J)), shape=(n, n)).tocsr()
+    Lap = (sparse.diags(np.asarray(A.sum(axis=1)).ravel()) - A).tocsr()
+    X = np.zeros((n, 2))
+    X[bset] = bpos
+    free = np.setdiff1d(np.arange(n), bset)
+    if len(free):
+        Lff = Lap[free][:, free].tocsc()
+        Lfb = Lap[free][:, bset]
+        for c in range(2):
+            X[free, c] = spsolve(Lff, -Lfb @ bpos[:, c])
+    return X
+
+
+def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf):
+    """Interior grid points as phi^-1(lattice) with phi = (Tutte disk map of the lattice polygon)^-1 o
+    (Tutte disk map of Omega_1).  Both disk maps are bijective (positive weights, convex circle
+    boundary, same boundary correspondence: 3D arc length <-> polygon arc length), so the composite
+    is a bijection Omega_1 -> logical polygon and every grid vertex lies inside Omega_1."""
+    from matplotlib.tri import Triangulation
+    from .zhang2021_onestring_boundary import _fraction_3d, run_interval
+
+    feats = dom["features"]
+    m = len(feats)
+    P = src.perimeter
+    lengths = np.asarray(dom["lengths"], float)
+    cum_n = np.r_[0.0, np.cumsum(lengths)]
+    total = float(cum_n[-1])
+    loop = np.asarray(src.loop, int)
+    cum = np.asarray(src.cum[:-1], float)
+    t_chart = np.full(len(cuv), np.nan)
+    for k in range(m):
+        a, b = feats[k], feats[(k + 1) % m]
+        lo, hi = run_interval(src, (a, b))
+        cnt = (b - a) % len(loop) or len(loop)
+        for jpos in (np.arange(a, a + cnt) % len(loop)):
+            sv = cum[jpos]
+            if sv < lo - 1e-12:
+                sv += P
+            t_chart[loop[jpos]] = cum_n[k] + _fraction_3d(src, lo, hi, sv) * lengths[k]
+    bset_c = np.flatnonzero(~np.isnan(t_chart))
+    circ = lambda t: np.c_[np.cos(2 * np.pi * t / total), np.sin(2 * np.pi * t / total)]   # noqa: E731
+    # chart weights: clamped cotangent (positive -> Floater embedding)
+    I, J, W = [], [], []
+    for tr in cf:
+        for k in range(3):
+            i, j, o = tr[k], tr[(k + 1) % 3], tr[(k + 2) % 3]
+            u, v = cuv[i] - cuv[o], cuv[j] - cuv[o]
+            cr = abs(u[0] * v[1] - u[1] * v[0])
+            w = max(0.5 * float(u @ v) / max(cr, 1e-15), 1e-6)
+            I += [i, j]; J += [j, i]; W += [w, w]
+    Dc = _tutte_disk(len(cuv), (I, J, W), bset_c, circ(t_chart[bset_c]))
+    # lattice: triangulated quads, uniform weights
+    nl = len(logical)
+    I, J = [], []
+    for q in quads:
+        for (i, j) in ((q[0], q[1]), (q[1], q[2]), (q[2], q[3]), (q[3], q[0]), (q[0], q[2])):
+            I += [i, j]; J += [j, i]
+    t_grid = np.zeros(nl)
+    for vtx, k, j in walk:
+        t_grid[vtx] = cum_n[k] + j
+    Dg = _tutte_disk(nl, (I, J, np.ones(len(I))), bnd, circ(t_grid[bnd]))
+    tri = Triangulation(Dc[:, 0], Dc[:, 1], cf)
+    finder = tri.get_trifinder()
+    gfree = np.setdiff1d(np.arange(nl), bnd)
+    pts = Dg[gfree]
+    t = finder(pts[:, 0], pts[:, 1])
+    if np.any(t < 0):
+        return None
+    out = np.zeros((len(gfree), 2))
+    for r, (ti, p) in enumerate(zip(t, pts)):
+        a, b, c = cf[ti]
+        T = np.c_[Dc[b] - Dc[a], Dc[c] - Dc[a]]
+        l1, l2 = np.linalg.solve(T, p - Dc[a])
+        out[r] = cuv[a] + l1 * (cuv[b] - cuv[a]) + l2 * (cuv[c] - cuv[a])
+    return gfree, out, {"phi_model": "composite of two Tutte disk maps (bijective)"}
 
 
 # ------------------------------------------------------------------ planner
@@ -320,9 +542,22 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     if h3d <= 0:
         h3d = float(np.sqrt(area3d / max(int(getattr(params, "structured_grid_auto_panels", 150)), 4)))
     feats = boundary_features(src, keep * diag)
-    dom = logical_domain(src, feats, h3d, keep * diag)
+    ratio0 = float(getattr(params, "structured_grid_min_side_ratio", 0.7))
+    dom, errors = None, []
+    for ratio in (ratio0, 0.5 * ratio0):
+        try:
+            dom = logical_domain(src, feats, h3d, keep * diag, min_ratio=ratio)
+            dom["min_side_ratio"] = ratio
+            break
+        except StructuredGridError as exc:
+            errors.append(str(exc)[:400])
+            print(f"[SG-GRID] min side ratio {ratio:g}: {str(exc)[:300]}", flush=True)
+    if dom is None:
+        raise StructuredGridError("; ".join(errors))
     logical, quads, vid, walk = lattice_grid(dom)
-    grid_uv = place_grid(src, dom, logical, quads, walk) * mirror
+    grid_uv, placement = place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2,
+                                    chart_xyz=pre.xyz, chart_f3=pre.f3)
+    grid_uv = grid_uv * mirror
     print(f"[SG-GRID] features={len(feats)} convex={dom['convex']} reflex={dom['reflex']} sides={dom['lengths']} "
           f"-> {len(quads)} quads, panel edge target {h3d:.4g}", flush=True)
     p = _params_with(params, zhang2021_repair_node_valence=False, zhang2021_seam_matching=False,
@@ -365,6 +600,9 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         "structured_grid_target_side_lengths": [round(x, 3) for x in dom["target_lengths"]],
         "structured_grid_panel_edge_target": h3d,
         "structured_grid_quads": int(len(quads)),
+        "structured_grid_initial_placement": placement,
+        "structured_grid_min_side_ratio": dom.get("min_side_ratio"),
+        "structured_grid_logical_attempts": dom.get("attempts", []),
         "structured_grid_interior_valence_all_4": bool(_interior_valence_ok(plan.quads)),
         "structured_grid_unresolved": unresolved,
         "structured_grid_geometrically_verified": not unresolved,
