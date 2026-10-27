@@ -193,11 +193,14 @@ def _install_optcuts_selector() -> None:
         elif value in {"optcuts_planar_quad_20261026", "optcuts_zhang2021_coarse_layout_experiment", "optcuts_zhang2021_reference_only"}:
             if value == "optcuts_zhang2021_reference_only":
                 st.caption(
-                    "AUTHOR REFERENCE ONLY. Actual Zhang et al. (CAD 2021) "
-                    "C++ source and its precise CLI remain unavailable. "
-                    "Supply an independently verified adapter to the genuine "
-                    "code; without it this mode fails explicitly, NEVER "
-                    "switches to Gmsh or an approximation.")
+                    "AUTHOR REFERENCE ONLY. Genuine Zhang 2021 C++ source "
+                    "and three published Windows executables recovered from "
+                    "the authors' public archives. The Segment original "
+                    "PARDISO runtime requires a host-bound license; choose "
+                    "a valid license OR explicitly provide an independently "
+                    "compiled Eigen sparse numerical DLL. No change to the "
+                    "authors' mesh algorithm, no Gmsh fallback. Full Bunny "
+                    "and seam validation is NOT yet certified.")
                 st.text_input(
                     "Official authors' ExeProgram folder",
                     value=os.environ.get("ONESTRING_ZHANG2021_EXE_ROOT", ""),
@@ -206,6 +209,16 @@ def _install_optcuts_selector() -> None:
                          "Segment.exe, QMSim.exe, dependencies, and WholePipeline.bat. "
                          "Download via scripts/download_zhang2021_executables.py "
                          "and DO NOT commit their proprietary binary ZIP.")
+                st.text_input(
+                    "Independent Eigen sparse solver DLL (optional, Windows)",
+                    value=os.environ.get(
+                        "ONESTRING_ZHANG2021_INDEPENDENT_EIGEN_DLL", ""),
+                    key="onestring_zhang2021_independent_solver_dll",
+                    help="Independently compiled sparse-direct DLL, replacing "
+                         "only the licensed PARDISO numeric solver inside "
+                         "a temporary author runtime copy. Build from "
+                         "native/zhang2021_sparse_solver; keep original "
+                         "Straighten, Segment and QMSim unchanged.")
                 st.text_input(
                     "Wine launcher command (Mac only, optional)",
                     value=os.environ.get("ONESTRING_ZHANG2021_WINE_COMMAND", ""),
