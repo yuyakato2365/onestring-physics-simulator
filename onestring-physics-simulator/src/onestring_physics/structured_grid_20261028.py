@@ -264,7 +264,7 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
         # stage 2: integer side lengths for these directions, simple polygon enforced by lazy
         # non-overlap constraints between non-adjacent sides (never by shortening sides)
         n, info = _lengths_for_directions(dirs, L, n_lo, pairs, T, w_pos)
-        attempts.append({"round": _round, "turns": turn, **info,
+        attempts.append({"round": _round, "turns": turn, **info, "milp_status": str(getattr(res, "message", ""))[:120],
                          "lengths": None if n is None else n.tolist()})
         if n is not None:
             pts = [np.zeros(2, int)]
@@ -1310,7 +1310,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
             coupling = side_coupling(src_dir, sorted(feats), uv_dir, pre.f2)
             forced_idx = {}                     # directions come from the chart's own rotation field
             w_head = float(getattr(params, "structured_grid_field_heading_weight", 0.1))
-        def solve_dom(forced):
+        def solve_dom(forced, w_head_override=None):
             for ratio in (ratio0, 0.5 * ratio0):
                 try:
                     d_ = logical_domain(src_dir, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
@@ -1318,7 +1318,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                                         side_coupling=coupling, w_field=float(getattr(params, "structured_grid_field_weight", 5.0)),
                                         heading_src=(src if str(getattr(params, "structured_grid_heading_source", "omega")) == "omega" else None),
                                         heading_length_weighted=bool(getattr(params, "structured_grid_heading_length_weighted", True)),
-                                        w_head=w_head,
+                                        w_head=(w_head if w_head_override is None else w_head_override),
                                         forced_cones=forced, target_positions=crop_targets,
                                         w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
                                         shape_weight=shape_w,
@@ -1380,9 +1380,40 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                     if not added:
                         break
                     dom_k = solve_dom(forced_fb)
+                # Robustness: the design MILP can land on a poor turn assignment (time limit / solver
+                # version / near ties).  When the continuous aligned map is clearly worse than the chart,
+                # re-solve the design with other heading weights and keep the best continuous map.
+                sd_ref = float(ps_info.get("polysquare_sd", np.nan)) if ps_info else np.nan
+                if not np.isfinite(sd_ref):
+                    sd_ref = 4.0
+                accept = float(getattr(params, "structured_grid_design_sd_ratio", 1.08)) * sd_ref
+                if best is None or best[0] > accept:
+                    for fac in tuple(float(x) for x in str(getattr(params, "structured_grid_design_alternatives", "0.5,2,0.25")).split(",") if x.strip()):
+                        dom_a = solve_dom(forced_fb, w_head_override=w_head * fac)
+                        if dom_a is None:
+                            continue
+                        dom_ar = merge_straight_features(src, dom_a)
+                        lg_a, q_a, vid_a, walk_a = lattice_grid(dom_ar)
+                        new_a, info_a = refine_domain_aligned(
+                            src, dom_ar, lg_a, q_a, walk_a, chart, h3d,
+                            min_3d_ratio=float(getattr(params, "structured_grid_min_3d_length_ratio", 0.0)),
+                            under_weight=float(getattr(params, "structured_grid_shortfall_weight", 1.0)),
+                            area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)))
+                        info_a.pop("_star", None)
+                        sd_a = float(info_a.get("aligned_sd_after", np.inf))
+                        print(f"[SG-ALIGNED] design alternative heading x{fac:g}: continuous SD {sd_a:.4f}, "
+                              f"rounding {info_a.get('aligned_rounding')}", flush=True)
+                        feedback_log.append({"alternative_heading_factor": fac, "continuous_sd": sd_a,
+                                             "rounding": info_a.get("aligned_rounding")})
+                        if new_a is not None and (best is None or sd_a < best[0] - 1e-9):
+                            best = (sd_a, new_a, info_a)
+                            dom_k = dom_a
+                        if best is not None and best[0] <= accept:
+                            break
                 if best is None:
                     raise StructuredGridError("SG_ALIGNED_NO_ROUNDED_POLYGON")
                 _sd, new, aligned_info = best
+                print(f"[SG-ALIGNED] chosen design: continuous SD {_sd:.4f} (accept <= {accept:.4f})", flush=True)
                 aligned_info["cone_feedback"] = feedback_log
                 dom_try = new
                 lg_t, q_t, vid_t, walk_t = lattice_grid(dom_try)
