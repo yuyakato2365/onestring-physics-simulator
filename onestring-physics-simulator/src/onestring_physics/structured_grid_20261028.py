@@ -66,7 +66,8 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
                    w_head: float = 0.5, shape_weight: float = 0.05, turn_weight: float = 0.3,
                    cone_curvature=None, w_curv: float = 1.0, forced_cones: dict | None = None,
                    side_coupling=None, w_field: float = 1.0, target_positions=None,
-                   heading_src=None, heading_length_weighted: bool = False) -> dict:
+                   heading_src=None, heading_length_weighted: bool = False,
+                   milp_time_limit: float | None = None) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -254,7 +255,8 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             r = np.zeros(nv); r[ng] = 1
             A2.append(r); lb2.append(-np.inf); ub2.append(m - 1)
         res = milp(c, constraints=LinearConstraint(np.asarray(A2), lb2, ub2), integrality=integrality,
-                   bounds=Bounds(lo_b, hi_b), options={"time_limit": 90.0 if cone_pairs else 8.0, "mip_rel_gap": 0.02})
+                   bounds=Bounds(lo_b, hi_b), options={"time_limit": (float(milp_time_limit) if milp_time_limit else (90.0 if cone_pairs else 8.0)),
+                                                       "mip_rel_gap": 0.02})
         if res.x is None:
             attempts.append({"round": _round, "status": f"no turn assignment: {res.message}"})
             break
@@ -1310,8 +1312,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
             coupling = side_coupling(src_dir, sorted(feats), uv_dir, pre.f2)
             forced_idx = {}                     # directions come from the chart's own rotation field
             w_head = float(getattr(params, "structured_grid_field_heading_weight", 0.1))
-        def solve_dom(forced, w_head_override=None):
-            for ratio in (ratio0, 0.5 * ratio0):
+        def solve_dom(forced, w_head_override=None, time_limit=None, max_rounds=12, ratios=None):
+            for ratio in (ratios or (ratio0, 0.5 * ratio0)):
                 try:
                     d_ = logical_domain(src_dir, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
                                         cone_curvature=cone_k, w_curv=float(getattr(params, "structured_grid_curvature_weight", 1.0)),
@@ -1322,7 +1324,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                                         forced_cones=forced, target_positions=crop_targets,
                                         w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
                                         shape_weight=shape_w,
-                                        turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)))
+                                        turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)),
+                                        milp_time_limit=time_limit, max_rounds=max_rounds)
                     d_["min_side_ratio"] = ratio
                     return d_
                 except StructuredGridError as exc:
@@ -1364,7 +1367,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                     sd_c = float(info_r.get("aligned_sd_after", np.inf))
                     print(f"[SG-ALIGNED] round {rr}: {len(dom_k['features'])} -> {len(dom_r['features'])} corners, "
                           f"seam cones {len(dom_k.get('seam_cones', []))}, continuous SD {sd_c:.4f}, "
-                          f"rounding {info_r.get('aligned_rounding')}", flush=True)
+                          f"rounding {info_r.get('aligned_rounding')} [{time.perf_counter() - started:.0f} s]", flush=True)
                     feedback_log.append({"round": rr, "continuous_sd": sd_c, "seam_cones": len(dom_k.get("seam_cones", [])),
                                          "rounding": info_r.get("aligned_rounding")})
                     if new is not None and (best is None or sd_c < best[0]):
@@ -1387,9 +1390,18 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                 if not np.isfinite(sd_ref):
                     sd_ref = 4.0
                 accept = float(getattr(params, "structured_grid_design_sd_ratio", 1.08)) * sd_ref
+                budget = float(getattr(params, "structured_grid_design_time_budget", 240.0))
+                t_alt = time.perf_counter()
                 if best is None or best[0] > accept:
                     for fac in tuple(float(x) for x in str(getattr(params, "structured_grid_design_alternatives", "0.5,2,0.25")).split(",") if x.strip()):
-                        dom_a = solve_dom(forced_fb, w_head_override=w_head * fac)
+                        print(f"[SG-ALIGNED] solving design alternative heading x{fac:g} "
+                              f"({time.perf_counter() - t_alt:.0f} s of {budget:g} s budget used)", flush=True)
+                        if time.perf_counter() - t_alt > budget:
+                            print(f"[SG-ALIGNED] design alternatives stopped: time budget {budget:g} s used", flush=True)
+                            break
+                        # bounded: short MILP time limit, few no-good rounds, first side ratio only
+                        dom_a = solve_dom(forced_fb, w_head_override=w_head * fac, time_limit=30.0, max_rounds=3,
+                                          ratios=(ratio0,))
                         if dom_a is None:
                             continue
                         dom_ar = merge_straight_features(src, dom_a)
