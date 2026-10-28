@@ -64,7 +64,8 @@ def _turning_angles(src, feats: list[int], scale: float) -> dict[int, float]:
 def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio: float = 0.7,
                    max_rounds: int = 12, cone_pairs: list | None = None, w_cone: float = 0.5,
                    w_head: float = 0.5, shape_weight: float = 0.05, turn_weight: float = 0.3,
-                   cone_curvature=None, w_curv: float = 1.0, forced_cones: dict | None = None) -> dict:
+                   cone_curvature=None, w_curv: float = 1.0, forced_cones: dict | None = None,
+                   side_coupling=None, w_field: float = 1.0) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -133,7 +134,13 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
     iO = 15 * m + P_c                               # free heading offset
     iR = lambda q: 15 * m + P_c + 1 + q             # noqa: E731  |t_A + t_B - curvature/(pi/2)| of candidate q
     kq = None if cone_curvature is None else np.asarray(cone_curvature, float)
-    nv = 15 * m + 2 * P_c + 1
+    # smooth rotation field: |(C_k - C_l) - (H_k - H_l)| for side pairs tied through the interior
+    fpairs = []
+    if side_coupling is not None:
+        Wc = np.asarray(side_coupling, float)
+        fpairs = [(k, l, float(Wc[k, l])) for k in range(m) for l in range(k) if Wc[k, l] > 1e-6]
+    iW = lambda p: 15 * m + 2 * P_c + 1 + p         # noqa: E731
+    nv = 15 * m + 2 * P_c + 1 + len(fpairs)
     M = int(10 * max(L.max(), 4) + 10)
     w_turn = float(turn_weight) if cone_pairs else 1.0
     # A side may not be squeezed: n_k >= max(1, floor(min_ratio * L_k)) (protrusions keep their cells).
@@ -191,10 +198,17 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             # h_k >= |C_k - sum_{i<=k} t_i - o|
             row([(i, -v) for i, v in tk] + [(iO, -1), (iH(k), -1)], -np.inf, -C[k])
             row(tk + [(iO, 1), (iH(k), -1)], -np.inf, C[k])
-    integrality = np.r_[np.ones(11 * m), np.zeros(4 * m + 2 * P_c + 1)]
+    if fpairs:
+        Cc = np.cumsum([_chord_turning(src, feats)[j] / 90.0 for j in feats])
+        for p_, (k, l, _w) in enumerate(fpairs):
+            tk = [(iT(i, s_), s_) for i in range(l + 1, k + 1) for s_ in (-1, 1)]
+            dC = float(Cc[k] - Cc[l])
+            row([(i, -v) for i, v in tk] + [(iW(p_), -1)], -np.inf, -dC)
+            row(tk + [(iW(p_), -1)], -np.inf, dC)
+    integrality = np.r_[np.ones(11 * m), np.zeros(4 * m + 2 * P_c + 1 + len(fpairs))]
     lo_b = np.zeros(nv)
     lo_b[iO] = -np.inf
-    hi_b = np.r_[np.ones(4 * m), np.full(4 * m, M), np.ones(3 * m), np.full(4 * m + 2 * P_c + 1, np.inf)]
+    hi_b = np.r_[np.ones(4 * m), np.full(4 * m, M), np.ones(3 * m), np.full(4 * m + 2 * P_c + 1 + len(fpairs), np.inf)]
     attempts = []
     nogood: list[list[int]] = []
     chosen = None
@@ -209,6 +223,8 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             c[iF(k, 0)] = c[iF(k, 1)] = w_pos / max(float(np.mean(L)), 1.0)
             if cone_pairs:
                 c[iH(k)] = w_head
+        for p_, (_k, _l, wkl) in enumerate(fpairs):
+            c[iW(p_)] = w_field * wkl
         for q in range(P_c):
             c[iZ(q)] = w_cone
             if kq is not None:
@@ -996,6 +1012,16 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, 
                 T = np.c_[Dp[b] - Dp[a], Dp[c] - Dp[a]]
                 l1, l2 = np.linalg.solve(T, p - Dp[a])
                 out[r] = cuv[a] + l1 * (cuv[b] - cuv[a]) + l2 * (cuv[c] - cuv[a])
+            if seam_out is not None and cxyz is not None and cf3 is not None:
+                from .zhang2021_onestring_reparam import _SDProblem
+                X3 = np.asarray(cxyz, float)[np.asarray(cf3, int)]
+                a3 = 0.5 * float(np.sum(np.linalg.norm(np.cross(X3[:, 1] - X3[:, 0], X3[:, 2] - X3[:, 0]), axis=1)))
+                Pq = np.asarray(logical, float)[np.concatenate([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]])]
+                pa = 0.5 * float(np.sum(np.abs((Pq[:, 1, 0] - Pq[:, 0, 0]) * (Pq[:, 2, 1] - Pq[:, 0, 1])
+                                              - (Pq[:, 1, 1] - Pq[:, 0, 1]) * (Pq[:, 2, 0] - Pq[:, 0, 0]))))
+                sc = float(np.sqrt(a3 / max(pa, 1e-300)))
+                seam_out.update({"phi": Dp * sc, "scale": sc,
+                                 "prob": _SDProblem(np.asarray(cxyz, float), np.asarray(cf3, int), cf, len(cuv))})
             return gfree, out, {"phi_model": "harmonic map Omega_1 -> logical polygon (no flip)"}
     Dc = _tutte_disk(len(cuv), (I, J, W), bset_c, circ(t_chart[bset_c]))
     # lattice: triangulated quads, uniform weights
@@ -1043,6 +1069,19 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     xyz = np.asarray(xyz, float); f3 = np.asarray(f3, int); uv = np.asarray(uv, float); f2 = np.asarray(f2, int)
     cone_info: dict = {"enabled": False}
     forced_xyz: dict = {}
+    area3d0 = float(0.5 * np.sum(np.linalg.norm(np.cross(xyz[f3[:, 1]] - xyz[f3[:, 0]], xyz[f3[:, 2]] - xyz[f3[:, 0]]), axis=1)))
+    h_req = float(getattr(params, "structured_grid_panel_edge", 0.0) or 0.0) or \
+        float(np.sqrt(area3d0 / max(int(getattr(params, "structured_grid_auto_panels", 150)), 4)))
+    prune_report: list = []
+    prune_ratio = float(getattr(params, "structured_grid_prune_branch_panels", 1.5) or 0.0)
+    if prune_ratio > 0:
+        from .aligned_grid_20261028 import prune_short_branches
+        try:
+            uv, f2, prune_report = prune_short_branches(xyz, f3, uv, f2, h_req, max_ratio=prune_ratio)
+        except Exception as exc:  # noqa: BLE001 - keep the OptCuts cuts
+            prune_report = [{"error": f"{type(exc).__name__}: {exc}"}]
+        print(f"[SG-PRUNE] sub-panel cut branches sewn back: {prune_report}", flush=True)
+    direction_model = str(getattr(params, "structured_grid_direction_model", "field") or "field")
     if bool(getattr(params, "structured_grid_cone_cuts", True)):
         cone_info, uv, f2, forced_xyz = _cone_first_seams(xyz, f3, uv, f2, params)
     tols = [float(t) for t in str(getattr(params, "structured_grid_smoothing_tolerances", "0.01,0.005,0")).split(",")
@@ -1050,6 +1089,17 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     keep = float(getattr(params, "structured_grid_corner_scale", 0.04))
     smoothing_log = []
     pre = None
+    if str(getattr(params, "structured_grid_boundary_smoothing", "taubin")) == "taubin":
+        cand = precondition_omega(xyz, f3, uv, f2, 0.01, node_keep_ratio=keep, boundary_model="taubin",
+                                  smooth_scale=h_req,
+                                  sd_mean_ratio_max=float(getattr(params, "structured_grid_taubin_sd_mean_ratio_max", 1.12)),
+                                  sd_p95_ratio_max=float(getattr(params, "zhang2021_precondition_sd_p95_ratio_max", 1.30)))
+        smoothing_log.append({"model": "taubin", "scale": h_req, "accepted": cand.accepted, "reason": cand.reason})
+        print(f"[SG-OMEGA] Taubin boundary low-pass (panel scale {h_req:.4g}): "
+              f"{'accepted' if cand.accepted else cand.reason}", flush=True)
+        if cand.accepted:
+            pre = cand
+            tols = []
     for tol in tols:
         cand = precondition_omega(xyz, f3, uv, f2, tol, node_keep_ratio=keep, boundary_model="spline",
                                   sd_mean_ratio_max=float(getattr(params, "zhang2021_precondition_sd_mean_ratio_max", 1.08)),
@@ -1085,10 +1135,18 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     cone_k = None
     if cone_pairs and float(getattr(params, "structured_grid_curvature_weight", 1.0)) > 0:
         cone_k = seam_curvature(src, cone_pairs, pre.xyz, pre.f3, h3d)
+    coupling, w_head = None, 0.5
+    if direction_model == "field":
+        from .aligned_grid_20261028 import side_coupling
+        coupling = side_coupling(src, sorted(feats), uvm, pre.f2)
+        forced_idx = {}                     # directions come from the chart's own rotation field
+        w_head = float(getattr(params, "structured_grid_field_heading_weight", 0.1))
     for ratio in (ratio0, 0.5 * ratio0):
         try:
             dom = logical_domain(src, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
                                  cone_curvature=cone_k, w_curv=float(getattr(params, "structured_grid_curvature_weight", 1.0)),
+                                 side_coupling=coupling, w_field=float(getattr(params, "structured_grid_field_weight", 5.0)),
+                                 w_head=w_head,
                                  forced_cones=forced_idx,
                                  w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
                                  shape_weight=float(getattr(params, "structured_grid_shape_weight", 0.05)),
@@ -1106,7 +1164,28 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     if area_w < 0:
         area_w = {"size": 50.0, "balanced": 5.0}.get(priority, 0.0)
     seamless_log = []
-    for _r in range(int(getattr(params, "structured_grid_seamless_rounds", 1))):
+    placement_model = str(getattr(params, "structured_grid_placement", "aligned") or "aligned")
+    aligned_info: dict = {}
+    grid_uv = None
+    if placement_model == "aligned":
+        from .aligned_grid_20261028 import merge_straight_features, place_grid_aligned, refine_domain_aligned
+        chart = (uvm, pre.f2, pre.xyz, pre.f3)
+        try:
+            dom_r = merge_straight_features(src, dom)
+            lg_r, q_r, vid_r, walk_r = lattice_grid(dom_r)
+            new, aligned_info = refine_domain_aligned(src, dom_r, lg_r, q_r, walk_r, chart, h3d)
+            print(f"[SG-ALIGNED] joint solve: {len(dom['features'])} -> {len(dom_r['features'])} corners; "
+                  f"{ {k: v for k, v in aligned_info.items() if k != 'aligned_continuous_lengths'} }", flush=True)
+            dom_try = new if new is not None else dom_r
+            lg_t, q_t, vid_t, walk_t = lattice_grid(dom_try)
+            g_uv, pl = place_grid_aligned(src, dom_try, lg_t, q_t, walk_t, chart, h3d)
+            dom, logical, quads, vid, walk = dom_try, lg_t, q_t, vid_t, walk_t
+            grid_uv, placement = g_uv, {**pl, "aligned_refine": aligned_info}
+        except Exception as exc:  # noqa: BLE001 - reported, previous placement below
+            aligned_info = {"aligned_failed": f"{type(exc).__name__}: {exc}"}
+            print(f"[SG-ALIGNED] failed, falling back to the pull-back placement: {aligned_info}", flush=True)
+            grid_uv = None
+    for _r in range(int(getattr(params, "structured_grid_seamless_rounds", 1)) if grid_uv is None else 0):
         so: dict = {}
         place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2, chart_xyz=pre.xyz,
                    chart_f3=pre.f3, area_weight=0.0, seam_out=so)
@@ -1122,9 +1201,11 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
             break
         dom = new
         logical, quads, vid, walk = lattice_grid(dom)
-    grid_uv, placement = place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2,
-                                    chart_xyz=pre.xyz, chart_f3=pre.f3, area_weight=area_w)
-    placement["seamless_refinement"] = seamless_log
+    if grid_uv is None:
+        grid_uv, placement = place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2,
+                                        chart_xyz=pre.xyz, chart_f3=pre.f3, area_weight=area_w)
+        placement["seamless_refinement"] = seamless_log
+        placement.update(aligned_info)
     grid_uv = grid_uv * mirror
     print(f"[SG-GRID] seam cones: {len(dom.get('seam_cones', []))} of {dom.get('cone_candidates', 0)} candidates "
           f"(3D valence 3: {sum(1 for c in dom.get('seam_cones', []) if c['valence_3d'] == 3)}, "
@@ -1173,6 +1254,9 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         "structured_grid_initial_placement": placement,
         "structured_grid_min_side_ratio": dom.get("min_side_ratio"),
         "structured_grid_cone_first_seams": cone_info,
+        "structured_grid_pruned_branches": prune_report,
+        "structured_grid_direction_model": direction_model,
+        "structured_grid_placement_model": placement_model,
         "structured_grid_seam_cones": dom.get("seam_cones", []),
         "structured_grid_seam_cone_candidates": int(dom.get("cone_candidates", 0)),
         "structured_grid_seam_cone_valence3": int(sum(1 for c in dom.get("seam_cones", []) if c["valence_3d"] == 3)),

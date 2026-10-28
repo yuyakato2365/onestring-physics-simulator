@@ -260,9 +260,66 @@ def faired_boundary(src, tol: float, *, corner_scale: float) -> tuple[np.ndarray
     return targets, feats
 
 
+def _taubin_run(P: np.ndarray, scale: float, lam: float = 0.6, pass_ratio: float = 4.0,
+                stop_ratio: float = 2.0) -> np.ndarray:
+    """Non-shrinking (Taubin lambda|mu) low-pass of an open polyline with fixed end points.
+
+    Pass band = wavelengths >= pass_ratio*scale (shapes of a few panels survive), wavelengths
+    <= stop_ratio*scale (bumps about one panel wide) are damped to <= 10 %.  Only the normal component of each Laplacian step is applied,
+    so vertices do not slide along the curve (the boundary <-> 3D correspondence is kept)."""
+    m = len(P)
+    if m <= 3 or scale <= 0:
+        return P.copy()
+    seg = np.linalg.norm(np.diff(P, axis=0), axis=1)
+    s = float(np.mean(seg)) if np.mean(seg) > 0 else 1e-12
+    k_of = lambda wl: 1.0 - np.cos(min(np.pi, 2.0 * np.pi * s / wl))      # noqa: E731
+    k_pb = float(k_of(pass_ratio * scale))
+    mu = 1.0 / (k_pb - 1.0 / lam)
+    f_stop = abs((1.0 - lam * k_of(stop_ratio * scale)) * (1.0 - mu * k_of(stop_ratio * scale)))
+    n_it = 5 if f_stop <= 0 or f_stop >= 1 else int(np.clip(np.ceil(np.log(0.1) / np.log(f_stop)), 5, 600))
+    X = P.copy()
+
+    def step(X, f):
+        d_prev = X[1:-1] - X[:-2]
+        d_next = X[2:] - X[1:-1]
+        wp = 1.0 / np.maximum(np.linalg.norm(d_prev, axis=1), 1e-300)
+        wn = 1.0 / np.maximum(np.linalg.norm(d_next, axis=1), 1e-300)
+        lap = (wp[:, None] * (-d_prev) + wn[:, None] * d_next) / (wp + wn)[:, None]
+        t = X[2:] - X[:-2]
+        t /= np.maximum(np.linalg.norm(t, axis=1), 1e-300)[:, None]
+        nrm = np.c_[-t[:, 1], t[:, 0]]
+        lap = np.sum(lap * nrm, axis=1)[:, None] * nrm
+        Y = X.copy()
+        Y[1:-1] += f * lap
+        return Y
+
+    for _ in range(n_it):
+        X = step(step(X, lam), mu)
+    return X
+
+
+def taubin_boundary(src, scale: float, fix_tips: bool = False) -> tuple[np.ndarray, list[int]]:
+    """Boundary low-pass at the panel scale; only the OptCuts seam junctions and cut/open
+    transitions stay fixed (cut tips too when ``fix_tips``).  A cut tip is a single chart vertex
+    between the two copies of its branch, so smoothing through it keeps the seam correspondence;
+    its sharp spike is a sub-panel feature that the grid cannot represent anyway."""
+    n = src.n
+    fixed = sorted(set(int(j) for j in src.nodes if fix_tips or src.node_kind.get(j) != "tip"))
+    if len(fixed) < 2:
+        far = int(np.argmax(np.linalg.norm(src.uv - src.uv[fixed[0] if fixed else 0], axis=1)))
+        fixed = sorted(set(fixed) | {fixed[0] if fixed else 0, far})
+    targets = src.uv.copy()
+    for r, a in enumerate(fixed):
+        b = fixed[(r + 1) % len(fixed)]
+        idx = [(a + k) % n for k in range(((b - a) % n) + 1)] if b != a else list(range(n)) + [a]
+        targets[idx] = _taubin_run(src.uv[idx], scale)
+    return targets, fixed
+
+
 def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: float = 1.08,
                        sd_p95_ratio_max: float = 1.25, max_steps: int = 2000,
-                       node_keep_ratio: float = 0.0, boundary_model: str = "polyline") -> PreconditionResult:
+                       node_keep_ratio: float = 0.0, boundary_model: str = "polyline",
+                       smooth_scale: float = 0.0) -> PreconditionResult:
     xyz = np.asarray(xyz, float)
     f3 = np.asarray(f3, int)
     uv = np.asarray(uv, float)
@@ -293,7 +350,11 @@ def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: 
         return reject(str(exc))
     diag = float(np.linalg.norm(np.ptp(uv, axis=0)))
     tol = tol_ratio * diag
-    if boundary_model == "spline":
+    if boundary_model == "taubin":
+        # scale-based low-pass: the deviation bound is the panel size itself (not a fixed tolerance)
+        targets, corners = taubin_boundary(src, float(smooth_scale))
+        tol = max(tol, 2.0 * float(smooth_scale))
+    elif boundary_model == "spline":
         targets, corners = faired_boundary(src, tol, corner_scale=max(float(node_keep_ratio), 0.02) * diag)
     else:
         targets, corners = simplified_boundary(src, tol, node_keep_radius=float(node_keep_ratio) * diag)

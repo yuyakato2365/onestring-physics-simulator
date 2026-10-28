@@ -1133,6 +1133,13 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_cone_cuts: bool = True         # cross-field cones; short seam branches to the cones
     structured_grid_max_branch_panels: float = 6.0 # longest new seam branch, in panel edges
     structured_grid_cone_snap: str = "positive"    # cross-field cones forced on the seam: "all" | "positive" | "none"
+    structured_grid_prune_branch_panels: float = 1.5   # sew back leaf cut branches shorter than this (0 = off)
+    structured_grid_boundary_smoothing: str = "taubin"  # "taubin" (panel-scale low-pass) | "spline" (tolerance)
+    structured_grid_taubin_sd_mean_ratio_max: float = 1.12
+    structured_grid_direction_model: str = "field"     # "field" (smooth rotation field) | "heading" (boundary only)
+    structured_grid_field_weight: float = 5.0
+    structured_grid_field_heading_weight: float = 0.1
+    structured_grid_placement: str = "aligned"         # "aligned" (joint integer-grid map) | "pullback"
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
