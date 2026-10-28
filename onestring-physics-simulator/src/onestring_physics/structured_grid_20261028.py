@@ -65,7 +65,7 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
                    max_rounds: int = 12, cone_pairs: list | None = None, w_cone: float = 0.5,
                    w_head: float = 0.5, shape_weight: float = 0.05, turn_weight: float = 0.3,
                    cone_curvature=None, w_curv: float = 1.0, forced_cones: dict | None = None,
-                   side_coupling=None, w_field: float = 1.0) -> dict:
+                   side_coupling=None, w_field: float = 1.0, target_positions=None) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -119,6 +119,10 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
     R = np.array([[np.cos(-theta), -np.sin(-theta)], [np.sin(-theta), np.cos(-theta)]])
     unit = float(np.sum(L) / max(float(np.sum(run_uv)), 1e-300))
     T = ((uvf - uvf[0]) @ R.T) * unit
+    if target_positions is not None:
+        # corner targets given in lattice units (e.g. the 10-23 crop frame)
+        tp = np.asarray(target_positions, float)
+        T = tp - tp[0]
     pos = {j: k for k, j in enumerate(feats)}
     pairs = _subside_pairs(src, feats, seam_constraints(src))
     cones = [(pos[a], pos[b]) for a, b in cone_pairs]
@@ -1214,6 +1218,22 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     coupling, w_head = None, 0.5
     src_dir, uv_dir = src, uvm
     ps_info: dict = {}
+    placement_model = str(getattr(params, "structured_grid_placement", "aligned") or "aligned")
+    crop = None
+    crop_targets = None
+    shape_w = float(getattr(params, "structured_grid_shape_weight", 0.05))
+    if placement_model == "crop_bs":
+        # 10-23 rule: whole cells kept by their area fraction inside Omega_1; the logical polygon
+        # is the crop straightened (corner positions pulled to the chart in the crop frame)
+        from .crop_bs_grid_20261028 import area_threshold_crop, crop_frame_positions
+        crop = area_threshold_crop(uvm, pre.f2, h3d,
+                                   threshold=float(getattr(params, "structured_grid_crop_threshold", 0.5)))
+        crop_targets = crop_frame_positions(crop, src.uv[np.asarray(sorted(feats))], h3d)
+        direction_model = "crop"
+        forced_idx = {}
+        shape_w = float(getattr(params, "structured_grid_crop_shape_weight", 2.0))
+        print(f"[SG-CROP] area-threshold crop: angle {crop['angle']} deg, {crop['cells']} whole cells kept, "
+              f"{crop['staircase_corners']} staircase corners", flush=True)
     if direction_model == "field" and str(getattr(params, "structured_grid_direction_source", "polysquare")) == "polysquare":
         # read the boundary headings from a PolySquare-deformed copy of Omega_1 (curved ends of
         # lobes become straight sides with clear corners); only the MILP sees it
@@ -1242,9 +1262,9 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                                     cone_curvature=cone_k, w_curv=float(getattr(params, "structured_grid_curvature_weight", 1.0)),
                                     side_coupling=coupling, w_field=float(getattr(params, "structured_grid_field_weight", 5.0)),
                                     w_head=w_head,
-                                    forced_cones=forced,
+                                    forced_cones=forced, target_positions=crop_targets,
                                     w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
-                                    shape_weight=float(getattr(params, "structured_grid_shape_weight", 0.05)),
+                                    shape_weight=shape_w,
                                     turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)))
                 d_["min_side_ratio"] = ratio
                 return d_
@@ -1262,7 +1282,6 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     if area_w < 0:
         area_w = {"size": 50.0, "balanced": 5.0}.get(priority, 0.0)
     seamless_log = []
-    placement_model = str(getattr(params, "structured_grid_placement", "aligned") or "aligned")
     aligned_info: dict = {}
     grid_uv = None
     if placement_model == "aligned":
@@ -1318,7 +1337,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
             aligned_info = {"aligned_failed": f"{type(exc).__name__}: {exc}"}
             print(f"[SG-ALIGNED] failed, falling back to the pull-back placement: {aligned_info}", flush=True)
             grid_uv = None
-    for _r in range(int(getattr(params, "structured_grid_seamless_rounds", 1)) if grid_uv is None else 0):
+    for _r in range(int(getattr(params, "structured_grid_seamless_rounds", 1))
+                    if grid_uv is None and placement_model != "crop_bs" else 0):
         so: dict = {}
         place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2, chart_xyz=pre.xyz,
                    chart_f3=pre.f3, area_weight=0.0, seam_out=so)
@@ -1339,6 +1359,19 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                                         chart_xyz=pre.xyz, chart_f3=pre.f3, area_weight=area_w)
         placement["seamless_refinement"] = seamless_log
         placement.update(aligned_info)
+    if placement_model == "crop_bs":
+        from .crop_bs_grid_20261028 import brackbill_saltzman
+        bnd_v = sorted({w_[0] for w_ in walk})
+        grid_uv, bs_info = brackbill_saltzman(
+            grid_uv, quads, bnd_v, uvm, pre.f2, pre.xyz, pre.f3, h3d,
+            lam_o=float(getattr(params, "structured_grid_bs_orthogonality", 0.3)),
+            lam_v=float(getattr(params, "structured_grid_bs_volume", 0.3)))
+        placement.update(bs_info)
+        placement["crop"] = {"angle": crop["angle"], "cells": crop["cells"],
+                             "staircase_corners": crop["staircase_corners"]}
+        print(f"[SG-BS] Brackbill-Saltzman: {bs_info}", flush=True)
+        place_grid.last_crop = {"crop": crop, "dom": dom, "logical": logical, "quads": quads,
+                                "grid_uv": grid_uv, "chart": (uvm, pre.f2, pre.xyz, pre.f3), "h": h3d}   # diagnostics
     grid_uv = grid_uv * mirror
     print(f"[SG-GRID] seam cones: {len(dom.get('seam_cones', []))} of {dom.get('cone_candidates', 0)} candidates "
           f"(3D valence 3: {sum(1 for c in dom.get('seam_cones', []) if c['valence_3d'] == 3)}, "

@@ -1141,7 +1141,11 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_polysquare_weight: float = 20000.0
     structured_grid_field_weight: float = 5.0
     structured_grid_field_heading_weight: float = 0.1
-    structured_grid_placement: str = "aligned"         # "aligned" (joint integer-grid map) | "pullback"
+    structured_grid_placement: str = "aligned"         # "aligned" (joint integer-grid map) | "pullback" | "crop_bs"
+    structured_grid_crop_threshold: float = 0.5        # crop_bs: keep a whole cell when >= this fraction is inside Omega_1
+    structured_grid_crop_shape_weight: float = 2.0     # crop_bs: pull the polygon corners to the crop frame
+    structured_grid_bs_orthogonality: float = 0.3      # crop_bs: Brackbill-Saltzman lambda_O
+    structured_grid_bs_volume: float = 0.3             # crop_bs: Brackbill-Saltzman lambda_V (3D-area weighted)
     structured_grid_min_3d_length_ratio: float = 0.0  # aligned (>0): every side keeps >= this x its 3D length in cells
     structured_grid_shortfall_weight: float = 1.0     # aligned: a missing cell costs this x an extra cell
     structured_grid_aligned_area_weight: float = 1.0   # aligned: area preservation (cells follow the 3D area)
