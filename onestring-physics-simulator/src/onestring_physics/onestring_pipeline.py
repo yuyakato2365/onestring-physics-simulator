@@ -1140,7 +1140,9 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_direction_source: str = "polysquare"  # headings from a PolySquare-deformed Omega_1 | "omega"
     structured_grid_polysquare_weight: float = 20000.0
     structured_grid_field_weight: float = 5.0
-    structured_grid_field_heading_weight: float = 0.1
+    structured_grid_field_heading_weight: float = 1.0
+    structured_grid_heading_source: str = "omega"           # "omega" (Omega_1 itself) | "polysquare"
+    structured_grid_heading_length_weighted: bool = True    # heading error cost per panel of side length
     structured_grid_placement: str = "aligned"         # "aligned" (joint integer-grid map) | "pullback" | "crop_bs"
     structured_grid_crop_threshold: float = 0.5        # crop_bs: keep a whole cell when >= this fraction is inside Omega_1
     structured_grid_crop_shape_weight: float = 2.0     # crop_bs: pull the polygon corners to the crop frame

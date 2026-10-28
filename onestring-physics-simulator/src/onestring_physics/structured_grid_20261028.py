@@ -65,7 +65,8 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
                    max_rounds: int = 12, cone_pairs: list | None = None, w_cone: float = 0.5,
                    w_head: float = 0.5, shape_weight: float = 0.05, turn_weight: float = 0.3,
                    cone_curvature=None, w_curv: float = 1.0, forced_cones: dict | None = None,
-                   side_coupling=None, w_field: float = 1.0, target_positions=None) -> dict:
+                   side_coupling=None, w_field: float = 1.0, target_positions=None,
+                   heading_src=None, heading_length_weighted: bool = False) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -206,7 +207,10 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             row(tsum + [(iR(q), -1)], -np.inf, float(kq[q]))
             row([(i, -v) for i, v in tsum] + [(iR(q), -1)], -np.inf, -float(kq[q]))
     if cone_pairs:
-        C = np.cumsum([ang[j] / 90.0 for j in feats])
+        # heading reference: the boundary as it really is (Omega_1) when given, so a long side that
+        # leaves its axis is seen even if the PolySquare copy straightened it
+        hang = _chord_turning(heading_src, feats) if heading_src is not None else ang
+        C = np.cumsum([hang[j] / 90.0 for j in feats])
         for k in range(m):
             tk = [(iT(i, s_), s_) for i in range(k + 1) for s_ in (-1, 1)]
             # h_k >= |C_k - sum_{i<=k} t_i - o|
@@ -236,7 +240,9 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
                 c[iT(k, s_)] = w_turn * abs(ang[feats[k]] / 90.0 - s_)
             c[iF(k, 0)] = c[iF(k, 1)] = w_pos / max(float(np.mean(L)), 1.0)
             if cone_pairs:
-                c[iH(k)] = w_head
+                # a heading error costs per panel along the side (long sides off their axis are what
+                # shears the grid), not once per side
+                c[iH(k)] = w_head * (max(L[k], 0.5) if heading_length_weighted else 1.0)
         for p_, (_k, _l, wkl) in enumerate(fpairs):
             c[iW(p_)] = w_field * wkl
         for q in range(P_c):
@@ -1310,6 +1316,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                     d_ = logical_domain(src_dir, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
                                         cone_curvature=cone_k, w_curv=float(getattr(params, "structured_grid_curvature_weight", 1.0)),
                                         side_coupling=coupling, w_field=float(getattr(params, "structured_grid_field_weight", 5.0)),
+                                        heading_src=(src if str(getattr(params, "structured_grid_heading_source", "omega")) == "omega" else None),
+                                        heading_length_weighted=bool(getattr(params, "structured_grid_heading_length_weighted", True)),
                                         w_head=w_head,
                                         forced_cones=forced, target_positions=crop_targets,
                                         w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
