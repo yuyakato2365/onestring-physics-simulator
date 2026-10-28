@@ -317,7 +317,7 @@ def _locate(uv: np.ndarray, faces: np.ndarray, points: np.ndarray, tol: float):
     return tri_ids, bary
 
 
-def _polygon_metrics(source_loop_uv: np.ndarray, quad_loop_uv: np.ndarray) -> dict[str, float]:
+def _polygon_metrics(source_loop_uv: np.ndarray, quad_loop_uv: np.ndarray, strict: bool = True) -> dict[str, float]:
     out: dict[str, float] = {}
     try:
         from shapely.geometry import Polygon
@@ -329,7 +329,13 @@ def _polygon_metrics(source_loop_uv: np.ndarray, quad_loop_uv: np.ndarray) -> di
     if not omega.is_valid:
         omega = omega.buffer(0)
     if not q.is_valid:
-        raise Zhang2021QuadModeError("ZHANG2021_QUAD_BOUNDARY_SELF_INTERSECTS")
+        if strict:
+            raise Zhang2021QuadModeError("ZHANG2021_QUAD_BOUNDARY_SELF_INTERSECTS")
+        # report-only callers (structured grid): record it, measure the repaired region, keep going
+        from shapely.validation import explain_validity
+        out["zhang2021_quad_boundary_self_intersects"] = str(explain_validity(q))  # type: ignore[assignment]
+        print(f"[ZHANG2021] M2D quad boundary not simple (report only): {explain_validity(q)}", flush=True)
+        q = q.buffer(0)
     area = float(omega.area)
     out.update({
         "zhang2021_omega_area": area,
@@ -558,7 +564,7 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
         "zhang2021_m3d_scaled_jacobian_mean": float(np.mean(sj3)),
         "zhang2021_boundary_hausdorff_vs_source_omega": float(dh),
         "zhang2021_boundary_hausdorff_vs_source_omega_percent_bbox": 100.0 * float(dh) / max(bbox_diag, 1e-300),
-        **_polygon_metrics(src_loop_uv, q_poly),
+        **_polygon_metrics(src_loop_uv, q_poly, strict=not report_only),
         **rp.metrics,
         **{k: v for k, v in opt_report.items()},
         "zhang2021_onestring_chart_injective": True,
