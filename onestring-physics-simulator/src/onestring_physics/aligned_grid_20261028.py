@@ -581,6 +581,19 @@ def prune_short_branches(xyz, f3, uv, f2, h: float, max_ratio: float = 1.5, sd_r
         e1 = P[f2n[:, 1]] - P[f2n[:, 0]]
         e2 = P[f2n[:, 2]] - P[f2n[:, 0]]
         if np.any(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0] <= 0):
+            # elliptic untangling against the isometric 3D triangle shapes (all interior free)
+            from .structured_grid_20261028 import _untangle_elliptic
+            X3 = xyz[f3]
+            d1 = X3[:, 1] - X3[:, 0]
+            d2 = X3[:, 2] - X3[:, 0]
+            l1 = np.linalg.norm(d1, axis=1)
+            x2 = np.einsum("ij,ij->i", d2, d1) / l1
+            y2 = np.linalg.norm(np.cross(d1, d2), axis=1) / l1
+            ref_tri = np.stack([np.zeros((len(l1), 2)), np.c_[l1, np.zeros(len(l1))], np.c_[x2, y2]], axis=1)
+            P = _untangle_elliptic(P, f2n, np.setdiff1d(np.arange(len(P)), bset), ref_tri)
+            e1 = P[f2n[:, 1]] - P[f2n[:, 0]]
+            e2 = P[f2n[:, 2]] - P[f2n[:, 0]]
+        if np.any(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0] <= 0):
             report.append({"round": _round, "rejected": "flipped triangles after sewing"})
             break
         prob = _SDProblem(xyz, f3, f2n, len(P))

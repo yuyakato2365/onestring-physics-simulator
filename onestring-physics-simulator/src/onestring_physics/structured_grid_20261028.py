@@ -459,7 +459,11 @@ def _untangle_elliptic(P: np.ndarray, F: np.ndarray, free: np.ndarray, ref: np.n
     from scipy.optimize import minimize
     P = np.asarray(P, float).copy()
     F = np.asarray(F, int)
-    R0 = np.stack([ref[F[:, 1]] - ref[F[:, 0]], ref[F[:, 2]] - ref[F[:, 0]]], axis=2)     # (t, 2, 2) columns
+    ref = np.asarray(ref, float)
+    if ref.ndim == 3:                                     # per-triangle reference shapes (t, 3, 2)
+        R0 = np.stack([ref[:, 1] - ref[:, 0], ref[:, 2] - ref[:, 0]], axis=2)
+    else:
+        R0 = np.stack([ref[F[:, 1]] - ref[F[:, 0]], ref[F[:, 2]] - ref[F[:, 0]]], axis=2)     # (t, 2, 2) columns
     detR = R0[:, 0, 0] * R0[:, 1, 1] - R0[:, 0, 1] * R0[:, 1, 0]
     Rinv = np.stack([np.stack([R0[:, 1, 1], -R0[:, 0, 1]], 1), np.stack([-R0[:, 1, 0], R0[:, 0, 0]], 1)], 1) / detR[:, None, None]
     area = 0.5 * np.abs(detR)
@@ -1154,6 +1158,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         float(np.sqrt(area3d0 / max(int(getattr(params, "structured_grid_auto_panels", 150)), 4)))
     prune_report: list = []
     prune_ratio = float(getattr(params, "structured_grid_prune_branch_panels", 1.5) or 0.0)
+    if str(getattr(params, "structured_grid_placement", "aligned")) == "quadmesh":
+        prune_ratio = max(prune_ratio, 3.0)        # free singularities: short slits only cost quality
     if prune_ratio > 0:
         from .aligned_grid_20261028 import prune_short_branches
         try:
@@ -1162,7 +1168,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
             prune_report = [{"error": f"{type(exc).__name__}: {exc}"}]
         print(f"[SG-PRUNE] sub-panel cut branches sewn back: {prune_report}", flush=True)
     direction_model = str(getattr(params, "structured_grid_direction_model", "field") or "field")
-    if bool(getattr(params, "structured_grid_cone_cuts", True)):
+    if bool(getattr(params, "structured_grid_cone_cuts", True)) and \
+            str(getattr(params, "structured_grid_placement", "aligned")) != "quadmesh":
         cone_info, uv, f2, forced_xyz = _cone_first_seams(xyz, f3, uv, f2, params)
     tols = [float(t) for t in str(getattr(params, "structured_grid_smoothing_tolerances", "0.01,0.005,0")).split(",")
             if t.strip()]
@@ -1201,177 +1208,191 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     h3d = float(getattr(params, "structured_grid_panel_edge", 0.0) or 0.0)
     if h3d <= 0:
         h3d = float(np.sqrt(area3d / max(int(getattr(params, "structured_grid_auto_panels", 150)), 4)))
-    feats = boundary_features(src, keep * diag)
-    ratio0 = float(getattr(params, "structured_grid_min_side_ratio", 0.7))
-    dom, errors = None, []
-    cone_pairs = []
-    if bool(getattr(params, "structured_grid_seam_cones", True)):
-        feats, cone_pairs = seam_cone_candidates(
-            src, feats, h3d, spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)),
-            open_spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)), forced_xyz=forced_xyz)
-    forced_idx = {q: int(forced_xyz[int(src.xyz_id[a])]) for q, (a, _b) in enumerate(cone_pairs)
-                  if int(src.xyz_id[a]) in forced_xyz}
-    cone_info["forced_seam_cones_used"] = len(forced_idx)
-    cone_k = None
-    if cone_pairs and float(getattr(params, "structured_grid_curvature_weight", 1.0)) > 0:
-        cone_k = seam_curvature(src, cone_pairs, pre.xyz, pre.f3, h3d)
-    coupling, w_head = None, 0.5
-    src_dir, uv_dir = src, uvm
-    ps_info: dict = {}
     placement_model = str(getattr(params, "structured_grid_placement", "aligned") or "aligned")
-    crop = None
-    crop_targets = None
-    shape_w = float(getattr(params, "structured_grid_shape_weight", 0.05))
-    if placement_model == "crop_bs":
-        # 10-23 rule: whole cells kept by their area fraction inside Omega_1; the logical polygon
-        # is the crop straightened (corner positions pulled to the chart in the crop frame)
-        from .crop_bs_grid_20261028 import area_threshold_crop, crop_frame_positions
-        crop = area_threshold_crop(uvm, pre.f2, h3d,
-                                   threshold=float(getattr(params, "structured_grid_crop_threshold", 0.5)))
-        crop_targets = crop_frame_positions(crop, src.uv[np.asarray(sorted(feats))], h3d)
-        direction_model = "crop"
-        forced_idx = {}
-        shape_w = float(getattr(params, "structured_grid_crop_shape_weight", 2.0))
-        print(f"[SG-CROP] area-threshold crop: angle {crop['angle']} deg, {crop['cells']} whole cells kept, "
-              f"{crop['staircase_corners']} staircase corners", flush=True)
-    if direction_model == "field" and str(getattr(params, "structured_grid_direction_source", "polysquare")) == "polysquare":
-        # read the boundary headings from a PolySquare-deformed copy of Omega_1 (curved ends of
-        # lobes become straight sides with clear corners); only the MILP sees it
-        from .aligned_grid_20261028 import polysquare_deform
-        from .zhang2021_onestring_reparam import _SDProblem
-        try:
-            uv_dir, ps_info = polysquare_deform(_SDProblem(pre.xyz, pre.f3, pre.f2, len(uvm)), uvm, src.loop,
-                                                iters=60, w_end=float(getattr(params, "structured_grid_polysquare_weight", 20000.0)))
-            src_dir = build_source_boundary(uv_dir, pre.f2, u2x, pre.xyz)
-            if list(src_dir.loop) != list(src.loop):
-                raise StructuredGridError("SG_POLYSQUARE_LOOP_CHANGED")
-            print(f"[SG-POLYSQUARE] {ps_info}", flush=True)
-        except Exception as exc:  # noqa: BLE001 - headings from Omega_1 itself
-            src_dir, uv_dir = src, uvm
-            ps_info = {"polysquare_failed": f"{type(exc).__name__}: {exc}"}
-            print(f"[SG-POLYSQUARE] skipped: {ps_info}", flush=True)
-    if direction_model == "field":
-        from .aligned_grid_20261028 import side_coupling
-        coupling = side_coupling(src_dir, sorted(feats), uv_dir, pre.f2)
-        forced_idx = {}                     # directions come from the chart's own rotation field
-        w_head = float(getattr(params, "structured_grid_field_heading_weight", 0.1))
-    def solve_dom(forced):
-        for ratio in (ratio0, 0.5 * ratio0):
-            try:
-                d_ = logical_domain(src_dir, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
-                                    cone_curvature=cone_k, w_curv=float(getattr(params, "structured_grid_curvature_weight", 1.0)),
-                                    side_coupling=coupling, w_field=float(getattr(params, "structured_grid_field_weight", 5.0)),
-                                    w_head=w_head,
-                                    forced_cones=forced, target_positions=crop_targets,
-                                    w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
-                                    shape_weight=shape_w,
-                                    turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)))
-                d_["min_side_ratio"] = ratio
-                return d_
-            except StructuredGridError as exc:
-                errors.append(str(exc)[:400])
-                print(f"[SG-GRID] min side ratio {ratio:g}: {str(exc)[:300]}", flush=True)
-        return None
-
-    dom = solve_dom(forced_idx)
-    if dom is None:
-        raise StructuredGridError("; ".join(errors))
-    logical, quads, vid, walk = lattice_grid(dom)
-    priority = str(getattr(params, "structured_grid_priority", "shape") or "shape")
-    area_w = float(getattr(params, "structured_grid_area_weight", -1.0))
-    if area_w < 0:
-        area_w = {"size": 50.0, "balanced": 5.0}.get(priority, 0.0)
-    seamless_log = []
-    aligned_info: dict = {}
-    grid_uv = None
-    if placement_model == "aligned":
-        from .aligned_grid_20261028 import merge_straight_features, place_grid_aligned, refine_domain_aligned
-        chart = (uvm, pre.f2, pre.xyz, pre.f3)
-        from .aligned_grid_20261028 import cone_feedback, current_cones
-        try:
-            feedback_log = []
-            best = None
-            forced_fb = dict(forced_idx)
-            dom_k = dom
-            for rr in range(int(getattr(params, "structured_grid_cone_feedback_rounds", 0)) + 1):
-                if dom_k is None:
-                    break
-                dom_r = merge_straight_features(src, dom_k)
-                lg_r, q_r, vid_r, walk_r = lattice_grid(dom_r)
-                new, info_r = refine_domain_aligned(
-                    src, dom_r, lg_r, q_r, walk_r, chart, h3d,
-                    min_3d_ratio=float(getattr(params, "structured_grid_min_3d_length_ratio", 0.0)),
-                    under_weight=float(getattr(params, "structured_grid_shortfall_weight", 1.0)),
-                    area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)))
-                star = info_r.pop("_star", None)
-                sd_c = float(info_r.get("aligned_sd_after", np.inf))
-                print(f"[SG-ALIGNED] round {rr}: {len(dom_k['features'])} -> {len(dom_r['features'])} corners, "
-                      f"seam cones {len(dom_k.get('seam_cones', []))}, continuous SD {sd_c:.4f}, "
-                      f"rounding {info_r.get('aligned_rounding')}", flush=True)
-                feedback_log.append({"round": rr, "continuous_sd": sd_c, "seam_cones": len(dom_k.get("seam_cones", [])),
-                                     "rounding": info_r.get("aligned_rounding")})
-                if new is not None and (best is None or sd_c < best[0]):
-                    best = (sd_c, new, info_r)
-                if star is None or not cone_pairs:
-                    break
-                forced_fb, added = cone_feedback(src, cone_pairs, star, chart, h3d,
-                                                 {**current_cones(src, cone_pairs, dom_k), **forced_fb},
-                                                 threshold=float(getattr(params, "structured_grid_cone_feedback_threshold", 0.35)),
-                                                 radius=float(getattr(params, "structured_grid_cone_feedback_radius", 2.0)))
-                feedback_log[-1]["added_cones"] = added
-                print(f"[SG-ALIGNED] cone feedback: {added}", flush=True)
-                if not added:
-                    break
-                dom_k = solve_dom(forced_fb)
-            if best is None:
-                raise StructuredGridError("SG_ALIGNED_NO_ROUNDED_POLYGON")
-            _sd, new, aligned_info = best
-            aligned_info["cone_feedback"] = feedback_log
-            dom_try = new
-            lg_t, q_t, vid_t, walk_t = lattice_grid(dom_try)
-            g_uv, pl = place_grid_aligned(src, dom_try, lg_t, q_t, walk_t, chart, h3d,
-                                          area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)))
-            dom, logical, quads, vid, walk = dom_try, lg_t, q_t, vid_t, walk_t
-            grid_uv, placement = g_uv, {**pl, "aligned_refine": aligned_info}
-        except Exception as exc:  # noqa: BLE001 - reported, previous placement below
-            aligned_info = {"aligned_failed": f"{type(exc).__name__}: {exc}"}
-            print(f"[SG-ALIGNED] failed, falling back to the pull-back placement: {aligned_info}", flush=True)
-            grid_uv = None
-    for _r in range(int(getattr(params, "structured_grid_seamless_rounds", 1))
-                    if grid_uv is None and placement_model != "crop_bs" else 0):
-        so: dict = {}
-        place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2, chart_xyz=pre.xyz,
-                   chart_f3=pre.f3, area_weight=0.0, seam_out=so)
-        if "phi" not in so:
-            break
-        try:
-            new, sinfo = refine_domain_seamless(src, dom, so)
-        except Exception as exc:  # noqa: BLE001 - keep the current polygon
-            new, sinfo = None, {"seamless_error": f"{type(exc).__name__}: {exc}"}
-        seamless_log.append(sinfo)
-        print(f"[SG-SEAMLESS] round {_r}: {sinfo}", flush=True)
-        if new is None:
-            break
-        dom = new
-        logical, quads, vid, walk = lattice_grid(dom)
-    if grid_uv is None:
-        grid_uv, placement = place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2,
-                                        chart_xyz=pre.xyz, chart_f3=pre.f3, area_weight=area_w)
-        placement["seamless_refinement"] = seamless_log
-        placement.update(aligned_info)
-    if placement_model == "crop_bs":
-        from .crop_bs_grid_20261028 import brackbill_saltzman
-        bnd_v = sorted({w_[0] for w_ in walk})
-        grid_uv, bs_info = brackbill_saltzman(
-            grid_uv, quads, bnd_v, uvm, pre.f2, pre.xyz, pre.f3, h3d,
+    if placement_model == "quadmesh":
+        # comparison: unstructured quad mesh of Omega_1 (interior singularities allowed)
+        from .quadmesh_20261028 import quadmesh_omega
+        grid_uv, quads, placement = quadmesh_omega(
+            src, uvm, pre.f2, pre.xyz, pre.f3, h3d,
             lam_o=float(getattr(params, "structured_grid_bs_orthogonality", 0.3)),
-            lam_v=float(getattr(params, "structured_grid_bs_volume", 0.3)))
-        placement.update(bs_info)
-        placement["crop"] = {"angle": crop["angle"], "cells": crop["cells"],
-                             "staircase_corners": crop["staircase_corners"]}
-        print(f"[SG-BS] Brackbill-Saltzman: {bs_info}", flush=True)
-        place_grid.last_crop = {"crop": crop, "dom": dom, "logical": logical, "quads": quads,
-                                "grid_uv": grid_uv, "chart": (uvm, pre.f2, pre.xyz, pre.f3), "h": h3d}   # diagnostics
+            lam_v=float(getattr(params, "structured_grid_bs_volume", 0.3)),
+            target_count=area3d / h3d ** 2)
+        dom = {"convex": 0, "reflex": 0, "lengths": [], "target_lengths": [], "seam_cones": [],
+               "cone_candidates": 0, "attempts": []}
+        feats, vid, direction_model, ps_info = [], {}, "none", {}
+        print(f"[SG-QUADMESH] {placement}", flush=True)
+    else:
+        feats = boundary_features(src, keep * diag)
+        ratio0 = float(getattr(params, "structured_grid_min_side_ratio", 0.7))
+        dom, errors = None, []
+        cone_pairs = []
+        if bool(getattr(params, "structured_grid_seam_cones", True)):
+            feats, cone_pairs = seam_cone_candidates(
+                src, feats, h3d, spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)),
+                open_spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)), forced_xyz=forced_xyz)
+        forced_idx = {q: int(forced_xyz[int(src.xyz_id[a])]) for q, (a, _b) in enumerate(cone_pairs)
+                      if int(src.xyz_id[a]) in forced_xyz}
+        cone_info["forced_seam_cones_used"] = len(forced_idx)
+        cone_k = None
+        if cone_pairs and float(getattr(params, "structured_grid_curvature_weight", 1.0)) > 0:
+            cone_k = seam_curvature(src, cone_pairs, pre.xyz, pre.f3, h3d)
+        coupling, w_head = None, 0.5
+        src_dir, uv_dir = src, uvm
+        ps_info: dict = {}
+        placement_model = str(getattr(params, "structured_grid_placement", "aligned") or "aligned")
+        crop = None
+        crop_targets = None
+        shape_w = float(getattr(params, "structured_grid_shape_weight", 0.05))
+        if placement_model == "crop_bs":
+            # 10-23 rule: whole cells kept by their area fraction inside Omega_1; the logical polygon
+            # is the crop straightened (corner positions pulled to the chart in the crop frame)
+            from .crop_bs_grid_20261028 import area_threshold_crop, crop_frame_positions
+            crop = area_threshold_crop(uvm, pre.f2, h3d,
+                                       threshold=float(getattr(params, "structured_grid_crop_threshold", 0.5)))
+            crop_targets = crop_frame_positions(crop, src.uv[np.asarray(sorted(feats))], h3d)
+            direction_model = "crop"
+            forced_idx = {}
+            shape_w = float(getattr(params, "structured_grid_crop_shape_weight", 2.0))
+            print(f"[SG-CROP] area-threshold crop: angle {crop['angle']} deg, {crop['cells']} whole cells kept, "
+                  f"{crop['staircase_corners']} staircase corners", flush=True)
+        if direction_model == "field" and str(getattr(params, "structured_grid_direction_source", "polysquare")) == "polysquare":
+            # read the boundary headings from a PolySquare-deformed copy of Omega_1 (curved ends of
+            # lobes become straight sides with clear corners); only the MILP sees it
+            from .aligned_grid_20261028 import polysquare_deform
+            from .zhang2021_onestring_reparam import _SDProblem
+            try:
+                uv_dir, ps_info = polysquare_deform(_SDProblem(pre.xyz, pre.f3, pre.f2, len(uvm)), uvm, src.loop,
+                                                    iters=60, w_end=float(getattr(params, "structured_grid_polysquare_weight", 20000.0)))
+                src_dir = build_source_boundary(uv_dir, pre.f2, u2x, pre.xyz)
+                if list(src_dir.loop) != list(src.loop):
+                    raise StructuredGridError("SG_POLYSQUARE_LOOP_CHANGED")
+                print(f"[SG-POLYSQUARE] {ps_info}", flush=True)
+            except Exception as exc:  # noqa: BLE001 - headings from Omega_1 itself
+                src_dir, uv_dir = src, uvm
+                ps_info = {"polysquare_failed": f"{type(exc).__name__}: {exc}"}
+                print(f"[SG-POLYSQUARE] skipped: {ps_info}", flush=True)
+        if direction_model == "field":
+            from .aligned_grid_20261028 import side_coupling
+            coupling = side_coupling(src_dir, sorted(feats), uv_dir, pre.f2)
+            forced_idx = {}                     # directions come from the chart's own rotation field
+            w_head = float(getattr(params, "structured_grid_field_heading_weight", 0.1))
+        def solve_dom(forced):
+            for ratio in (ratio0, 0.5 * ratio0):
+                try:
+                    d_ = logical_domain(src_dir, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
+                                        cone_curvature=cone_k, w_curv=float(getattr(params, "structured_grid_curvature_weight", 1.0)),
+                                        side_coupling=coupling, w_field=float(getattr(params, "structured_grid_field_weight", 5.0)),
+                                        w_head=w_head,
+                                        forced_cones=forced, target_positions=crop_targets,
+                                        w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
+                                        shape_weight=shape_w,
+                                        turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)))
+                    d_["min_side_ratio"] = ratio
+                    return d_
+                except StructuredGridError as exc:
+                    errors.append(str(exc)[:400])
+                    print(f"[SG-GRID] min side ratio {ratio:g}: {str(exc)[:300]}", flush=True)
+            return None
+
+        dom = solve_dom(forced_idx)
+        if dom is None:
+            raise StructuredGridError("; ".join(errors))
+        logical, quads, vid, walk = lattice_grid(dom)
+        priority = str(getattr(params, "structured_grid_priority", "shape") or "shape")
+        area_w = float(getattr(params, "structured_grid_area_weight", -1.0))
+        if area_w < 0:
+            area_w = {"size": 50.0, "balanced": 5.0}.get(priority, 0.0)
+        seamless_log = []
+        aligned_info: dict = {}
+        grid_uv = None
+        if placement_model == "aligned":
+            from .aligned_grid_20261028 import merge_straight_features, place_grid_aligned, refine_domain_aligned
+            chart = (uvm, pre.f2, pre.xyz, pre.f3)
+            from .aligned_grid_20261028 import cone_feedback, current_cones
+            try:
+                feedback_log = []
+                best = None
+                forced_fb = dict(forced_idx)
+                dom_k = dom
+                for rr in range(int(getattr(params, "structured_grid_cone_feedback_rounds", 0)) + 1):
+                    if dom_k is None:
+                        break
+                    dom_r = merge_straight_features(src, dom_k)
+                    lg_r, q_r, vid_r, walk_r = lattice_grid(dom_r)
+                    new, info_r = refine_domain_aligned(
+                        src, dom_r, lg_r, q_r, walk_r, chart, h3d,
+                        min_3d_ratio=float(getattr(params, "structured_grid_min_3d_length_ratio", 0.0)),
+                        under_weight=float(getattr(params, "structured_grid_shortfall_weight", 1.0)),
+                        area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)))
+                    star = info_r.pop("_star", None)
+                    sd_c = float(info_r.get("aligned_sd_after", np.inf))
+                    print(f"[SG-ALIGNED] round {rr}: {len(dom_k['features'])} -> {len(dom_r['features'])} corners, "
+                          f"seam cones {len(dom_k.get('seam_cones', []))}, continuous SD {sd_c:.4f}, "
+                          f"rounding {info_r.get('aligned_rounding')}", flush=True)
+                    feedback_log.append({"round": rr, "continuous_sd": sd_c, "seam_cones": len(dom_k.get("seam_cones", [])),
+                                         "rounding": info_r.get("aligned_rounding")})
+                    if new is not None and (best is None or sd_c < best[0]):
+                        best = (sd_c, new, info_r)
+                    if star is None or not cone_pairs:
+                        break
+                    forced_fb, added = cone_feedback(src, cone_pairs, star, chart, h3d,
+                                                     {**current_cones(src, cone_pairs, dom_k), **forced_fb},
+                                                     threshold=float(getattr(params, "structured_grid_cone_feedback_threshold", 0.35)),
+                                                     radius=float(getattr(params, "structured_grid_cone_feedback_radius", 2.0)))
+                    feedback_log[-1]["added_cones"] = added
+                    print(f"[SG-ALIGNED] cone feedback: {added}", flush=True)
+                    if not added:
+                        break
+                    dom_k = solve_dom(forced_fb)
+                if best is None:
+                    raise StructuredGridError("SG_ALIGNED_NO_ROUNDED_POLYGON")
+                _sd, new, aligned_info = best
+                aligned_info["cone_feedback"] = feedback_log
+                dom_try = new
+                lg_t, q_t, vid_t, walk_t = lattice_grid(dom_try)
+                g_uv, pl = place_grid_aligned(src, dom_try, lg_t, q_t, walk_t, chart, h3d,
+                                              area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)))
+                dom, logical, quads, vid, walk = dom_try, lg_t, q_t, vid_t, walk_t
+                grid_uv, placement = g_uv, {**pl, "aligned_refine": aligned_info}
+            except Exception as exc:  # noqa: BLE001 - reported, previous placement below
+                aligned_info = {"aligned_failed": f"{type(exc).__name__}: {exc}"}
+                print(f"[SG-ALIGNED] failed, falling back to the pull-back placement: {aligned_info}", flush=True)
+                grid_uv = None
+        for _r in range(int(getattr(params, "structured_grid_seamless_rounds", 1))
+                        if grid_uv is None and placement_model != "crop_bs" else 0):
+            so: dict = {}
+            place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2, chart_xyz=pre.xyz,
+                       chart_f3=pre.f3, area_weight=0.0, seam_out=so)
+            if "phi" not in so:
+                break
+            try:
+                new, sinfo = refine_domain_seamless(src, dom, so)
+            except Exception as exc:  # noqa: BLE001 - keep the current polygon
+                new, sinfo = None, {"seamless_error": f"{type(exc).__name__}: {exc}"}
+            seamless_log.append(sinfo)
+            print(f"[SG-SEAMLESS] round {_r}: {sinfo}", flush=True)
+            if new is None:
+                break
+            dom = new
+            logical, quads, vid, walk = lattice_grid(dom)
+        if grid_uv is None:
+            grid_uv, placement = place_grid(src, dom, logical, quads, walk, chart_uv=uvm, chart_f2=pre.f2,
+                                            chart_xyz=pre.xyz, chart_f3=pre.f3, area_weight=area_w)
+            placement["seamless_refinement"] = seamless_log
+            placement.update(aligned_info)
+        if placement_model == "crop_bs":
+            from .crop_bs_grid_20261028 import brackbill_saltzman
+            bnd_v = sorted({w_[0] for w_ in walk})
+            grid_uv, bs_info = brackbill_saltzman(
+                grid_uv, quads, bnd_v, uvm, pre.f2, pre.xyz, pre.f3, h3d,
+                lam_o=float(getattr(params, "structured_grid_bs_orthogonality", 0.3)),
+                lam_v=float(getattr(params, "structured_grid_bs_volume", 0.3)))
+            placement.update(bs_info)
+            placement["crop"] = {"angle": crop["angle"], "cells": crop["cells"],
+                                 "staircase_corners": crop["staircase_corners"]}
+            print(f"[SG-BS] Brackbill-Saltzman: {bs_info}", flush=True)
+            place_grid.last_crop = {"crop": crop, "dom": dom, "logical": logical, "quads": quads,
+                                    "grid_uv": grid_uv, "chart": (uvm, pre.f2, pre.xyz, pre.f3), "h": h3d}   # diagnostics
     grid_uv = grid_uv * mirror
     print(f"[SG-GRID] seam cones: {len(dom.get('seam_cones', []))} of {dom.get('cone_candidates', 0)} candidates "
           f"(3D valence 3: {sum(1 for c in dom.get('seam_cones', []) if c['valence_3d'] == 3)}, "

@@ -129,6 +129,10 @@ DEFAULT_DOWNSTREAM_ROUTE = ROUTE_PAPER_LOCAL_GLOBAL
 
 def downstream_route(params: Any) -> str:
     if structured_grid_enabled(params):
+        if str(getattr(params, "structured_grid_placement", "aligned")) == "quadmesh":
+            # comparison mesh with interior singularities: the 09-18 alternating linkage needs even
+            # interior valence, so this one goes through the singularity-capable route
+            return ROUTE_OPTCUTS_TEST2
         return ROUTE_PAPER_LOCAL_GLOBAL     # the unchanged 2026-09-18 K3D...T2D route
     route = str(getattr(params, "zhang2021_downstream_route", DEFAULT_DOWNSTREAM_ROUTE) or DEFAULT_DOWNSTREAM_ROUTE)
     if route not in DOWNSTREAM_ROUTES:

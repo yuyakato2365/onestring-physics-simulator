@@ -104,11 +104,20 @@ def brackbill_saltzman(grid_uv, quads, fixed, chart_uv, chart_f2, chart_xyz, cha
         return E, G[free].ravel()
 
     E0, _ = fun(X[free].ravel())
+    untangled = False
     if not np.isfinite(E0):
-        return np.asarray(grid_uv, float), {"bs_status": "start grid folded"}
+        # non-convex / folded start: make every quad corner positive first (elliptic untangling of
+        # the corner triangles towards square corners), then minimise the functional
+        from .structured_grid_20261028 import _untangle_elliptic
+        ref_tri = np.tile(np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]), (len(C), 1, 1))
+        X = _untangle_elliptic(X, C, free, ref_tri, outer=40, iters=600)
+        untangled = True
+        E0, _ = fun(X[free].ravel())
+        if not np.isfinite(E0):
+            return np.asarray(grid_uv, float), {"bs_status": "start grid folded (untangling failed)"}
     z, E1, it = _lbfgs(fun, X[free].ravel(), max_iter=iters)
     X[free] = z.reshape(-1, 2)
-    return X * h, {"bs_energy_before": float(E0), "bs_energy_after": float(E1), "bs_iterations": int(it),
+    return X * h, {"bs_untangled_start": untangled, "bs_energy_before": float(E0), "bs_energy_after": float(E1), "bs_iterations": int(it),
                    "bs_lambda_orth": lam_o, "bs_lambda_vol": lam_v}
 
 
