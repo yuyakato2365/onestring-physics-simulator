@@ -513,12 +513,16 @@ def current_cones(src, cone_pairs, dom) -> dict:
 
 # ------------------------------------------------------------------ gluing back sub-panel cut branches
 def prune_short_branches(xyz, f3, uv, f2, h: float, max_ratio: float = 1.5, sd_ratio_max: float = 1.15,
-                         rounds: int = 3):
+                         rounds: int = 3, narrow_ratio: float = 0.5, narrow_max_ratio: float = 6.0):
     """Sew back every leaf cut branch (a slit ending in a cut tip) whose 3D length is below
     ``max_ratio`` panels.  Such a branch is narrower than one panel, so the grid cannot follow
     it; it only leaves a spike / notch in Omega.  The released curvature is absorbed by the
     flattening (untangle + SLIM, boundary elsewhere fixed); rejected if the mean symmetric
-    Dirichlet energy grows more than ``sd_ratio_max``."""
+    Dirichlet energy grows more than ``sd_ratio_max``.
+
+    A longer slit (up to ``narrow_max_ratio`` panels) is also sewn back when OptCuts barely opened
+    it: its widest UV opening is below ``narrow_ratio`` panels, so the two sides are closer than a
+    panel and no boundary smoothing or grid can keep them apart."""
     from .zhang2021_onestring_boundary import build_source_boundary, uv_to_xyz_vertex_map, oriented_boundary_loops
     from .zhang2021_onestring_reparam import _SDProblem, _slim_iterations, signed_uv_areas
     from .zhang2021_onestring_seam_matching import seam_constraints
@@ -541,14 +545,21 @@ def prune_short_branches(xyz, f3, uv, f2, h: float, max_ratio: float = 1.5, sd_r
                 continue
             a0, a1 = con.run_a
             length = (float(src.cum3[a1]) - float(src.cum3[a0])) % tot3
-            if length >= max_ratio * h:
-                continue
             posB = {int(src.xyz_id[j]): j for j in _cyclic_positions(n, *con.run_b)}
+            width = 0.0
+            for p in _cyclic_positions(n, a0, a1):
+                q = posB.get(int(src.xyz_id[p]))
+                if q is not None:
+                    width = max(width, float(np.linalg.norm(uvm[loop[p]] - uvm[loop[q]])))
+            narrow = width < narrow_ratio * h and length < narrow_max_ratio * h
+            if length >= max_ratio * h and not narrow:
+                continue
             for p in _cyclic_positions(n, a0, a1):
                 q = posB.get(int(src.xyz_id[p]))
                 if q is not None and loop[q] != loop[p]:
                     merge[int(loop[q])] = int(loop[p])
-            report.append({"round": _round, "tip_xyz": int(src.xyz_id[a1]), "length_panels": round(length / h, 3)})
+            report.append({"round": _round, "tip_xyz": int(src.xyz_id[a1]), "length_panels": round(length / h, 3),
+                           "opening_panels": round(width / h, 3)})
         if not merge:
             break
         new_uv = uvm.copy()

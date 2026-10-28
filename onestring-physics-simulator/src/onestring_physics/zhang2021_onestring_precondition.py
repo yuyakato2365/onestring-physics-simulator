@@ -298,6 +298,27 @@ def _taubin_run(P: np.ndarray, scale: float, lam: float = 0.6, pass_ratio: float
     return X
 
 
+def _neck_spans(P: np.ndarray, width: float) -> list[tuple[int, int]]:
+    """Thin notches / fingers of an open polyline: vertex pairs i < j closer than ``width`` while
+    the curve between them is much longer (outermost spans, non-overlapping).  A low-pass moves
+    the two walls of such a feature sideways into each other (self-intersection), and closing it
+    would stretch the chart enormously (the walls are far apart in 3D), so it is kept as it is."""
+    X = np.asarray(P, float)
+    m = len(X)
+    if m < 5 or width <= 0:
+        return []
+    from scipy.spatial import cKDTree
+    seg = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(X, axis=0), axis=1))]
+    pairs = [(i, j) for i, j in cKDTree(X).query_pairs(width)
+             if j - i >= 3 and 3.0 * np.linalg.norm(X[i] - X[j]) < seg[j] - seg[i] < 0.5 * seg[-1]]
+    spans: list[tuple[int, int]] = []
+    for i, j in sorted(pairs, key=lambda ij: -(seg[ij[1]] - seg[ij[0]])):
+        if any(not (j < a or i > b) for a, b in spans):
+            continue
+        spans.append((i, j))
+    return sorted(spans)
+
+
 def taubin_boundary(src, scale: float, fix_tips: bool = False) -> tuple[np.ndarray, list[int]]:
     """Boundary low-pass at the panel scale; only the OptCuts seam junctions and cut/open
     transitions stay fixed (cut tips too when ``fix_tips``).  A cut tip is a single chart vertex
@@ -308,12 +329,43 @@ def taubin_boundary(src, scale: float, fix_tips: bool = False) -> tuple[np.ndarr
     if len(fixed) < 2:
         far = int(np.argmax(np.linalg.norm(src.uv - src.uv[fixed[0] if fixed else 0], axis=1)))
         fixed = sorted(set(fixed) | {fixed[0] if fixed else 0, far})
+    extra: set = set()
+    for _ in range(8):
+        targets = _taubin_targets(src, scale, sorted(set(fixed) | extra))
+        # a boundary edge that collapses (typically at a cut tip pulled back into its slit) would
+        # leave a degenerate chart triangle: keep that vertex where it is and smooth again
+        e0 = np.linalg.norm(np.roll(src.uv, -1, axis=0) - src.uv, axis=1)
+        e1 = np.linalg.norm(np.roll(targets, -1, axis=0) - targets, axis=1)
+        bad = [int(i) for i in np.flatnonzero(e1 < 0.25 * e0)]
+        new = set()
+        for i in bad:
+            j = (i + 1) % n
+            new.add(i if src.node_kind.get(i) == "tip" or src.node_kind.get(j) != "tip" else j)
+        new -= set(fixed) | extra
+        if not new:
+            break
+        extra |= new
+    taubin_boundary.pinned = sorted(extra)
+    return targets, sorted(set(fixed) | extra)
+
+
+def _taubin_targets(src, scale: float, fixed: list[int]) -> np.ndarray:
+    n = src.n
     targets = src.uv.copy()
-    for r, a in enumerate(fixed):
-        b = fixed[(r + 1) % len(fixed)]
-        idx = [(a + k) % n for k in range(((b - a) % n) + 1)] if b != a else list(range(n)) + [a]
-        targets[idx] = _taubin_run(src.uv[idx], scale)
-    return targets, fixed
+    # thin necks (narrow cut slits including their tip, sub-panel notches) are found on the whole
+    # loop and kept as they are; only the pieces between fixed nodes / neck ends are low-passed
+    order = [(fixed[0] + k) % n for k in range(n + 1)]
+    P = src.uv[order]
+    spans = _neck_spans(P, 0.5 * scale)
+    taubin_boundary.necks = len(spans)
+    anchors = {k for k in range(n + 1) if order[k] in set(fixed)} | {k for sp in spans for k in sp}
+    frozen = {k for i, j in spans for k in range(i + 1, j)}
+    cuts = sorted(k for k in anchors if k not in frozen)
+    for lo, hi in zip(cuts[:-1], cuts[1:]):
+        if hi - lo < 2 or (lo + 1) in frozen:
+            continue
+        targets[order[lo:hi + 1]] = _taubin_run(P[lo:hi + 1], scale)
+    return targets
 
 
 def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: float = 1.08,
@@ -352,6 +404,7 @@ def precondition_omega(xyz, f3, uv, f2, tol_ratio: float, *, sd_mean_ratio_max: 
     tol = tol_ratio * diag
     if boundary_model == "taubin":
         # scale-based low-pass: the deviation bound is the panel size itself (not a fixed tolerance)
+        taubin_boundary.necks = 0
         targets, corners = taubin_boundary(src, float(smooth_scale))
         tol = max(tol, 2.0 * float(smooth_scale))
     elif boundary_model == "spline":

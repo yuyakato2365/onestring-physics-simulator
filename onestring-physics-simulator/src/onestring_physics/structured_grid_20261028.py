@@ -1522,21 +1522,39 @@ def _cone_first_seams(xyz, f3, uv, f2, params):
         info.update({"singularities": plan["singularities_raw"], "pairs_cancelled": plan["pairs_cancelled"],
                      "report": plan["report"]})
         branches = plan["branches"]
-        if branches:
-            uv_s, f2_s = split_chart(uv, f2, f3, branches)
+        from .zhang2021_onestring_reparam import signed_uv_areas
+
+        def attempt(brs):
+            uv_s, f2_s = split_chart(uv, f2, f3, brs)
             uv_o, oinfo = open_slits(xyz, f3, uv_s, f2_s, touched=getattr(split_chart, "touched", None))
-            info["slit_opening"] = oinfo
-            from .zhang2021_onestring_reparam import signed_uv_areas
             sa_o = signed_uv_areas(uv_o, f2_s)
-            info["opened_boundary_simple"] = bool(boundary_simple(uv_o, f2_s))
-            if np.all(sa_o > 0) or np.all(sa_o < 0):
+            ok = (np.all(sa_o > 0) or np.all(sa_o < 0)) and bool(boundary_simple(uv_o, f2_s))
+            return ok, uv_o, f2_s, oinfo
+
+        if branches:
+            ok, uv_o, f2_s, oinfo = attempt(branches)
+            if not ok:
+                # an opened slit overlaps another part of the chart (Omega no longer simple):
+                # drop the offending branch (one at a time) instead of all of them
+                for k in range(len(branches)):
+                    sub = branches[:k] + branches[k + 1:]
+                    if not sub:
+                        break
+                    ok, uv_o, f2_s, oinfo = attempt(sub)
+                    if ok:
+                        info["branches_dropped"] = f"branch {k} (opened chart not simple / flipped)"
+                        branches = sub
+                        break
+            info["slit_opening"] = oinfo
+            info["opened_boundary_simple"] = bool(ok)
+            if ok:
                 uv, f2 = uv_o, f2_s
                 info["new_branches"] = len(branches)
                 info["new_seam_length"] = float(sum(np.sum(np.linalg.norm(np.diff(xyz[b], axis=0), axis=1))
                                                     for b in branches))
             else:
                 info["new_branches"] = 0
-                info["branches_dropped"] = "opened chart has flipped triangles"
+                info["branches_dropped"] = "opened chart has flipped triangles or is not simple"
         print(f"[SG-CONES] cross-field singularities {plan['singularities_raw']} ({plan['pairs_cancelled']} close "
               f"+/- pairs cancelled); new seam branches {info.get('new_branches', 0)} "
               f"(length {info.get('new_seam_length', 0.0):.3f}); seam cones snapped {len(plan['forced'])}", flush=True)
