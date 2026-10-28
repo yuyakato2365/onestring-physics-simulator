@@ -1158,7 +1158,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         float(np.sqrt(area3d0 / max(int(getattr(params, "structured_grid_auto_panels", 150)), 4)))
     prune_report: list = []
     prune_ratio = float(getattr(params, "structured_grid_prune_branch_panels", 1.5) or 0.0)
-    if str(getattr(params, "structured_grid_placement", "aligned")) == "quadmesh":
+    if str(getattr(params, "structured_grid_placement", "aligned")) in ("quadmesh", "pedp"):
         prune_ratio = max(prune_ratio, 3.0)        # free singularities: short slits only cost quality
     if prune_ratio > 0:
         from .aligned_grid_20261028 import prune_short_branches
@@ -1169,7 +1169,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         print(f"[SG-PRUNE] sub-panel cut branches sewn back: {prune_report}", flush=True)
     direction_model = str(getattr(params, "structured_grid_direction_model", "field") or "field")
     if bool(getattr(params, "structured_grid_cone_cuts", True)) and \
-            str(getattr(params, "structured_grid_placement", "aligned")) != "quadmesh":
+            str(getattr(params, "structured_grid_placement", "aligned")) not in ("quadmesh", "pedp"):
         cone_info, uv, f2, forced_xyz = _cone_first_seams(xyz, f3, uv, f2, params)
     tols = [float(t) for t in str(getattr(params, "structured_grid_smoothing_tolerances", "0.01,0.005,0")).split(",")
             if t.strip()]
@@ -1209,7 +1209,24 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     if h3d <= 0:
         h3d = float(np.sqrt(area3d / max(int(getattr(params, "structured_grid_auto_panels", 150)), 4)))
     placement_model = str(getattr(params, "structured_grid_placement", "aligned") or "aligned")
-    if placement_model == "quadmesh":
+    if placement_model == "pedp":
+        # Xiao, Kang, Fu, Chen 2018: PolySquare-enhanced domain partition, applied to Omega_1
+        from .pedp_grid_20261028 import pedp_m2d
+        from .zhang2021_onestring_reparam import _SDProblem
+        grid_uv, quads, lattice_ix, placement = pedp_m2d(
+            _SDProblem(pre.xyz, pre.f3, pre.f2, len(uvm)), uvm, pre.f2, src.loop, h3d,
+            sigma_ratio=float(getattr(params, "structured_grid_pedp_sigma", 1.0)),
+            alpha=float(getattr(params, "structured_grid_pedp_alpha", 20.0)),
+            pixel_ratio=float(getattr(params, "structured_grid_pedp_pixel_ratio", 0.5)),
+            target=int(round(area3d / h3d ** 2)))
+        dom = {"convex": 0, "reflex": 0, "lengths": [], "target_lengths": [], "seam_cones": [],
+               "cone_candidates": 0, "attempts": []}
+        feats, direction_model, ps_info = [], "polysquare (PeDP)", {}
+        vid = {k: v[0] for k, v in lattice_ix.items() if len(v) == 1}
+        if getattr(pedp_m2d, "last", None) is not None:
+            pedp_m2d.last.update({"xyz": pre.xyz, "f3": pre.f3})
+        print(f"[SG-PEDP] {placement}", flush=True)
+    elif placement_model == "quadmesh":
         # comparison: unstructured quad mesh of Omega_1 (interior singularities allowed)
         from .quadmesh_20261028 import quadmesh_omega
         grid_uv, quads, placement = quadmesh_omega(
