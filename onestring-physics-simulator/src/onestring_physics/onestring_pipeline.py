@@ -1130,6 +1130,9 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_area_weight: float = -1.0      # equal-area weight of the grid map (-1 = from priority)
     structured_grid_curvature_weight: float = 0.0  # >0: seam cones also follow the 3D curvature next to the seam
     structured_grid_seamless_rounds: int = 1       # re-size the logical polygon to the seamless flattening
+    structured_grid_cone_cuts: bool = True         # cross-field cones; short seam branches to the cones
+    structured_grid_max_branch_panels: float = 6.0 # longest new seam branch, in panel edges
+    structured_grid_cone_snap: str = "positive"    # cross-field cones forced on the seam: "all" | "positive" | "none"
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",

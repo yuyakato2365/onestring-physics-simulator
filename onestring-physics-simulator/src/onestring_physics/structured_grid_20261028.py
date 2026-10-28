@@ -64,7 +64,7 @@ def _turning_angles(src, feats: list[int], scale: float) -> dict[int, float]:
 def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio: float = 0.7,
                    max_rounds: int = 12, cone_pairs: list | None = None, w_cone: float = 0.5,
                    w_head: float = 0.5, shape_weight: float = 0.05, turn_weight: float = 0.3,
-                   cone_curvature=None, w_curv: float = 1.0) -> dict:
+                   cone_curvature=None, w_curv: float = 1.0, forced_cones: dict | None = None) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -173,7 +173,11 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
         row([(iX(ka, d), 1) for d in range(4)] + [(iX(kb, d), -1) for d in range(4)], 0, 0)
     for q, (ka, kb) in enumerate(cones):
         tsum = [(iT(ka, s_), s_) for s_ in (-1, 1)] + [(iT(kb, s_), s_) for s_ in (-1, 1)]
-        row(tsum, -1, 1)                                      # 3D valence 3..5 on the seam
+        if forced_cones and q in forced_cones:
+            sv = float(forced_cones[q])                        # cone required by the cross field
+            row(tsum, sv, sv)
+        else:
+            row(tsum, -1, 1)                                  # 3D valence 3..5 on the seam
         row(tsum + [(iZ(q), -1)], -np.inf, 0)
         row([(i, -v) for i, v in tsum] + [(iZ(q), -1)], -np.inf, 0)
         if kq is not None:
@@ -328,7 +332,7 @@ def seam_curvature(src, cone_pairs, xyz, f3, h3d: float, radius: float = 1.5) ->
 
 
 def seam_cone_candidates(src, base_feats: list[int], h3d: float, spacing: float = 2.0,
-                         open_spacing: float = 2.0) -> tuple[list[int], list[tuple[int, int]]]:
+                         open_spacing: float = 2.0, forced_xyz: dict | None = None):
     """Extra feature points: paired copies of 3D cut vertices every ~spacing panels along every cut
     branch (seam cone candidates) and points every ~open_spacing panels on open runs."""
     from .zhang2021_onestring_seam_matching import seam_constraints
@@ -344,6 +348,12 @@ def seam_cone_candidates(src, base_feats: list[int], h3d: float, spacing: float 
         length = d3(a0, a1)
         last = a0
         for j in _cyclic_positions(n, a0, a1)[1:-1]:
+            if forced_xyz and int(src.xyz_id[j]) in forced_xyz and posB.get(int(src.xyz_id[j])) is not None:
+                q = posB[int(src.xyz_id[j])]
+                pairs.append((int(j), int(q)))
+                feats.update((int(j), int(q)))
+                last = j
+                continue
             if d3(last, j) >= spacing * h3d and d3(j, a1) >= 0.6 * spacing * h3d:
                 q = posB.get(int(src.xyz_id[j]))
                 if q is not None:
@@ -1031,6 +1041,10 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
 
     started = time.perf_counter()
     xyz = np.asarray(xyz, float); f3 = np.asarray(f3, int); uv = np.asarray(uv, float); f2 = np.asarray(f2, int)
+    cone_info: dict = {"enabled": False}
+    forced_xyz: dict = {}
+    if bool(getattr(params, "structured_grid_cone_cuts", True)):
+        cone_info, uv, f2, forced_xyz = _cone_first_seams(xyz, f3, uv, f2, params)
     tols = [float(t) for t in str(getattr(params, "structured_grid_smoothing_tolerances", "0.01,0.005,0")).split(",")
             if t.strip()]
     keep = float(getattr(params, "structured_grid_corner_scale", 0.04))
@@ -1064,7 +1078,10 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     if bool(getattr(params, "structured_grid_seam_cones", True)):
         feats, cone_pairs = seam_cone_candidates(
             src, feats, h3d, spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)),
-            open_spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)))
+            open_spacing=float(getattr(params, "structured_grid_cone_spacing", 1.0)), forced_xyz=forced_xyz)
+    forced_idx = {q: int(forced_xyz[int(src.xyz_id[a])]) for q, (a, _b) in enumerate(cone_pairs)
+                  if int(src.xyz_id[a]) in forced_xyz}
+    cone_info["forced_seam_cones_used"] = len(forced_idx)
     cone_k = None
     if cone_pairs and float(getattr(params, "structured_grid_curvature_weight", 1.0)) > 0:
         cone_k = seam_curvature(src, cone_pairs, pre.xyz, pre.f3, h3d)
@@ -1072,6 +1089,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         try:
             dom = logical_domain(src, feats, h3d, keep * diag, min_ratio=ratio, cone_pairs=cone_pairs,
                                  cone_curvature=cone_k, w_curv=float(getattr(params, "structured_grid_curvature_weight", 1.0)),
+                                 forced_cones=forced_idx,
                                  w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
                                  shape_weight=float(getattr(params, "structured_grid_shape_weight", 0.05)),
                                  turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)))
@@ -1154,6 +1172,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         "structured_grid_quads": int(len(quads)),
         "structured_grid_initial_placement": placement,
         "structured_grid_min_side_ratio": dom.get("min_side_ratio"),
+        "structured_grid_cone_first_seams": cone_info,
         "structured_grid_seam_cones": dom.get("seam_cones", []),
         "structured_grid_seam_cone_candidates": int(dom.get("cone_candidates", 0)),
         "structured_grid_seam_cone_valence3": int(sum(1 for c in dom.get("seam_cones", []) if c["valence_3d"] == 3)),
@@ -1184,6 +1203,48 @@ def _panel_weights(params: Any):
     pr = str(getattr(params, "structured_grid_priority", "shape") or "shape")
     w = dict(PRIORITY_WEIGHTS.get(pr, PRIORITY_WEIGHTS["shape"]))
     return PanelOptimizerWeights(smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0)), **w)
+
+
+def _cone_first_seams(xyz, f3, uv, f2, params):
+    """Cross-field cones -> new short cut branches + forced seam cones (see cross_field_cones_20261028)."""
+    from .cross_field_cones_20261028 import boundary_simple, chart_cut_edges, open_slits, plan_cone_cuts, split_chart
+    info: dict = {"enabled": True}
+    try:
+        area3d = float(0.5 * np.sum(np.linalg.norm(np.cross(xyz[f3[:, 1]] - xyz[f3[:, 0]], xyz[f3[:, 2]] - xyz[f3[:, 0]]), axis=1)))
+        h = float(getattr(params, "structured_grid_panel_edge", 0.0) or 0.0)
+        if h <= 0:
+            h = float(np.sqrt(area3d / max(int(getattr(params, "structured_grid_auto_panels", 150)), 4)))
+        cut, op = chart_cut_edges(f3, f2)
+        plan = plan_cone_cuts(xyz, f3, cut, op, h,
+                              max_branch_ratio=float(getattr(params, "structured_grid_max_branch_panels", 6.0)),
+                              snap_negative=str(getattr(params, "structured_grid_cone_snap", "positive")) == "all",
+                              snap_positive=str(getattr(params, "structured_grid_cone_snap", "positive")) in ("all", "positive"))
+        info.update({"singularities": plan["singularities_raw"], "pairs_cancelled": plan["pairs_cancelled"],
+                     "report": plan["report"]})
+        branches = plan["branches"]
+        if branches:
+            uv_s, f2_s = split_chart(uv, f2, f3, branches)
+            uv_o, oinfo = open_slits(xyz, f3, uv_s, f2_s, touched=getattr(split_chart, "touched", None))
+            info["slit_opening"] = oinfo
+            from .zhang2021_onestring_reparam import signed_uv_areas
+            sa_o = signed_uv_areas(uv_o, f2_s)
+            info["opened_boundary_simple"] = bool(boundary_simple(uv_o, f2_s))
+            if np.all(sa_o > 0) or np.all(sa_o < 0):
+                uv, f2 = uv_o, f2_s
+                info["new_branches"] = len(branches)
+                info["new_seam_length"] = float(sum(np.sum(np.linalg.norm(np.diff(xyz[b], axis=0), axis=1))
+                                                    for b in branches))
+            else:
+                info["new_branches"] = 0
+                info["branches_dropped"] = "opened chart has flipped triangles"
+        print(f"[SG-CONES] cross-field singularities {plan['singularities_raw']} ({plan['pairs_cancelled']} close "
+              f"+/- pairs cancelled); new seam branches {info.get('new_branches', 0)} "
+              f"(length {info.get('new_seam_length', 0.0):.3f}); seam cones snapped {len(plan['forced'])}", flush=True)
+        return info, uv, f2, dict(plan["forced"])
+    except Exception as exc:  # noqa: BLE001 - keep the OptCuts seams
+        info["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[SG-CONES] skipped: {info['error']}", flush=True)
+        return info, uv, f2, {}
 
 
 def _interior_valence_ok(quads: np.ndarray) -> bool:
