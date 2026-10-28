@@ -161,7 +161,7 @@ def _side_chains(src, dom):
     return chains
 
 
-def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float = 1e-7):
+def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float = 1e-7, area_weight: float = 0.0):
     """SLIM (3D symmetric Dirichlet) under linear constraints kept exactly at every iterate:
     seam transitions x_b = R x_a + t (groups), straight axis-parallel sides (chains: consecutive
     vertices share the coordinate ``ax``), fixed vertices.  Start must satisfy them; redundant
@@ -192,7 +192,20 @@ def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float =
     C = sparse.csr_matrix((vals, (rows, cols)), shape=(r, 2 * nV))
     x0 = np.r_[uv[:, 0], uv[:, 1]]
     d = C @ x0
-    E, J, _ = prob.energy(uv)
+    wa = float(area_weight)
+    wts = prob.weight / float(np.sum(prob.weight))
+
+    def energy(P):
+        """mean symmetric Dirichlet + area_weight * mean log^2 det J (area preservation)."""
+        E_, J_, x_ = prob.energy(P)
+        if wa > 0 and np.isfinite(E_):
+            det = J_[:, 0, 0] * J_[:, 1, 1] - J_[:, 0, 1] * J_[:, 1, 0]
+            if np.any(det <= 0):
+                return np.inf, J_, x_
+            E_ = E_ + wa * float(np.dot(wts, np.log(det) ** 2))
+        return E_, J_, x_
+
+    E, J, _ = energy(uv)
     if not np.isfinite(E):
         return uv, {"aligned_status": "start not injective"}
     E_start = E
@@ -208,6 +221,11 @@ def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float =
             w2 = np.where(np.abs(sv - 1) > 1e-8, (sv - sv ** -3) / (sv - 1), 4.0)
         w = np.sqrt(np.maximum(w2, 1e-12))
         W = np.einsum("tij,tj,tkj->tik", U, w, U)
+        if wa > 0:
+            # local target between the closest rotation (shape) and the closest unit-area map
+            beta = wa / (1.0 + wa)
+            detJ = np.clip(S[:, 0] * S[:, 1], 1e-12, None)
+            Rt = (1.0 - beta) * Rt + beta * J / np.sqrt(detJ)[:, None, None]
         WR = W @ Rt
         blocks, rhs = [], []
         for rr in (0, 1):
@@ -237,7 +255,7 @@ def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float =
         accepted = False
         while alpha > 1e-12:
             trial = uv + alpha * duv
-            Et, Jt, _ = prob.energy(trial)
+            Et, Jt, _ = energy(trial)
             if np.isfinite(Et) and Et <= E:
                 accepted = True
                 break
@@ -266,7 +284,8 @@ def _start_map(src, dom, logical, quads, walk, chart, h):
     return so["phi"] / so["scale"] * h, so["prob"]
 
 
-def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float, w_pos: float = 2.0):
+def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float, w_pos: float = 2.0,
+                          min_3d_ratio: float = 0.9, under_weight: float = 3.0, area_weight: float = 0.0):
     """Continuous joint solve (free corners, straight axis-parallel sides, seamless cuts), then one
     MILP rounds the corner positions to the lattice (closure, equal cut copies, simple polygon)."""
     from shapely.geometry import Polygon
@@ -275,7 +294,7 @@ def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float,
         return None, {"aligned_refine": "no bijective start map"}
     groups = _seam_groups(src, dom)
     chains = _side_chains(src, dom)
-    star, info = aligned_slim(prob, start, groups, chains, fixed=[], iters=120)
+    star, info = aligned_slim(prob, start, groups, chains, fixed=[], iters=120, area_weight=area_weight)
     feats, dirs = dom["features"], dom["dirs"]
     m = len(feats)
     loop = np.asarray(src.loop, int)
@@ -283,10 +302,20 @@ def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float,
     Tst = Tst - Tst[0]
     Lst = np.array([float((Tst[(k + 1) % m] - Tst[k]) @ DIRS[dirs[k]]) for k in range(m)])
     info["aligned_continuous_lengths"] = [round(float(x), 3) for x in Lst]
-    Lc = np.maximum(Lst, 0.3)
-    n_lo = np.maximum(1, np.floor(0.6 * Lc)).astype(int)
-    nn, linfo = _lengths_for_directions(dirs, Lc, n_lo, dom["cut_pairs"], Tst, w_pos)
-    info["aligned_rounding"] = linfo.get("status")
+    info["_star"] = star
+    # never fewer cells than the surface needs: every side gets at least ~its 3D length (protrusions
+    # such as the ears keep as many panels across as a uniform grid would give them), shortfalls
+    # cost ``under_weight`` times more than extra cells
+    L3 = np.asarray(dom["target_lengths"], float)
+    Lc = np.maximum(np.maximum(Lst, 0.3), min_3d_ratio * L3)
+    nn = None
+    for lo_ratio in (min_3d_ratio, 0.7 * min_3d_ratio, 0.0):
+        n_lo = np.maximum(1, np.maximum(np.floor(lo_ratio * L3), np.floor(0.6 * np.maximum(Lst, 0.3)))).astype(int)
+        nn, linfo = _lengths_for_directions(dirs, Lc, n_lo, dom["cut_pairs"], Tst, w_pos, under_weight=under_weight)
+        info["aligned_rounding"] = linfo.get("status")
+        info["aligned_min_3d_ratio_used"] = lo_ratio
+        if nn is not None:
+            break
     if nn is None:
         return None, info
     pts = [np.zeros(2, int)]
@@ -303,7 +332,7 @@ def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float,
     return new, info
 
 
-def place_grid_aligned(src, dom: dict, logical, quads, walk, chart, h: float):
+def place_grid_aligned(src, dom: dict, logical, quads, walk, chart, h: float, area_weight: float = 0.0):
     """M2D grid = pull-back of the integer lattice through the low-distortion map onto the integer
     polygon (corners fixed, boundary vertices sliding along their sides, cuts seamless)."""
     uvm, f2, xyz, f3 = chart
@@ -315,7 +344,7 @@ def place_grid_aligned(src, dom: dict, logical, quads, walk, chart, h: float):
     groups = _seam_groups(src, dom)
     chains = _side_chains(src, dom)
     fixed = [(int(loop[j]), ax) for j in feats for ax in (0, 1)]
-    cur, info = aligned_slim(prob, start, groups, chains, fixed, iters=150)
+    cur, info = aligned_slim(prob, start, groups, chains, fixed, iters=150, area_weight=area_weight)
     e1 = cur[f2[:, 1]] - cur[f2[:, 0]]
     e2 = cur[f2[:, 2]] - cur[f2[:, 0]]
     if np.any(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0] <= 0):
@@ -346,6 +375,140 @@ def place_grid_aligned(src, dom: dict, logical, quads, walk, chart, h: float):
     place_grid_aligned.last = {"map": cur, "start": start, "dom": dom, "chart": chart, "logical": logical,
                                "quads": quads, "h": h}            # diagnostics only
     return uv, info
+
+
+# ------------------------------------------------------------------ polysquare deformation
+def polysquare_deform(prob, uv0, loop, iters: int = 40, w_start: float = 0.05, w_end: float = 20.0):
+    """Deform Omega_1 so that every boundary edge turns to its nearest axis (2D PolySquare,
+    rotation-driven as in PolyCube deformation, Gregson et al. 2011), while the interior stays as
+    undistorted as possible (SLIM, flip-free).  Curved runs such as the round end of an ear become
+    straight sides joined by clear corners, so the boundary headings read from the deformed chart
+    give each lobe its full width instead of a column.
+
+    Energy: symmetric Dirichlet + w * sum_e |e| |(P_j - P_i) - |P_j - P_i| a_e|^2, a_e = nearest axis
+    of the current edge (re-snapped every iteration), w increased geometrically."""
+    from scipy import sparse
+    from scipy.sparse.linalg import splu
+    from .zhang2021_onestring_reparam import _max_feasible_step
+    uv = np.asarray(uv0, float).copy()
+    nV = len(uv)
+    loop = np.asarray(loop, int)
+    ei, ej = loop, np.roll(loop, -1)
+    # global rotation that best aligns the boundary with the axes
+    e = uv[ej] - uv[ei]
+    L = np.linalg.norm(e, axis=1)
+    th = float(np.angle(np.sum(L * np.exp(4j * np.arctan2(e[:, 1], e[:, 0])))) / 4.0)
+    Rg = np.array([[np.cos(-th), -np.sin(-th)], [np.sin(-th), np.cos(-th)]])
+    uv = uv @ Rg.T
+    sw = np.sqrt(prob.area)
+    Dx, Dy = prob.Dx, prob.Dy
+    perim = float(np.sum(L))
+    a_tot = float(np.sum(prob.area))
+    E_sd, J, _ = prob.energy(uv)
+    rowsB = np.arange(len(ei))
+    DB = sparse.csr_matrix((np.r_[-np.ones(len(ei)), np.ones(len(ei))], (np.r_[rowsB, rowsB], np.r_[ei, ej])),
+                           shape=(len(ei), nV))
+
+    def align_energy(P, A_dirs, w):
+        d = P[ej] - P[ei]
+        ln = np.linalg.norm(d, axis=1)
+        r = d - ln[:, None] * A_dirs
+        return w * float(np.sum(ln * np.sum(r * r, axis=1))) / perim ** 2
+
+    ws = np.geomspace(w_start, w_end, iters)
+    for it, w in enumerate(ws):
+        d = uv[ej] - uv[ei]
+        ln = np.linalg.norm(d, axis=1)
+        ang = np.arctan2(d[:, 1], d[:, 0])
+        q = np.round(ang / (0.5 * np.pi))
+        A_dirs = np.c_[np.cos(q * 0.5 * np.pi), np.sin(q * 0.5 * np.pi)]
+        U, S, Vt = np.linalg.svd(J)
+        Rt = U @ Vt
+        sv = np.clip(S, 1e-12, None)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w2 = np.where(np.abs(sv - 1) > 1e-8, (sv - sv ** -3) / (sv - 1), 4.0)
+        Wl = np.einsum("tij,tj,tkj->tik", U, np.sqrt(np.maximum(w2, 1e-12)), U)
+        WR = Wl @ Rt
+        blocks, rhs = [], []
+        for rr in (0, 1):
+            for c_, Dm in ((0, Dx), (1, Dy)):
+                blocks.append(sparse.hstack([sparse.diags(sw * Wl[:, rr, 0]) @ Dm, sparse.diags(sw * Wl[:, rr, 1]) @ Dm]))
+                rhs.append(sw * WR[:, rr, c_])
+        # boundary alignment rows (scaled like the area-weighted SD rows)
+        sb = np.sqrt(w * ln * a_tot) / perim
+        Z = sparse.csr_matrix((len(ei), nV))
+        blocks.append(sparse.hstack([sparse.diags(sb) @ DB, Z]))
+        rhs.append(sb * ln * A_dirs[:, 0])
+        blocks.append(sparse.hstack([Z, sparse.diags(sb) @ DB]))
+        rhs.append(sb * ln * A_dirs[:, 1])
+        A = sparse.vstack(blocks).tocsc()
+        b = np.concatenate(rhs)
+        H = (A.T @ A).tocsc()
+        H = H + sparse.identity(H.shape[0], format="csc") * (1e-9 * float(H.diagonal().mean()))
+        x = splu(H).solve(A.T @ b)
+        new = np.c_[x[:nV], x[nV:]]
+        # keep the centroid (translation is free)
+        new += uv.mean(axis=0) - new.mean(axis=0)
+        duv = new - uv
+        dJ = prob.jacobians(duv)
+        amax = _max_feasible_step(J, dJ)
+        alpha = min(1.0, 0.8 * amax)
+        E0 = E_sd + align_energy(uv, A_dirs, w)
+        while alpha > 1e-10:
+            trial = uv + alpha * duv
+            Et, Jt, _ = prob.energy(trial)
+            if np.isfinite(Et) and Et + align_energy(trial, A_dirs, w) <= E0:
+                break
+            alpha *= 0.5
+        else:
+            continue
+        uv, E_sd, J = trial, Et, Jt
+    return uv, {"polysquare_sd": float(E_sd), "polysquare_iterations": len(ws)}
+
+
+# ------------------------------------------------------------------ cone feedback
+def cone_feedback(src, cone_pairs, star, chart, h: float, current: dict, radius: float = 2.0,
+                  threshold: float = 0.35):
+    """Seam cones asked for by the continuous map itself.
+
+    Where the boundary-aligned map squeezes the surface (log2 area scale < -threshold within
+    ``radius`` panels of a seam-cone candidate) the region carries Gaussian curvature that no cone
+    releases (a cap such as an ear: too few cells); a +1 cone (3D valence 3) is added there.
+    Where it stretches (> threshold) a -1 cone (valence 5).  Greedy, strongest first, at most one
+    new cone per 2*radius panels; existing cones are kept."""
+    uvm, f2, xyz, f3 = chart
+    a2 = 0.5 * np.abs((star[f2[:, 1], 0] - star[f2[:, 0], 0]) * (star[f2[:, 2], 1] - star[f2[:, 0], 1])
+                      - (star[f2[:, 1], 1] - star[f2[:, 0], 1]) * (star[f2[:, 2], 0] - star[f2[:, 0], 0]))
+    X = np.asarray(xyz, float)[np.asarray(f3, int)]
+    a3 = 0.5 * np.linalg.norm(np.cross(X[:, 1] - X[:, 0], X[:, 2] - X[:, 0]), axis=1)
+    ls = np.log2(np.maximum(a2, 1e-300) / np.maximum(a3, 1e-300))
+    ls -= float(np.sum(ls * a3) / np.sum(a3))
+    C3 = X.mean(axis=1)
+    sites = np.array([np.asarray(xyz, float)[int(src.xyz_id[a])] for a, _b in cone_pairs]) if cone_pairs else np.zeros((0, 3))
+    mean = np.zeros(len(sites))
+    for q, p in enumerate(sites):
+        w = a3 * (np.linalg.norm(C3 - p, axis=1) < radius * h)
+        mean[q] = float(np.sum(w * ls) / np.sum(w)) if np.sum(w) > 0 else 0.0
+    taken = [sites[q] for q, v in current.items() if v]
+    out = dict(current)
+    added = []
+    for q in np.argsort(-np.abs(mean)):
+        q = int(q)
+        if abs(mean[q]) < threshold or q in out:
+            continue
+        if any(np.linalg.norm(sites[q] - t) < 2.0 * radius * h for t in taken):
+            continue
+        out[q] = 1 if mean[q] < 0 else -1
+        taken.append(sites[q])
+        added.append({"candidate": q, "xyz_id": int(src.xyz_id[cone_pairs[q][0]]), "log2_area_scale": round(mean[q], 3),
+                      "valence_3d": 3 if mean[q] < 0 else 5})
+    return out, added
+
+
+def current_cones(src, cone_pairs, dom) -> dict:
+    """Candidate index -> t_A + t_B of the cones in a logical domain."""
+    by_xyz = {int(c["xyz_id"]): 4 - int(c["valence_3d"]) for c in dom.get("seam_cones", [])}
+    return {q: by_xyz[int(src.xyz_id[a])] for q, (a, _b) in enumerate(cone_pairs) if int(src.xyz_id[a]) in by_xyz}
 
 
 # ------------------------------------------------------------------ gluing back sub-panel cut branches
@@ -432,5 +595,5 @@ def prune_short_branches(xyz, f3, uv, f2, h: float, max_ratio: float = 1.5, sd_r
     return uv, f2, report
 
 
-__all__ = ["prune_short_branches", "side_coupling", "merge_straight_features", "aligned_slim", "refine_domain_aligned",
+__all__ = ["cone_feedback", "current_cones", "prune_short_branches", "side_coupling", "merge_straight_features", "aligned_slim", "refine_domain_aligned",
            "place_grid_aligned"]

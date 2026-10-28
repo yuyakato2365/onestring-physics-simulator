@@ -1137,9 +1137,16 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_boundary_smoothing: str = "taubin"  # "taubin" (panel-scale low-pass) | "spline" (tolerance)
     structured_grid_taubin_sd_mean_ratio_max: float = 1.12
     structured_grid_direction_model: str = "field"     # "field" (smooth rotation field) | "heading" (boundary only)
+    structured_grid_direction_source: str = "polysquare"  # headings from a PolySquare-deformed Omega_1 | "omega"
+    structured_grid_polysquare_weight: float = 20000.0
     structured_grid_field_weight: float = 5.0
     structured_grid_field_heading_weight: float = 0.1
     structured_grid_placement: str = "aligned"         # "aligned" (joint integer-grid map) | "pullback"
+    structured_grid_min_3d_length_ratio: float = 0.0  # aligned (>0): every side keeps >= this x its 3D length in cells
+    structured_grid_shortfall_weight: float = 1.0     # aligned: a missing cell costs this x an extra cell
+    structured_grid_aligned_area_weight: float = 1.0   # aligned: area preservation (cells follow the 3D area)
+    structured_grid_cone_feedback_rounds: int = 0      # aligned: add seam cones where the map squeezes / stretches
+    structured_grid_cone_feedback_threshold: float = 0.35  # |log2 area scale| that asks for a cone
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",
