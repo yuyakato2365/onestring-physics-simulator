@@ -1151,6 +1151,17 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
 
     started = time.perf_counter()
     xyz = np.asarray(xyz, float); f3 = np.asarray(f3, int); uv = np.asarray(uv, float); f2 = np.asarray(f2, int)
+    try:   # input snapshot (OptCuts chart + parameters) so a failing run can be reproduced offline
+        import pickle
+        from pathlib import Path
+        snap = Path(__file__).resolve().parents[2] / "logs" / "structured_grid_last_input.pkl"
+        snap.parent.mkdir(parents=True, exist_ok=True)
+        pv = {k: v for k, v in (vars(params) if hasattr(params, "__dict__") else {}).items()
+              if isinstance(v, (int, float, str, bool, type(None)))}
+        with open(snap, "wb") as fh:
+            pickle.dump({"xyz": xyz, "f3": f3, "uv": uv, "f2": f2, "params": pv}, fh)
+    except Exception:  # noqa: BLE001 - diagnostics only
+        pass
     cone_info: dict = {"enabled": False}
     forced_xyz: dict = {}
     area3d0 = float(0.5 * np.sum(np.linalg.norm(np.cross(xyz[f3[:, 1]] - xyz[f3[:, 0]], xyz[f3[:, 2]] - xyz[f3[:, 0]]), axis=1)))
