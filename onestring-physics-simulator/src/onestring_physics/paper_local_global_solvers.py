@@ -469,7 +469,9 @@ def optimize_paper_local_global_k3d(target,mesh,parameterization,params,*,pipeli
     # weights at each local step. The exact LSE value is tracked separately.
     square_tail_alpha=max(0.0,_env_float("ONESTRING_K3D_SQUARE_TAIL_ALPHA",4.0))
     square_tail_beta=max(0.0,_env_float("ONESTRING_K3D_SQUARE_TAIL_BETA",12.0))
-    square_tail_active=(str(getattr(params,"omega_parameterization_mode",""))=="optcuts_paper_local_global_k3d_k2d")
+    # 09-18 mode, and the 2026-10-28 structured-grid mode that reuses this route
+    square_tail_active=(str(getattr(params,"omega_parameterization_mode",""))=="optcuts_paper_local_global_k3d_k2d"
+                        or bool(getattr(params,"optcuts_structured_grid_20261028_enabled",False)))
 
     def _square_tail_deviations(v):
         q=np.asarray(v)[faces]
