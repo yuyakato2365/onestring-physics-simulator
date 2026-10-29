@@ -339,13 +339,53 @@ def _smooth_resample(P, s, step, iters=6):
 
 
 # ------------------------------------------------------------------ chart location and grid rows
-def locate_in_chart(points: np.ndarray, xyz: np.ndarray, f3: np.ndarray):
-    """closest surface point: (face id, barycentric) on the chart's 3D triangles."""
-    import trimesh
-    S = trimesh.Trimesh(np.asarray(xyz, float), np.asarray(f3, int), process=False)
-    cp, dist, tri = trimesh.proximity.closest_point(S, np.asarray(points, float))
-    bary = trimesh.triangles.points_to_barycentric(S.triangles[tri], cp)
-    return np.asarray(tri, int), np.clip(bary, 0.0, 1.0), dist
+def _closest_on_triangles(P, A, B, C):
+    """closest points of P (n,3) on triangles (n,3) each (Ericson), with barycentrics."""
+    ab, ac, ap = B - A, C - A, P - A
+    d1, d2 = np.einsum("ij,ij->i", ab, ap), np.einsum("ij,ij->i", ac, ap)
+    bp = P - B
+    d3, d4 = np.einsum("ij,ij->i", ab, bp), np.einsum("ij,ij->i", ac, bp)
+    cp = P - C
+    d5, d6 = np.einsum("ij,ij->i", ab, cp), np.einsum("ij,ij->i", ac, cp)
+    va = d3 * d6 - d5 * d4
+    vb = d5 * d2 - d1 * d6
+    vc = d1 * d4 - d3 * d2
+    bary = np.zeros((len(P), 3))
+    den = np.where(np.abs(va + vb + vc) > 1e-300, va + vb + vc, 1.0)
+    v, w = vb / den, vc / den
+    bary[:] = np.c_[1 - v - w, v, w]
+    # regions outside the face
+    m = (d1 <= 0) & (d2 <= 0); bary[m] = [1, 0, 0]
+    m = (d3 >= 0) & (d4 <= d3); bary[m] = [0, 1, 0]
+    m = (d6 >= 0) & (d5 <= d6); bary[m] = [0, 0, 1]
+    m = (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+    t = np.where(m, d1 / np.where(d1 - d3 == 0, 1, d1 - d3), 0); bary[m] = np.c_[1 - t, t, 0 * t][m]
+    m = (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+    t = np.where(m, d2 / np.where(d2 - d6 == 0, 1, d2 - d6), 0); bary[m] = np.c_[1 - t, 0 * t, t][m]
+    m = (va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0)
+    t = np.where(m, (d4 - d3) / np.where((d4 - d3) + (d5 - d6) == 0, 1, (d4 - d3) + (d5 - d6)), 0)
+    bary[m] = np.c_[0 * t, 1 - t, t][m]
+    Q = bary[:, :1] * A + bary[:, 1:2] * B + bary[:, 2:] * C
+    return Q, bary
+
+
+def locate_in_chart(points: np.ndarray, xyz: np.ndarray, f3: np.ndarray, k: int = 24):
+    """closest surface point: (face id, barycentric, distance) on the chart's 3D triangles
+    (candidate triangles by centroid distance; numpy / scipy only)."""
+    from scipy.spatial import cKDTree
+    X = np.asarray(xyz, float); F = np.asarray(f3, int); P = np.asarray(points, float)
+    T = X[F]
+    k = min(k, len(F))
+    _, cand = cKDTree(T.mean(axis=1)).query(P, k=k)
+    cand = np.asarray(cand).reshape(len(P), k)
+    best_d = np.full(len(P), np.inf); best_t = np.zeros(len(P), int); best_b = np.zeros((len(P), 3))
+    for j in range(k):
+        t = cand[:, j]
+        Q, b = _closest_on_triangles(P, T[t, 0], T[t, 1], T[t, 2])
+        d = np.linalg.norm(Q - P, axis=1)
+        better = d < best_d
+        best_d[better], best_t[better], best_b[better] = d[better], t[better], b[better]
+    return best_t, np.clip(best_b, 0.0, 1.0), best_d
 
 
 def crease_rows(lines: list, chart, phi0: np.ndarray, h: float, boundary_loop=None, trim_ratio: float = 0.25,
