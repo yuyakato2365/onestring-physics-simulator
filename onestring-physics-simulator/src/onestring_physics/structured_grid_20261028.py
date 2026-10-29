@@ -1158,6 +1158,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     from .zhang2021_panel_optimizer import PanelOptimizerWeights
 
     started = time.perf_counter()
+    from .feature_lines_20261029 import apply_feature_preset
+    params = apply_feature_preset(params)          # 2026-10-29 modes: crease-line settings
     xyz = np.asarray(xyz, float); f3 = np.asarray(f3, int); uv = np.asarray(uv, float); f2 = np.asarray(f2, int)
     try:   # input snapshot (OptCuts chart + parameters) so a failing run can be reproduced offline
         import pickle
@@ -1172,6 +1174,7 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         pass
     cone_info: dict = {"enabled": False}
     forced_xyz: dict = {}
+    feature_lines_used = None
     area3d0 = float(0.5 * np.sum(np.linalg.norm(np.cross(xyz[f3[:, 1]] - xyz[f3[:, 0]], xyz[f3[:, 2]] - xyz[f3[:, 0]]), axis=1)))
     h_req = float(getattr(params, "structured_grid_panel_edge", 0.0) or 0.0) or \
         float(np.sqrt(area3d0 / max(int(getattr(params, "structured_grid_auto_panels", 150)), 4)))
@@ -1344,6 +1347,18 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         seamless_log = []
         aligned_info: dict = {}
         grid_uv = None
+        feature_opts = None
+        if placement_model == "aligned" and str(getattr(params, "structured_grid_feature_mode", "off") or "off") != "off":
+            # 2026-10-29: grid lines along panel-scale creases / lattice aligned with the principal
+            # bend directions (see feature_lines_20261029)
+            from .feature_lines_20261029 import build_features
+            try:
+                feature_opts = build_features(xyz, f3, h3d, params)
+                print(f"[SG-FEATURES] mode {feature_opts['mode']}, design stage {feature_opts['design']}, "
+                      f"creases {feature_opts.get('crease_stats')}, align weight {feature_opts.get('align_weight')}", flush=True)
+            except Exception as exc:  # noqa: BLE001 - plain aligned placement
+                feature_opts = None
+                print(f"[SG-FEATURES] skipped: {type(exc).__name__}: {exc}", flush=True)
         if placement_model == "aligned":
             from .aligned_grid_20261028 import merge_straight_features, place_grid_aligned, refine_domain_aligned
             chart = (uvm, pre.f2, pre.xyz, pre.f3)
@@ -1362,7 +1377,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                         src, dom_r, lg_r, q_r, walk_r, chart, h3d,
                         min_3d_ratio=float(getattr(params, "structured_grid_min_3d_length_ratio", 0.0)),
                         under_weight=float(getattr(params, "structured_grid_shortfall_weight", 1.0)),
-                        area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)))
+                        area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)),
+                        features=feature_opts)
                     star = info_r.pop("_star", None)
                     sd_c = float(info_r.get("aligned_sd_after", np.inf))
                     print(f"[SG-ALIGNED] round {rr}: {len(dom_k['features'])} -> {len(dom_r['features'])} corners, "
@@ -1410,7 +1426,8 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                             src, dom_ar, lg_a, q_a, walk_a, chart, h3d,
                             min_3d_ratio=float(getattr(params, "structured_grid_min_3d_length_ratio", 0.0)),
                             under_weight=float(getattr(params, "structured_grid_shortfall_weight", 1.0)),
-                            area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)))
+                            area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)),
+                            features=feature_opts)
                         info_a.pop("_star", None)
                         sd_a = float(info_a.get("aligned_sd_after", np.inf))
                         print(f"[SG-ALIGNED] design alternative heading x{fac:g}: continuous SD {sd_a:.4f}, "
@@ -1430,7 +1447,18 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                 dom_try = new
                 lg_t, q_t, vid_t, walk_t = lattice_grid(dom_try)
                 g_uv, pl = place_grid_aligned(src, dom_try, lg_t, q_t, walk_t, chart, h3d,
-                                              area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)))
+                                              area_weight=float(getattr(params, "structured_grid_aligned_area_weight", 1.0)),
+                                              features=feature_opts)
+                if feature_opts is not None:
+                    fr = pl.get("features") or {}
+                    print(f"[SG-FEATURES] placement: SD {fr.get('sd_without_features')} -> {fr.get('aligned_sd_after')}, "
+                          f"crease offset {fr.get('feature_offset_before_mean_cells')} -> {fr.get('feature_offset_after_mean_cells')} cells, "
+                          f"align residual {fr.get('align_residual_before')} -> {fr.get('align_residual_after')}", flush=True)
+                    place_grid_aligned.last_feature_lines = {"lines": feature_opts.get("lines", []),
+                                                             "kinds": feature_opts.get("line_kinds", []),
+                                                             "dropped_lines": feature_opts.get("dropped_lines", []),
+                                                             "dropped_kinds": feature_opts.get("dropped_kinds", [])}
+                    feature_lines_used = feature_opts.get("lines") or None
                 dom, logical, quads, vid, walk = dom_try, lg_t, q_t, vid_t, walk_t
                 grid_uv, placement = g_uv, {**pl, "aligned_refine": aligned_info}
             except Exception as exc:  # noqa: BLE001 - reported, previous placement below
@@ -1478,6 +1506,32 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
           f"5: {sum(1 for c in dom.get('seam_cones', []) if c['valence_3d'] == 5)})", flush=True)
     print(f"[SG-GRID] features={len(feats)} convex={dom['convex']} reflex={dom['reflex']} sides={dom['lengths']} "
           f"-> {len(quads)} quads, panel edge target {h3d:.4g}", flush=True)
+    principal_field = None
+    if float(getattr(params, "structured_grid_panel_principal_weight", 0.0)) > 0:
+        # principal bend directions at panel scale for the panel-quality step (feature_lines_20261029)
+        from .feature_lines_20261029 import panel_bend_field, panel_principal
+        try:
+            _fld = panel_bend_field(xyz, f3, h3d)
+            _b1, _b2, _d1, _d2 = panel_principal(_fld)
+            principal_field = {"V": xyz, "d1": _d1, "d2": _d2, "aniso": np.degrees(_b1 - _b2),
+                               "lo": float(getattr(params, "structured_grid_align_aniso_lo", 10.0)),
+                               "full": float(getattr(params, "structured_grid_align_aniso_full", 30.0))}
+        except Exception as exc:  # noqa: BLE001 - plain panel-quality step
+            print(f"[SG-FEATURES] principal field skipped: {type(exc).__name__}: {exc}", flush=True)
+    extra_fixed = None
+    crease_slide = None
+    hold = str(getattr(params, "structured_grid_feature_crease_hold", "slide") or "slide")
+    if isinstance(placement, dict) and hold in ("fix", "slide"):
+        fr_ = placement.get("features") or {}
+        cv = fr_.get("crease_grid_vertices")
+        if cv and hold == "fix":
+            extra_fixed = np.asarray(cv, int)
+            print(f"[SG-FEATURES] {len(cv)} grid vertices on creases kept in place by the panel-quality step", flush=True)
+        elif cv and feature_lines_used:
+            crease_slide = {"vertices": np.asarray(cv, int), "line_of": np.asarray(fr_["crease_grid_vertex_lines"], int),
+                            "lines": feature_lines_used,
+                            "weight": float(getattr(params, "structured_grid_feature_slide_weight", 100.0))}
+            print(f"[SG-FEATURES] {len(cv)} grid vertices on creases may only slide along them in the panel-quality step", flush=True)
     p = _params_with(params, zhang2021_repair_node_valence=False, zhang2021_seam_matching=False,
                      zhang2021_hard_seams=True)
     fake = SimpleNamespace(quad_vertices=grid_uv, quads=quads, metrics={
@@ -1487,7 +1541,9 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
         plan = plan_zhang2021_m2d(pre.xyz, pre.f3, pre.uv, pre.f2, p, zhang_result=fake,
                                   panel_line_triples=grid_line_triples(vid), strict_node_valence=False,
                                   panel_weights=_panel_weights(params),
-                                  report_only=True, keep_interior_3d=True)
+                                  report_only=True, keep_interior_3d=True,
+                                  extra_fixed=extra_fixed, principal_field=principal_field,
+                                  crease_slide=crease_slide)
     except Zhang2021QuadModeError as exc:
         raise StructuredGridError(str(exc)) from exc
     m = plan.metrics
@@ -1553,7 +1609,9 @@ def _panel_weights(params: Any):
     from .zhang2021_panel_optimizer import PanelOptimizerWeights
     pr = str(getattr(params, "structured_grid_priority", "shape") or "shape")
     w = dict(PRIORITY_WEIGHTS.get(pr, PRIORITY_WEIGHTS["shape"]))
-    return PanelOptimizerWeights(smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0)), **w)
+    return PanelOptimizerWeights(smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0)),
+                                 planar=float(getattr(params, "structured_grid_panel_planar_weight", 0.0)),
+                                 principal=float(getattr(params, "structured_grid_panel_principal_weight", 0.0)), **w)
 
 
 def _cone_first_seams(xyz, f3, uv, f2, params):

@@ -161,11 +161,22 @@ def _side_chains(src, dom):
     return chains
 
 
-def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float = 1e-7, area_weight: float = 0.0):
+def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float = 1e-7, area_weight: float = 0.0,
+                 soft=None, align=None):
     """SLIM (3D symmetric Dirichlet) under linear constraints kept exactly at every iterate:
     seam transitions x_b = R x_a + t (groups), straight axis-parallel sides (chains: consecutive
     vertices share the coordinate ``ax``), fixed vertices.  Start must satisfy them; redundant
-    constraints are tolerated (quasi-definite KKT)."""
+    constraints are tolerated (quasi-definite KKT).
+
+    ``soft`` (optional): {"B": sparse (n, 2 nV), "c": (n,), "w": (n,), "h": lattice unit,
+    "schedule": [weights], "iters": per stage}: adds the penalty  wf * sum w (B x - c)^2 / (h^2 sum w)
+    (mean squared offset in cells) with the weight wf raised stage by stage (continuation).
+
+    ``align`` (optional): {"d": (nT, 2) principal direction in each triangle frame, "w": (nT,) in
+    [0, 1], "weight": lambda}: the map Jacobian should be diagonal in the principal frame, i.e. the
+    principal direction maps onto a lattice axis (the nearest one, re-chosen every iteration) and
+    the other direction onto the other axis; penalty lambda * mean_area(w (a_perp . J d1)^2 +
+    (a . J d2)^2)."""
     from scipy import sparse
     from scipy.sparse.linalg import splu
     from .zhang2021_onestring_reparam import _max_feasible_step
@@ -205,15 +216,95 @@ def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float =
             E_ = E_ + wa * float(np.dot(wts, np.log(det) ** 2))
         return E_, J_, x_
 
+    if soft is not None and len(soft.get("c", [])):
+        Bm = soft["B"].tocsr(); cpen = np.asarray(soft["c"], float); wpen = np.asarray(soft["w"], float)
+        pen_norm = float(np.sum(wpen)) * float(soft["h"]) ** 2
+        schedule = [float(x) for x in soft.get("schedule", (1.0,))]
+        stage_iters = int(soft.get("iters", max(1, iters // max(len(schedule), 1))))
+    else:
+        Bm = None
+        schedule, stage_iters = [0.0], int(iters)
+    area_sum = float(np.sum(prob.area))
+
+    if align is not None:
+        dl = np.asarray(align["d"], float)
+        wl = np.asarray(align["w"], float) * prob.area
+        lam = float(align.get("weight", 1.0))
+        G1 = sparse.diags(dl[:, 0]) @ prob.Dx + sparse.diags(dl[:, 1]) @ prob.Dy
+        G2 = sparse.diags(-dl[:, 1]) @ prob.Dx + sparse.diags(dl[:, 0]) @ prob.Dy
+        if Bm is None:
+            schedule, stage_iters = [0.0], int(iters)
+    else:
+        lam = 0.0
+
+    def snap(P):
+        """True where d1 maps closer to the u axis; also refreshes the scale normalisation (the
+        penalty measures the angle, not the size: |J d|^2 of the current map divides it)."""
+        global_scale[:] = 1.0
+        if lam > 0:
+            a1 = (G1 @ P[:, 0]) ** 2 + (G1 @ P[:, 1]) ** 2
+            a2 = (G2 @ P[:, 0]) ** 2 + (G2 @ P[:, 1]) ** 2
+            global_scale[:] = 1.0 / np.maximum(0.5 * (a1 + a2), 1e-6)
+        return np.abs(G1 @ P[:, 0]) >= np.abs(G1 @ P[:, 1])
+
+    global_scale = np.ones(prob.Dx.shape[0])
+
+    def align_energy(P, on_u):
+        """exact scale-free value (the quadratic model uses the lagged normalisation)."""
+        if lam <= 0:
+            return 0.0
+        u, v = P[:, 0], P[:, 1]
+        g1u, g1v, g2u, g2v = G1 @ u, G1 @ v, G2 @ u, G2 @ v
+        r1 = np.where(on_u, g1v, g1u)
+        r2 = np.where(on_u, g2u, g2v)
+        sc = 1.0 / np.maximum(0.5 * (g1u * g1u + g1v * g1v + g2u * g2u + g2v * g2v), 1e-6)
+        return lam * float(np.dot(wl * sc, r1 * r1 + r2 * r2)) / area_sum
+
+    def penalty(P, wf):
+        if Bm is None or wf <= 0:
+            return 0.0
+        r_ = Bm @ np.r_[P[:, 0], P[:, 1]] - cpen
+        return wf * float(np.dot(wpen, r_ * r_)) / pen_norm
+
+    def offsets(P):
+        if Bm is None:
+            return None
+        return np.abs(Bm @ np.r_[P[:, 0], P[:, 1]] - cpen) / float(soft["h"])
+
     E, J, _ = energy(uv)
     if not np.isfinite(E):
         return uv, {"aligned_status": "start not injective"}
     E_start = E
+    off0 = offsets(uv)
     sw = np.sqrt(prob.area)
     Dx, Dy = prob.Dx, prob.Dy
     done = 0
     status = "converged"
-    for _ in range(int(iters)):
+    stage_log = []
+    wf = schedule[0]
+    it_in_stage = 0
+    stage = 0
+    Esd = E
+    E = Esd + penalty(uv, wf)
+    mis0 = None
+    if lam > 0:
+        _on = snap(uv)
+        mis0 = align_energy(uv, _on) / lam
+        E = E + align_energy(uv, _on)
+    for _ in range(int(iters) if Bm is None else stage_iters * len(schedule)):
+        if lam > 0:
+            on_u = snap(uv)
+            E = Esd + penalty(uv, wf) + align_energy(uv, on_u)
+        if Bm is not None and it_in_stage >= stage_iters:
+            stage_log.append({"weight": wf, "sd": float(Esd), "offset_mean_cells": float(np.mean(offsets(uv))),
+                              "offset_max_cells": float(np.max(offsets(uv)))})
+            stage += 1
+            if stage >= len(schedule):
+                break
+            wf = schedule[stage]
+            it_in_stage = 0
+            E = Esd + penalty(uv, wf) + (align_energy(uv, snap(uv)) if lam > 0 else 0.0)
+        it_in_stage += 1
         U, S, Vt = np.linalg.svd(J)
         Rt = U @ Vt
         sv = np.clip(S, 1e-12, None)
@@ -234,6 +325,20 @@ def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float =
                 Av = sparse.diags(sw * W[:, rr, 1]) @ Dm
                 blocks.append(sparse.hstack([Au, Av]))
                 rhs.append(sw * WR[:, rr, c_])
+        if Bm is not None and wf > 0:
+            sp_ = np.sqrt(area_sum * wf * wpen / pen_norm)
+            blocks.append(sparse.diags(sp_) @ Bm)
+            rhs.append(sp_ * cpen)
+        if lam > 0:
+            sl = np.sqrt(lam * wl * global_scale)
+            Z = sparse.csr_matrix(G1.shape)
+            m_u = sparse.diags(sl * on_u); m_v = sparse.diags(sl * (~on_u))
+            # d1 on u: (G1 v)^2 + (G2 u)^2 ; d1 on v: (G1 u)^2 + (G2 v)^2
+            blocks.append(sparse.hstack([m_v @ G1, m_u @ G1]))
+            rhs.append(np.zeros(G1.shape[0]))
+            blocks.append(sparse.hstack([m_u @ G2, m_v @ G2]))
+            rhs.append(np.zeros(G1.shape[0]))
+            del Z
         A = sparse.vstack(blocks).tocsc()
         b = np.concatenate(rhs)
         H = (A.T @ A).tocsc()
@@ -255,22 +360,45 @@ def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float =
         accepted = False
         while alpha > 1e-12:
             trial = uv + alpha * duv
-            Et, Jt, _ = energy(trial)
+            Esd_t, Jt, _ = energy(trial)
+            Et = Esd_t + penalty(trial, wf) + (align_energy(trial, on_u) if lam > 0 else 0.0) \
+                if np.isfinite(Esd_t) else np.inf
             if np.isfinite(Et) and Et <= E:
                 accepted = True
                 break
             alpha *= 0.5
         if not accepted:
+            if Bm is not None and stage + 1 < len(schedule):
+                it_in_stage = stage_iters            # next stage
+                continue
             status = "line search stalled"
             break
         rel = (E - Et) / max(E, 1e-30)
-        uv, E, J = trial, Et, Jt
+        uv, E, J, Esd = trial, Et, Jt, Esd_t
         done += 1
-        if rel < tol:
+        if rel < tol and lam <= 0:
+            if Bm is not None and stage + 1 < len(schedule):
+                it_in_stage = stage_iters
+                continue
             break
     viol = float(np.max(np.abs(C @ np.r_[uv[:, 0], uv[:, 1]] - d))) if r else 0.0
-    return uv, {"aligned_sd_before": float(E_start), "aligned_sd_after": float(E), "aligned_iterations": done,
-                "aligned_constraint_violation": viol, "aligned_status": status}
+    info = {"aligned_sd_before": float(E_start), "aligned_sd_after": float(Esd), "aligned_iterations": done,
+            "aligned_constraint_violation": viol, "aligned_status": status}
+    if lam > 0:
+        on_u = snap(uv)
+        info["align_residual_before"] = float(mis0)
+        info["align_residual_after"] = float(align_energy(uv, on_u) / lam)
+    if Bm is not None:
+        off = offsets(uv)
+        if not stage_log or stage_log[-1]["weight"] != wf:
+            stage_log.append({"weight": wf, "sd": float(Esd), "offset_mean_cells": float(np.mean(off)),
+                              "offset_max_cells": float(np.max(off))})
+        info.update({"feature_stages": stage_log, "feature_offset_before_mean_cells": float(np.mean(off0)),
+                     "feature_offset_before_max_cells": float(np.max(off0)),
+                     "feature_offset_after_mean_cells": float(np.mean(off)),
+                     "feature_offset_after_p90_cells": float(np.percentile(off, 90)),
+                     "feature_offset_after_max_cells": float(np.max(off))})
+    return uv, info
 
 
 def _start_map(src, dom, logical, quads, walk, chart, h):
@@ -285,9 +413,15 @@ def _start_map(src, dom, logical, quads, walk, chart, h):
 
 
 def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float, w_pos: float = 2.0,
-                          min_3d_ratio: float = 0.9, under_weight: float = 3.0, area_weight: float = 0.0):
+                          min_3d_ratio: float = 0.9, under_weight: float = 3.0, area_weight: float = 0.0,
+                          features: dict | None = None):
     """Continuous joint solve (free corners, straight axis-parallel sides, seamless cuts), then one
-    MILP rounds the corner positions to the lattice (closure, equal cut copies, simple polygon)."""
+    MILP rounds the corner positions to the lattice (closure, equal cut copies, simple polygon).
+
+    ``features`` with "design": True (2026-10-29): the continuous map is solved a second time with
+    the principal-direction alignment and with every crease kept straight and axis-parallel (its
+    lattice line is not known yet), so the rounded corners already make room for them.  The design
+    is still ranked by the SD of the first (feature-free) solve."""
     from shapely.geometry import Polygon
     start, prob = _start_map(src, dom, logical, quads, walk, chart, h)
     if start is None:
@@ -295,6 +429,43 @@ def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float,
     groups = _seam_groups(src, dom)
     chains = _side_chains(src, dom)
     star, info = aligned_slim(prob, start, groups, chains, fixed=[], iters=120, area_weight=area_weight)
+    if features and features.get("design"):
+        from .feature_lines_20261029 import crease_rows, face_alignment, straightness_matrix
+        uvm, f2, xyz, f3 = chart
+        soft = align = None
+        if features.get("lines"):
+            cr = crease_rows(features["lines"], chart, star, h, boundary_loop=np.asarray(src.loop, int),
+                             trim_ratio=float(features.get("trim", 0.25)),
+                             min_piece_ratio=float(features.get("min_piece", 0.5)), snap="none",
+                             switch_ratio=float(features.get("switch", 2.0)),
+                             segmentation=str(features.get("segmentation", "dp")),
+                             resolve=bool(features.get("resolve", True)))
+            if cr["pieces"]:
+                Bm, cc, ww = straightness_matrix(cr["pieces"], len(star))
+                if Bm.shape[0]:
+                    soft = {"B": Bm, "c": cc, "w": ww, "h": h,
+                            "schedule": features.get("schedule", (1.0, 3.0, 10.0, 30.0)),
+                            "iters": int(features.get("iters", 40))}
+        if float(features.get("align_weight", 0.0)) > 0 and features.get("field") is not None:
+            dloc, wloc, _an = face_alignment(xyz, f3, features["surface_vertices"], features["field"],
+                                             aniso_lo_deg=float(features.get("align_aniso_lo", 10.0)),
+                                             aniso_full_deg=float(features.get("align_aniso_full", 30.0)))
+            align = {"d": dloc, "w": wloc, "weight": float(features["align_weight"])}
+        if soft is not None or align is not None:
+            n_it = 4 * int(features.get("iters", 40)) if soft is None else 0
+            star_f, finfo = aligned_slim(prob, star, groups, chains, fixed=[], iters=n_it, area_weight=area_weight,
+                                         soft=soft, align=align)
+            info["design_features"] = {k: v for k, v in finfo.items() if k != "feature_stages"}
+
+            def _area(P):
+                e1 = P[f2[:, 1]] - P[f2[:, 0]]
+                e2 = P[f2[:, 2]] - P[f2[:, 0]]
+                return 0.5 * float(np.sum(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]))
+            # the features may reshape the polygon but not shrink it (aligning is cheaper on a
+            # smaller map): keep the feature-free map area, i.e. the panel count
+            sc = float(np.sqrt(_area(star) / max(_area(star_f), 1e-300)))
+            info["design_features"]["area_rescale"] = sc
+            star = star_f * sc
     feats, dirs = dom["features"], dom["dirs"]
     m = len(feats)
     loop = np.asarray(src.loop, int)
@@ -332,9 +503,17 @@ def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float,
     return new, info
 
 
-def place_grid_aligned(src, dom: dict, logical, quads, walk, chart, h: float, area_weight: float = 0.0):
+def place_grid_aligned(src, dom: dict, logical, quads, walk, chart, h: float, area_weight: float = 0.0,
+                       features: dict | None = None):
     """M2D grid = pull-back of the integer lattice through the low-distortion map onto the integer
-    polygon (corners fixed, boundary vertices sliding along their sides, cuts seamless)."""
+    polygon (corners fixed, boundary vertices sliding along their sides, cuts seamless).
+
+    ``features`` (optional, 2026-10-29): {"lines": [3D crease polylines], "schedule": penalty
+    weights, "iters": per stage, "trim": panels kept free near the chart boundary, "min_piece":
+    shortest axis-parallel piece in panels}.  The map is solved once without them; every crease is
+    then assigned the lattice line nearest to it in that map and the map is re-solved with the
+    crease samples pulled onto their lines (soft penalty, continuation), so a grid line runs along
+    each crease and the bend falls on a hinge instead of inside a panel."""
     uvm, f2, xyz, f3 = chart
     start, prob = _start_map(src, dom, logical, quads, walk, chart, h)
     if start is None:
@@ -345,11 +524,61 @@ def place_grid_aligned(src, dom: dict, logical, quads, walk, chart, h: float, ar
     chains = _side_chains(src, dom)
     fixed = [(int(loop[j]), ax) for j in feats for ax in (0, 1)]
     cur, info = aligned_slim(prob, start, groups, chains, fixed, iters=150, area_weight=area_weight)
+    feature_report = None
+    if features and (features.get("lines") or features.get("align_weight", 0.0) > 0):
+        from .feature_lines_20261029 import crease_rows, face_alignment, rows_to_matrix
+        feature_report = {"rows": 0, "pieces": []}
+        soft = None
+        if features.get("lines"):
+            cr = crease_rows(features["lines"], chart, cur, h, boundary_loop=loop,
+                             trim_ratio=float(features.get("trim", 0.25)),
+                             min_piece_ratio=float(features.get("min_piece", 0.5)),
+                             switch_ratio=float(features.get("switch", 2.0)),
+                             segmentation=str(features.get("segmentation", "dp")),
+                             resolve=bool(features.get("resolve", True)))
+            feature_report = {"pieces": [{k: v for k, v in pc.items() if k not in ("samples", "verts", "bary", "w", "_other")}
+                                         for pc in cr["pieces"]], "rows": len(cr["rows"])}
+            place_grid_aligned.last_features = {"rows": cr}
+            if cr["rows"]:
+                Bm, cc, ww = rows_to_matrix(cr["rows"], len(cur))
+                soft = {"B": Bm, "c": cc, "w": ww, "h": h,
+                        "schedule": features.get("schedule", (1.0, 3.0, 10.0, 30.0, 100.0)),
+                        "iters": int(features.get("iters", 40))}
+        align = None
+        if float(features.get("align_weight", 0.0)) > 0 and features.get("field") is not None:
+            dloc, wloc, an = face_alignment(xyz, f3, features["surface_vertices"], features["field"],
+                                            aniso_lo_deg=float(features.get("align_aniso_lo", 10.0)),
+                                            aniso_full_deg=float(features.get("align_aniso_full", 30.0)))
+            align = {"d": dloc, "w": wloc, "weight": float(features["align_weight"])}
+            feature_report["align_weighted_fraction"] = float(np.sum(wloc * prob.area) / np.sum(prob.area))
+        if soft is not None or align is not None:
+            cur0 = cur
+            n_it = 4 * int(features.get("iters", 40)) if soft is None else 0
+            cur, finfo = aligned_slim(prob, cur0, groups, chains, fixed, iters=n_it, area_weight=area_weight,
+                                      soft=soft, align=align)
+            feature_report.update(finfo)
+            feature_report["sd_without_features"] = info.get("aligned_sd_after")
+            info["aligned_sd_after"] = finfo.get("aligned_sd_after")
+            place_grid_aligned.last_unconstrained = cur0
+        info["features"] = feature_report
     e1 = cur[f2[:, 1]] - cur[f2[:, 0]]
     e2 = cur[f2[:, 2]] - cur[f2[:, 0]]
     if np.any(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0] <= 0):
         raise StructuredGridError("SG_ALIGNED_MAP_NOT_INJECTIVE")
     lg = np.asarray(logical, float) * h
+    if feature_report is not None and getattr(place_grid_aligned, "last_features", None) and feature_report.get("rows"):
+        # grid vertices that now sit on a crease (on the piece's lattice line, within its extent):
+        # the later panel-quality step keeps them in place so the hinge stays on the crease
+        on: dict = {}
+        for pc in place_grid_aligned.last_features["rows"]["pieces"]:
+            ax, oth = pc["ax"], 1 - pc["ax"]
+            Xs = np.einsum("ij,ijk->ik", pc["bary"], cur[pc["verts"]])
+            lo, hi = float(Xs[:, oth].min()) - 0.25 * h, float(Xs[:, oth].max()) + 0.25 * h
+            sel = (np.abs(lg[:, ax] - pc["c"]) < 1e-6 * h) & (lg[:, oth] >= lo) & (lg[:, oth] <= hi)
+            for i in np.flatnonzero(sel):
+                on.setdefault(int(i), int(pc["line"]))
+        feature_report["crease_grid_vertices"] = sorted(on)
+        feature_report["crease_grid_vertex_lines"] = [on[i] for i in sorted(on)]
     uv = np.full((len(logical), 2), np.nan)
     # boundary lattice points: walk along the chart boundary chain of their side
     chain_of = {k: (verts, ax) for k, verts, ax in chains}

@@ -42,6 +42,8 @@ class PanelOptimizerWeights:
     barrier_ratio: float = 0.05
     smooth: float = 0.0     # Brackbill-Saltzman smoothness on grid-line triples (structured grids)
     area: float = 0.0       # log^2(panel area / L^2): equal panel AREAS (structured grids, size priority)
+    planar: float = 0.0     # (det[P1-P0, P2-P0, P3-P0] / L^3)^2: lifted panels close to planar (2026-10-29)
+    principal: float = 0.0  # sin^2(2 theta) of both panel directions vs the principal bend directions (2026-10-29)
 
 
 @dataclass
@@ -327,7 +329,9 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
                            weights: PanelOptimizerWeights | None = None, max_iter: int = 300,
                            reference_length: float | None = None,
                            line_triples: np.ndarray | None = None,
-                           allow_invalid: bool = False) -> tuple[np.ndarray, np.ndarray, dict]:
+                           allow_invalid: bool = False,
+                           principal_field: dict | None = None,
+                           crease_slide: dict | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
     """Move non-fixed vertices (UV) to optimise the lifted panels; returns (uv, xyz, report).
 
     ``line_triples`` (a, i, b): consecutive vertices along a grid line; with
@@ -375,6 +379,36 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
     if line_triples is not None and len(line_triples) and w.smooth > 0:
         tri_lines = np.asarray(line_triples, int).reshape(-1, 3)
     report["panel_optimizer_smooth_triples"] = 0 if tri_lines is None else int(len(tri_lines))
+    cs = None
+    if crease_slide is not None and len(crease_slide.get("vertices", [])):
+        # vertices that lie on a crease may slide along it but not leave it (2026-10-29)
+        cv = np.asarray(crease_slide["vertices"], int)
+        cl = np.asarray(crease_slide["line_of"], int)
+        segs = [(np.asarray(Lp, float)[:-1], np.asarray(Lp, float)[1:]) for Lp in crease_slide["lines"]]
+        cs = (cv, cl, segs, float(crease_slide.get("weight", 100.0)))
+        report["panel_optimizer_crease_slide_vertices"] = int(len(cv))
+
+    def crease_proj(Xz):
+        out = np.empty((len(cs[0]), 3))
+        for k, (v, li) in enumerate(zip(cs[0], cs[1])):
+            A, B = cs[2][li]
+            AB = B - A
+            t = np.clip(np.einsum("ij,ij->i", Xz[v] - A, AB) / np.maximum(np.einsum("ij,ij->i", AB, AB), 1e-30), 0.0, 1.0)
+            Pp = A + t[:, None] * AB
+            out[k] = Pp[int(np.argmin(np.linalg.norm(Pp - Xz[v], axis=1)))]
+        return out
+    pf = None
+    if principal_field is not None and w.principal > 0:
+        # per panel: principal bend directions of the surface near its centre and an anisotropy
+        # weight in [0, 1] (frozen during the optimisation; the field is smooth at panel scale)
+        from scipy.spatial import cKDTree
+        cen = X[quads].mean(axis=1)
+        j = cKDTree(np.asarray(principal_field["V"], float)).query(cen)[1]
+        an = np.asarray(principal_field["aniso"], float)[j]
+        lo, full = float(principal_field.get("lo", 10.0)), float(principal_field.get("full", 30.0))
+        pf = (np.asarray(principal_field["d1"], float)[j], np.asarray(principal_field["d2"], float)[j],
+              np.clip((an - lo) / max(full - lo, 1e-9), 0.0, 1.0))
+        report["panel_optimizer_principal_weighted_panels"] = float(np.sum(pf[2]))
 
     def fun(z):
         Pz = P.copy()
@@ -397,6 +431,45 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
             np.add.at(GX, a, 2.0 * c * r)
             np.add.at(GX, b, 2.0 * c * r)
             np.add.at(GX, i, -4.0 * c * r)
+        if w.planar > 0:
+            # planarity of every lifted panel: triple product of three edge vectors from corner 0
+            # (6 x tetrahedron volume), relative to L^3; a planar quad has zero volume
+            Q0, Q1, Q2, Q3 = (Xz[quads[:, k]] for k in range(4))
+            a1, a2, a3 = Q1 - Q0, Q2 - Q0, Q3 - Q0
+            c23, c31, c12 = np.cross(a2, a3), np.cross(a3, a1), np.cross(a1, a2)
+            tau = np.einsum("ij,ij->i", a1, c23) / L ** 3
+            cp = w.planar / len(quads)
+            Eq = Eq + cp * float(np.sum(tau * tau))
+            g = (2.0 * cp * tau / L ** 3)[:, None]
+            GX = GX.copy()
+            np.add.at(GX, quads[:, 1], g * c23)
+            np.add.at(GX, quads[:, 2], g * c31)
+            np.add.at(GX, quads[:, 3], g * c12)
+            np.add.at(GX, quads[:, 0], -g * (c23 + c31 + c12))
+        if cs is not None:
+            r_ = Xz[cs[0]] - crease_proj(Xz)
+            cw = cs[3] / (len(cs[0]) * L * L)
+            Eq = Eq + cw * float(np.sum(r_ * r_))
+            GX = GX.copy()
+            np.add.at(GX, cs[0], 2.0 * cw * r_)
+        if pf is not None:
+            # both panel directions (mid-edge vectors) along the principal directions:
+            # f = sin^2(2 theta) = 4 p^2 q^2 / (p^2 + q^2)^2, p = e.d1, q = e.d2
+            d1q, d2q, wq = pf
+            Q0, Q1, Q2, Q3 = (Xz[quads[:, k]] for k in range(4))
+            cpa = w.principal / len(quads)
+            GX = GX.copy()
+            for e, sg in (((Q1 + Q2 - Q0 - Q3) * 0.5, (-0.5, 0.5, 0.5, -0.5)),
+                          ((Q2 + Q3 - Q0 - Q1) * 0.5, (-0.5, -0.5, 0.5, 0.5))):
+                pp = np.einsum("ij,ij->i", e, d1q); qq = np.einsum("ij,ij->i", e, d2q)
+                ss = np.maximum(pp * pp + qq * qq, 1e-30)
+                f = 4.0 * pp * pp * qq * qq / (ss * ss)
+                Eq = Eq + cpa * float(np.dot(wq, f))
+                dfp = 8.0 * pp * qq * qq * (qq * qq - pp * pp) / ss ** 3
+                dfq = 8.0 * pp * pp * qq * (pp * pp - qq * qq) / ss ** 3
+                ge = (cpa * wq)[:, None] * (dfp[:, None] * d1q + dfq[:, None] * d2q)
+                for k in range(4):
+                    np.add.at(GX, quads[:, k], sg[k] * ge)
         GP = np.einsum("nij,ni->nj", lift.J[t], GX) + Gb
         return Eq + Eb, GP[free].ravel()
 

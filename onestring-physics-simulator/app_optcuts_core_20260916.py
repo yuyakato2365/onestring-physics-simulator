@@ -96,6 +96,8 @@ def _install_optcuts_selector() -> None:
             "optcuts_planar_quad_20261026",
             "optcuts_zhang2021_quad_20261027",
             "optcuts_structured_grid_20261028",
+            "optcuts_structured_grid_valley_fix_align_20261029",
+            "optcuts_structured_grid_strong_lines_20261029",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -109,6 +111,10 @@ def _install_optcuts_selector() -> None:
             if mode=="optcuts_zhang2021_quad_20261027":
                 return ("2026-10-27 | OptCuts → Zhang et al. 2021 Quad M2D "
                         "(authors' reference code) + OneString seam/3D adapter")
+            if mode=="optcuts_structured_grid_valley_fix_align_20261029":
+                return "2026-10-29 | 10-28 構造化グリッド＋谷線に格子線を通して固定＋格子の向きを曲がる方向にそろえる"
+            if mode=="optcuts_structured_grid_strong_lines_20261029":
+                return "2026-10-29 | 10-28 構造化グリッド＋強く曲がる谷線・山線を Ω に描いて格子を沿わせる"
             if mode=="optcuts_structured_grid_20261028":
                 return ("2026-10-28 | OptCuts → piecewise smooth Ω (line+spline) → structured quad grid "
                         "(Brackbill–Saltzman, interior valence 4) + 09-18 K3D…T2D")
@@ -139,13 +145,21 @@ def _install_optcuts_selector() -> None:
                 value in experimental
                 and value not in {"optcuts_planar_quad_20261026",
                                   "optcuts_zhang2021_quad_20261027",
-                                  "optcuts_structured_grid_20261028"})
+                                  "optcuts_structured_grid_20261028",
+                                  "optcuts_structured_grid_valley_fix_align_20261029",
+                                  "optcuts_structured_grid_strong_lines_20261029"})
         )
         st.session_state["_onestring_planar_quad_20261026_selected"] = (value == "optcuts_planar_quad_20261026")
         st.session_state["_onestring_zhang2021_quad_20261027_selected"] = (
             value == "optcuts_zhang2021_quad_20261027")
         st.session_state["_onestring_structured_grid_20261028_selected"] = (
-            value == "optcuts_structured_grid_20261028")
+            value in {"optcuts_structured_grid_20261028",
+                      "optcuts_structured_grid_valley_fix_align_20261029",
+                      "optcuts_structured_grid_strong_lines_20261029"})
+        st.session_state["_onestring_structured_grid_feature_preset"] = {
+            "optcuts_structured_grid_valley_fix_align_20261029": "valley_fix_align",
+            "optcuts_structured_grid_strong_lines_20261029": "strong_lines",
+        }.get(value, "off")
         st.session_state["_onestring_grid_seam_native_selected"] = (
             value == "optcuts_grid_seam_native")
         st.session_state["_onestring_area_grid_optimizations"] = {
@@ -324,7 +338,9 @@ def _install_optcuts_selector() -> None:
                      "09-18 route's alternating corner linkage additionally needs every interior vertex to have "
                      "even valence (checked in Phase 1).",
             )
-        elif value == "optcuts_structured_grid_20261028":
+        elif value in {"optcuts_structured_grid_20261028",
+                       "optcuts_structured_grid_valley_fix_align_20261029",
+                       "optcuts_structured_grid_strong_lines_20261029"}:
             st.caption(
                 "2026-10-28: official OptCuts chart Ω → Ω boundary replaced by straight lines / smoothing "
                 "splines between features (seam nodes, sharp corners), bijective SLIM inside → regular quad "

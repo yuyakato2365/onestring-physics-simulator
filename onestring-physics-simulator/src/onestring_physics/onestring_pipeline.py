@@ -1153,6 +1153,24 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_aligned_area_weight: float = 1.0   # aligned: area preservation (cells follow the 3D area)
     structured_grid_cone_feedback_rounds: int = 0      # aligned: add seam cones where the map squeezes / stretches
     structured_grid_cone_feedback_threshold: float = 0.35  # |log2 area scale| that asks for a cone
+    # 2026-10-29 (feature_lines_20261029): grid lines on panel-scale creases / lattice along the bend
+    structured_grid_feature_preset: str = "off"        # set by the Omega mode: "off" | "valley_fix_align" | "strong_lines"
+    structured_grid_feature_mode: str = "off"          # "off" | "crease" | "align" | "crease+align"
+    structured_grid_feature_kinds: str = "valley"      # creases: "valley" | "ridge" | "both"
+    structured_grid_feature_bend_hi: float = 35.0      # crease seed: bend across one panel (deg)
+    structured_grid_feature_bend_lo: float = 20.0      # crease continues while the bend stays above (deg)
+    structured_grid_feature_min_length: float = 2.0    # shortest crease kept (panels)
+    structured_grid_feature_min_mean_bend: float = 0.0  # use only lines whose mean bend per panel is at least this (deg)
+    structured_grid_feature_schedule: str = "1,3,10,30"  # crease penalty weights (continuation)
+    structured_grid_feature_iters: int = 40            # SLIM iterations per stage
+    structured_grid_feature_design: bool = False       # also use them before the corners are rounded
+    structured_grid_feature_crease_hold: str = "slide"  # panel-quality step: crease grid vertices "slide" along the crease | "fix" | "free"
+    structured_grid_feature_slide_weight: float = 100.0  # strength of "slide" (distance to the crease / panel edge, squared)
+    structured_grid_panel_planar_weight: float = 0.0   # panel-quality step: lifted panels close to planar
+    structured_grid_panel_principal_weight: float = 0.0  # panel-quality step: panel edges along the principal bend
+    structured_grid_align_weight: float = 10.0         # principal-bend alignment weight
+    structured_grid_align_aniso_lo: float = 10.0       # alignment starts at this bend difference (deg / panel)
+    structured_grid_align_aniso_full: float = 30.0     # ... and has full weight from here
     bff_boundary_policy: Literal[
         "automatic_reference",
         "boundary_scale_zero",

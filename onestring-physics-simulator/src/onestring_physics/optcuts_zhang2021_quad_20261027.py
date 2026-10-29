@@ -411,7 +411,8 @@ def _seam_preflight(rp: Any, quad_uv: np.ndarray, faces: np.ndarray) -> dict:
 def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None,
                        panel_line_triples: Any = None, strict_node_valence: bool = True,
                        panel_weights: Any = None, report_only: bool = False,
-                       keep_interior_3d: bool = False) -> Zhang2021M2DPlan:
+                       keep_interior_3d: bool = False, extra_fixed: Any = None,
+                       principal_field: Any = None, crease_slide: Any = None) -> Zhang2021M2DPlan:
     """Paper stage + OneString adapter on one chart (raises on failure).
 
     1. [paper]     Zhang et al. 2021 reference programs -> Q (``zhang_result`` may
@@ -495,6 +496,10 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
     lift = ChartLift(rp.uv, rp.f2, rp.xyz, rp.f3)
     fixed = np.zeros(len(quv), bool)
     fixed[quad_boundary_loop(faces_ccw)] = True
+    if extra_fixed is not None and len(extra_fixed):
+        # e.g. grid vertices placed on a crease line by the structured-grid mode (2026-10-29)
+        ef = np.asarray(extra_fixed, int)
+        fixed[ef[(ef >= 0) & (ef < len(quv))]] = True
     if keep_interior_3d:
         # The re-parameterisation moved the chart interior; keep every interior grid vertex on the
         # SAME surface point it had in the input chart (3D closest point on the new chart's triangles).
@@ -506,7 +511,8 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
             quv, m3d, opt_report = optimize_panel_quality(
                 lift, quv, faces_ccw, fixed, weights=panel_weights or PanelOptimizerWeights(),
                 max_iter=int(getattr(params, "zhang2021_panel_optimization_iterations", 300)),
-                line_triples=panel_line_triples, allow_invalid=report_only)
+                line_triples=panel_line_triples, allow_invalid=report_only, principal_field=principal_field,
+                crease_slide=crease_slide)
         except PanelOptimizationError as exc:
             raise Zhang2021QuadModeError(str(exc)) from exc
         opt_report["panel_optimizer_enabled"] = True

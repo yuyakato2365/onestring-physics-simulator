@@ -697,6 +697,11 @@ with st.sidebar:
             help="shape_preserving_experimental is PCA-based and not paper-default. paper_default fails explicitly when unimplemented.",
         ),
     )
+    STRUCTURED_GRID_FEATURE_MODES = {
+        "optcuts_structured_grid_20261028": "off",
+        "optcuts_structured_grid_valley_fix_align_20261029": "valley_fix_align",
+        "optcuts_structured_grid_strong_lines_20261029": "strong_lines",
+    }
     omega_parameterization_mode = _param_row(
         "S→Omega のパラメータ化。paper_reference_bff だけが公式BFF CLIを使用し、代替fallbackを禁止する。",
         lambda: st.selectbox(
@@ -720,6 +725,9 @@ with st.sidebar:
                 # 2026-10-28: piecewise smooth Omega + structured quad grid
                 # (interior valence 4) + the unchanged 09-18 K3D...T2D route.
                 "optcuts_structured_grid_20261028",
+                # 2026-10-29: the 10-28 structured grid + grid lines along crease lines
+                "optcuts_structured_grid_valley_fix_align_20261029",
+                "optcuts_structured_grid_strong_lines_20261029",
             ],
             format_func=lambda mode: {
                 "bff":"bff — LEGACY harmonic, NOT official BFF",
@@ -733,6 +741,10 @@ with st.sidebar:
                 "optcuts_structured_grid_20261028":
                     "2026-10-28 | OptCuts → piecewise smooth Ω (line+spline) → structured quad grid "
                     "(Brackbill–Saltzman, interior valence 4) + 09-18 K3D…T2D",
+                "optcuts_structured_grid_valley_fix_align_20261029":
+                    "2026-10-29 | 10-28 構造化グリッド＋谷線に格子線を通して固定＋格子の向きを曲がる方向にそろえる",
+                "optcuts_structured_grid_strong_lines_20261029":
+                    "2026-10-29 | 10-28 構造化グリッド＋強く曲がる谷線・山線を Ω に描いて格子を沿わせる",
             }.get(mode,mode),
             index=2 if (paper_fidelity_enabled
                         or selected_model_version["id"]=="0.2.0-paper-reference-bff") else 0,
@@ -816,13 +828,17 @@ with st.sidebar:
         and not optcuts_planar_quad_20261026_enabled
         and not optcuts_zhang2021_quad_20261027_enabled
         and (
-            omega_parameterization_mode == "optcuts_structured_grid_20261028"
+            omega_parameterization_mode in STRUCTURED_GRID_FEATURE_MODES
             or (
                 omega_parameterization_mode == "optcuts_test"
                 and st.session_state.get(
                     "_onestring_structured_grid_20261028_selected", False)
             )
         ))
+    # 2026-10-29: which crease-line preset the structured-grid mode uses ("off" = plain 10-28)
+    structured_grid_feature_preset = STRUCTURED_GRID_FEATURE_MODES.get(
+        omega_parameterization_mode,
+        st.session_state.get("_onestring_structured_grid_feature_preset", "off"))
     if (optcuts_planar_quad_20261026_enabled or optcuts_zhang2021_quad_20261027_enabled
             or optcuts_structured_grid_20261028_enabled):
         omega_parameterization_mode = "optcuts_test"
@@ -2209,6 +2225,7 @@ def current_pipeline_key() -> tuple:
         structured_grid_smoothing_tolerances,
         structured_grid_corner_scale,
         structured_grid_smoothness_weight,
+        structured_grid_feature_preset,
         structured_grid_seam_closure,
         bff_boundary_policy,
         bff_rectangle_selection_mode,
@@ -2418,6 +2435,7 @@ pipeline_params = PipelineParameters(
     structured_grid_smoothing_tolerances=structured_grid_smoothing_tolerances,
     structured_grid_corner_scale=structured_grid_corner_scale,
     structured_grid_smoothness_weight=structured_grid_smoothness_weight,
+    structured_grid_feature_preset=structured_grid_feature_preset,
     structured_grid_seam_closure=structured_grid_seam_closure,
     bff_executable=bff_executable or None,
     bff_rectangle_executable=bff_rectangle_executable or None,
