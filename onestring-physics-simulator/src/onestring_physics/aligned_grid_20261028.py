@@ -161,6 +161,20 @@ def _side_chains(src, dom):
     return chains
 
 
+# 2026-10-30 "shape first": (size_lo, size_hi) panel-size band, or None for the original isometric SLIM.
+# Set by plan_structured_grid from params.structured_grid_size_band for the duration of one plan.
+SHAPE_FIRST = None
+
+
+def _shape_scale(J):
+    """per triangle: the similarity scale the shape-first energy compares against.
+    J maps 3D -> lattice, so sigma = lattice length / 3D length = 1 / panel size; the scale is
+    sqrt(det J) clamped to [1/size_hi, 1/size_lo] (inside the band only the shape is penalised)."""
+    lo, hi = SHAPE_FIRST
+    det = J[:, 0, 0] * J[:, 1, 1] - J[:, 0, 1] * J[:, 1, 0]
+    return np.clip(np.sqrt(np.maximum(det, 1e-300)), 1.0 / hi, 1.0 / lo)
+
+
 def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float = 1e-7, area_weight: float = 0.0,
                  soft=None, align=None):
     """SLIM (3D symmetric Dirichlet) under linear constraints kept exactly at every iterate:
@@ -207,8 +221,19 @@ def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float =
     wts = prob.weight / float(np.sum(prob.weight))
 
     def energy(P):
-        """mean symmetric Dirichlet + area_weight * mean log^2 det J (area preservation)."""
+        """mean symmetric Dirichlet + area_weight * mean log^2 det J (area preservation).
+        Shape first: symmetric Dirichlet of J / s (s = clamped sqrt det J), i.e. 2 (r + 1/r) with the
+        stretch ratio r inside the size band, plus a size penalty only outside it."""
         E_, J_, x_ = prob.energy(P)
+        if SHAPE_FIRST is not None and np.isfinite(E_):
+            det = J_[:, 0, 0] * J_[:, 1, 1] - J_[:, 0, 1] * J_[:, 1, 0]
+            if np.any(det <= 0):
+                return np.inf, J_, x_
+            sc = _shape_scale(J_)
+            fro = np.einsum("tij,tij->t", J_, J_)
+            inv_fro = fro / det ** 2                      # |J^-1|_F^2 for 2x2
+            E_ = float(np.dot(wts, fro / sc ** 2 + sc ** 2 * inv_fro))
+            return E_, J_, x_
         if wa > 0 and np.isfinite(E_):
             det = J_[:, 0, 0] * J_[:, 1, 1] - J_[:, 0, 1] * J_[:, 1, 0]
             if np.any(det <= 0):
@@ -308,11 +333,18 @@ def aligned_slim(prob, uv0, groups, chains, fixed, iters: int = 80, tol: float =
         U, S, Vt = np.linalg.svd(J)
         Rt = U @ Vt
         sv = np.clip(S, 1e-12, None)
+        if SHAPE_FIRST is not None:
+            # local target = closest similarity s R (s clamped to the size band); SLIM weights of J / s
+            sc_ = _shape_scale(J)
+            sv = np.clip(S / sc_[:, None], 1e-12, None)
         with np.errstate(divide="ignore", invalid="ignore"):
             w2 = np.where(np.abs(sv - 1) > 1e-8, (sv - sv ** -3) / (sv - 1), 4.0)
         w = np.sqrt(np.maximum(w2, 1e-12))
         W = np.einsum("tij,tj,tkj->tik", U, w, U)
-        if wa > 0:
+        if SHAPE_FIRST is not None:
+            W = W / sc_[:, None, None]                    # |W/s (J - s R)| = |W (J/s - R)|
+            Rt = Rt * sc_[:, None, None]
+        if wa > 0 and SHAPE_FIRST is None:
             # local target between the closest rotation (shape) and the closest unit-area map
             beta = wa / (1.0 + wa)
             detJ = np.clip(S[:, 0] * S[:, 1], 1e-12, None)
@@ -412,7 +444,20 @@ def _start_map(src, dom, logical, quads, walk, chart, h):
     return so["phi"] / so["scale"] * h, so["prob"]
 
 
-def refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float, w_pos: float = 2.0,
+def refine_domain_aligned(*args, **kwargs):
+    """Design stage: always the original isometric energy.  The shape-first energy (SHAPE_FIRST) leaves
+    the overall scale free, which would let the designed lattice domain (and the panel count) grow;
+    it is used only for placing the grid in the fixed designed domain (place_grid_aligned)."""
+    global SHAPE_FIRST
+    keep = SHAPE_FIRST
+    SHAPE_FIRST = None
+    try:
+        return _refine_domain_aligned(*args, **kwargs)
+    finally:
+        SHAPE_FIRST = keep
+
+
+def _refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float, w_pos: float = 2.0,
                           min_3d_ratio: float = 0.9, under_weight: float = 3.0, area_weight: float = 0.0,
                           features: dict | None = None):
     """Continuous joint solve (free corners, straight axis-parallel sides, seamless cuts), then one
@@ -654,6 +699,10 @@ def polysquare_deform(prob, uv0, loop, iters: int = 40, w_start: float = 0.05, w
         U, S, Vt = np.linalg.svd(J)
         Rt = U @ Vt
         sv = np.clip(S, 1e-12, None)
+        if SHAPE_FIRST is not None:
+            # local target = closest similarity s R (s clamped to the size band); SLIM weights of J / s
+            sc_ = _shape_scale(J)
+            sv = np.clip(S / sc_[:, None], 1e-12, None)
         with np.errstate(divide="ignore", invalid="ignore"):
             w2 = np.where(np.abs(sv - 1) > 1e-8, (sv - sv ** -3) / (sv - 1), 4.0)
         Wl = np.einsum("tij,tj,tkj->tik", U, np.sqrt(np.maximum(w2, 1e-12)), U)

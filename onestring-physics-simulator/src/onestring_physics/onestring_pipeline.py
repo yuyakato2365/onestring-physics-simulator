@@ -1036,6 +1036,7 @@ class PipelineParameters(_original.PipelineParameters):
     # -> rectilinear boundary + interior harmonic reparameterization.
     # Defaults to OFF to preserve all existing OptCuts/Paper workflows.
     optcuts_area_grid_boundary_enabled: bool = False
+    optcuts_area_grid_size_band: str = ""  # 2026-10-30 shape first for the 10-23 re-parameterisation ('0.6,1.6')
     optcuts_area_grid_coverage_threshold: float = 0.50
     # Try rigid orientations BEFORE each official chart's production M2D grid
     # is first constructed. Does not edit seam topology or rephase a fixed grid.
@@ -1168,6 +1169,13 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_feature_slide_weight: float = 100.0  # strength of "slide" (distance to the crease / panel edge, squared)
     structured_grid_panel_planar_weight: float = 0.0   # panel-quality step: lifted panels close to planar
     structured_grid_panel_principal_weight: float = 0.0  # panel-quality step: panel edges along the principal bend
+    structured_grid_panel_neighbor_size_weight: float = 0.0  # 2026-10-30: adjacent panels of similar size
+    structured_grid_panel_min_size_weight: float = 0.0  # 2026-10-30: penalise panel edges shorter than ratio x L
+    structured_grid_panel_min_size_ratio: float = 0.6
+    structured_grid_panel_size_weight: float | None = None  # overrides the priority's size weight
+    structured_grid_size_band: str = ""  # 2026-10-30 shape first: '0.6,1.6' = panel size may follow the map within the band
+    structured_grid_panel_boundary_slide: bool = False  # panel-quality step: boundary vertices slide along Omega (seams stay closed)
+    structured_grid_boundary_slide_max: float = 0.35     # largest slide, in panel edges
     structured_grid_align_weight: float = 10.0         # principal-bend alignment weight
     structured_grid_align_aniso_lo: float = 10.0       # alignment starts at this bend difference (deg / panel)
     structured_grid_align_aniso_full: float = 30.0     # ... and has full weight from here

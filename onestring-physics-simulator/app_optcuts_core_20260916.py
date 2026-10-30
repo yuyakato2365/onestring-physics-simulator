@@ -98,6 +98,9 @@ def _install_optcuts_selector() -> None:
             "optcuts_structured_grid_20261028",
             "optcuts_structured_grid_valley_fix_align_20261029",
             "optcuts_structured_grid_strong_lines_20261029",
+            "optcuts_structured_grid_slide_shape_keep_20261030",
+            "optcuts_structured_grid_align_even_keep_20261030",
+            "optcuts_structured_grid_align_even_neighbor_keep_20261030",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -113,6 +116,12 @@ def _install_optcuts_selector() -> None:
                         "(authors' reference code) + OneString seam/3D adapter")
             if mode=="optcuts_structured_grid_valley_fix_align_20261029":
                 return "2026-10-29 | 10-28 構造化グリッド＋谷線に格子線を通して固定＋格子の向きを曲がる方向にそろえる"
+            if mode=="optcuts_structured_grid_slide_shape_keep_20261030":
+                return "2026-10-30 | 10-28 構造化グリッド＋境界の点をすべらせる＋形を優先（大きさは写像に合わせる）＋T3D で上面パネルの形を保つ"
+            if mode=="optcuts_structured_grid_align_even_keep_20261030":
+                return "2026-10-30 | 10-28 構造化グリッド＋格子の向きを曲がる方向にそろえる＋形を優先＋小さいパネルを防ぎ大きさをそろえる＋T3D で上面パネルの形を保つ"
+            if mode=="optcuts_structured_grid_align_even_neighbor_keep_20261030":
+                return "2026-10-30 | 上の向きそろえの版＋隣り合うパネルの大きさの比をそろえる"
             if mode=="optcuts_structured_grid_strong_lines_20261029":
                 return "2026-10-29 | 10-28 構造化グリッド＋強く曲がる谷線・山線を Ω に描いて格子を沿わせる"
             if mode=="optcuts_structured_grid_20261028":
@@ -147,7 +156,10 @@ def _install_optcuts_selector() -> None:
                                   "optcuts_zhang2021_quad_20261027",
                                   "optcuts_structured_grid_20261028",
                                   "optcuts_structured_grid_valley_fix_align_20261029",
-                                  "optcuts_structured_grid_strong_lines_20261029"})
+                                  "optcuts_structured_grid_strong_lines_20261029",
+                                  "optcuts_structured_grid_slide_shape_keep_20261030",
+                                  "optcuts_structured_grid_align_even_keep_20261030",
+                                  "optcuts_structured_grid_align_even_neighbor_keep_20261030"})
         )
         st.session_state["_onestring_planar_quad_20261026_selected"] = (value == "optcuts_planar_quad_20261026")
         st.session_state["_onestring_zhang2021_quad_20261027_selected"] = (
@@ -155,10 +167,16 @@ def _install_optcuts_selector() -> None:
         st.session_state["_onestring_structured_grid_20261028_selected"] = (
             value in {"optcuts_structured_grid_20261028",
                       "optcuts_structured_grid_valley_fix_align_20261029",
-                      "optcuts_structured_grid_strong_lines_20261029"})
+                      "optcuts_structured_grid_strong_lines_20261029",
+                                  "optcuts_structured_grid_slide_shape_keep_20261030",
+                                  "optcuts_structured_grid_align_even_keep_20261030",
+                                  "optcuts_structured_grid_align_even_neighbor_keep_20261030"})
         st.session_state["_onestring_structured_grid_feature_preset"] = {
             "optcuts_structured_grid_valley_fix_align_20261029": "valley_fix_align",
             "optcuts_structured_grid_strong_lines_20261029": "strong_lines",
+            "optcuts_structured_grid_slide_shape_keep_20261030": "slide_shape_keep_20261030",
+            "optcuts_structured_grid_align_even_keep_20261030": "align_shape_even_keep_20261030",
+            "optcuts_structured_grid_align_even_neighbor_keep_20261030": "align_shape_even_neighbor_keep_20261030",
         }.get(value, "off")
         st.session_state["_onestring_grid_seam_native_selected"] = (
             value == "optcuts_grid_seam_native")
@@ -340,7 +358,10 @@ def _install_optcuts_selector() -> None:
             )
         elif value in {"optcuts_structured_grid_20261028",
                        "optcuts_structured_grid_valley_fix_align_20261029",
-                       "optcuts_structured_grid_strong_lines_20261029"}:
+                       "optcuts_structured_grid_strong_lines_20261029",
+                       "optcuts_structured_grid_slide_shape_keep_20261030",
+                       "optcuts_structured_grid_align_even_keep_20261030",
+                       "optcuts_structured_grid_align_even_neighbor_keep_20261030"}:
             st.caption(
                 "2026-10-28: official OptCuts chart Ω → Ω boundary replaced by straight lines / smoothing "
                 "splines between features (seam nodes, sharp corners), bijective SLIM inside → regular quad "

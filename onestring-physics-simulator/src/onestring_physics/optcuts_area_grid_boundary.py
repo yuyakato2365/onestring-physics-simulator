@@ -748,6 +748,25 @@ def apply_area_grid_boundary(parameterization,grid,params,*,domain=None):
                     "original SD quality gate remains enforced",
                     flush=True,
                 )
+        band_raw=str(getattr(params,"optcuts_area_grid_size_band","") or "").strip()
+        if band_raw and band_raw.lower() not in {"off","none","0"}:
+            # 2026-10-30 shape first: square cells -> square panels, size may follow the map
+            from .shape_first_uv_20261030 import shape_first_refine
+            band=tuple(float(x) for x in band_raw.split(","))
+            try:
+                sf_uv,sf_rep=shape_first_refine(
+                    parameterization.surface_vertices_3d,parameterization.surface_faces,
+                    faces,trial_uv,loop,band)
+                sf_quality=assess(sf_uv)
+                sf_sd=float(sf_quality["distortion_area_mean"])
+                ok=np.isfinite(sf_sd) and sf_sd<=max_mean_sd
+                print(f"[GRID-SHAPE-FIRST] correspondence={attempt} {sf_rep} mean_sd {trial_sd:.5g}->{sf_sd:.5g} "
+                      f"limit={max_mean_sd:.5g} accepted={ok}",flush=True)
+                if ok:
+                    trial_uv,trial_quality,trial_sd=sf_uv,sf_quality,sf_sd
+                    parameterization.metrics.update({"optcuts_area_grid_"+k:v for k,v in sf_rep.items()})
+            except ValueError as exc:
+                print(f"[GRID-SHAPE-FIRST] skipped: {exc}",flush=True)
         if np.isfinite(trial_sd) and trial_sd < best_valid_sd:
             best_valid_sd=trial_sd
             best_valid_method=f"phase={phase}, fit={method}"

@@ -44,6 +44,9 @@ class PanelOptimizerWeights:
     area: float = 0.0       # log^2(panel area / L^2): equal panel AREAS (structured grids, size priority)
     planar: float = 0.0     # (det[P1-P0, P2-P0, P3-P0] / L^3)^2: lifted panels close to planar (2026-10-29)
     principal: float = 0.0  # sin^2(2 theta) of both panel directions vs the principal bend directions (2026-10-29)
+    neighbor_size: float = 0.0  # (log size_i - log size_j)^2 over edge-adjacent panels: no abrupt size jumps (2026-10-30)
+    min_size: float = 0.0   # one-sided log^2 penalty on panel edges shorter than min_ratio x L (2026-10-30)
+    min_ratio: float = 0.6
 
 
 @dataclass
@@ -115,6 +118,29 @@ class ChartLift:
         return self.X0[tri] + np.einsum("tij,tj->ti", self.J[tri], d)
 
 
+_PAIR_CACHE: dict = {}
+
+
+def _adjacent_panel_pairs(quads: np.ndarray) -> np.ndarray:
+    """(n, 2) panels that share an edge (cached per quad array)."""
+    key = (quads.shape, quads.tobytes())
+    hit = _PAIR_CACHE.get(key)
+    if hit is not None:
+        return hit
+    owner: dict = {}
+    pairs = []
+    for qi, q in enumerate(quads):
+        for k in range(4):
+            e = (min(int(q[k]), int(q[(k + 1) % 4])), max(int(q[k]), int(q[(k + 1) % 4])))
+            if e in owner:
+                pairs.append((owner[e], qi))
+            else:
+                owner[e] = qi
+    out = np.asarray(pairs, int).reshape(-1, 2)
+    _PAIR_CACHE.clear(); _PAIR_CACHE[key] = out
+    return out
+
+
 def _quad_terms(X: np.ndarray, quads: np.ndarray, L: float, w: PanelOptimizerWeights):
     """Per-panel badness b_q and dE/dX for E = mean b + alpha LSE(b)."""
     Q = X[quads]                                       # (m, 4, 3)
@@ -127,9 +153,13 @@ def _quad_terms(X: np.ndarray, quads: np.ndarray, L: float, w: PanelOptimizerWei
     theta = np.arccos(c)
     y = np.log(lu)                                      # log edge length, edge k = (k, k+1)
     ybar = y.mean(axis=1, keepdims=True)
-    lr = np.log(lu / L)
+    Lc = np.asarray(L, float)
+    lr = np.log(lu / (Lc[:, None] if Lc.ndim else Lc))   # per-panel target when L is an array (size band)
     sum_dev = theta.sum(axis=1) - 2.0 * np.pi
-    b = (w.angle * np.mean(c * c, axis=1) + w.size * np.mean(lr * lr, axis=1)
+    # edges shorter than min_ratio x the global reference L (not the per-panel target): too-small panels
+    lmin = np.minimum(np.log(lu / (w.min_ratio * float(np.exp(np.mean(np.log(np.maximum(Lc, 1e-300))))))), 0.0) \
+        if w.min_size > 0 else np.zeros_like(lu)
+    b = (w.angle * np.mean(c * c, axis=1) + w.size * np.mean(lr * lr, axis=1) + w.min_size * np.mean(lmin * lmin, axis=1)
          + w.aspect * np.mean((y - ybar) ** 2, axis=1) + w.angle_sum * sum_dev ** 2)
     if w.area > 0:
         d1 = Q[:, 2] - Q[:, 0]
@@ -137,7 +167,7 @@ def _quad_terms(X: np.ndarray, quads: np.ndarray, L: float, w: PanelOptimizerWei
         cr = np.cross(d1, d2)
         crn = np.maximum(np.linalg.norm(cr, axis=1), 1e-300)
         A = 0.5 * crn
-        la = np.log(A / (L * L))
+        la = np.log(A / (Lc * Lc))
         b = b + w.area * la * la
     m = len(quads)
     if w.worst_alpha > 0 and w.worst_beta > 0:
@@ -151,12 +181,25 @@ def _quad_terms(X: np.ndarray, quads: np.ndarray, L: float, w: PanelOptimizerWei
         lse = 0.0
     E = float(np.mean(b) + w.worst_alpha * lse)
     qw = 1.0 / m + w.worst_alpha * soft                 # dE/db_q
+    g_ybar = None
+    if w.neighbor_size > 0:
+        # panel size = mean log edge length; neighbours should differ little (size may still vary
+        # slowly over the surface).  Added outside the worst-panel weighting.
+        pr = _adjacent_panel_pairs(quads)
+        if len(pr):
+            dd = ybar[pr[:, 0], 0] - ybar[pr[:, 1], 0]
+            E += float(w.neighbor_size * np.mean(dd * dd))
+            g_ybar = np.zeros(m)
+            np.add.at(g_ybar, pr[:, 0], 2.0 * w.neighbor_size * dd / len(pr))
+            np.add.at(g_ybar, pr[:, 1], -2.0 * w.neighbor_size * dd / len(pr))
     # d b / d c_k, d b / d y_k (edge k), d b / d theta_k
     dbdc = qw[:, None] * w.angle * 2.0 * c / 4.0
     sin = np.sqrt(np.maximum(1.0 - c * c, 1e-12))
     dbdtheta = qw[:, None] * w.angle_sum * 2.0 * sum_dev[:, None] * np.ones((1, 4))
     dbdc = dbdc - dbdtheta / sin                        # theta = arccos(c)
-    dbdy = qw[:, None] * (w.size * 2.0 * lr / 4.0 + w.aspect * 2.0 * (y - ybar) / 4.0)
+    dbdy = qw[:, None] * (w.size * 2.0 * lr / 4.0 + w.aspect * 2.0 * (y - ybar) / 4.0 + w.min_size * 2.0 * lmin / 4.0)
+    if g_ybar is not None:
+        dbdy = dbdy + g_ybar[:, None] / 4.0             # d ybar / d y_k = 1/4
     # c_k = u.v/(|u||v|)
     dcdu = prv / (lu * lv)[..., None] - (c / (lu * lu))[..., None] * nxt
     dcdv = nxt / (lu * lv)[..., None] - (c / (lv * lv))[..., None] * prv
@@ -331,7 +374,9 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
                            line_triples: np.ndarray | None = None,
                            allow_invalid: bool = False,
                            principal_field: dict | None = None,
-                           crease_slide: dict | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
+                           crease_slide: dict | None = None,
+                           boundary_slide: dict | None = None,
+                           size_band: tuple | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
     """Move non-fixed vertices (UV) to optimise the lifted panels; returns (uv, xyz, report).
 
     ``line_triples`` (a, i, b): consecutive vertices along a grid line; with
@@ -374,6 +419,16 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
         el = np.linalg.norm(X[edges[:, 1]] - X[edges[:, 0]], axis=1)
         reference_length = float(np.exp(np.mean(np.log(np.maximum(el, 1e-300)))))
     L = float(reference_length)
+    Lq = L
+    if size_band is not None:
+        # 2026-10-30 shape first: each panel keeps the size the grid placement gave it (which follows
+        # the map's area), only clamped to [lo, hi] x the reference; shape terms are unchanged
+        lo, hi = float(size_band[0]), float(size_band[1])
+        Qx = X[quads]
+        own = np.exp(np.mean(np.log(np.maximum(np.linalg.norm(np.roll(Qx, -1, axis=1) - Qx, axis=2), 1e-300)), axis=1))
+        Lq = np.clip(own, lo * L, hi * L)
+        report["panel_optimizer_size_band"] = [lo, hi]
+        report["panel_optimizer_size_target_p05_p95"] = [float(np.percentile(Lq / L, 5)), float(np.percentile(Lq / L, 95))]
     state = {"tri": tri}
     tri_lines = None
     if line_triples is not None and len(line_triples) and w.smooth > 0:
@@ -410,9 +465,31 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
               np.clip((an - lo) / max(full - lo, 1e-9), 0.0, 1.0))
         report["panel_optimizer_principal_weighted_panels"] = float(np.sum(pf[2]))
 
+    sl = _boundary_slide_setup(lift, P, X, quads, fixed, L, boundary_slide) if boundary_slide else None
+    nfz = 2 * len(free)
+    if sl is not None:
+        report["panel_optimizer_boundary_slide_groups"] = len(sl["groups"])
+
+    def place_slides(Pz, s_):
+        """put the sliding boundary vertices at arc a = a0 + w tanh(s); returns d uv / d s per member."""
+        jac = []
+        for g, sv in zip(sl["groups"], s_):
+            th = np.tanh(sv)
+            a = g["a0"] + g["w"] * th
+            dads = g["w"] * (1.0 - th * th)
+            k = int(np.clip(np.searchsorted(g["cum"], a, side="right") - 1, 0, len(g["len"]) - 1))
+            t = (a - g["cum"][k]) / g["len"][k]
+            rows = []
+            for (A, B) in g["edges"][k]:
+                Pz[g["members"][len(rows)]] = (1.0 - t) * lift.uv[A] + t * lift.uv[B]
+                rows.append((lift.uv[B] - lift.uv[A]) / g["len"][k] * dads)
+            jac.append(rows)
+        return jac
+
     def fun(z):
         Pz = P.copy()
-        Pz[free] = z.reshape(-1, 2)
+        Pz[free] = z[:nfz].reshape(-1, 2)
+        jac = place_slides(Pz, z[nfz:]) if sl is not None else None
         Eb, Gb = _barrier(Pz, quads, ref_area, w)
         if not np.isfinite(Eb):
             return np.inf, None
@@ -421,7 +498,7 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
             return np.inf, None
         state["tri"] = t
         Xz = lift.lift(Pz, t)
-        Eq, GX, _ = _quad_terms(Xz, quads, L, w)
+        Eq, GX, _ = _quad_terms(Xz, quads, Lq, w)
         if tri_lines is not None:
             a, i, b = tri_lines[:, 0], tri_lines[:, 1], tri_lines[:, 2]
             r = Xz[a] - 2.0 * Xz[i] + Xz[b]
@@ -471,11 +548,21 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
                 for k in range(4):
                     np.add.at(GX, quads[:, k], sg[k] * ge)
         GP = np.einsum("nij,ni->nj", lift.J[t], GX) + Gb
+        if sl is not None:
+            gs = np.array([sum(float(GP[m] @ r) for m, r in zip(g["members"], rows))
+                           for g, rows in zip(sl["groups"], jac)])
+            return Eq + Eb, np.r_[GP[free].ravel(), gs]
         return Eq + Eb, GP[free].ravel()
 
-    E0, _ = fun(P[free].ravel())
-    z, E1, it = _lbfgs(fun, P[free].ravel(), max_iter=max_iter)
-    P[free] = z.reshape(-1, 2)
+    z0 = P[free].ravel() if sl is None else np.r_[P[free].ravel(), np.zeros(len(sl["groups"]))]
+    E0, _ = fun(z0)
+    z, E1, it = _lbfgs(fun, z0, max_iter=max_iter)
+    P[free] = z[:nfz].reshape(-1, 2)
+    if sl is not None:
+        place_slides(P, z[nfz:])
+        shift = np.array([g["w"] * abs(np.tanh(v)) for g, v in zip(sl["groups"], z[nfz:])]) / L
+        report["panel_optimizer_boundary_slide_mean_shift"] = float(shift.mean()) if len(shift) else 0.0
+        report["panel_optimizer_boundary_slide_max_shift"] = float(shift.max()) if len(shift) else 0.0
     tri = lift.locate(P, state["tri"])
     X = lift.lift(P, tri)
     report.update({"panel_optimizer_energy_before": float(E0), "panel_optimizer_energy_after": float(E1),
@@ -484,6 +571,143 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
     if np.any(quad_validity(P, quads)[0] <= 0) and not allow_invalid:
         raise PanelOptimizationError("ZHANG2021_ONESTRING_PANEL_OPTIMIZER_FLIPPED_A_QUAD")
     return P, X, report
+
+
+def _boundary_slide_setup(lift, P, X, quads, fixed, L, opts):
+    """Boundary grid vertices that may slide along the chart boundary (2026-10-30).
+
+    A vertex slides when every copy of it (seam copies share one 3D point) lies on a straight part
+    of the grid boundary (two incident quads) and no copy is a corner or a seam junction.  All
+    copies move by the same 3D arc length along the same 3D boundary edges, so the seam stays
+    exactly closed.  The shift is limited to ``opts["max_shift"]`` panel edges (default 0.35)."""
+    from scipy.spatial import cKDTree
+    f2 = np.asarray(lift.f2, int); f3 = np.asarray(lift.f3, int)
+    cnt = {}
+    for t in f2:
+        for k in range(3):
+            e = (min(t[k], t[(k + 1) % 3]), max(t[k], t[(k + 1) % 3]))
+            cnt[e] = cnt.get(e, 0) + 1
+    nxt = {}
+    for t in f2:                                   # oriented boundary edges (chart is CCW)
+        for k in range(3):
+            a, b = int(t[k]), int(t[(k + 1) % 3])
+            if cnt[(min(a, b), max(a, b))] == 1:
+                nxt[a] = b
+    if not nxt:
+        return None
+    start = next(iter(nxt)); loop = [start]
+    while nxt.get(loop[-1], start) != start and len(loop) <= len(nxt):
+        loop.append(nxt[loop[-1]])
+    loop = np.asarray(loop, int); nb = len(loop)
+    if nb != len(nxt):
+        return None                                # several boundary loops: not supported
+    xid = np.zeros(len(lift.uv), int)
+    xid[f2.ravel()] = f3.ravel()
+    xyz = np.asarray(lift.xyz, float)
+    seg3 = np.linalg.norm(xyz[xid[np.roll(loop, -1)]] - xyz[xid[loop]], axis=1)
+    pair_edges = {}
+    for i in range(nb):
+        key = frozenset((int(xid[loop[i]]), int(xid[loop[(i + 1) % nb]])))
+        pair_edges.setdefault(key, []).append(i)
+    # grid boundary vertices and their position on the chart boundary
+    ecount = {}
+    for q in quads:
+        for k in range(4):
+            e = (min(q[k], q[(k + 1) % 4]), max(q[k], q[(k + 1) % 4]))
+            ecount[e] = ecount.get(e, 0) + 1
+    gb = sorted({v for e, c in ecount.items() if c == 1 for v in e})
+    nquad = np.zeros(len(P), int)
+    for q in quads:
+        nquad[np.asarray(q, int)] += 1
+    A = lift.uv[loop]; B = lift.uv[np.roll(loop, -1)]; AB = B - A
+    L2 = np.maximum(np.einsum("ij,ij->i", AB, AB), 1e-300)
+    where = {}
+    for v in gb:
+        t = np.clip(np.einsum("ij,ij->i", P[v] - A, AB) / L2, 0.0, 1.0)
+        d = np.linalg.norm(A + t[:, None] * AB - P[v], axis=1)
+        i = int(np.argmin(d))
+        if d[i] < 1e-7 * max(L, 1e-12):
+            where[v] = (i, float(t[i]))
+    # 3D points that carry a grid vertex on some side of the cut (incl. T-vertices): a slide must not
+    # pass one, or the two sides' vertex order along the cut would interleave (2026-10-30)
+    blocked = set()
+    for v, (i_, t_) in where.items():
+        if t_ <= 1e-9:
+            blocked.add(int(xid[loop[i_]]))
+        elif t_ >= 1.0 - 1e-9:
+            blocked.add(int(xid[loop[(i_ + 1) % nb]]))
+    tree = cKDTree(X[gb])
+    groups_raw = {}
+    for a_, b_ in tree.query_pairs(1e-7 * max(L, 1e-12)):
+        groups_raw.setdefault(gb[a_], {gb[a_]}).add(gb[b_])
+    copy_of = {}
+    for m, mem in groups_raw.items():
+        for v in mem:
+            copy_of[v] = mem
+    max_shift = float((opts or {}).get("max_shift", 0.35)) * L
+    groups, seen = [], set()
+    extra_fixed = set(int(v) for v in (opts or {}).get("keep", []))
+    for v in gb:
+        if v in seen or v not in where:
+            continue
+        mem = sorted(copy_of.get(v, {v}))
+        seen.update(mem)
+        if len(mem) > 2 or any(nquad[u] != 2 or u not in where or u in extra_fixed for u in mem):
+            continue
+        m = mem[0]
+        i0, t0 = where[m]
+        # walk along the master side while every copy has the matching 3D edge
+        def copy_edge(i, u):
+            key = frozenset((int(xid[loop[i]]), int(xid[loop[(i + 1) % nb]])))
+            cands = [j for j in pair_edges.get(key, []) if j != i]
+            if u == m:
+                if len(mem) == 1 and cands:
+                    # a lone copy on a cut edge: its other side has no grid vertex to move with it
+                    return None
+                return (int(loop[i]), int(loop[(i + 1) % nb]))
+            if not cands:
+                return None
+            iu = where[u][0]
+            j = min(cands, key=lambda j_: min(abs(j_ - iu), nb - abs(j_ - iu)))
+            a3, b3 = int(xid[loop[i]]), int(xid[loop[(i + 1) % nb]])
+            ca, cb = int(loop[j]), int(loop[(j + 1) % nb])
+            return (ca, cb) if xid[ca] == a3 else (cb, ca)
+        idx = [i0]
+        edges = {i0: [copy_edge(i0, u) for u in mem]}
+        if any(e is None for e in edges[i0]):
+            continue
+        own3 = {int(xid[loop[where[u][0]]]) if where[u][1] <= 1e-9 else
+                int(xid[loop[(where[u][0] + 1) % nb]]) if where[u][1] >= 1.0 - 1e-9 else -1 for u in mem}
+        acc = (1 - t0) * seg3[i0]
+        i = i0
+        while acc < max_shift:
+            i = (i + 1) % nb
+            if int(xid[loop[i]]) in blocked and int(xid[loop[i]]) not in own3:
+                break
+            e = [copy_edge(i, u) for u in mem]
+            if any(x is None for x in e) or i == i0:
+                break
+            idx.append(i); edges[i] = e; acc += seg3[i]
+        acc = t0 * seg3[i0]
+        i = i0
+        while acc < max_shift:
+            i = (i - 1) % nb
+            if int(xid[loop[(i + 1) % nb]]) in blocked and int(xid[loop[(i + 1) % nb]]) not in own3:
+                break
+            e = [copy_edge(i, u) for u in mem]
+            if any(x is None for x in e) or i in edges:
+                break
+            idx.insert(0, i); edges[i] = e; acc += seg3[i]
+        lens = np.array([seg3[i] for i in idx])
+        cum = np.r_[0.0, np.cumsum(lens)][:-1]
+        k0 = idx.index(i0)
+        a0 = cum[k0] + t0 * lens[k0]
+        w = min(max_shift, a0 - 1e-9 * L, cum[-1] + lens[-1] - a0 - 1e-9 * L) * 0.999
+        if w <= 1e-6 * L:
+            continue
+        groups.append({"members": mem, "a0": a0, "w": w, "cum": cum, "len": lens,
+                       "edges": [edges[i] for i in idx]})
+    return {"groups": groups} if groups else None
 
 
 def _pull_inside(lift: ChartLift, P: np.ndarray, free: np.ndarray) -> np.ndarray:

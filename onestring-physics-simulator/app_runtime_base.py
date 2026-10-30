@@ -701,6 +701,9 @@ with st.sidebar:
         "optcuts_structured_grid_20261028": "off",
         "optcuts_structured_grid_valley_fix_align_20261029": "valley_fix_align",
         "optcuts_structured_grid_strong_lines_20261029": "strong_lines",
+        "optcuts_structured_grid_slide_shape_keep_20261030": "slide_shape_keep_20261030",
+        "optcuts_structured_grid_align_even_keep_20261030": "align_shape_even_keep_20261030",
+        "optcuts_structured_grid_align_even_neighbor_keep_20261030": "align_shape_even_neighbor_keep_20261030",
     }
     omega_parameterization_mode = _param_row(
         "S→Omega のパラメータ化。paper_reference_bff だけが公式BFF CLIを使用し、代替fallbackを禁止する。",
@@ -839,6 +842,10 @@ with st.sidebar:
     structured_grid_feature_preset = STRUCTURED_GRID_FEATURE_MODES.get(
         omega_parameterization_mode,
         st.session_state.get("_onestring_structured_grid_feature_preset", "off"))
+    # 2026-10-30: T3D top-face mode follows the selected structured-grid preset (every run sets it)
+    from onestring_physics.feature_lines_20261029 import t3d_top_shape_mode as _t3d_top_mode
+    os.environ["ONESTRING_T3D_TOP_SHAPE"] = (
+        _t3d_top_mode(structured_grid_feature_preset) if optcuts_structured_grid_20261028_enabled else "plane")
     if (optcuts_planar_quad_20261026_enabled or optcuts_zhang2021_quad_20261027_enabled
             or optcuts_structured_grid_20261028_enabled):
         omega_parameterization_mode = "optcuts_test"

@@ -341,11 +341,35 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
     weight=float(metrics_in.get("paper_t3d_planarity_weight",1.0))
     anchor_weight=float(metrics_in.get("paper_t3d_rest_weight",1e-3))
     before=_planarity_error(x,all_faces)
+    # 2026-10-30 "keep the K3D panel shapes": every top face moves only rigidly, as the planar
+    # version of its K3D shape (best-fit plane projection, fixed once).  The plain Eq.(2) projection
+    # lets a top face change its shape freely to make the side walls planar, which collapses panels
+    # that K3D had made square.  Bottom and side faces keep the original plane projection.
+    import os as _os
+    top_mode=str(metrics_in.get("paper_t3d_top_shape_mode",
+                                _os.environ.get("ONESTRING_T3D_TOP_SHAPE","plane"))).strip().lower()
+    keep_top=top_mode in ("k3d_rigid","rigid","keep_k3d")
+    top_shape=[_best_fit_plane(x[np.asarray(f,int)]) for f in top_face_ids] if keep_top else None
+    top_weight=float(metrics_in.get("paper_t3d_top_shape_weight",
+                                    _os.environ.get("ONESTRING_T3D_TOP_SHAPE_WEIGHT","1")))
+    if keep_top:
+        print("[PAPER-T3D] top faces keep their K3D shape (rigid moves only)",flush=True)
+    def _rigid_target(P0,cur):
+        c0=P0.mean(axis=0);c1=cur.mean(axis=0)
+        H=(P0-c0).T@(cur-c1)
+        U,_,Vt=np.linalg.svd(H)
+        D=np.diag([1.,1.,np.sign(np.linalg.det(Vt.T@U.T))])
+        R=Vt.T@D@U.T
+        return (P0-c0)@R.T+c1
     done=0
     for it in range(iterations):
         constraints=[]
-        for ids in all_faces:
+        for fi,ids in enumerate(all_faces):
             ids_arr=np.asarray(ids,int)
+            if keep_top and fi<len(top_face_ids):
+                projected=_rigid_target(top_shape[fi],x[ids_arr])
+                constraints.append((ids,projected,weight*top_weight))
+                continue
             projected=_best_fit_plane(x[ids_arr])
             constraints.append((ids,projected,weight))
         new=_solve(len(x),constraints,x0,anchor_weight,
@@ -525,6 +549,8 @@ def extrude_paper_face_planarity(mesh,thickness,stage,pipeline):
         "side_face_planarity_error":grouped["side"],
         "tile_thickness":float(thickness),
         "paper_t3d_rest_weight":anchor_weight,
+        "paper_t3d_top_shape_mode":("k3d_rigid" if keep_top else "plane"),
+        "paper_t3d_top_shape_weight":(top_weight if keep_top else None),
         "paper_t3d_shared_vertex_separation_max":edge_copy_separation,
         "t3d_seam_exact_equality_group_count":len(seam_groups),
         "t3d_seam_affine_row_count":len(affine_rows),

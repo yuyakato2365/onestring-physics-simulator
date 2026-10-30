@@ -378,6 +378,17 @@ def stage_thresholds(params: Any, stage: str):
         raise Zhang2021QuadModeError(f"ZHANG2021_{stage.upper()}_GATE_INVALID: {exc}") from exc
 
 
+def _size_band(params: Any):
+    """'0.6,1.6' -> (0.6, 1.6): shape-first panel sizes (2026-10-30); '' / off -> None."""
+    raw = str(getattr(params, "structured_grid_size_band", "") or "").strip()
+    if not raw or raw.lower() in ("off", "none", "0"):
+        return None
+    lo, hi = (float(x) for x in raw.split(","))
+    if not (0.0 < lo <= 1.0 <= hi):
+        raise Zhang2021QuadModeError(f"STRUCTURED_GRID_SIZE_BAND_INVALID: {raw!r}")
+    return lo, hi
+
+
 def _seam_preflight(rp: Any, quad_uv: np.ndarray, faces: np.ndarray) -> dict:
     """The downstream source-seam classifier on this candidate (before any K3D)."""
     from .optcuts_seam_exact_closure import SeamTopologyMismatch, discover_exact_seam_topology
@@ -412,7 +423,8 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
                        panel_line_triples: Any = None, strict_node_valence: bool = True,
                        panel_weights: Any = None, report_only: bool = False,
                        keep_interior_3d: bool = False, extra_fixed: Any = None,
-                       principal_field: Any = None, crease_slide: Any = None) -> Zhang2021M2DPlan:
+                       principal_field: Any = None, crease_slide: Any = None,
+                       boundary_slide: Any = None) -> Zhang2021M2DPlan:
     """Paper stage + OneString adapter on one chart (raises on failure).
 
     1. [paper]     Zhang et al. 2021 reference programs -> Q (``zhang_result`` may
@@ -512,10 +524,34 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
                 lift, quv, faces_ccw, fixed, weights=panel_weights or PanelOptimizerWeights(),
                 max_iter=int(getattr(params, "zhang2021_panel_optimization_iterations", 300)),
                 line_triples=panel_line_triples, allow_invalid=report_only, principal_field=principal_field,
-                crease_slide=crease_slide)
+                crease_slide=crease_slide, boundary_slide=boundary_slide, size_band=_size_band(params))
         except PanelOptimizationError as exc:
             raise Zhang2021QuadModeError(str(exc)) from exc
         opt_report["panel_optimizer_enabled"] = True
+        if boundary_slide and int(opt_report.get("panel_optimizer_boundary_slide_groups", 0) or 0) > 0:
+            # 2026-10-30: slid boundary vertices -> make the chart boundary the new quad polygon again
+            # (otherwise the seam classifier cannot pair the two cut sides and K3D leaves seams open)
+            from .chart_slide_conform_20261030 import ChartConformError, conform_chart_to_grid_boundary
+            try:
+                rp2, crep = conform_chart_to_grid_boundary(rp, quv_in, quv, faces_ccw)
+                lift2 = ChartLift(rp2.uv, rp2.f2, rp2.xyz, rp2.f3)
+                tri2 = lift2.locate(quv)
+                if np.any(tri2 < 0):
+                    raise ChartConformError(f"CHART_CONFORM_GRID_VERTEX_OUTSIDE: {int(np.sum(tri2 < 0))}")
+                m3d = lift2.lift(quv, tri2)
+                rp, lift = rp2, lift2
+                opt_report.update(crep)
+                opt_report["chart_conform_status"] = "ok"
+                print(f"[SG-SLIDE-CONFORM] chart made conforming again: {crep}", flush=True)
+            except ChartConformError as exc:
+                print(f"[SG-SLIDE-CONFORM] failed ({exc}); boundary slide undone", flush=True)
+                quv, m3d, opt_report = optimize_panel_quality(
+                    lift, quv_in.copy(), faces_ccw, fixed, weights=panel_weights or PanelOptimizerWeights(),
+                    max_iter=int(getattr(params, "zhang2021_panel_optimization_iterations", 300)),
+                    line_triples=panel_line_triples, allow_invalid=report_only, principal_field=principal_field,
+                    crease_slide=crease_slide, boundary_slide=None, size_band=_size_band(params))
+                opt_report["panel_optimizer_enabled"] = True
+                opt_report["chart_conform_status"] = f"failed, slide undone: {str(exc)[:200]}"
     else:
         tri = lift.locate(quv)
         if np.any(tri < 0):
@@ -545,6 +581,18 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
         src_loop_uv, [list(range(len(src_loop_uv)))], q_poly, [list(range(len(q_poly)))])
     bbox_diag = float(np.linalg.norm(np.ptp(uv, axis=0)))
     seam = _seam_preflight(rp, quv, faces_ccw)
+    if (boundary_slide and int(opt_report.get("panel_optimizer_boundary_slide_groups", 0) or 0) > 0
+            and seam.get("zhang2021_seam_preflight_mode") not in ("hard", "no_cut")):
+        # 2026-10-30: the slide left the two cut sides unmatched -> same plan without the slide
+        print(f"[SG-SLIDE-CONFORM] seam not hard-closable after the slide "
+              f"({str(seam.get('zhang2021_seam_preflight_reason', ''))[:160]}); boundary slide undone", flush=True)
+        plan = plan_zhang2021_m2d(xyz, f3, uv, f2, params, zhang_result=zhang_result,
+                                  panel_line_triples=panel_line_triples, strict_node_valence=strict_node_valence,
+                                  panel_weights=panel_weights, report_only=report_only,
+                                  keep_interior_3d=keep_interior_3d, extra_fixed=extra_fixed,
+                                  principal_field=principal_field, crease_slide=crease_slide, boundary_slide=None)
+        plan.metrics["panel_optimizer_boundary_slide_undone"] = "seam not hard-closable after the slide"
+        return plan
     odd = odd_valence_interior_vertices(faces_ccw)
     moved = float(np.max(np.linalg.norm(quv - quv_in, axis=1))) if len(quv) else 0.0
     metrics: dict[str, Any] = {

@@ -364,7 +364,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                 winning_hard['pose'],positions,faces,reference_pose,
                 scale,global_deadline,rng,
                 lambda pose: (lambda energy, gradient, stats: (energy,gradient))(*evaluate(pose)),
-                iterations=24,
+                iterations=int(getattr(params,'hinge_layout_hard_refine_iterations',24)),
             )
             hard_refinement_elapsed=time.perf_counter()-hard_refinement_started
             refined_xy,_=positions(refined)

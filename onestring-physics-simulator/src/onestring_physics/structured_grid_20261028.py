@@ -1150,7 +1150,25 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, 
 
 # ------------------------------------------------------------------ planner
 def plan_structured_grid(xyz, f3, uv, f2, params: Any):
-    """Omega_0 -> Omega_1 -> structured grid M2D plan (Zhang2021M2DPlan container, report-only gates)."""
+    """Omega_0 -> Omega_1 -> structured grid M2D plan (Zhang2021M2DPlan container, report-only gates).
+
+    2026-10-30: ``params.structured_grid_size_band`` ('0.6,1.6') switches the grid placement and the
+    panel step to "shape first" (panel size follows the map within the band, only shape is fought)."""
+    from . import aligned_grid_20261028 as _ag
+    from .optcuts_zhang2021_quad_20261027 import _size_band
+    from .feature_lines_20261029 import apply_feature_preset
+    band = _size_band(apply_feature_preset(params))
+    previous = _ag.SHAPE_FIRST
+    _ag.SHAPE_FIRST = band
+    if band is not None:
+        print(f"[SG-SHAPE-FIRST] grid placement + panel step: shape first, panel size band {band}", flush=True)
+    try:
+        return _plan_structured_grid(xyz, f3, uv, f2, params)
+    finally:
+        _ag.SHAPE_FIRST = previous
+
+
+def _plan_structured_grid(xyz, f3, uv, f2, params: Any):
     from .optcuts_zhang2021_quad_20261027 import Zhang2021QuadModeError, _params_with, plan_zhang2021_m2d
     from .zhang2021_onestring_boundary import build_source_boundary, oriented_boundary_loops, uv_to_xyz_vertex_map
     from .zhang2021_onestring_precondition import boundary_features, precondition_omega
@@ -1543,7 +1561,9 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
                                   panel_weights=_panel_weights(params),
                                   report_only=True, keep_interior_3d=True,
                                   extra_fixed=extra_fixed, principal_field=principal_field,
-                                  crease_slide=crease_slide)
+                                  crease_slide=crease_slide,
+                                  boundary_slide=({"max_shift": float(getattr(params, "structured_grid_boundary_slide_max", 0.35))}
+                                                  if bool(getattr(params, "structured_grid_panel_boundary_slide", False)) else None))
     except Zhang2021QuadModeError as exc:
         raise StructuredGridError(str(exc)) from exc
     m = plan.metrics
@@ -1609,6 +1629,14 @@ def _panel_weights(params: Any):
     from .zhang2021_panel_optimizer import PanelOptimizerWeights
     pr = str(getattr(params, "structured_grid_priority", "shape") or "shape")
     w = dict(PRIORITY_WEIGHTS.get(pr, PRIORITY_WEIGHTS["shape"]))
+    # 2026-10-30: keep panels from getting too small / make sizes more even
+    if float(getattr(params, "structured_grid_panel_min_size_weight", 0.0) or 0.0) > 0:
+        w["min_size"] = float(params.structured_grid_panel_min_size_weight)
+        w["min_ratio"] = float(getattr(params, "structured_grid_panel_min_size_ratio", 0.6))
+    if float(getattr(params, "structured_grid_panel_neighbor_size_weight", 0.0) or 0.0) > 0:
+        w["neighbor_size"] = float(params.structured_grid_panel_neighbor_size_weight)
+    if getattr(params, "structured_grid_panel_size_weight", None) not in (None, ""):
+        w["size"] = float(params.structured_grid_panel_size_weight)
     return PanelOptimizerWeights(smooth=float(getattr(params, "structured_grid_smoothness_weight", 1.0)),
                                  planar=float(getattr(params, "structured_grid_panel_planar_weight", 0.0)),
                                  principal=float(getattr(params, "structured_grid_panel_principal_weight", 0.0)), **w)

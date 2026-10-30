@@ -190,7 +190,7 @@ def face_alignment(xyz, f3, V, field, aniso_lo_deg: float = 10.0, aniso_full_deg
 # ------------------------------------------------------------------ crest points and lines
 def crease_lines(V, F, h: float, kinds: str = "valley", bend_hi_deg: float = 35.0, bend_lo_deg: float = 20.0,
                  anisotropy: float = 1.5, min_length_ratio: float = 2.0, gap_ratio: float = 0.75,
-                 spacing_ratio: float = 0.25, field=None) -> dict:
+                 spacing_ratio: float = 0.25, field=None, anisotropy_mode: str = "abs") -> dict:
     """Panel-scale crease polylines of the surface (V, F).
 
     kinds: "valley" (concave folds such as the base of a neck or an ear), "ridge" (convex folds) or
@@ -215,7 +215,13 @@ def crease_lines(V, F, h: float, kinds: str = "valley", bend_hi_deg: float = 35.
         sb = -bend if kind == "valley" else bend
         kc = np.argmax(sb, axis=1)
         s = sb[np.arange(len(V)), kc]                          # bend across the crease (>0)
-        along = np.abs(bend[np.arange(len(V)), (kc + n_dirs // 2) % n_dirs])
+        along_signed = bend[np.arange(len(V)), (kc + n_dirs // 2) % n_dirs]     # convex positive
+        if anisotropy_mode == "same_sign":
+            # drop only bowls / domes (the bend along the line has the same sign as across it);
+            # saddles such as the base of an ear (concave across, convex around) stay
+            along = np.maximum(-along_signed, 0.0) if kind == "valley" else np.maximum(along_signed, 0.0)
+        else:
+            along = np.abs(along_signed)
         cdir = D[np.arange(len(V)), kc]
         ok = (s >= lo) & (s >= anisotropy * along)
         sp = _sample(tree, V, Ns, s, V + delta * cdir, Ns)
@@ -616,8 +622,42 @@ FEATURE_PRESETS = {
         "structured_grid_feature_design": False,
         "structured_grid_feature_trim": 0.25, "structured_grid_feature_min_piece": 0.5,
         "structured_grid_feature_segmentation": "dp", "structured_grid_feature_resolve": True,
+        # saddle creases (base of an ear) count; nearby pieces of one crease are joined
+        "structured_grid_feature_anisotropy_mode": "same_sign", "structured_grid_feature_gap": 1.5,
+    },
+    # 2026-10-30: boundary grid vertices slide along Omega (seams stay closed); grid placement and
+    # panel step "shape first" (panel size may follow the map within 0.6-1.6 x); T3D keeps the K3D
+    # shape of every top panel (rigid moves only)
+    "slide_shape_keep_20261030": {
+        "structured_grid_feature_mode": "off",
+        "structured_grid_panel_boundary_slide": True, "structured_grid_size_band": "0.6,1.6",
+        "paper_t3d_top_shape_mode": "k3d_rigid",
+    },
+    # 2026-10-30: lattice turned to the principal bend directions from the design stage (weight 5);
+    # shape first with a narrow size band 0.8-1.25 x, size weight 1, too-short edges (< 0.7 x) penalised;
+    # T3D keeps the K3D panel shapes
+    "align_shape_even_keep_20261030": {
+        "structured_grid_feature_mode": "align", "structured_grid_feature_kinds": "valley",
+        "structured_grid_feature_design": True, "structured_grid_align_weight": 5.0,
+        "structured_grid_size_band": "0.8,1.25", "structured_grid_panel_size_weight": 1.0,
+        "structured_grid_panel_min_size_weight": 20.0, "structured_grid_panel_min_size_ratio": 0.7,
+        "paper_t3d_top_shape_mode": "k3d_rigid",
+    },
+    # 2026-10-30: the previous + adjacent panels of similar size (no abrupt size jumps)
+    "align_shape_even_neighbor_keep_20261030": {
+        "structured_grid_feature_mode": "align", "structured_grid_feature_kinds": "valley",
+        "structured_grid_feature_design": True, "structured_grid_align_weight": 5.0,
+        "structured_grid_size_band": "0.8,1.25", "structured_grid_panel_size_weight": 1.0,
+        "structured_grid_panel_min_size_weight": 20.0, "structured_grid_panel_min_size_ratio": 0.7,
+        "structured_grid_panel_neighbor_size_weight": 20.0,
+        "paper_t3d_top_shape_mode": "k3d_rigid",
     },
 }
+
+
+def t3d_top_shape_mode(preset: str) -> str:
+    """T3D top-face mode of a structured-grid preset ("plane" = the original Eq.(2) projection)."""
+    return str(FEATURE_PRESETS.get(str(preset or "off"), {}).get("paper_t3d_top_shape_mode", "plane"))
 
 
 def apply_feature_preset(params):
@@ -656,6 +696,8 @@ def build_features(V, F, h: float, params) -> dict | None:
                           bend_hi_deg=float(getattr(params, "structured_grid_feature_bend_hi", 35.0)),
                           bend_lo_deg=float(getattr(params, "structured_grid_feature_bend_lo", 20.0)),
                           min_length_ratio=float(getattr(params, "structured_grid_feature_min_length", 2.0)),
+                          gap_ratio=float(getattr(params, "structured_grid_feature_gap", 0.75)),
+                          anisotropy_mode=str(getattr(params, "structured_grid_feature_anisotropy_mode", "abs")),
                           field=field)
         # keep only lines that bend strongly as a whole: mean bend per panel >= min_mean_bend (deg)
         mm = float(getattr(params, "structured_grid_feature_min_mean_bend", 0.0) or 0.0)
