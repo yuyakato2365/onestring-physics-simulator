@@ -98,7 +98,7 @@ def _render_eq5_controls(st: Any) -> None:
     w2=st.number_input("ω2 / ECollision",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_COLLISION",1.0)),step=0.1,format="%.4f",key="onestring_eq5_w_collision",help="独立tile同士の2D overlapを避ける項。")
     w3=st.number_input("ω3 / EFab",min_value=0.0,max_value=10000.0,value=max(0.0,_env_float("ONESTRING_EQ5_W_FAB",0.001)),step=0.001,format="%.6f",key="onestring_eq5_w_fab",help="同じhinge周りで隣接する異なるtileのray間gap angleを制御する項。")
     theta=st.number_input("θmin / EFab gap angle [deg]",min_value=0.0,max_value=90.0,value=min(90.0,max(0.0,_env_float("ONESTRING_EQ5_THETA_MIN_DEG",5.0))),step=1.0,format="%.2f",key="onestring_eq5_theta_min_deg")
-    iterations=st.number_input("Eq.5 K2D iterations",min_value=1,max_value=10000,value=max(1,_env_int("ONESTRING_EQ5_ITERATIONS",240)),step=20,key="onestring_eq5_iterations")
+    iterations=st.number_input("Eq.5 K2D iterations",min_value=1,max_value=10000,value=min(10000,max(1,_env_int("ONESTRING_EQ5_ITERATIONS",240))),step=20,key="onestring_eq5_iterations")  # 2026-11-04: in range when a boundary-fit mode set 100000
     os.environ["ONESTRING_EQ5_W_EDGE"]=str(float(w1)); os.environ["ONESTRING_EQ5_W_COLLISION"]=str(float(w2)); os.environ["ONESTRING_EQ5_W_FAB"]=str(float(w3)); os.environ["ONESTRING_EQ5_THETA_MIN_DEG"]=str(float(theta)); os.environ["ONESTRING_EQ5_ITERATIONS"]=str(int(iterations))
     st.caption("各ヒンジは2枚のタイルだけで共有します。全反復の目的関数を評価し、制約が残る場合は未充足と表示します。")
 

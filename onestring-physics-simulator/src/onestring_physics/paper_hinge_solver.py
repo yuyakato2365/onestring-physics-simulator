@@ -19,6 +19,22 @@ class _Deadline(Exception):
     pass
 
 
+# 2026-11-04: one contact rule for the T2D verdicts and the app's collision map
+# 2026-11-04 (later): a penetration shallower than this (x tile edge) is contact, not a collision.  The collision
+# energy is the squared depth, so its gradient vanishes with the depth; a 1e-8 threshold flagged depths the
+# optimiser cannot move any more.  Default 0.1 % of the tile edge; env ONESTRING_T2D_CONTACT_TOLERANCE_REL
+# (set by the app) overrides it at call time.
+T2D_CONTACT_TOLERANCE_REL_DEFAULT = 1e-3
+def t2d_contact_tolerance_rel() -> float:
+    import os
+    try:
+        return float(os.environ.get('ONESTRING_T2D_CONTACT_TOLERANCE_REL', T2D_CONTACT_TOLERANCE_REL_DEFAULT))
+    except ValueError:
+        return T2D_CONTACT_TOLERANCE_REL_DEFAULT
+T2D_CONTACT_TOLERANCE_REL = T2D_CONTACT_TOLERANCE_REL_DEFAULT   # kept for old imports; use t2d_contact_tolerance_rel()
+T2D_HINGE_CLOSED_REL = 0.05          # a hinge counts as closed when its corners are this close, x tile edge
+
+
 def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_callback=None):
     started=time.perf_counter()
     from .paper_t2d import build_hinge_graph, validate_flat_linkage
@@ -91,11 +107,12 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         rotated=np.stack((c*local[:,:,0]-s*local[:,:,1],s*local[:,:,0]+c*local[:,:,1]),axis=2)
         xy=rotated+centers[:,None,:]+scale*pose[:,None,1:]
         return xy,rotated
-    def evaluate(pose):
+    def evaluate(pose, wc=None):
+        w_coll=wcoll if wc is None else float(wc)   # 2026-11-04: collision weight can be raised (continuation)
         xy,rotated=positions(pose)
         flat=xy.reshape(-1,2)
-        ec,g,ncoll,collision_stats=collision_energy_gradient(flat,faces,scale*1e-8,return_diagnostics=True)
-        g*=wcoll
+        ec,g,ncoll,collision_stats=collision_energy_gradient(flat,faces,scale*t2d_contact_tolerance_rel(),return_diagnostics=True)
+        g*=w_coll
         delta=flat[ha]-flat[hb]
         dz=rest.reshape(-1,3)[ha,2]-rest.reshape(-1,3)[hb,2]
         conn=2*float(np.sum(delta*delta)+dz@dz)
@@ -107,10 +124,10 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         translation_delta=pose[:,1:]-reference_pose[:,1:]
         anchor=scale**2*float(np.sum(translation_delta**2))
         gradient[:,1:]+=2*wanchor*scale**2*translation_delta
-        energy=wconn*conn+wcoll*ec+wanchor*anchor
+        energy=wconn*conn+w_coll*ec+wanchor*anchor
         errors=np.sqrt(np.sum(delta*delta,axis=1)+dz*dz)
         stats=dict(EHinge=energy,EConn=conn,ECollision=ec,EAnchor=anchor,ERigid=0.,
-                   wConnEConn=wconn*conn,wCollisionECollision=wcoll*ec,wAnchorEAnchor=wanchor*anchor,
+                   wConnEConn=wconn*conn,wCollisionECollision=w_coll*ec,wAnchorEAnchor=wanchor*anchor,
                    rigid_constraint='exact SE(2) poses; no soft weight',
                    collisions=ncoll,**collision_stats,
                    hinge_mean=float(errors.mean()) if len(errors) else 0.,
@@ -293,16 +310,125 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     hard_remaining_collision_count=None
     hard_remaining_max_depth=None
     hard_tolerance=max(1e-12,scale*1e-10)
+    # 2026-11-03: hinge-aware hard check (default).  The strict check counted the
+    # contact of two hinged tiles along their shared edge as an overlap and used
+    # a tolerance of 1e-10 tile edges, so the overlap repair could only succeed
+    # on trials whose hinges were already torn, and those were selected.  Now:
+    #  * contacts between hinge partners are not overlaps (how far a hinged pair
+    #    closes is bounded by its opening angle instead),
+    #  * other contacts count only when deeper than a tolerance relative to the
+    #    tile edge (hinge_layout_hard_tolerance_rel, default 0.1 %),
+    #  * trials with an opening angle outside the rotating-squares range
+    #    (hinge_layout_opening_angle_range_deg, default -1..91 deg) are not
+    #    repair candidates, and an accepted result must stay inside it.
+    # hinge_layout_hard_check='strict' restores the previous behaviour.
+    # 2026-11-04 (later): 'contact' (default) = every pair counts, hinge partners included -- a hinge allows
+    # contact, not penetration (the same rule as the soft collision energy and the app's collision map); the
+    # tolerance is T2D_CONTACT_TOLERANCE_REL x tile edge.  Overlaps are removed by raising the collision weight in
+    # the rigid-pose optimisation step by step (tiles rotate about their hinges instead of being pushed apart),
+    # until no pair penetrates; only then the translation repair is used.  'hinge_aware' = the earlier rule
+    # (hinge partners exempt, 0.1 %), 'strict' = the original rule (all pairs, 1e-10 tile edges, repair only).
+    hard_check=str(getattr(params,'hinge_layout_hard_check','contact'))
+    if hard_check not in ('contact','hinge_aware','strict'):
+        raise ValueError(f'Unsupported hinge_layout_hard_check: {hard_check}')
+    hinge_aware=hard_check in ('hinge_aware','contact')      # opening-angle filter and acceptance
+    contact_mode=hard_check=='contact'
+    hinge_partner_pairs=({(min(int(h.tile_a),int(h.tile_b)),max(int(h.tile_a),int(h.tile_b))) for h in graph.hinges}
+                         if hard_check=='hinge_aware' else None)
+    if hard_check=='hinge_aware':
+        hard_tolerance=float(getattr(params,'hinge_layout_hard_tolerance_rel',1e-3))*scale
+    elif contact_mode:
+        hard_tolerance=t2d_contact_tolerance_rel()*scale
+    angle_lo,angle_hi=(float(x) for x in getattr(params,'hinge_layout_opening_angle_range_deg',(-1.,91.)))
+    hard_angle_filter=None
+    final_overlaps=None
+    quad_faces=np.asarray(mesh_faces,int)
+    angle_index=[]
+    for h in graph.hinges:
+        a_,b_=int(h.tile_a),int(h.tile_b)
+        if a_>=len(quad_faces) or b_>=len(quad_faces):
+            continue
+        Fa,Fb=list(quad_faces[a_]),list(quad_faces[b_])
+        hv=Fa[h.local_vertex_a%4]; g_=[v for v in Fa if v in Fb and v!=hv]
+        if len(g_)!=1:
+            continue
+        angle_index.append((a_,Fa.index(hv),Fa.index(g_[0]),b_,Fb.index(hv),Fb.index(g_[0])))
+    angle_index=np.asarray(angle_index,int).reshape(-1,6)
+    def opening_angles(pose):
+        # Opening angle of each hinge in the flat state: angle between the two
+        # tiles' copies of their shared edge (0 = closed, 90 = fully open,
+        # negative = the hinged tiles overlap).
+        if not len(angle_index):
+            return np.zeros(0)
+        top=positions(pose)[0][:,:4]
+        a_,iah,iag,b_,ibh,ibg=angle_index.T
+        eA=top[a_,iag]-top[a_,iah]; eB=top[b_,ibg]-top[b_,ibh]; cA=top[a_].mean(axis=1)-top[a_,iah]
+        cr=lambda u,v: u[:,0]*v[:,1]-u[:,1]*v[:,0]
+        return np.degrees(np.sign(cr(eA,cA))*np.arctan2(cr(eB,eA),np.sum(eB*eA,axis=1)))
+    def angles_ok(pose):
+        ang=opening_angles(pose); ang=ang[np.isfinite(ang)]
+        return bool(np.all((ang>=angle_lo)&(ang<=angle_hi)))
     if collision_mode=='hard':
         from .hard_collision_solver import (
-            footprint_contacts, repair_nonpenetration, refine_feasible_pose,
+            footprint_contacts, repair_nonpenetration, refine_feasible_pose, drop_exempt_contacts,
         )
+        def hard_violations(pose):
+            xy_,_=positions(pose)
+            if hinge_aware:      # contact mode: hinge_partner_pairs is None -> every pair counts
+                _,_,_,_,d_=drop_exempt_contacts(footprint_contacts(xy_,faces),hinge_partner_pairs)
+                return int(np.count_nonzero(d_>hard_tolerance)),float(np.max(d_,initial=0.))
+            _,_,n_,_=collision_energy_gradient(xy_.reshape(-1,2),faces,scale*1e-8,return_diagnostics=True)
+            _,_,_,_,d_=footprint_contacts(xy_,faces)
+            return int(n_),float(np.max(d_,initial=0.))
+        def remove_contacts_by_continuation(pose, trial_id):
+            # Raise the collision weight x10 per stage and re-solve the rigid poses (L-BFGS-B to convergence),
+            # until no pair penetrates deeper than the tolerance, or the overlaps stop shrinking (converged).
+            cur=np.asarray(pose,float).copy(); w=float(wcoll) if wcoll>0 else 1.0; frames_=[(0,cur.copy())]
+            n0,d0=hard_violations(cur); hist=[(w,n0,d0)]; stall=0
+            while True:
+                w*=10.
+                fw=lambda z: tuple(v/(scale**2) for v in (lambda e,g: (e,g.ravel()))(*evaluate(z.reshape(-1,3),wc=w)[:2]))
+                res_=minimize(fw,cur.ravel(),jac=True,method='L-BFGS-B',
+                              options=dict(maxiter=100000,maxls=40,maxcor=20,ftol=1e-15,gtol=1e-10))
+                cur=res_.x.reshape(-1,3).copy(); frames_.append((len(frames_),cur.copy()))
+                n_,d_=hard_violations(cur); hist.append((w,n_,d_))
+                if progress_callback:
+                    progress_callback('Hard collision repair',0.,
+                                      f"trial {trial_id}: collision weight {w:.3g}; overlaps {n_}; deepest {d_/scale:.3g} tile edge; "
+                                      f"hinge rms {evaluate(cur)[2]['hinge_rms']/scale:.4g} tile edge")
+                if n_==0:
+                    break
+                stall=stall+1 if (n_>=hist[-2][1] and d_>=0.5*hist[-2][2]) else 0
+                if stall>=2:
+                    break
+            return cur,frames_,dict(history=hist)
+
         hard_started=time.perf_counter()
         hard_feasible=False
         # Prioritize the best soft energy but also try geometrically different
         # soft endpoints. All starts share the same anchor reference and
         # unbounded rigid SE(2) pose variables.
         ordered=sorted(trial_candidates,key=lambda item:item['energy'])
+        if hinge_aware:
+            for item in ordered:
+                ang=opening_angles(item['pose'])
+                item['angle_min']=float(np.nanmin(ang)) if len(ang) else 0.
+                item['angle_max']=float(np.nanmax(ang)) if len(ang) else 0.
+                item['angles_in_range']=angles_ok(item['pose'])
+            in_range=[item for item in ordered if item['angles_in_range']]
+            hard_angle_filter=dict(range_deg=[angle_lo,angle_hi],
+                                   trials_in_range=[int(item['trial_id']) for item in in_range],
+                                   trials_out_of_range=[int(item['trial_id']) for item in ordered if not item['angles_in_range']],
+                                   angle_min_by_trial={int(item['trial_id']):item['angle_min'] for item in ordered},
+                                   angle_max_by_trial={int(item['trial_id']):item['angle_max'] for item in ordered},
+                                   fallback_all_trials=not in_range)
+            if in_range:
+                ordered=in_range
+            if progress_callback:
+                progress_callback('Hard collision repair',0.,
+                                  f"opening angles within {angle_lo:g}..{angle_hi:g} deg: trials {hard_angle_filter['trials_in_range']}; "
+                                  f"excluded {hard_angle_filter['trials_out_of_range']}; tolerance {hard_tolerance/scale:.3g} tile edge; "
+                                  + (f"{len(hinge_partner_pairs)} hinge-partner pairs exempt" if hinge_partner_pairs is not None else "every pair counts, hinge partners included"))
         repair_sources=ordered[:min(len(ordered),6)]
         winning_hard=None
         near_miss=None
@@ -318,26 +444,29 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             else:
                 attempt_deadline=float('inf')
             before_pose=item['pose']
-            before_xy,_=positions(before_pose)
-            _,_,before_count,_=collision_energy_gradient(
-                before_xy.reshape(-1,2),faces,scale*1e-8,return_diagnostics=True)
-            _,_,_,_,before_depths=footprint_contacts(before_xy,faces)
-            if before_count==0 and np.max(before_depths,initial=0.)<=hard_tolerance:
+            before_count,before_max_depth=hard_violations(before_pose)
+            continuation_frames=[]
+            if contact_mode and before_count>0:
+                before_pose,continuation_frames,cinfo=remove_contacts_by_continuation(before_pose,int(item['trial_id']))
+                before_count,before_max_depth=hard_violations(before_pose)
+            if before_count==0 and before_max_depth<=hard_tolerance:
                 candidate=before_pose.copy()
                 repaired=True
-                repair_frames=[(0,candidate.copy())]
+                repair_frames=continuation_frames+[(len(continuation_frames),candidate.copy())]
                 steps=[]
             else:
                 candidate,repaired,repair_frames,steps=repair_nonpenetration(
                     before_pose,positions,faces,reference_pose,
                     scale,attempt_deadline,rng,max_iterations=480,
+                    exempt_pairs=hinge_partner_pairs,
+                    tolerance=(hard_tolerance if hinge_aware else None),
                 )
-            candidate_xy,_=positions(candidate)
-            ci,cj,cn,cs,depths=footprint_contacts(candidate_xy,faces)
-            _,_,ncount,_=collision_energy_gradient(
-                candidate_xy.reshape(-1,2),faces,scale*1e-8,return_diagnostics=True)
-            max_depth=float(np.max(depths,initial=0.))
-            certified=bool(repaired and ncount==0 and max_depth<=hard_tolerance)
+                if continuation_frames:
+                    off_=len(continuation_frames)
+                    repair_frames=continuation_frames+[(off_+int(k_),p_) for k_,p_ in repair_frames]
+            ncount,max_depth=hard_violations(candidate)
+            candidate_angles_ok=angles_ok(candidate) if hinge_aware else True
+            certified=bool(repaired and ncount==0 and max_depth<=hard_tolerance and candidate_angles_ok)
             candidate_energy,_,_ = evaluate(candidate)
             diag=dict(source_trial_id=int(item['trial_id']),
                       initial_collision_count=int(before_count),
@@ -345,6 +474,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                       final_max_depth=max_depth,
                       resulting_EHinge=float(candidate_energy),
                       feasible=certified,
+                      opening_angles_in_range=bool(candidate_angles_ok),
                       repair_iterations=int(steps[-1]['iteration']) if steps else 0)
             hard_attempts.append(diag)
             miss_score=(int(ncount),max_depth,float(candidate_energy))
@@ -357,6 +487,8 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             if progress_callback:
                 progress_callback('Hard collision repair',min(.99,(idx+1)/len(repair_sources)),
                                   f"repair {idx+1}/{len(repair_sources)}; XY overlaps={ncount}; feasible={certified}")
+            if contact_mode and certified:
+                break      # candidates are in order of soft energy: the first overlap-free one is kept
         hard_repair_elapsed=time.perf_counter()-hard_started
         if winning_hard is not None:
             hard_refinement_started=time.perf_counter()
@@ -365,13 +497,14 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                 scale,global_deadline,rng,
                 lambda pose: (lambda energy, gradient, stats: (energy,gradient))(*evaluate(pose)),
                 iterations=int(getattr(params,'hinge_layout_hard_refine_iterations',24)),
+                exempt_pairs=hinge_partner_pairs,
+                tolerance=(hard_tolerance if hinge_aware else None),
+                accept=(angles_ok if hinge_aware else None),
             )
             hard_refinement_elapsed=time.perf_counter()-hard_refinement_started
-            refined_xy,_=positions(refined)
-            _,_,refined_count,_=collision_energy_gradient(
-                refined_xy.reshape(-1,2),faces,scale*1e-8,return_diagnostics=True)
-            _,_,_,_,refined_depths=footprint_contacts(refined_xy,faces)
-            hard_feasible=bool(refined_count==0 and np.max(refined_depths,initial=0.)<=hard_tolerance)
+            refined_count,refined_max_depth=hard_violations(refined)
+            hard_feasible=bool(refined_count==0 and refined_max_depth<=hard_tolerance
+                               and (angles_ok(refined) if hinge_aware else True))
             if hard_feasible:
                 last=refined.copy()
                 hard_selected_source_trial=winning_hard['source_trial_id']
@@ -409,6 +542,9 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             hard_remaining_collision_count=0
             hard_remaining_max_depth=0.
         optimization_elapsed=time.perf_counter()-optimization_started
+    if collision_mode=='hard':
+        final_overlaps=hard_violations(last)[0]
+    final_angles=opening_angles(last)
     xy,_=positions(last)
     out=copy.deepcopy(t2d);out.vertices[:,:,:2]=xy;out.stage='T2D dual hinge'
     # Compose the SE(2) placement with each original T3D->T2D rigid transform.
@@ -467,7 +603,12 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        dual_hinge_weights={'connection':wconn,'collision':wcoll,'anchor':wanchor},
                        dual_hinge_rigidity='exact in-plane rigid poses; fixed Z, not unrestricted paper 3D motion',
                        dual_hinge_fixed_z_infeasible=final['hinge_fixed_z_error_lower_bound']>=scale*1e-4,
-                       dual_hinge_collision_pair_exclusions=0,
+                       dual_hinge_collision_pair_exclusions=(len(hinge_partner_pairs) if (collision_mode=='hard' and hinge_partner_pairs is not None) else 0),
+                       hard_check_mode=hard_check,
+                       hard_overlap_count=final_overlaps,
+                       hard_angle_filter=hard_angle_filter,
+                       dual_hinge_opening_angle_min=(float(np.nanmin(final_angles)) if len(final_angles) else None),
+                       dual_hinge_opening_angle_max=(float(np.nanmax(final_angles)) if len(final_angles) else None),
                        dual_hinge_collision_candidate_limit_applied=False,
                        dual_hinge_iterations=(int(records[-1]['iteration']) if records else 0),dual_hinge_history=records,
                        dual_hinge_pose_history=[{'iteration': i, 'poses': p.tolist()} for i,p in pose_history],
@@ -480,9 +621,23 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                        tile_shape_max_error_to_T3D=pipeline._tile_shape_distance_error(out.vertices,t3d.vertices,use_max=True),
                        fabrication_feasible=final['collisions']==0 and final['hinge_rms']<scale*1e-4)
     out.metrics.update(validate_flat_linkage(out,t3d,pipeline,graph))
-    out.metrics['dual_hinge_initial_solid_collisions'] = audit_solid_collisions(rest,scale*1e-8)
-    out.metrics.update(audit_solid_collisions(out.vertices,scale*1e-8))
-    out.metrics['fabrication_feasible'] = bool(out.metrics['fabrication_feasible'] and out.metrics['solid_collision_pair_count']==0)
+    solid_tol=(hard_tolerance if (collision_mode=='hard' and contact_mode) else scale*1e-8)
+    out.metrics['dual_hinge_initial_solid_collisions'] = audit_solid_collisions(rest,solid_tol)
+    out.metrics.update(audit_solid_collisions(out.vertices,solid_tol))
+    if collision_mode=='hard' and contact_mode:
+        # 2026-11-04: one rule for every verdict -- no pair (hinge partners included) penetrates deeper than the
+        # tolerance, in the plane and as 3D solids; every hinge closed within T2D_HINGE_CLOSED_REL x tile edge;
+        # opening angles in range
+        hinge_ok=bool(final['hinge_max']<=float(getattr(params,'hinge_layout_hinge_closed_rel',T2D_HINGE_CLOSED_REL))*scale)
+        out.metrics['fabrication_feasible']=bool(hard_feasible and final_overlaps==0 and hinge_ok and angles_ok(last)
+                                                 and out.metrics['solid_collision_pair_count']==0)
+        out.metrics['fabrication_checks']=dict(overlaps_in_plane=int(final_overlaps or 0),
+                                               solid_overlaps=int(out.metrics['solid_collision_pair_count']),
+                                               hinge_max_over_edge=float(final['hinge_max']/scale), hinge_closed=hinge_ok,
+                                               opening_angles_in_range=bool(angles_ok(last)),
+                                               contact_tolerance_over_edge=float(hard_tolerance/scale))
+    else:
+        out.metrics['fabrication_feasible'] = bool(out.metrics['fabrication_feasible'] and out.metrics['solid_collision_pair_count']==0)
     if collision_mode=='hard':
         out.metrics['fabrication_feasible']=bool(out.metrics['fabrication_feasible'] and hard_feasible)
         out.metrics['hard_collision_status']=('verified_feasible' if hard_feasible else 'NONPENETRATION_NOT_FOUND')
@@ -498,5 +653,6 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
                                constraint_violation=final['hinge_rms'],computation_time=time.perf_counter()-started,
                                counts={'tiles':len(rest),'hinges':len(graph.hinges)})
     if progress_callback:
-        progress_callback('Eq.6 complete',1.,f"selected trial {chosen_trial} ({chosen_source}); {message}; collisions={final['collisions']}; hinge_rms={final['hinge_rms']:.5g}")
+        progress_callback('Eq.6 complete',1.,f"selected trial {chosen_trial} ({chosen_source}); {message}; collisions={final['collisions']}; hinge_rms={final['hinge_rms']:.5g}"
+                          +(f"; overlaps={final_overlaps} ({hard_check} check)" if final_overlaps is not None else ""))
     return out,graph,report

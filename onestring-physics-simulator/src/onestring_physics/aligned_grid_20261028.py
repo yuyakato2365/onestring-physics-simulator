@@ -538,7 +538,13 @@ def _refine_domain_aligned(src, dom: dict, logical, quads, walk, chart, h: float
     for k in range(m):
         pts.append(pts[-1] + nn[k] * DIRS[dirs[k]])
     poly = np.asarray(pts[:-1])
-    if np.any(pts[-1] != 0) or not Polygon(poly).is_valid:
+    from . import structured_grid_20261028 as _sgz
+    if _sgz.ZIPPER:
+        okz, whyz = _sgz._zipper_polygon_ok(poly, dirs, nn, dom["cut_pairs"])
+        if not okz:
+            info["aligned_rounding"] = f"not a zipper polygon: {whyz}"
+            return None, info
+    elif np.any(pts[-1] != 0) or not Polygon(poly).is_valid:
         info["aligned_rounding"] = "not a simple closed polygon"
         return None, info
     new = dict(dom)

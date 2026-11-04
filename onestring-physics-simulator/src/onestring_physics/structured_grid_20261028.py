@@ -27,6 +27,7 @@ connectivity and seam mismatch are reported as unresolved.
 """
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any
 import time
@@ -38,6 +39,94 @@ MODE_LABEL = "2026-10-28 | OptCuts → piecewise smooth Ω (line+spline) → str
 FLAG = "optcuts_structured_grid_20261028_enabled"
 
 DIRS = np.array([[1, 0], [0, 1], [-1, 0], [0, -1]])
+
+# 2026-11-03 "seam zipper" mode (params.structured_grid_seam_zipper): every OptCuts seam closes with 4 panels
+# around each of its points, the tip included.  In the logical polygon the two copies of a cut branch then lie on
+# top of each other (a zero-width slit along grid edges): the tip is a U-turn (360 deg, 4 panels instead of the
+# reflex 270 deg corner = 3 panels), corners on the two copies come in complementary pairs (t_A + t_B = 0, no seam
+# cones), junctions get 4 panels, and the lattice vertices along the slit are duplicated (one copy per side).
+ZIPPER = False
+
+
+def _slit_runs(m: int, pairs) -> list[list[int]]:
+    """Maximal cyclic runs of consecutive sides that are copies of a cut branch (one run per slit)."""
+    S = sorted({int(k) for pr in pairs for k in pr})
+    if not S:
+        return []
+    Sset = set(S)
+    if len(S) == m:
+        return [list(range(m))]
+    starts = [k for k in S if (k - 1) % m not in Sset]
+    runs = []
+    for k0 in starts:
+        run = [k0]
+        while (run[-1] + 1) % m in Sset:
+            run.append((run[-1] + 1) % m)
+        runs.append(run)
+    return runs
+
+
+def _zipper_exempt(m: int, pairs) -> set:
+    """Side pairs that legitimately touch in a zipper polygon: sides of one slit and the two outer sides that meet
+    the slit at its mouth."""
+    out = set()
+    for run in _slit_runs(m, pairs):
+        grp = list(run) + [(run[0] - 1) % m, (run[-1] + 1) % m]
+        for a in grp:
+            for b in grp:
+                if a != b:
+                    out.add((min(a, b), max(a, b)))
+    return out
+
+
+def _zipper_polygon_ok(poly, dirs, n, pairs) -> tuple[bool, str]:
+    """Weakly simple orthogonal polygon whose slits are zero-width excursions inside a simple outer polygon."""
+    from shapely.geometry import LineString, Polygon
+    m = len(dirs)
+    P = [np.asarray(poly[0], int)]
+    for k in range(m):
+        P.append(P[-1] + int(n[k]) * DIRS[dirs[k]])
+    if np.any(P[-1] != P[0]):
+        return False, "not closed"
+    P = P[:-1]
+    for ka, kb in pairs:
+        a0, a1 = P[ka], P[(ka + 1) % m]
+        b0, b1 = P[kb], P[(kb + 1) % m]
+        if not (np.all(a0 == b1) and np.all(a1 == b0)):
+            return False, f"cut copies {ka}/{kb} do not coincide"
+    drop = set()
+    slits = []
+    for run in _slit_runs(m, pairs):
+        if np.any(P[run[0]] != P[(run[-1] + 1) % m]):
+            return False, "slit does not return to its mouth"
+        drop |= set(run[1:])               # keep the mouth point (start of the first copy side)
+        slits.append([P[k] for k in run] + [P[(run[-1] + 1) % m]])
+    outer = [P[k] for k in range(m) if k not in drop]
+    clean = [outer[0]]
+    for q in outer[1:]:
+        if np.any(q != clean[-1]):
+            clean.append(q)
+    if len(clean) >= 2 and np.all(clean[0] == clean[-1]):
+        clean = clean[:-1]
+    if len(clean) < 3:
+        return False, "outer polygon degenerate"
+    pg = Polygon(np.asarray(clean, float))
+    if not (pg.is_valid and pg.area > 0):
+        return False, "outer polygon not simple"
+    for sl in slits:
+        ls = LineString(np.asarray(sl, float))
+        if not pg.buffer(1e-9).covers(ls):
+            return False, "slit leaves the outer polygon"
+    return True, "ok"
+
+
+def polygon_is_simple(poly, dirs=None, n=None, pairs=None) -> bool:
+    """Polygon validity used by the planner (zipper polygons: weakly simple with zero-width slits)."""
+    from shapely.geometry import Polygon
+    if ZIPPER and dirs is not None and pairs:
+        return _zipper_polygon_ok(poly, dirs, n, pairs)[0]
+    pg = Polygon(np.asarray(poly, float))
+    return bool(pg.is_valid and pg.area > 0)
 
 
 class StructuredGridError(RuntimeError):
@@ -67,7 +156,7 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
                    cone_curvature=None, w_curv: float = 1.0, forced_cones: dict | None = None,
                    side_coupling=None, w_field: float = 1.0, target_positions=None,
                    heading_src=None, heading_length_weighted: bool = False,
-                   milp_time_limit: float | None = None) -> dict:
+                   milp_time_limit: float | None = None, turn3d=None) -> dict:
     """Turns (+1 / 0 / -1 quarter turns), directions and integer side lengths of the orthogonal polygon.
 
     One mixed-integer program chooses everything together:
@@ -100,7 +189,14 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
         ang = _chord_turning(src, feats)
     else:
         ang = _turning_angles(src, feats, scale)
+    if turn3d is not None:
+        ang = _chord_turning_3d(src, feats, turn3d[0], turn3d[1])
     tips = {k for k, j in enumerate(feats) if src.node_kind.get(j) == "tip"}
+    if ZIPPER:
+        # a zero-width slit: the boundary turns back on itself at the tip (-180 deg)
+        ang = dict(ang)
+        for k in tips:
+            ang[feats[k]] = -180.0
     L = []
     run_uv = []
     for k in range(m):
@@ -167,11 +263,17 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
         km = (k - 1) % m
         row([(iT(k, s), 1) for s in (-1, 0, 1)], 1, 1)
         for d in range(4):
+            if ZIPPER and k in tips:
+                row([(iD(k, (d + 2) % 4), 1), (iD(km, d), -1)], 0, 0)     # U-turn: the copies coincide
+                continue
             row([(iD(km, d), 1), (iD(k, (d + 2) % 4), 1)], -np.inf, 1)
             for s_ in (-1, 0, 1):
                 row([(iT(k, s_), 1), (iD(km, d), -1), (iD(k, (d + s_) % 4), -1)], -1, np.inf)
         if k in tips:
-            row([(iT(k, -1), 1)], 1, 1)
+            if ZIPPER:
+                row([(iT(k, 0), 1)], 1, 1)          # placeholder; the tip turns by -2 quarter turns (4 panels)
+            else:
+                row([(iT(k, -1), 1)], 1, 1)
         nk = [(iX(k, d), 1) for d in range(4)]
         row(nk + [(iE(k), -1)], -np.inf, L[k])
         row([(i, -v) for i, v in nk] + [(iE(k), -1)], -np.inf, -L[k])
@@ -179,7 +281,9 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             pk = [(iX(i, d), float(DIRS[d][ax])) for i in range(k) for d in range(4)]
             row(pk + [(iF(k, ax), -1)], -np.inf, T[k, ax])
             row([(i, -v) for i, v in pk] + [(iF(k, ax), -1)], -np.inf, -T[k, ax])
-    row([(iT(k, s_), s_) for k in range(m) for s_ in (-1, 1)], 4, 4)
+    ztip = 2 * len(tips) if ZIPPER else 0
+    tip_before = np.cumsum([1 if (ZIPPER and k in tips) else 0 for k in range(m)])
+    row([(iT(k, s_), s_) for k in range(m) for s_ in (-1, 1)], 4 + ztip, 4 + ztip)
     # every 3D vertex shared by several polygon corners (seam junctions) gets 3..5 panels around it:
     # sum over its copies of (2 - t_k) in [3, 5]
     groups3d: dict = {}
@@ -189,14 +293,28 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
     for ks in groups3d.values():
         if len(ks) >= 2:
             c_ = len(ks)
-            row([(iT(k, s_), s_) for k in ks for s_ in (-1, 1)], 2 * c_ - 5, 2 * c_ - 3)
+            if ZIPPER:
+                row([(iT(k, s_), s_) for k in ks for s_ in (-1, 1)], 2 * c_ - 4, 2 * c_ - 4)   # 4 panels
+            else:
+                row([(iT(k, s_), s_) for k in ks for s_ in (-1, 1)], 2 * c_ - 5, 2 * c_ - 3)
+    if ZIPPER:
+        # where a cut meets the open boundary the 3D boundary vertex keeps 2..3 panels (no fold, no spike)
+        groups_tr: dict = {}
+        for k, j in enumerate(feats):
+            if src.node_kind.get(j) == "transition":
+                groups_tr.setdefault(int(src.xyz_id[j]), []).append(k)
+        for ks in groups_tr.values():
+            if len(ks) == 2:
+                row([(iT(k, s_), s_) for k in ks for s_ in (-1, 1)], 1, 2)
     for ax in (0, 1):
         row([(iX(k, d), float(DIRS[d][ax])) for k in range(m) for d in range(4)], 0, 0)
     for ka, kb in pairs:
         row([(iX(ka, d), 1) for d in range(4)] + [(iX(kb, d), -1) for d in range(4)], 0, 0)
     for q, (ka, kb) in enumerate(cones):
         tsum = [(iT(ka, s_), s_) for s_ in (-1, 1)] + [(iT(kb, s_), s_) for s_ in (-1, 1)]
-        if forced_cones and q in forced_cones:
+        if ZIPPER:
+            row(tsum, 0, 0)                                   # complementary corners only: 4 panels on the seam
+        elif forced_cones and q in forced_cones:
             sv = float(forced_cones[q])                        # cone required by the cross field
             row(tsum, sv, sv)
         else:
@@ -211,19 +329,25 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
         # heading reference: the boundary as it really is (Omega_1) when given, so a long side that
         # leaves its axis is seen even if the PolySquare copy straightened it
         hang = _chord_turning(heading_src, feats) if heading_src is not None else ang
+        if ZIPPER:
+            hang = dict(hang)
+            for k in tips:
+                hang[feats[k]] = -180.0
         C = np.cumsum([hang[j] / 90.0 for j in feats])
         for k in range(m):
             tk = [(iT(i, s_), s_) for i in range(k + 1) for s_ in (-1, 1)]
+            ck = -2.0 * float(tip_before[k])                 # zipper tips: -2 quarter turns each
             # h_k >= |C_k - sum_{i<=k} t_i - o|
-            row([(i, -v) for i, v in tk] + [(iO, -1), (iH(k), -1)], -np.inf, -C[k])
-            row(tk + [(iO, 1), (iH(k), -1)], -np.inf, C[k])
+            row([(i, -v) for i, v in tk] + [(iO, -1), (iH(k), -1)], -np.inf, -C[k] + ck)
+            row(tk + [(iO, 1), (iH(k), -1)], -np.inf, C[k] - ck)
     if fpairs:
         Cc = np.cumsum([_chord_turning(src, feats)[j] / 90.0 for j in feats])
         for p_, (k, l, _w) in enumerate(fpairs):
             tk = [(iT(i, s_), s_) for i in range(l + 1, k + 1) for s_ in (-1, 1)]
             dC = float(Cc[k] - Cc[l])
-            row([(i, -v) for i, v in tk] + [(iW(p_), -1)], -np.inf, -dC)
-            row(tk + [(iW(p_), -1)], -np.inf, dC)
+            cz = -2.0 * float(tip_before[k] - tip_before[l])
+            row([(i, -v) for i, v in tk] + [(iW(p_), -1)], -np.inf, -dC + cz)
+            row(tk + [(iW(p_), -1)], -np.inf, dC - cz)
     integrality = np.r_[np.ones(11 * m), np.zeros(4 * m + 2 * P_c + 1 + len(fpairs))]
     lo_b = np.zeros(nv)
     lo_b[iO] = -np.inf
@@ -232,6 +356,12 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
     nogood: list[list[int]] = []
     chosen = None
     w_pos = float(shape_weight)
+    from .run_trace import trace as _trace
+    _trace("grid.logical_domain", "start", min_ratio=min_ratio, max_rounds=max_rounds, zipper=bool(ZIPPER), features=m,
+           tips=sorted(tips), cone_pairs=cone_pairs, turn_reference=("surface" if turn3d is not None else "omega"),
+           side_target_panels=L, side_min_panels=n_lo, turning_deg=[float(ang[j]) for j in feats],
+           feature_kind=[src.node_kind.get(j, "corner") for j in feats], feature_uv=uvf,
+           seam_pairs=pairs, milp_time_limit=milp_time_limit)
     for _round in range(max_rounds):
         # stage 1: turns / directions (lengths soft, with the hard lower bounds)
         c = np.zeros(nv)
@@ -259,10 +389,13 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
                                                        "mip_rel_gap": 0.02})
         if res.x is None:
             attempts.append({"round": _round, "status": f"no turn assignment: {res.message}"})
+            _trace("grid.logical_domain", "attempt", min_ratio=min_ratio, **attempts[-1])
             break
         x = res.x
         dirs = [int(np.argmax([x[iD(k, d)] for d in range(4)])) for k in range(m)]
         turn = [int(round(sum(s_ * x[iT(k, s_)] for s_ in (-1, 1)))) for k in range(m)]
+        if ZIPPER:
+            turn = [(-2 if k in tips else t_) for k, t_ in enumerate(turn)]
         # stage 2: integer side lengths for these directions, simple polygon enforced by lazy
         # non-overlap constraints between non-adjacent sides (never by shortening sides)
         n, info = _lengths_for_directions(dirs, L, n_lo, pairs, T, w_pos)
@@ -273,11 +406,21 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             for k in range(m):
                 pts.append(pts[-1] + n[k] * DIRS[dirs[k]])
             poly = np.asarray(pts[:-1])
-            pg = Polygon(poly)
-            if np.all(pts[-1] == 0) and pg.is_valid and pg.area > 0:
-                chosen = (w_pos, dirs, n, turn, poly)
-                break
-        nogood.append([iT(k, turn[k]) for k in range(m)])     # rotation-invariant cut on the turns
+            if ZIPPER:
+                ok_z, why_z = _zipper_polygon_ok(poly, dirs, n, pairs)
+                attempts[-1]["zipper_check"] = why_z
+                if ok_z:
+                    chosen = (w_pos, dirs, n, turn, poly)
+                    break
+            else:
+                pg = Polygon(poly)
+                if np.all(pts[-1] == 0) and pg.is_valid and pg.area > 0:
+                    chosen = (w_pos, dirs, n, turn, poly)
+                    break
+        _trace("grid.logical_domain", "attempt", min_ratio=min_ratio, dirs=dirs, **attempts[-1])
+        nogood.append([iT(k, (0 if turn[k] == -2 else turn[k])) for k in range(m)])     # rotation-invariant cut on the turns
+    _trace("grid.logical_domain", "result", min_ratio=min_ratio, found=chosen is not None, rounds=len(attempts),
+           chosen_turns=(chosen[3] if chosen else None), chosen_lengths=(chosen[2] if chosen else None))
     if chosen is None:
         raise StructuredGridError(
             "SG_LOGICAL_POLYGON_NOT_FOUND: no simple orthogonal polygon with every side >= "
@@ -298,7 +441,40 @@ def logical_domain(src, feats: list[int], h3d: float, scale: float, *, min_ratio
             "features": feats, "turn": turn, "dirs": dirs, "lengths": n.tolist(),
             "target_lengths": L.tolist(), "polygon": poly, "cut_pairs": pairs,
             "convex": int(sum(1 for t in turn if t == 1)), "reflex": int(sum(1 for t in turn if t == -1)),
+            "zipper_tips": int(sum(1 for t in turn if t == -2)),
             "shape_weight": w_pos, "attempts": attempts, "turning_deg": [float(ang[j]) for j in feats]}
+
+
+def _chord_turning_3d(src, feats: list[int], nrm_loop: np.ndarray, orient: float) -> dict[int, float]:
+    """Turning (deg) of the polygon through the feature points measured on the 3D surface: the chords to the
+    neighbouring features projected onto the tangent plane at the feature (geodesic turning), signed like the
+    chart's CCW loop (``orient``).  2026-11-03: where a conformal chart bends a straight 3D rim (strong scale
+    gradient), the chart's own turning puts spurious convex/reflex corner pairs there (degenerate panels)."""
+    X = np.asarray([src.xyz[j] for j in feats], float)
+    din = X - np.roll(X, 1, axis=0)
+    dout = np.roll(X, -1, axis=0) - X
+    out = {}
+    for k, j in enumerate(feats):
+        n = np.asarray(nrm_loop[j], float)
+        a = din[k] - (din[k] @ n) * n
+        b = dout[k] - (dout[k] @ n) * n
+        out[j] = float(orient * np.degrees(np.arctan2(n @ np.cross(a, b), a @ b)))
+    return out
+
+
+def surface_turn_reference(src, feats, xyz, f3):
+    """(vertex normals per loop position, orientation sign) for _chord_turning_3d."""
+    xyz = np.asarray(xyz, float); f3 = np.asarray(f3, int)
+    fn = np.cross(xyz[f3[:, 1]] - xyz[f3[:, 0]], xyz[f3[:, 2]] - xyz[f3[:, 0]])
+    vn = np.zeros_like(xyz)
+    for k in range(3):
+        np.add.at(vn, f3[:, k], fn)
+    vn /= np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-300)
+    nrm_loop = vn[np.asarray(src.xyz_id, int)]
+    a2 = _chord_turning(src, sorted(feats))
+    a3 = _chord_turning_3d(src, sorted(feats), nrm_loop, 1.0)
+    orient = 1.0 if sum(a2[j] * a3[j] for j in a2) >= 0 else -1.0
+    return nrm_loop, orient
 
 
 def _chord_turning(src, feats: list[int]) -> dict[int, float]:
@@ -413,11 +589,42 @@ def seam_cone_candidates(src, base_feats: list[int], h3d: float, spacing: float 
     return sorted(feats), pairs
 
 
+def _find_triangles(V: np.ndarray, F: np.ndarray, pts: np.ndarray, chunk: int = 256) -> np.ndarray:
+    """Index of a triangle of (V, F) containing each point (-1 if none).  Unlike matplotlib's TriFinder this
+    accepts coincident vertices (the two copies of a zipper slit map to the same logical points)."""
+    V = np.asarray(V, float); F = np.asarray(F, int); pts = np.asarray(pts, float)
+    A, B, C = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+    e1, e2 = B - A, C - A
+    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    ok = np.abs(det) > 1e-300
+    lo, hi = np.minimum(np.minimum(A, B), C), np.maximum(np.maximum(A, B), C)
+    out = np.full(len(pts), -1, int)
+    for s0 in range(0, len(pts), chunk):
+        P = pts[s0:s0 + chunk]
+        inb = ((P[:, None, 0] >= lo[None, :, 0] - 1e-9) & (P[:, None, 0] <= hi[None, :, 0] + 1e-9) &
+               (P[:, None, 1] >= lo[None, :, 1] - 1e-9) & (P[:, None, 1] <= hi[None, :, 1] + 1e-9) & ok[None, :])
+        for r, row in enumerate(inb):
+            cand = np.flatnonzero(row)
+            if not len(cand):
+                continue
+            d = P[r] - A[cand]
+            l1 = (d[:, 0] * e2[cand, 1] - d[:, 1] * e2[cand, 0]) / det[cand]
+            l2 = (e1[cand, 0] * d[:, 1] - e1[cand, 1] * d[:, 0]) / det[cand]
+            mn = np.minimum(np.minimum(l1, l2), 1 - l1 - l2)
+            best = int(np.argmax(mn))
+            if mn[best] >= -1e-9:
+                out[s0 + r] = int(cand[best])
+    return out
+
+
 def _locate_bary(Vsrc: np.ndarray, F: np.ndarray, pts: np.ndarray, Vdst: np.ndarray):
     """Map points through the piecewise-linear map Vsrc -> Vdst on triangles F (None if any is outside)."""
-    from matplotlib.tri import Triangulation
-    finder = Triangulation(Vsrc[:, 0], Vsrc[:, 1], F).get_trifinder()
-    t = finder(pts[:, 0], pts[:, 1])
+    if ZIPPER:
+        t = _find_triangles(Vsrc, F, pts)
+    else:
+        from matplotlib.tri import Triangulation
+        finder = Triangulation(Vsrc[:, 0], Vsrc[:, 1], F).get_trifinder()
+        t = finder(pts[:, 0], pts[:, 1])
     if np.any(t < 0):
         return None
     a, b, c = F[t, 0], F[t, 1], F[t, 2]
@@ -793,7 +1000,11 @@ def refine_domain_seamless(src, dom: dict, seam_out: dict, w_pos: float = 2.0) -
         pts.append(pts[-1] + nn[k] * DIRS[dirs[k]])
     from shapely.geometry import Polygon
     poly = np.asarray(pts[:-1])
-    if np.any(pts[-1] != 0) or not Polygon(poly).is_valid:
+    if ZIPPER:
+        if not _zipper_polygon_ok(poly, dirs, nn, dom["cut_pairs"])[0]:
+            info["seamless_relength"] = "not a zipper polygon"
+            return None, info
+    elif np.any(pts[-1] != 0) or not Polygon(poly).is_valid:
         info["seamless_relength"] = "not a simple closed polygon"
         return None, info
     new = dict(dom)
@@ -883,6 +1094,9 @@ def _lengths_for_directions(dirs, L, n_lo, pairs, T, w_pos, *, max_iter: int = 4
                           "lazy_iterations": it + 1}
         n_sol = np.rint(res.x[:m]).astype(int)
         touching = _touching_pairs(dirs, n_sol)
+        if ZIPPER:
+            ex = _zipper_exempt(m, pairs)
+            touching = [pq for pq in touching if (min(pq), max(pq)) not in ex]
         new = [pq for pq in touching if pq not in sep_pairs]
         if not new:
             return n_sol, {"status": "simple", "separated_pairs": len(sep_pairs), "lazy_iterations": it + 1}
@@ -915,6 +1129,8 @@ def _touching_pairs(dirs, n) -> list[tuple[int, int]]:
 
 def lattice_grid(dom: dict) -> tuple[np.ndarray, np.ndarray, dict[tuple[int, int], int], list[tuple[int, int, int]]]:
     """Cells of the orthogonal polygon -> (logical vertices, quads CCW, index map, boundary walk)."""
+    if ZIPPER and dom.get("cut_pairs"):
+        return _lattice_grid_zipper(dom)
     from matplotlib.path import Path as _Path
     poly = np.asarray(dom["polygon"])
     path = _Path(poly)
@@ -948,6 +1164,124 @@ def lattice_grid(dom: dict) -> tuple[np.ndarray, np.ndarray, dict[tuple[int, int
             walk.append((vid[key], k, j))
             p = p + DIRS[dk]
     return logical, np.asarray(quads, int), vid, walk
+
+
+def _ccw_angle(a, b) -> float:
+    """Counter-clockwise angle in [0, 2 pi) from direction a to direction b."""
+    t = float(np.arctan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]))
+    return t if t >= 0 else t + 2 * np.pi
+
+
+def _lattice_grid_zipper(dom: dict):
+    """lattice_grid for a zipper polygon: cells of the outer polygon (slits removed); every lattice point on a slit
+    except the tip gets a second vertex for the quads on the far side, so the M2D is cut along the seam while the
+    two copies keep the same logical position (they close with 4 panels in 3D)."""
+    from matplotlib.path import Path as _Path
+    poly = np.asarray(dom["polygon"], int)
+    dirs, lengths = list(dom["dirs"]), [int(x) for x in dom["lengths"]]
+    m = len(dirs)
+    P = [poly[0].copy()]
+    for k in range(m):
+        P.append(P[-1] + lengths[k] * DIRS[dirs[k]])
+    P = P[:-1]
+    runs = _slit_runs(m, dom["cut_pairs"])
+    drop = set()
+    for run in runs:
+        drop |= set(run[1:])
+    outer = np.asarray([P[k] for k in range(m) if k not in drop], float)
+    path = _Path(outer)
+    xmin, ymin = poly.min(axis=0)
+    xmax, ymax = poly.max(axis=0)
+    xs, ys = np.meshgrid(np.arange(xmin, xmax) + 0.5, np.arange(ymin, ymax) + 0.5)
+    centers = np.c_[xs.ravel(), ys.ravel()]
+    inside = path.contains_points(centers)
+    vid: dict[tuple[int, int], int] = {}
+
+    def v(x, y):
+        key = (int(x), int(y))
+        if key not in vid:
+            vid[key] = len(vid)
+        return vid[key]
+
+    quads = []
+    for (cx, cy) in centers[inside]:
+        x0, y0 = int(np.floor(cx)), int(np.floor(cy))
+        quads.append([v(x0, y0), v(x0 + 1, y0), v(x0 + 1, y0 + 1), v(x0, y0 + 1)])
+    quads = np.asarray(quads, int)
+    logical = [None] * len(vid)
+    for (x, y), i in vid.items():
+        logical[i] = (x, y)
+    qc = np.asarray([[np.mean([logical[i][0] for i in q]), np.mean([logical[i][1] for i in q])] for q in quads])
+    dupB: dict[tuple[int, int], int] = {}      # slit point -> vertex used by the quads on the B side
+    side_copy: dict[int, str] = {}            # side index -> "A" (towards the tip) / "B" (back to the mouth)
+    after_run: set = set()
+    for run in runs:
+        tipk = next((k for k in run[1:] if dirs[k] == (dirs[(k - 1) % m] + 2) % 4), None)
+        if tipk is None:
+            raise StructuredGridError("SG_ZIPPER_SLIT_WITHOUT_TIP")
+        ia = run.index(tipk)
+        for k in run[:ia]:
+            side_copy[k] = "A"
+        for k in run[ia:]:
+            side_copy[k] = "B"
+        after_run.add((run[-1] + 1) % m)
+        # slit path from the mouth to the tip along copy A
+        pts = [P[run[0]].copy()]
+        for k in run[:ia]:
+            for _j in range(lengths[k]):
+                pts.append(pts[-1] + DIRS[dirs[k]])
+        d_o_in = DIRS[dirs[(run[0] - 1) % m]].astype(float)
+        for i, p in enumerate(pts[:-1]):                       # the tip (last point) stays shared
+            d_out = (pts[i + 1] - p).astype(float)
+            back = -d_o_in if i == 0 else -(p - pts[i - 1]).astype(float)
+            span_A = _ccw_angle(d_out, back) or 2 * np.pi
+            key = (int(p[0]), int(p[1]))
+            if key not in vid:
+                raise StructuredGridError("SG_ZIPPER_SLIT_POINT_NOT_ON_GRID")
+            iv = vid[key]
+            new_id = len(logical)
+            used = False
+            for qi in np.flatnonzero((quads == iv).any(axis=1)):
+                w = qc[qi] - p
+                if _ccw_angle(d_out, w) >= span_A:              # right of the slit path: B side
+                    quads[qi][quads[qi] == iv] = new_id
+                    used = True
+            if used:
+                logical.append(key)
+                dupB[key] = new_id
+    logical = np.asarray(logical, float)
+    walk = []
+    p = P[0].copy()
+    for k, (dk, nk) in enumerate(zip(dirs, lengths)):
+        p = P[k].copy()
+        for j in range(nk):
+            key = (int(p[0]), int(p[1]))
+            if key not in vid:
+                raise StructuredGridError("SG_LOGICAL_BOUNDARY_NOT_ON_GRID")
+            use_b = key in dupB and (side_copy.get(k) == "B" or (k in after_run and j == 0))
+            walk.append((dupB[key] if use_b else vid[key], k, j))
+            p = p + DIRS[dk]
+    lattice_grid.last_zipper = {"slits": len(runs), "duplicated": len(dupB)}
+    return logical, quads, vid, walk
+
+
+def grid_line_triples_topo(logical: np.ndarray, quads: np.ndarray) -> np.ndarray:
+    """(a, i, b) along grid lines from the quad edges (slit copies are never neighbours)."""
+    nb: dict = {}
+    for q in np.asarray(quads, int):
+        for k in range(4):
+            a, b = int(q[k]), int(q[(k + 1) % 4])
+            nb.setdefault(a, set()).add(b)
+            nb.setdefault(b, set()).add(a)
+    L = np.asarray(logical, float)
+    out = []
+    for i, ns in nb.items():
+        for e in (np.array([1.0, 0.0]), np.array([0.0, 1.0])):
+            a = [j for j in ns if np.allclose(L[j], L[i] - e)]
+            b = [j for j in ns if np.allclose(L[j], L[i] + e)]
+            if len(a) == 1 and len(b) == 1:
+                out.append((a[0], i, b[0]))
+    return np.asarray(out, int).reshape(-1, 3)
 
 
 def grid_line_triples(vid: dict[tuple[int, int], int]) -> np.ndarray:
@@ -1092,11 +1426,14 @@ def _pullback_interior(src, dom, logical, quads, bnd, walk, cuv, cf, cxyz=None, 
     o1 = cuv[cf[:, 2]] - cuv[cf[:, 0]]
     flips = int(np.sum((e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]) * np.sign(o0[:, 0] * o1[:, 1] - o0[:, 1] * o1[:, 0]) <= 0))
     if flips == 0:
-        tri = Triangulation(Dp[:, 0], Dp[:, 1], cf)
-        finder = tri.get_trifinder()
         gfree = np.setdiff1d(np.arange(len(logical)), bnd)
         pts = np.asarray(logical, float)[gfree]
-        t = finder(pts[:, 0], pts[:, 1])
+        if ZIPPER:
+            t = _find_triangles(Dp, cf, pts)
+        else:
+            tri = Triangulation(Dp[:, 0], Dp[:, 1], cf)
+            finder = tri.get_trifinder()
+            t = finder(pts[:, 0], pts[:, 1])
         if np.all(t >= 0):
             out = np.zeros((len(gfree), 2))
             for r, (ti, p) in enumerate(zip(t, pts)):
@@ -1157,15 +1494,69 @@ def plan_structured_grid(xyz, f3, uv, f2, params: Any):
     from . import aligned_grid_20261028 as _ag
     from .optcuts_zhang2021_quad_20261027 import _size_band
     from .feature_lines_20261029 import apply_feature_preset
+    global ZIPPER
     band = _size_band(apply_feature_preset(params))
     previous = _ag.SHAPE_FIRST
     _ag.SHAPE_FIRST = band
     if band is not None:
         print(f"[SG-SHAPE-FIRST] grid placement + panel step: shape first, panel size band {band}", flush=True)
+    zip_prev = ZIPPER
+    ZIPPER = bool(getattr(apply_feature_preset(params), "structured_grid_seam_zipper", False))   # preset may switch it on
+    if ZIPPER:
+        print("[SG-ZIPPER] seams close with 4 panels everywhere (tips = U-turns, complementary seam corners, "
+              "no seam cones, no cone-first branches)", flush=True)
+    from .run_trace import trace as _trace, enabled as _trace_on
+    if _trace_on():
+        try:   # 2026-11-04: the planner's input next to the trace, so a failure can be replayed offline
+            import pickle as _pk
+            _f2 = np.asarray(f2, int)
+            _E = np.sort(np.concatenate([_f2[:, [0, 1]], _f2[:, [1, 2]], _f2[:, [2, 0]]]), 1)
+            _u, _c = np.unique(_E, axis=0, return_counts=True)
+            _trace("grid.plan", "start", uv_vertices=len(uv), faces=len(_f2), boundary_edges=int((_c == 1).sum()),
+                   zipper=bool(ZIPPER), turn_reference=str(getattr(params, "structured_grid_turn_reference", "omega")),
+                   panels=getattr(params, "structured_grid_auto_panels", None),
+                   preset=getattr(params, "structured_grid_feature_preset", None))
+            _pv = {k: v for k, v in (vars(params) if hasattr(params, "__dict__") else {}).items()
+                   if isinstance(v, (int, float, str, bool, type(None)))}
+            with open(os.path.join(os.environ["ONESTRING_TRACE_DIR"], "grid_planner_input.pkl"), "wb") as _fh:
+                _pk.dump({"xyz": np.asarray(xyz), "f3": np.asarray(f3), "uv": np.asarray(uv), "f2": _f2, "params": _pv}, _fh)
+        except Exception:  # noqa: BLE001
+            pass
+    if bool(getattr(params, "structured_grid_size_from_grid", False)) and int(getattr(params, "nx", 0) or 0) > 0:
+        # 2026-11-04: the sidebar "grid size" sets the panel size: a grid of nx cells spans the longer side of
+        # Omega's bounding box (measured in the 3D metric), as in the paper route's overlay grid
+        import copy as _copy
+        _x = np.asarray(xyz, float); _f3 = np.asarray(f3, int); _u = np.asarray(uv, float); _f2 = np.asarray(f2, int)
+        _a3 = float(0.5 * np.sum(np.linalg.norm(np.cross(_x[_f3[:, 1]] - _x[_f3[:, 0]], _x[_f3[:, 2]] - _x[_f3[:, 0]]), axis=1)))
+        _q = _u[_f2]; _au = float(0.5 * np.sum(np.abs((_q[:, 1, 0] - _q[:, 0, 0]) * (_q[:, 2, 1] - _q[:, 0, 1])
+                                                    - (_q[:, 1, 1] - _q[:, 0, 1]) * (_q[:, 2, 0] - _q[:, 0, 0]))))
+        _h = float(np.sqrt(_a3 / max(_au, 1e-30)) * float(np.max(np.ptp(_u, axis=0))) / int(params.nx))
+        params = _copy.copy(params)
+        params.structured_grid_panel_edge = _h
+        print(f"[SG-SIZE] grid size {int(getattr(params, 'nx'))} -> panel edge {_h:.4g} in 3D (about {_a3 / _h ** 2:.0f} panels)", flush=True)
     try:
-        return _plan_structured_grid(xyz, f3, uv, f2, params)
+        out = _plan_structured_grid(xyz, f3, uv, f2, params)
+        _trace("grid.plan", "done")
+        return out
+    except Exception as _exc:
+        import traceback as _tb
+        _trace("grid.plan", "failed", error_type=type(_exc).__name__, error=str(_exc), traceback=_tb.format_exc())
+        raise
     finally:
         _ag.SHAPE_FIRST = previous
+        ZIPPER = zip_prev
+
+
+def print(*args, **kwargs):  # noqa: A001 - 2026-11-04: planner messages are also written to the trace log
+    import builtins
+    builtins.print(*args, **kwargs)
+    try:
+        msg = " ".join(str(a_) for a_ in args)
+        if msg.startswith("[SG"):
+            from .run_trace import trace as _trace
+            _trace("grid.message", msg.split("]", 1)[0].lstrip("["), text=msg)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _plan_structured_grid(xyz, f3, uv, f2, params: Any):
@@ -1208,7 +1599,7 @@ def _plan_structured_grid(xyz, f3, uv, f2, params: Any):
             prune_report = [{"error": f"{type(exc).__name__}: {exc}"}]
         print(f"[SG-PRUNE] sub-panel cut branches sewn back: {prune_report}", flush=True)
     direction_model = str(getattr(params, "structured_grid_direction_model", "field") or "field")
-    if bool(getattr(params, "structured_grid_cone_cuts", True)) and \
+    if bool(getattr(params, "structured_grid_cone_cuts", True)) and not ZIPPER and \
             str(getattr(params, "structured_grid_placement", "aligned")) not in ("quadmesh", "pedp"):
         cone_info, uv, f2, forced_xyz = _cone_first_seams(xyz, f3, uv, f2, params)
     tols = [float(t) for t in str(getattr(params, "structured_grid_smoothing_tolerances", "0.01,0.005,0")).split(",")
@@ -1333,6 +1724,11 @@ def _plan_structured_grid(xyz, f3, uv, f2, params: Any):
             coupling = side_coupling(src_dir, sorted(feats), uv_dir, pre.f2)
             forced_idx = {}                     # directions come from the chart's own rotation field
             w_head = float(getattr(params, "structured_grid_field_heading_weight", 0.1))
+        turn3d = None
+        if str(getattr(params, "structured_grid_turn_reference", "omega")) == "surface":
+            turn3d = surface_turn_reference(src, feats, pre.xyz, pre.f3)
+            print(f"[SG-TURN] corner costs from the 3D surface's geodesic turning (orientation {turn3d[1]:+.0f})", flush=True)
+
         def solve_dom(forced, w_head_override=None, time_limit=None, max_rounds=12, ratios=None):
             for ratio in (ratios or (ratio0, 0.5 * ratio0)):
                 try:
@@ -1346,11 +1742,13 @@ def _plan_structured_grid(xyz, f3, uv, f2, params: Any):
                                         w_cone=float(getattr(params, "structured_grid_cone_weight", 0.5)),
                                         shape_weight=shape_w,
                                         turn_weight=float(getattr(params, "structured_grid_turn_weight", 1.0)),
-                                        milp_time_limit=time_limit, max_rounds=max_rounds)
+                                        milp_time_limit=time_limit, max_rounds=max_rounds, turn3d=turn3d)
                     d_["min_side_ratio"] = ratio
                     return d_
                 except StructuredGridError as exc:
                     errors.append(str(exc)[:400])
+                    from .run_trace import trace as _trace
+                    _trace("grid.logical_domain", "ratio_failed", min_ratio=ratio, error=str(exc))
                     print(f"[SG-GRID] min side ratio {ratio:g}: {str(exc)[:300]}", flush=True)
             return None
 
@@ -1557,7 +1955,8 @@ def _plan_structured_grid(xyz, f3, uv, f2, params: Any):
         "zhang2021_j_min": float("nan"), "zhang2021_d_h_percent_bbox": 0.0})
     try:
         plan = plan_zhang2021_m2d(pre.xyz, pre.f3, pre.uv, pre.f2, p, zhang_result=fake,
-                                  panel_line_triples=grid_line_triples(vid), strict_node_valence=False,
+                                  panel_line_triples=(grid_line_triples_topo(logical, quads) if ZIPPER
+                                                      else grid_line_triples(vid)), strict_node_valence=False,
                                   panel_weights=_panel_weights(params),
                                   report_only=True, keep_interior_3d=True,
                                   extra_fixed=extra_fixed, principal_field=principal_field,

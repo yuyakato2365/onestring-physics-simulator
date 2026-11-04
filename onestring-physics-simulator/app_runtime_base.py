@@ -560,7 +560,8 @@ with st.sidebar:
             "K3D local/global iterations",
             min_value=1,
             max_value=1000,
-            value=max(1, int(float(os.environ.get("ONESTRING_PAPER_K3D_ITERATIONS", "40")))),
+            # 2026-11-04: the boundary-fit modes set this variable to 100000 (run to convergence); keep the widget in range
+            value=min(1000, max(1, int(float(os.environ.get("ONESTRING_PAPER_K3D_ITERATIONS", "40"))))),
             step=10,
             help="M3D→K3D の paper-aligned local/global 最適化の反復回数。デフォルトは40回です。",
             key="onestring_0920_k3d_iterations",
@@ -704,6 +705,8 @@ with st.sidebar:
         "optcuts_structured_grid_slide_shape_keep_20261030": "slide_shape_keep_20261030",
         "optcuts_structured_grid_align_even_keep_20261030": "align_shape_even_keep_20261030",
         "optcuts_structured_grid_align_even_neighbor_keep_20261030": "align_shape_even_neighbor_keep_20261030",
+        "optcuts_structured_grid_soft_fit_20261104": "soft_fit_20261104",
+        "optcuts_structured_grid_fit_20261104": "soft_fit_20261104",
     }
     omega_parameterization_mode = _param_row(
         "S→Omega のパラメータ化。paper_reference_bff だけが公式BFF CLIを使用し、代替fallbackを禁止する。",
@@ -731,6 +734,9 @@ with st.sidebar:
                 # 2026-10-29: the 10-28 structured grid + grid lines along crease lines
                 "optcuts_structured_grid_valley_fix_align_20261029",
                 "optcuts_structured_grid_strong_lines_20261029",
+                # 2026-11-04: soft sigma1 = sigma2 OptCuts + boundary-fit structured grid (seam zipper, 3D turning)
+                "optcuts_structured_grid_soft_fit_20261104",
+                "optcuts_structured_grid_fit_20261104",
             ],
             format_func=lambda mode: {
                 "bff":"bff — LEGACY harmonic, NOT official BFF",
@@ -748,6 +754,10 @@ with st.sidebar:
                     "2026-10-29 | 10-28 構造化グリッド＋谷線に格子線を通して固定＋格子の向きを曲がる方向にそろえる",
                 "optcuts_structured_grid_strong_lines_20261029":
                     "2026-10-29 | 10-28 構造化グリッド＋強く曲がる谷線・山線を Ω に描いて格子を沿わせる",
+                "optcuts_structured_grid_fit_20261104":
+                    "2026-11-04 | 境界に添わせる経路をアーティファクトと同じ手順で（OptCuts の制約・seam の始点の探索・対称リメッシュを選べる。各最適化は収束まで）",
+                "optcuts_structured_grid_soft_fit_20261104":
+                    "2026-11-04 | OptCuts（σ1/σ2 のソフト制約）→ 構造格子を境界に添わせる（seam を 4 枚で閉じる＋格子の角を立体の縁の曲がりで決める）＋格子の向きそろえ・形優先・T3D で上面パネルの形を保つ",
             }.get(mode,mode),
             index=2 if (paper_fidelity_enabled
                         or selected_model_version["id"]=="0.2.0-paper-reference-bff") else 0,
@@ -846,11 +856,33 @@ with st.sidebar:
     from onestring_physics.feature_lines_20261029 import t3d_top_shape_mode as _t3d_top_mode
     os.environ["ONESTRING_T3D_TOP_SHAPE"] = (
         _t3d_top_mode(structured_grid_feature_preset) if optcuts_structured_grid_20261028_enabled else "plane")
+    # 2026-11-04: soft sigma1 = sigma2 OptCuts (OneString fork) + interior-slit repair, only for that mode
+    from onestring_physics.optcuts_soft_fit_20261104 import configure as _soft_fit_configure
+    _fit_active = bool(optcuts_structured_grid_20261028_enabled and structured_grid_feature_preset == "soft_fit_20261104")
+    _fit_artifact_mode = bool(_fit_active and omega_parameterization_mode == "optcuts_structured_grid_fit_20261104")
+    fit_symremesh_enabled = bool(_fit_artifact_mode and st.session_state.get("onestring_fit_symremesh", False))
+    _soft_fit_configure(_fit_active,
+                        constraint=(st.session_state.get("onestring_fit_constraint", "hard") if _fit_artifact_mode else "soft"),
+                        multistart=(bool(st.session_state.get("onestring_fit_multistart", True)) if _fit_artifact_mode else False))
+    # 2026-11-04: K3D / K2D / grid placement / panel step run until converged, as in the cloud comparison runs
+    from onestring_physics import converged_route_20261104 as _converged_route
+    _converged_route.set_active(_fit_active)
+    if optcuts_structured_grid_20261028_enabled:
+        # 2026-11-04: settings this route never reads (found by recording which parameters a structured-grid run
+        # actually reads); shown so that changing them is not mistaken for an effect
+        st.info("この構造格子のモードで効かない設定：M2D crop policy、Omega overlay margin、Omega boundary mode、"
+                "tile size、gap size、3D optimization iterations と 2D optimization iterations（K3D・K2D の反復回数は「K3D local/global iterations」「Eq.5 K2D iterations」で決まり、境界に添わせるモードではどちらも収束まで回る）、"
+                "K2D strict solver time budget、K2D SciPy vertex limit、collision Split の各設定、"
+                "collision sweeps per layout iteration、lift coupling tau、string channel friction、T3D の押し出し・トリム関連の設定。"
+                "パネルの大きさは grid size（Ω の外接長方形の長い辺を何マスに分けるか）で決まります。")
     if (optcuts_planar_quad_20261026_enabled or optcuts_zhang2021_quad_20261027_enabled
             or optcuts_structured_grid_20261028_enabled):
         omega_parameterization_mode = "optcuts_test"
     structured_grid_panel_edge = float(st.session_state.get("onestring_structured_grid_panel_edge", 0.0))
     structured_grid_auto_panels = int(st.session_state.get("onestring_structured_grid_auto_panels", 150))
+    # 2026-11-04: the sidebar grid size sets the structured-grid panel size unless the expander says otherwise
+    structured_grid_size_from_grid = (st.session_state.get("onestring_structured_grid_size_source",
+                                                           "grid size (sidebar)") == "grid size (sidebar)")
     structured_grid_smoothing_tolerances = str(st.session_state.get(
         "onestring_structured_grid_smoothing_tolerances", "0.01,0.005,0") or "0")
     structured_grid_corner_scale = float(st.session_state.get("onestring_structured_grid_corner_scale", 0.04))
@@ -1481,6 +1513,24 @@ with st.sidebar:
             help="Full pipeline: seconds PER T2D attempt, not total across restarts. Each requested trial is executed. Other hinge stages use their existing stage budget.",
         ),
     )
+    # 2026-11-04: as in the cloud comparison runs, every T2D trial may run until L-BFGS-B stops on its own
+    # tolerances (no wall-clock budget, no iteration cap); on by default
+    t2d_run_to_convergence = bool(_param_row(
+        "T2D の各試行を、時間や反復回数で打ち切らず、最適化が自分で止まるまで回す（クラウドで比べた実験と同じ条件）。",
+        lambda: st.checkbox("T2D trials run to convergence (no time / iteration cap)", value=True,
+                            key="onestring_t2d_run_to_convergence"),
+    ))
+    if t2d_run_to_convergence:
+        hinge_layout_time_budget_sec = 0.0
+        hinge_layout_iterations = 10 ** 7
+    # 2026-11-04: penetration shallower than this is contact, not a collision (T2D verdicts, Hard repair, collision map)
+    t2d_contact_tolerance_pct = float(_param_row(
+        "これより浅いパネル同士のめり込みは「接触」とみなし、衝突として数えない（T2D の判定・Hard の修復・衝突マップ共通）。"
+        "めり込みの罰則は深さの 2 乗なので、ごく浅いめり込みは最適化でほとんど動かせない。",
+        lambda: st.number_input("T2D contact tolerance (% of tile edge)", min_value=0.0, max_value=5.0, value=0.1,
+                                step=0.05, format="%.3f", key="onestring_t2d_contact_tolerance_pct"),
+    ))
+    os.environ["ONESTRING_T2D_CONTACT_TOLERANCE_REL"] = repr(t2d_contact_tolerance_pct / 100.0)
     hinge_layout_max_candidate_pairs = int(_param_row(
         "衝突判定する候補ペア数の上限。上げると正確だが重く、下げると衝突を見逃しやすい。",
         lambda: st.number_input("hinge layout max collision candidate pairs", min_value=200, max_value=20000, value=3000, step=200, help="Cap on candidate tile pairs for SAT footprint collision checks."),
@@ -2147,6 +2197,17 @@ def build_target():
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as fh:
         fh.write(uploaded.getbuffer())
         temp_path = fh.name
+    if fit_symremesh_enabled:
+        # 2026-11-04: mirror-symmetric isotropic remesh before anything else (tools/optcuts_soft_fit_20261104/symremesh.py)
+        import subprocess as _sp, sys as _sys
+        _rm_out = temp_path + "_symremesh.obj"
+        _rm = _sp.run([_sys.executable, str(Path(__file__).resolve().parent / "tools" / "optcuts_soft_fit_20261104" / "symremesh.py"),
+                       temp_path, _rm_out], capture_output=True, text=True)
+        print(_rm.stdout[-2000:], _rm.stderr[-2000:], flush=True)
+        if _rm.returncode != 0 or not Path(_rm_out).exists():
+            raise RuntimeError("symmetric remesh failed (gpytoolbox installed in this environment?): " + _rm.stderr[-500:])
+        st.caption("対称リメッシュ: " + " / ".join(l for l in _rm.stdout.splitlines() if l.startswith(("original:", "remeshed:"))))
+        temp_path = _rm_out
     result = load_target_shape(temp_path)
     if paper_split_criterion in ("reflatten_tile_area", "fixed_chart_tile_area"):
         from onestring_physics.reference_bff import (
@@ -2439,6 +2500,7 @@ pipeline_params = PipelineParameters(
     optcuts_structured_grid_20261028_enabled=optcuts_structured_grid_20261028_enabled,
     structured_grid_panel_edge=structured_grid_panel_edge,
     structured_grid_auto_panels=structured_grid_auto_panels,
+    structured_grid_size_from_grid=structured_grid_size_from_grid,
     structured_grid_smoothing_tolerances=structured_grid_smoothing_tolerances,
     structured_grid_corner_scale=structured_grid_corner_scale,
     structured_grid_smoothness_weight=structured_grid_smoothness_weight,
@@ -2529,6 +2591,11 @@ pipeline_params = PipelineParameters(
     t3d_intersection_trim_enabled=bool(selected_model_version.get("t3d_intersection_trim_enabled", False)),
     compute=ComputeConfig(backend=compute_backend, dtype=tensor_dtype),
 )
+if _fit_active:
+    # 2026-11-04: as in the cloud comparison runs: OptCuts seams instead of Split, panel step to its own tolerance
+    pipeline_params.enable_csf_splits = False
+    pipeline_params.collision_split_enabled = False
+    pipeline_params.zhang2021_panel_optimization_iterations = 10 ** 6
 
 from onestring_physics.paper_fidelity_mode import (
     configure_paper_fidelity,
@@ -2825,7 +2892,7 @@ if rerun_t2d_only and not run_pipeline:
     # Do not mutate the parameters shared with a future full pipeline run.
     import copy as _copy
     t2d_rerun_params = _copy.copy(pipeline_params)
-    t2d_rerun_params.hinge_layout_time_budget_sec = float(t2d_rerun_time_budget_sec)
+    t2d_rerun_params.hinge_layout_time_budget_sec = (0.0 if t2d_run_to_convergence else float(t2d_rerun_time_budget_sec))
     t2d_rerun_params.hinge_layout_budget_mode = "total_shared"
     t2d_rerun_params.collision_split_enabled = False  # requires complete M2D rebuild
     t2d_rerun_params.hinge_layout_search_mode = t2d_search_mode

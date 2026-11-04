@@ -53,9 +53,26 @@ def footprint_contacts(xy, faces):
     return ii[mask], jj[mask], normals[mask, active_axes], sign, depth[mask]
 
 
+def drop_exempt_contacts(contacts, exempt_pairs):
+    """2026-11-03: remove contacts between tiles that share a hinge.
+
+    Hinge partners touch along their common edge by construction (their
+    8-corner footprints meet at the hinge), so such a contact is not an
+    overlap; how far a hinged pair may close is checked separately through
+    the opening angle.
+    """
+    ii, jj, normals, signs, depths = contacts
+    if not exempt_pairs or not len(ii):
+        return contacts
+    keep = np.array([(min(int(a), int(b)), max(int(a), int(b))) not in exempt_pairs
+                     for a, b in zip(ii, jj)], bool)
+    return ii[keep], jj[keep], normals[keep], signs[keep], depths[keep]
+
+
 def repair_nonpenetration(initial_pose, positions, faces, reference_pose,
                           scale, deadline, rng,
-                          *, max_iterations=480, log_stride=8, callback=None):
+                          *, max_iterations=480, log_stride=8, callback=None,
+                          exempt_pairs=None, tolerance=None):
     """Try to enforce SAT nonpenetration by rigid SE(2) panel displacements.
 
     Translation is unbounded. Only the common XY translation gauge is fixed:
@@ -72,7 +89,7 @@ def repair_nonpenetration(initial_pose, positions, faces, reference_pose,
         pose[:, 1:] += np.mean(ref[:, 1:] - pose[:, 1:], axis=0)
     best = pose.copy()
     history = [(0, pose.copy())]
-    eps = max(1e-12, float(scale)*1e-10)
+    eps = max(1e-12, float(scale)*1e-10) if tolerance is None else float(tolerance)
     clearance = max(2e-11, float(scale)*1e-7)
     ntiles = len(pose)
     best_quality = None
@@ -80,7 +97,11 @@ def repair_nonpenetration(initial_pose, positions, faces, reference_pose,
     diagnostics = []
     for iteration in range(max_iterations+1):
         xy, _ = positions(pose)
-        ii, jj, normals, signs, depths = footprint_contacts(xy, faces)
+        ii, jj, normals, signs, depths = drop_exempt_contacts(footprint_contacts(xy, faces), exempt_pairs)
+        if tolerance is not None:
+            # only contacts deeper than the tolerance are pushed apart
+            deep = depths > eps
+            ii, jj, normals, signs, depths = ii[deep], jj[deep], normals[deep], signs[deep], depths[deep]
         collisions = int(np.count_nonzero(depths > eps))
         max_depth = float(np.max(depths, initial=0.))
         quality = (collisions, max_depth, float(depths@depths))
@@ -127,7 +148,8 @@ def repair_nonpenetration(initial_pose, positions, faces, reference_pose,
 
 
 def refine_feasible_pose(pose, positions, faces, reference_pose,
-                         scale, deadline, rng, objective, *, iterations=24):
+                         scale, deadline, rng, objective, *, iterations=24,
+                         exempt_pairs=None, tolerance=None, accept=None):
     """Projected descent on hinge/anchor energy, rejecting nonfeasible steps."""
     current = np.asarray(pose, float).copy()
     current_energy, _ = objective(current)
@@ -145,7 +167,10 @@ def refine_feasible_pose(pose, positions, faces, reference_pose,
         projected, feasible, _, _ = repair_nonpenetration(
             proposed, positions, faces, reference_pose,
             scale, deadline, rng, max_iterations=24, log_stride=24,
+            exempt_pairs=exempt_pairs, tolerance=tolerance,
         )
+        if feasible and accept is not None:
+            feasible = bool(accept(projected))
         if feasible:
             after, _ = objective(projected)
             if after < current_energy-1e-12*scale_sq:

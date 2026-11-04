@@ -1,0 +1,687 @@
+--- a/src/TriMesh.cpp
++++ b/src/TriMesh.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ //
+ //  TriMesh.cpp
+ //  OptCuts
+@@ -31,6 +32,14 @@
+ extern double filterExp_in;
+ extern int inSplitTotalAmt;
+ 
++// 2026-11-02 (OneString): multi-start seams.
++//   ONESTRING_FORCE_START_VERTEX=v : the FIRST seam must start at boundary vertex v (no interior split before a seam exists)
++//   ONESTRING_PRINT_START_CANDS=file : write the ranked boundary split candidates of the first query to file and exit
++#include <cstdio>
++#include <cstdlib>
++static bool osHasSeam(const OptCuts::TriMesh& m) { for(int c = 0; c < m.cohE.rows(); c++) { if(!m.boundaryEdge[c]) { return true; } } return false; }
++static int osForcedStart(void) { static int v = -2; if(v == -2) { const char* e = std::getenv("ONESTRING_FORCE_START_VERTEX"); v = e ? std::atoi(e) : -1; } return v; }
++
+ namespace OptCuts {
+     
+     TriMesh::TriMesh(void)
+@@ -577,7 +586,7 @@
+                         }
+                         if(!connectToBound) {
+                             // don't split vertices connected to boundary here
+-                            sortedCandVerts_in[-divGradPerVert[vI] / vertWeight[vI]] = vI;
++                            sortedCandVerts_in[-(divGradPerVert[vI] / std::max(vertWeight[vI], 0.05) + 1.0e3 * std::max(0.0, 0.05 - vertWeight[vI]))] = vI;
+                         }
+                     }
+                 }
+@@ -591,11 +600,24 @@
+                     }
+                     
+                     if(isBoundaryVert(vI)) {
+-                        sortedCandVerts_b[-divGradPerVert[vI] / vertWeight[vI]] = vI;
++                        sortedCandVerts_b[-(divGradPerVert[vI] / std::max(vertWeight[vI], 0.05) + 1.0e3 * std::max(0.0, 0.05 - vertWeight[vI]))] = vI;
+                     }
+                 }
+             }
+             
++            if(!osHasSeam(*this)) {
++                const char* pf = std::getenv("ONESTRING_PRINT_START_CANDS");
++                if(pf && !splitInterior) {
++                    FILE* fo = std::fopen(pf, "w");
++                    if(fo) { for(const auto& c : sortedCandVerts_b) { std::fprintf(fo, "%d %.9g\n", c.second, -c.first); } std::fclose(fo); }
++                    std::exit(0);
++                }
++                const int fv = osForcedStart();
++                if(fv >= 0) {
++                    if(splitInterior) { EwDec_max = -__DBL_MAX__; path_max.resize(0); newVertPos_max.resize(0, 2); timer_step.stop(); return; }
++                    if((fv < V_rest.rows()) && isBoundaryVert(fv) && (vNeighbor[fv].size() > 2)) { sortedCandVerts_b.clear(); sortedCandVerts_b[0.0] = fv; }
++                }
++            }
+             if(!splitInterior)
+             {
+                 if(sortedCandVerts_b.empty()) {
+@@ -831,6 +853,11 @@
+                     continue;
+                 }
+             }
++            // OneString CSF (2026-11-02): seams cut for the CSF condition carry seam weight 0.05 and are never zipped
++            if((vertWeight[cohE(cohI, 1 - forkVI)] <= 0.0501) || (vertWeight[cohE(cohI, 3 - forkVI)] <= 0.0501) ||
++               (vertWeight[cohE(cohI, forkVI)] <= 0.0501)) {
++                continue;
++            }
+             
+             // find incident triangles for inversion check and local energy decrease evaluation
+             std::vector<int> triangles;
+@@ -2102,6 +2129,127 @@
+         }
+     }
+     
++} // namespace OptCuts (reopened below)
++
++// 2026-11-02 (OneString): optional penalty on seams that bend (env ONESTRING_SEAM_BEND_W, default 0 = original).
++// A new seam edge vI->nbVI costs  length * (1 + w * (1 - cos t)),  t = angle to the straightest existing seam edge
++// ending at vI (no seam at vI: no penalty).  Merges give back the same amount; interior splits use the angle at the
++// middle vertex of the 3-vertex path.
++static double seamBendW(void) { static double w = -1.0; if(w < 0.0) { const char* e = std::getenv("ONESTRING_SEAM_BEND_W"); w = e ? std::atof(e) : 0.0; } return w; }
++static double seamBendFactor(const OptCuts::TriMesh& m, int vI, int nbVI)
++{
++    const double w = seamBendW();
++    if(w <= 0.0) { return 1.0; }
++    Eigen::RowVector3d dNew = m.V_rest.row(nbVI) - m.V_rest.row(vI);
++    if(dNew.norm() < 1.0e-12) { return 1.0; }
++    dNew.normalize();
++    double bestCos = -2.0;
++    for(int c = 0; c < m.cohE.rows(); c++) {
++        if(m.boundaryEdge[c]) { continue; }
++        for(int sI = 0; sI < 2; sI++) {
++            const int a = m.cohE(c, 2 * sI), b = m.cohE(c, 2 * sI + 1);
++            if((a < 0) || (b < 0)) { continue; }
++            int other = -1;
++            if(a == vI) { other = b; } else if(b == vI) { other = a; }
++            if(other < 0 || other == nbVI) { continue; }
++            Eigen::RowVector3d dPrev = m.V_rest.row(vI) - m.V_rest.row(other);
++            if(dPrev.norm() < 1.0e-12 || (m.V_rest.row(other) - m.V_rest.row(nbVI)).norm() < 1.0e-12) { continue; }
++            bestCos = std::max(bestCos, dPrev.normalized().dot(dNew));
++        }
++    }
++    if(bestCos < -1.5) { return 1.0; }
++    return 1.0 + w * (1.0 - bestCos);
++}
++// 2026-11-03 (OneString): optional mirror-symmetry term for the seams (env ONESTRING_SYM_W > 0 together with
++// ONESTRING_SYM_PLANE="nx,ny,nz,d", the mirror plane n.x = d in the input frame; ONESTRING_SYM_TOL optional,
++// default 0.6 x mean edge length).  E_sym = sum of |e| over the seam edges e that are off the plane and whose
++// mirror image is not a seam edge; it is added to the seam length with weight w (same normalisation).  A new seam
++// edge changes E_sym by +|e| (unpaired), 0 (on the plane) or -|e| (it completes the mirror image of an existing
++// seam edge); a merge changes it by the opposite amounts.
++struct OsSym { bool on = false; double w = 0.0, tol = 0.0, d = 0.0; Eigen::RowVector3d n = Eigen::RowVector3d::Zero(); };
++static const OsSym& osSym(const OptCuts::TriMesh& m)
++{
++    static OsSym s;
++    static bool init = false;
++    if(!init) {
++        init = true;
++        const char* ew = std::getenv("ONESTRING_SYM_W");
++        const char* ep = std::getenv("ONESTRING_SYM_PLANE");
++        double a = 0, b = 0, c = 0, dd = 0;
++        if(ew && ep && std::atof(ew) > 0.0 && std::sscanf(ep, "%lf,%lf,%lf,%lf", &a, &b, &c, &dd) == 4) {
++            s.w = std::atof(ew);
++            s.n << a, b, c;
++            const double nn = s.n.norm();
++            if(nn > 1.0e-12) {
++                s.n /= nn; s.d = dd / nn; s.on = true;
++                const char* et = std::getenv("ONESTRING_SYM_TOL");
++                if(et) { s.tol = std::atof(et); }
++                else {
++                    double sum = 0.0; int cnt = 0;
++                    for(int t = 0; t < m.F.rows(); t++) {
++                        for(int k = 0; k < 3; k++) { sum += (m.V_rest.row(m.F(t, k)) - m.V_rest.row(m.F(t, (k + 1) % 3))).norm(); cnt++; }
++                    }
++                    s.tol = 0.6 * sum / std::max(cnt, 1);
++                }
++                std::cout << "[ONESTRING] seam symmetry term: w " << s.w << ", plane (" << s.n << ") . x = " << s.d
++                          << ", tolerance " << s.tol << std::endl;
++            }
++        }
++    }
++    return s;
++}
++// 0: the 3D edge (a, b) lies on the mirror plane; -1: its mirror image is a current seam edge other than (a, b)
++// itself; +1 otherwise
++static int osSymStatus(const OptCuts::TriMesh& m, int a, int b)
++{
++    const OsSym& s = osSym(m);
++    const Eigen::RowVector3d pa = m.V_rest.row(a), pb = m.V_rest.row(b);
++    if(std::abs(pa.dot(s.n) - s.d) < s.tol && std::abs(pb.dot(s.n) - s.d) < s.tol) { return 0; }
++    const Eigen::RowVector3d ra = pa - 2.0 * (pa.dot(s.n) - s.d) * s.n, rb = pb - 2.0 * (pb.dot(s.n) - s.d) * s.n;
++    for(int c = 0; c < m.cohE.rows(); c++) {
++        if(m.boundaryEdge[c]) { continue; }
++        const int x = m.cohE(c, 0), y = m.cohE(c, 1);
++        if((x < 0) || (y < 0)) { continue; }
++        const Eigen::RowVector3d px = m.V_rest.row(x), py = m.V_rest.row(y);
++        if((((px - pa).norm() < 1.0e-12) && ((py - pb).norm() < 1.0e-12)) || (((px - pb).norm() < 1.0e-12) && ((py - pa).norm() < 1.0e-12))) { continue; }
++        if((((px - ra).norm() < s.tol) && ((py - rb).norm() < s.tol)) || (((px - rb).norm() < s.tol) && ((py - ra).norm() < s.tol))) { return -1; }
++    }
++    return 1;
++}
++static double osSymTerm(const OptCuts::TriMesh& m, int a, int b)
++{
++    const OsSym& s = osSym(m);
++    return s.on ? s.w * osSymStatus(m, a, b) : 0.0;
++}
++// 2026-11-03 (OneString): ONESTRING_NO_BRANCH=1 keeps every seam a simple slit (one mouth on the boundary, one tip):
++// a boundary split is only allowed at a boundary vertex that carries no seam edge (a new seam) or at a seam tip
++// (the seam grows); splits in the middle of a seam (a branch) or at a seam mouth (a second seam from the same
++// boundary point) are refused.  The structured grid closes seams with 4 panels only along simple slits.
++static bool osNoBranch(void) { static int f = -1; if(f < 0) { const char* e = std::getenv("ONESTRING_NO_BRANCH"); f = (e && std::atoi(e) != 0) ? 1 : 0; } return f == 1; }
++static bool osBranchingSplit(const OptCuts::TriMesh& m, int vI)
++{
++    if(!osNoBranch()) { return false; }
++    int seamRows = 0;
++    bool onOrigBoundary = false;
++    for(int c = 0; c < m.cohE.rows(); c++) {
++        bool hit = false;
++        for(int k = 0; k < 4; k++) { if(m.cohE(c, k) == vI) { hit = true; } }
++        if(!hit) { continue; }
++        if(m.boundaryEdge[c]) { onOrigBoundary = true; } else { seamRows++; }
++    }
++    if(seamRows == 0) { return false; }                      // plain boundary vertex: starts a new seam
++    if(seamRows == 1 && !onOrigBoundary) { return false; }   // seam tip: the seam grows
++    return true;                                             // middle of a seam or a seam mouth
++}
++static double pathBendFactor(const OptCuts::TriMesh& m, const std::vector<int>& path)
++{
++    const double w = seamBendW();
++    if(w <= 0.0 || path.size() < 3) { return 1.0; }
++    Eigen::RowVector3d d1 = m.V_rest.row(path[1]) - m.V_rest.row(path[0]), d2 = m.V_rest.row(path[2]) - m.V_rest.row(path[1]);
++    if(d1.norm() < 1.0e-12 || d2.norm() < 1.0e-12) { return 1.0; }
++    return 1.0 + w * (1.0 - d1.normalized().dot(d2.normalized()));
++}
++namespace OptCuts {
+     double TriMesh::computeLocalLDec(int vI, double lambda_t,
+                                      std::vector<int>& path_max,
+                                      Eigen::MatrixXd& newVertPos_max,
+@@ -2120,6 +2268,7 @@
+                 // zipper merge
+                 double seDec = (V_rest.row(path_max[0]) - V_rest.row(path_max[1])).norm() /
+                     virtualRadius * (vertWeight[path_max[0]] + vertWeight[path_max[1]]) / 2.0;
++                seDec *= seamBendFactor(*this, path_max[0], path_max[1]) + osSymTerm(*this, path_max[0], path_max[1]);
+                 // closing up splitted diamond
+                 bool closeup = false;
+                 for(const auto& nbVI : vNeighbor[path_max[0]]) {
+@@ -2171,6 +2320,7 @@
+             energyChanges_max.first = __DBL_MAX__;
+             energyChanges_max.second = __DBL_MAX__;
+             path_max.resize(2);
++            if(osBranchingSplit(*this, vI)) { path_max[0] = vI; path_max[1] = vI; return -__DBL_MAX__; }
+             for(const auto& nbVI : vNeighbor[vI]) {
+                 const std::pair<int, int> edge(vI, nbVI);
+                 if((edge2Tri.find(edge) != edge2Tri.end()) &&
+@@ -2182,7 +2332,7 @@
+                     const double SDDec = queryLocalEdDec_bSplit(edge, newVertPosI);
+                     
+                     const double seInc = (V_rest.row(vI) - V_rest.row(nbVI)).norm() /
+-                        virtualRadius * (vertWeight[vI] + vertWeight[nbVI]) / 2.0;
++                        virtualRadius * (vertWeight[vI] + vertWeight[nbVI]) / 2.0 * (seamBendFactor(*this, vI, nbVI) + osSymTerm(*this, vI, nbVI));
+                     const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;
+                     if(curEwDec > maxEwDec) {
+                         maxEwDec = curEwDec;
+@@ -2244,7 +2394,10 @@
+                     //TODO: share local mesh before split, also for boundary splits
+                     
+                     const double seInc = ((V_rest.row(path[0]) - V_rest.row(path[1])).norm() * (vertWeight[path[0]] + vertWeight[path[1]]) +
+-                                          (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]])) / virtualRadius / 2.0;
++                                          (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]])) / virtualRadius / 2.0
++                                          * pathBendFactor(*this, path)
++                                          + ((V_rest.row(path[0]) - V_rest.row(path[1])).norm() * (vertWeight[path[0]] + vertWeight[path[1]]) * osSymTerm(*this, path[0], path[1]) +
++                                             (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]]) * osSymTerm(*this, path[1], path[2])) / virtualRadius / 2.0;
+                     const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;
+                     if(EwDec > EwDec_max) {
+                         EwDec_max = EwDec;
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,3 +1,9 @@
++#include <cstdlib>
++#include <set>
++#include <array>
++#include <vector>
++#include <cmath>
++#include <cstdio>
+ #include "Types.hpp"
+ #include "IglUtils.hpp"
+ #include "Optimizer.hpp"
+@@ -73,6 +79,153 @@
+ std::ofstream logFile;
+ std::string outputFolderPath = "output/";
+ 
++// ---------------------------------------------------------------------------------------------
++// OneString (2026-11-02): conformal-scale (CSF) condition inside the OptCuts loop.
++//   ONESTRING_CSF_MODE = 0 : plain OptCuts (default, identical to the authors' code path)
++//                        1 : soft  - at every stationary point the helper measures how far the
++//                                    conformal scale of the chart exceeds the allowed range and
++//                                    makes seams cheaper there (vertWeight); weight strength fixed
++//                        2 : hard  - same seam weights, and W <= W_max is required for a
++//                                    configuration to count as feasible (like the distortion
++//                                    bound; enforced through the same dual update of lambda)
++//   W = smallest max/min ratio of the conformal scale over the chart (free boundary), computed by
++//   ONESTRING_CSF_HELPER (python) from the current cut mesh.
++// ---------------------------------------------------------------------------------------------
++int csfMode = 0;
++double csfWmax = std::sqrt(2.0), csfBeta = 4.0, csfPanels = 600.0, csfKappa = 1.0;
++double csfW = 0.0, csfP = 0.0, csfScale = 0.0, csfGamma = -1.0, csfRho = 0.5, csfBand = 0.97;
++std::vector<int> csfPath;                       // directed cut proposed by the helper (boundary vertex first)
++std::set<std::array<long long, 3>> csfProtected; // 3D positions on directed cuts (kept out of merges)
++int csfSoftBlockedUntil = -1, csfCutCount = 0;
++std::array<long long, 3> csfKey(const Eigen::RowVectorXd& p)
++{
++    const double q = 1.0e7;
++    return {static_cast<long long>(std::llround(p[0] * q)), static_cast<long long>(std::llround(p[1] * q)), static_cast<long long>(std::llround(p[2] * q))};
++}
++double csfRelExcess(double W) { return (W > csfWmax) ? (std::log(W) - std::log(csfWmax)) / std::log(csfWmax) : 0.0; }
++int csfEvalIter = -1, csfEvalCount = 0, csfMaxEvals = 1000000;
++std::string csfHelper = "", csfPython = "python3";
++bool csfInited = false;
++void csfInit(void)
++{
++    if(csfInited) { return; }
++    csfInited = true;
++    if(const char* e = std::getenv("ONESTRING_CSF_MODE")) { csfMode = std::atoi(e); }
++    if(const char* e = std::getenv("ONESTRING_CSF_WMAX")) { csfWmax = std::atof(e); }
++    if(const char* e = std::getenv("ONESTRING_CSF_BETA")) { csfBeta = std::atof(e); }
++    if(const char* e = std::getenv("ONESTRING_CSF_PANELS")) { csfPanels = std::atof(e); }
++    if(const char* e = std::getenv("ONESTRING_CSF_KAPPA")) { csfKappa = std::atof(e); }
++    if(const char* e = std::getenv("ONESTRING_CSF_MAXEVALS")) { csfMaxEvals = std::atoi(e); }
++    if(const char* e = std::getenv("ONESTRING_CSF_HELPER")) { csfHelper = e; }
++    if(const char* e = std::getenv("ONESTRING_CSF_PYTHON")) { csfPython = e; }
++    if(const char* e = std::getenv("ONESTRING_CSF_RHO")) { csfRho = std::atof(e); }
++    if(const char* e = std::getenv("ONESTRING_CSF_BAND")) { csfBand = std::atof(e); }
++    csfGamma = csfBeta;
++    if(csfHelper.empty()) { csfMode = 0; }
++    std::cout << "[CSF] mode " << csfMode << " Wmax " << csfWmax << " beta " << csfBeta << " panels " << csfPanels << std::endl;
++}
++bool csfEvaluate(double E_SD_now)
++{
++    csfInit();
++    if(csfMode == 0) { return false; }
++    if(csfEvalIter == iterNum) { return true; }
++    OptCuts::TriMesh& R = optimizer->getResult();
++    const std::string inP = outputFolderPath + "csf_in.bin", outP = outputFolderPath + "csf_out.txt";
++    {
++        std::ofstream f(inP, std::ios::binary);
++        int n = static_cast<int>(R.V_rest.rows()), m = static_cast<int>(R.F.rows());
++        f.write(reinterpret_cast<const char*>(&n), 4); f.write(reinterpret_cast<const char*>(&m), 4);
++        for(int i = 0; i < n; i++) { for(int k = 0; k < 3; k++) { double x = R.V_rest(i, k); f.write(reinterpret_cast<const char*>(&x), 8); } }
++        for(int t = 0; t < m; t++) { for(int k = 0; k < 3; k++) { int v = R.F(t, k); f.write(reinterpret_cast<const char*>(&v), 4); } }
++        double prm[4] = {csfPanels, csfWmax, csfBeta, 2.0};
++        f.write(reinterpret_cast<const char*>(prm), 32);
++    }
++    std::remove(outP.c_str());
++    const std::string cmd = csfPython + " " + csfHelper + " " + inP + " " + outP + " 2>> " + outputFolderPath + "csf_helper.log";
++    int rc = std::system(cmd.c_str());
++    std::ifstream g(outP);
++    if(!g) { logFile << "[CSF] helper failed rc=" << rc << std::endl; std::cout << "[CSF] helper failed rc=" << rc << std::endl; return false; }
++    g >> csfW >> csfP;
++    Eigen::VectorXd w(R.V_rest.rows());
++    for(int i = 0; i < w.size(); i++) { g >> w[i]; }
++    if(g) { R.vertWeight = w; }
++    {
++        std::ifstream gs(outP + ".scale");
++        if(gs) { gs >> csfScale; }        // panel side
++        csfPath.clear();
++        std::ifstream gp(outP + ".path");
++        int v; while(gp >> v) { csfPath.push_back(v); }
++    }
++    // directed cuts stay cut: almost free seams there, so zipping them saves nothing
++    if(!csfProtected.empty()) {
++        for(int i = 0; i < R.V_rest.rows(); i++) {
++            if(csfProtected.count(csfKey(R.V_rest.row(i)))) { R.vertWeight[i] = 0.05; }
++        }
++    }
++    csfEvalIter = iterNum; csfEvalCount++;
++    logFile << "[CSF] iter " << iterNum << " W = " << csfW << " P = " << csfP << " V = " << R.V_rest.rows() << " eval " << csfEvalCount << " gamma " << csfGamma << std::endl;
++    std::cout << "[CSF] iter " << iterNum << " W = " << csfW << " P = " << csfP << " V = " << R.V_rest.rows() << std::endl;
++    return true;
++}
++double csfMeasure(double E_SD)
++{
++    csfInit();
++    return E_SD;   // v2: the CSF condition acts through the seam cost (reward) and the feasibility test, not through lambda
++}
++bool csfFeasible(void)
++{
++    return (csfMode != 2) || ((csfW > 0.0) && (csfW <= csfWmax));
++}
++// Cut along the helper's path (current boundary -> worst interior spot) with OptCuts' own boundary splits.
++// hard: always while W > W_max.  soft: keep the cut only if  seam length + mu * relative CSF excess  goes down.
++bool csfDirectedCut(double E_SD_now)
++{
++    if((csfMode == 0) || (csfW <= csfWmax) || (csfPath.size() < 2)) { return false; }
++    if((csfMode == 1) && (csfEvalCount < csfSoftBlockedUntil)) { return false; }
++    OptCuts::TriMesh backup = optimizer->getResult();
++    const std::vector<int> path = csfPath;
++    const double W0 = csfW, P0 = csfP;
++    double addLen = 0.0; int nSplit = 0;
++    std::vector<std::array<long long, 3>> keys;
++    for(int k = 0; k + 1 < static_cast<int>(path.size()); k++) {
++        OptCuts::TriMesh& R = optimizer->getResult();
++        const int a = path[k], b = path[k + 1];
++        if((a >= R.V_rest.rows()) || (b >= R.V_rest.rows())) { break; }
++        if(!R.isBoundaryVert(a) || R.isBoundaryVert(b)) { break; }
++        if((R.edge2Tri.find(std::pair<int, int>(a, b)) == R.edge2Tri.end()) ||
++           (R.edge2Tri.find(std::pair<int, int>(b, a)) == R.edge2Tri.end())) { break; }
++        Eigen::MatrixXd nvp;
++        const double dec = R.queryLocalEdDec_bSplit(std::pair<int, int>(a, b), nvp);
++        if((dec == -__DBL_MAX__) || (nvp.rows() != 2)) { break; }
++        keys.push_back(csfKey(R.V_rest.row(a))); keys.push_back(csfKey(R.V_rest.row(b)));
++        addLen += (R.V_rest.row(a) - R.V_rest.row(b)).norm();
++        optimizer->createFracture(0, std::vector<int>{a, b}, nvp, false);
++        nSplit++;
++    }
++    if(nSplit == 0) { return false; }
++    for(const auto& kk : keys) { csfProtected.insert(kk); }
++    csfEvalIter = -1;
++    csfEvaluate(E_SD_now);
++    const double R_ = optimizer->getResult().virtualRadius;
++    if(csfMode == 1) {
++        const double dE = addLen / csfScale + csfBeta * (csfRelExcess(csfW) - csfRelExcess(W0));   // in panels
++        if(dE >= 0.0) {
++            optimizer->setConfig(backup, iterNum, optimizer->getTopoIter());
++            for(const auto& kk : keys) { csfProtected.erase(kk); }
++            logFile << "[CSF] soft: directed cut of " << nSplit << " edges rejected (W " << W0 << " -> " << csfW << ", dE " << dE << " panels)" << std::endl;
++            std::cout << "[CSF] soft: directed cut rejected (W " << W0 << " -> " << csfW << ")" << std::endl;
++            csfW = W0; csfP = P0; csfPath.clear(); csfEvalIter = iterNum;
++            csfSoftBlockedUntil = csfEvalCount + 15;
++            return false;
++        }
++    }
++    csfCutCount++;
++    logFile << "[CSF] directed cut " << csfCutCount << ": " << nSplit << " edges, length " << addLen / csfScale << " panels, W " << W0 << " -> " << csfW << std::endl;
++    std::cout << "[CSF] directed cut " << csfCutCount << ": " << nSplit << " edges, W " << W0 << " -> " << csfW << std::endl;
++    (void)R_;
++    return true;
++}
++
+ // visualization
+ bool headlessMode = false;
+ igl::opengl::glfw::Viewer viewer;
+@@ -106,14 +259,44 @@
+ 
+ void saveInfo(bool writePNG = true, bool writeGIF = true, bool writeMesh = true);
+ 
++// 2026-11-02: optional dump of every iteration (env ONESTRING_DUMP_DIR) to show how OptCuts optimises a shape.
++// Each file: iterNum(int) lambda_SD(double) nV(int) nF(int), then per vertex [u v x y z] (double), per face 3 ints.
++std::string dumpDir = ""; int dumpCount = 0; bool dumpInited = false;
++void dumpState(void)
++{
++    if(dumpDir.empty()) { return; }
++    const OptCuts::TriMesh& m = *triSoup[channel_result];
++    char fn[1024]; std::snprintf(fn, sizeof(fn), "%s/f%05d.bin", dumpDir.c_str(), dumpCount++);
++    FILE* f = std::fopen(fn, "wb");
++    if(!f) { return; }
++    int it = iterNum, nV = (int)m.V.rows(), nF = (int)m.F.rows(); double lam = energyParams[0];
++    std::fwrite(&it, sizeof(int), 1, f); std::fwrite(&lam, sizeof(double), 1, f);
++    std::fwrite(&nV, sizeof(int), 1, f); std::fwrite(&nF, sizeof(int), 1, f);
++    for(int i = 0; i < nV; i++) {
++        double a[5] = {m.V(i, 0), m.V(i, 1), m.V_rest(i, 0), m.V_rest(i, 1), m.V_rest(i, 2)};
++        std::fwrite(a, sizeof(double), 5, f);
++    }
++    for(int i = 0; i < nF; i++) {
++        int b[3] = {m.F(i, 0), m.F(i, 1), m.F(i, 2)};
++        std::fwrite(b, sizeof(int), 3, f);
++    }
++    std::fclose(f);
++}
++
+ void proceedOptimization(int proceedNum = 1)
+ {
++    if(!dumpInited) {
++        dumpInited = true;
++        if(const char* e = std::getenv("ONESTRING_DUMP_DIR")) { dumpDir = e; }
++        dumpState();     // the starting chart (initial cut + Tutte embedding)
++    }
+     for(int proceedI = 0; (proceedI < proceedNum) && (!converged); proceedI++) {
+ //        infoName = std::to_string(iterNum);
+ //        saveInfo(true, false, true); //!!! output mesh for making video, PNG output only works under online rendering mode
+         std::cout << "Iteration" << iterNum << ":" << std::endl;
+         converged = optimizer->solve(1);
+         iterNum = optimizer->getIterNum();
++        dumpState();
+     }
+ }
+ 
+@@ -611,6 +794,21 @@
+     return false;
+ }
+ 
++// 2026-11-02 (OneString): with ONESTRING_ANGLE_BOUND_SD=1 the distortion bound b_d and the lambda update use the plain
++// symmetric Dirichlet energy, without the s1 = s2 penalty (the penalty still shapes the UV map).  Used for the "hard"
++// s1 = s2 variant, where the penalty weight is raised until the result stops changing.
++namespace OptCuts { extern bool g_angleOff; }
++double boundMeasureSD(double E_SD_withPenalty)
++{
++    static int mode = -1;
++    if(mode < 0) { const char* e = std::getenv("ONESTRING_ANGLE_BOUND_SD"); mode = (e && std::atoi(e)) ? 1 : 0; }
++    if(!mode) { return E_SD_withPenalty; }
++    OptCuts::g_angleOff = true;
++    double v = 0.0; energyTerms[0]->computeEnergyVal(*triSoup[channel_result], v);
++    OptCuts::g_angleOff = false;
++    return v;
++}
++
+ double updateLambda(double measure_bound, double lambda_SD = energyParams[0], double kappa = 1.0, double kappa2 = 1.0)
+ {
+     lambda_SD = std::max(0.0, kappa * (measure_bound - (upperBound - convTol_upperBound / 2.0)) + kappa2 * lambda_SD / (1.0 - lambda_SD));
+@@ -623,12 +821,12 @@
+     const double eps_E_se = 1.0e-3 * edgeLengths.minCoeff() / triSoup[channel_result]->virtualRadius;
+     
+     // measurement and energy value computation
+-    const double E_SD = optimizer->getLastEnergyVal(true) / energyParams[0];
++    const double E_SD = boundMeasureSD(optimizer->getLastEnergyVal(true) / energyParams[0]);
+     double E_se; triSoup[channel_result]->computeSeamSparsity(E_se);
+     E_se /= triSoup[channel_result]->virtualRadius;
+     double stretch_l2, stretch_inf, stretch_shear, compress_inf;
+     triSoup[channel_result]->computeStandardStretch(stretch_l2, stretch_inf, stretch_shear, compress_inf);
+-    double measure_bound = E_SD;
++    double measure_bound = csfMeasure(E_SD);
+     const double eps_lambda = std::min(1.0e-3, std::abs(updateLambda(measure_bound) - energyParams[0]));
+     
+     //TODO?: stop when first violates bounds from feasible, don't go to best feasible. check after each merge whether distortion is violated
+@@ -708,10 +906,15 @@
+         }
+         
+         // record best feasible UV map
+-        if((measure_bound <= upperBound) && (E_se < E_se_bestFeasible)) {
++        // OneString soft CSF: the objective is  seam length + mu * P  (mu = beta * scale / virtualRadius)
++        double E_track = E_se;
++        if((csfMode == 1) && (csfScale > 0.0)) {
++            E_track = E_se + csfBeta * csfScale / triSoup[channel_result]->virtualRadius * csfRelExcess(csfW);
++        }
++        if((measure_bound <= upperBound) && csfFeasible() && (E_track < E_se_bestFeasible)) {
+             iterNum_bestFeasible = iterNum;
+             triSoup_bestFeasible = *triSoup[channel_result];
+-            E_se_bestFeasible = E_se;
++            E_se_bestFeasible = E_track;
+         }
+         
+         if(oscillate && (iterNum_bestFeasible >= 0)) {
+@@ -747,7 +950,7 @@
+ //                logFile << "firstFeasibleS saved" << std::endl;
+             }
+             
+-            if(measure_bound >= upperBound - convTol_upperBound) {
++            if((measure_bound >= upperBound - convTol_upperBound) && csfFeasible()) {
+                 logFile << "all converged at measure = " << measure_bound << ", b = " << upperBound <<
+                     " lambda = " << energyParams[0] << std::endl;
+                 if(iterNum_bestFeasible != iterNum) {
+@@ -930,7 +1133,7 @@
+             
+             double stretch_l2, stretch_inf, stretch_shear, compress_inf;
+             triSoup[channel_result]->computeStandardStretch(stretch_l2, stretch_inf, stretch_shear, compress_inf);
+-            double measure_bound = optimizer->getLastEnergyVal(true) / energyParams[0];
++            double measure_bound = boundMeasureSD(optimizer->getLastEnergyVal(true) / energyParams[0]);
+             
+             switch(methodType) {
+                 case OptCuts::MT_EBCUTS: {
+@@ -995,8 +1198,18 @@
+                     
+                     double E_se; triSoup[channel_result]->computeSeamSparsity(E_se);
+                     E_se /= triSoup[channel_result]->virtualRadius;
+-                    const double E_SD = optimizer->getLastEnergyVal(true) / energyParams[0];
++                    const double E_SD = boundMeasureSD(optimizer->getLastEnergyVal(true) / energyParams[0]);
+                     
++                    csfEvaluate(E_SD);
++                    if(csfDirectedCut(E_SD)) {
++                        converged = false;
++                        break;
++                    }
++                    if((csfMode == 2) && (csfEvalCount > csfMaxEvals)) {
++                        logFile << "[CSF] evaluation budget reached, stopping" << std::endl;
++                        converge_preDrawFunc(viewer);
++                        break;
++                    }
+                     std::cout << iterNum << ": " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
+                     logFile << iterNum << ": " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
+                     optimizer->flushEnergyFileOutput();
+--- a/src/Optimizer.cpp
++++ b/src/Optimizer.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ //
+ //  Optimizer.cpp
+ //  OptCuts
+@@ -439,6 +440,11 @@
+     
+     bool Optimizer::createFracture(double stressThres, int propType, bool allowPropagate, bool allowInSplit)
+     {
++        // 2026-11-02 (OneString): ONESTRING_TOPO_BUDGET=N stops the run when the (N+1)-th topology change would be
++        // attempted (the last dumped frame is then the converged state after N changes); used for multi-start pruning.
++        static long osBudget = -2, osChanges = 0;
++        if(osBudget == -2) { const char* e = std::getenv("ONESTRING_TOPO_BUDGET"); osBudget = e ? std::atol(e) : -1; }
++        if((osBudget >= 0) && (osChanges >= osBudget)) { std::cout << "[ONESTRING] topology budget reached" << std::endl; std::exit(0); }
+         if(propType == 0) {
+             topoIter++;
+         }
+@@ -478,6 +484,7 @@
+                 break;
+         }
+         timer.stop();
++        if(changed) { osChanges++; }
+         
+         if(changed) {
+             if(scaffolding) {
+--- a/src/Energy/SymDirichletEnergy.cpp
++++ b/src/Energy/SymDirichletEnergy.cpp
+@@ -18,6 +18,15 @@
+ #include <cfloat>
+ 
+ extern std::ofstream logFile;
++// 2026-11-02 (OneString): optional shape-distortion penalty.  Per triangle the energy becomes
++//   SD + w_angle * (s1/s2 + s2/s1 - 2)        (w_angle from env ONESTRING_ANGLE_W, default 0 = original OptCuts)
++// SD = (s1^2 + s2^2) * (1 + r^2) with r = A3 / A_UV;  s1/s2 + s2/s1 = (s1^2 + s2^2) * r, so only the left factor
++// changes:  left = 1 + r^2 + w_angle * r.  Its derivatives follow the same pattern as the original r^2 term.
++#include <cstdlib>
++// g_angleOff: main.cpp switches the penalty off to read the plain SD (ONESTRING_ANGLE_BOUND_SD=1, "hard" variant)
++namespace OptCuts { bool g_angleOff = false; inline double angleWeight(void) { static double w = -1.0; if(w < 0.0) { const char* e = std::getenv("ONESTRING_ANGLE_W"); w = e ? std::atof(e) : 0.0; } return g_angleOff ? 0.0 : w; } }
++#define ANGLE_W (OptCuts::angleWeight())
++
+ 
+ namespace OptCuts {
+     
+@@ -39,9 +48,9 @@
+             const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
+             
+             const double w = (uniformWeight ? 1.0 : (data.triArea[triI] / normalizer_div));
+-            energyValPerElem[triI] = w * (1.0 + data.triAreaSq[triI] / area_U / area_U) *
++            energyValPerElem[triI] = w * ((1.0 + data.triAreaSq[triI] / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / area_U) *
+                 ((U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) / 4 / data.triAreaSq[triI] -
+-                U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]);
++                U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]) - 2.0 * ANGLE_W);
+         }
+     }
+     
+@@ -62,9 +71,9 @@
+         const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
+         
+         const double w = (uniformWeight ? 1.0 : (data.triArea[triI] / normalizer_div));
+-        energyVal = w * (1.0 + data.triAreaSq[triI] / area_U / area_U) *
++        energyVal = w * ((1.0 + data.triAreaSq[triI] / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / area_U) *
+         ((U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) / 4 / data.triAreaSq[triI] -
+-         U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]);
++         U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]) - 2.0 * ANGLE_W);
+     }
+     
+     void SymDirichletEnergy::getEnergyValPerVert(const TriMesh& data, Eigen::VectorXd& energyValPerVert) const
+@@ -229,11 +238,11 @@
+             
+             const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
+             
+-            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U;
++            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / area_U;
+             const double rightTerm = (U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) /
+             4 / data.triAreaSq[triI] - U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI];
+             
+-            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U;
++            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / (2.0 * area_U * area_U);
+             const double w = data.triArea[triI] / normalizer_div;
+             const int startRowI = triI * 3;
+             
+@@ -273,11 +282,11 @@
+             
+             const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
+             
+-            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U;
++            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / area_U;
+             const double rightTerm = (U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) /
+                 4 / data.triAreaSq[triI] - U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI];
+             
+-            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U;
++            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / (2.0 * area_U * area_U);
+             const double w = (uniformWeight ? 1.0 : (data.triArea[triI] / normalizer_div));
+             
+             const Eigen::Vector2d edge_oppo1 = U3 - U2;
+@@ -326,8 +335,8 @@
+             const Eigen::Vector2d U3m1 = U3 - U1;
+             
+             const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
+-            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U;
+-            const double dAreaRatio_div_dArea_mult = 3.0 / 2.0 * areaRatio / area_U;
++            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / (2.0 * area_U * area_U);
++            const double dAreaRatio_div_dArea_mult = (3.0 / 2.0 * areaRatio - 0.5 * ANGLE_W * std::sqrt(data.triAreaSq[triI]) / (2.0 * area_U * area_U)) / area_U;
+             
+             const double w = (uniformWeight ? 1.0 : (data.triArea[triI] / normalizer_div));
+             
+@@ -336,7 +345,7 @@
+             const double e0dote1_div_dbAreaSq = data.e0dote1_div_dbAreaSq[triI];
+             
+             // compute energy terms
+-            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U;
++            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / area_U;
+             const double rightTerm = (U3m1.squaredNorm() * e0SqLen_div_dbAreaSq + U2m1.squaredNorm() * e1SqLen_div_dbAreaSq) / 2. - U3m1.dot(U2m1) * e0dote1_div_dbAreaSq;
+             
+             const Eigen::Vector2d edge_oppo1 = U3 - U2;
+@@ -447,8 +456,8 @@
+             const Eigen::Vector2d U3m1 = U3 - U1;
+             
+             const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
+-            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U;
+-            const double dAreaRatio_div_dArea_mult = 3.0 / 2.0 * areaRatio / area_U;
++            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / (2.0 * area_U * area_U);
++            const double dAreaRatio_div_dArea_mult = (3.0 / 2.0 * areaRatio - 0.5 * ANGLE_W * std::sqrt(data.triAreaSq[triI]) / (2.0 * area_U * area_U)) / area_U;
+             
+             const double w = (uniformWeight ? 1.0 : (data.triArea[triI] / normalizer_div));
+             
+@@ -457,7 +466,7 @@
+             const double e0dote1_div_dbAreaSq = data.e0dote1_div_dbAreaSq[triI];
+             
+             // compute energy terms
+-            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U;
++            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / area_U;
+             const double rightTerm = (U3m1.squaredNorm() * e0SqLen_div_dbAreaSq + U2m1.squaredNorm() * e1SqLen_div_dbAreaSq) / 2. - U3m1.dot(U2m1) * e0dote1_div_dbAreaSq;
+             
+             const Eigen::Vector2d edge_oppo1 = U3 - U2;
+@@ -635,9 +644,9 @@
+             logFile << "areas: " << data.triArea[triI] << ", " << area_U << std::endl;
+             
+             const double w = data.triArea[triI] / normalizer_div;
+-            energyValPerTri[triI] = w * (1.0 + data.triAreaSq[triI] / area_U / area_U) *
++            energyValPerTri[triI] = w * ((1.0 + data.triAreaSq[triI] / area_U / area_U + ANGLE_W * std::sqrt(data.triAreaSq[triI]) / area_U) *
+                 ((U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) / 4 / data.triAreaSq[triI] -
+-                U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]);
++                U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]) - 2.0 * ANGLE_W);
+             err += energyValPerTri[triI] - w * 4.0;
+         }
+         std::cout << "energyVal computation error = " << err << std::endl;

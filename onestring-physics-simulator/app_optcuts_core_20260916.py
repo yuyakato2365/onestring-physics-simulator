@@ -101,6 +101,8 @@ def _install_optcuts_selector() -> None:
             "optcuts_structured_grid_slide_shape_keep_20261030",
             "optcuts_structured_grid_align_even_keep_20261030",
             "optcuts_structured_grid_align_even_neighbor_keep_20261030",
+            "optcuts_structured_grid_soft_fit_20261104",
+            "optcuts_structured_grid_fit_20261104",
         )
         for mode in ("optcuts", "optcuts_test", "optcuts_test2",
                      "optcuts_grid_aware", "optcuts_area_grid_boundary",
@@ -122,6 +124,10 @@ def _install_optcuts_selector() -> None:
                 return "2026-10-30 | 10-28 構造化グリッド＋格子の向きを曲がる方向にそろえる＋形を優先＋小さいパネルを防ぎ大きさをそろえる＋T3D で上面パネルの形を保つ"
             if mode=="optcuts_structured_grid_align_even_neighbor_keep_20261030":
                 return "2026-10-30 | 上の向きそろえの版＋隣り合うパネルの大きさの比をそろえる"
+            if mode=="optcuts_structured_grid_fit_20261104":
+                return "2026-11-04 | 境界に添わせる経路をアーティファクトと同じ手順で（OptCuts の制約・seam の始点の探索・対称リメッシュを選べる。各最適化は収束まで）"
+            if mode=="optcuts_structured_grid_soft_fit_20261104":
+                return "2026-11-04 | OptCuts（σ1/σ2 のソフト制約）→ 構造格子を境界に添わせる（seam を 4 枚で閉じる＋格子の角を立体の縁の曲がりで決める）＋格子の向きそろえ・形優先・T3D で上面パネルの形を保つ"
             if mode=="optcuts_structured_grid_strong_lines_20261029":
                 return "2026-10-29 | 10-28 構造化グリッド＋強く曲がる谷線・山線を Ω に描いて格子を沿わせる"
             if mode=="optcuts_structured_grid_20261028":
@@ -159,7 +165,8 @@ def _install_optcuts_selector() -> None:
                                   "optcuts_structured_grid_strong_lines_20261029",
                                   "optcuts_structured_grid_slide_shape_keep_20261030",
                                   "optcuts_structured_grid_align_even_keep_20261030",
-                                  "optcuts_structured_grid_align_even_neighbor_keep_20261030"})
+                                  "optcuts_structured_grid_align_even_neighbor_keep_20261030",
+                                  "optcuts_structured_grid_soft_fit_20261104", "optcuts_structured_grid_fit_20261104"})
         )
         st.session_state["_onestring_planar_quad_20261026_selected"] = (value == "optcuts_planar_quad_20261026")
         st.session_state["_onestring_zhang2021_quad_20261027_selected"] = (
@@ -170,13 +177,16 @@ def _install_optcuts_selector() -> None:
                       "optcuts_structured_grid_strong_lines_20261029",
                                   "optcuts_structured_grid_slide_shape_keep_20261030",
                                   "optcuts_structured_grid_align_even_keep_20261030",
-                                  "optcuts_structured_grid_align_even_neighbor_keep_20261030"})
+                                  "optcuts_structured_grid_align_even_neighbor_keep_20261030",
+                                  "optcuts_structured_grid_soft_fit_20261104", "optcuts_structured_grid_fit_20261104"})
         st.session_state["_onestring_structured_grid_feature_preset"] = {
             "optcuts_structured_grid_valley_fix_align_20261029": "valley_fix_align",
             "optcuts_structured_grid_strong_lines_20261029": "strong_lines",
             "optcuts_structured_grid_slide_shape_keep_20261030": "slide_shape_keep_20261030",
             "optcuts_structured_grid_align_even_keep_20261030": "align_shape_even_keep_20261030",
             "optcuts_structured_grid_align_even_neighbor_keep_20261030": "align_shape_even_neighbor_keep_20261030",
+            "optcuts_structured_grid_soft_fit_20261104": "soft_fit_20261104",
+            "optcuts_structured_grid_fit_20261104": "soft_fit_20261104",
         }.get(value, "off")
         st.session_state["_onestring_grid_seam_native_selected"] = (
             value == "optcuts_grid_seam_native")
@@ -361,7 +371,19 @@ def _install_optcuts_selector() -> None:
                        "optcuts_structured_grid_strong_lines_20261029",
                        "optcuts_structured_grid_slide_shape_keep_20261030",
                        "optcuts_structured_grid_align_even_keep_20261030",
-                       "optcuts_structured_grid_align_even_neighbor_keep_20261030"}:
+                       "optcuts_structured_grid_align_even_neighbor_keep_20261030",
+                       "optcuts_structured_grid_soft_fit_20261104", "optcuts_structured_grid_fit_20261104"}:
+            if value == "optcuts_structured_grid_fit_20261104":
+                # 2026-11-04: the choices of the cloud comparison runs (the artifacts)
+                st.radio("OptCuts の σ1/σ2 の制約", ["hard", "soft", "none"], index=0, key="onestring_fit_constraint",
+                         format_func=lambda c: {"hard": "ハード制約（重み 4096、上限の判定は SD）",
+                                                "soft": "ソフト制約（重み 16）", "none": "なし（普通の OptCuts）"}[c])
+                st.checkbox("seam の始点を探索する（OptCuts 自身の上位 N^0.8 個の境界の頂点を候補に、topology の変更回数を倍々に"
+                            "増やして良い半分を残す。対称面があれば対称性の罰則を入れ、ハード制約では枝分かれを禁止）",
+                            value=True, key="onestring_fit_multistart")
+                st.checkbox("入力メッシュを対称リメッシュする（対称面で半分に切り、Botsch–Kobbelt の等方リメッシュを形が変わらなく"
+                            "なるまでかけて鏡に映し貼り合わせる。読み込んだメッシュファイルにだけ効く。gpytoolbox が必要）",
+                            value=False, key="onestring_fit_symremesh")
             st.caption(
                 "2026-10-28: official OptCuts chart Ω → Ω boundary replaced by straight lines / smoothing "
                 "splines between features (seam nodes, sharp corners), bijective SLIM inside → regular quad "
@@ -372,6 +394,10 @@ def _install_optcuts_selector() -> None:
                 "Initial Ω CSF Split stays OFF. Quality is reported (console, metrics, "
                 "output/structured_grid_diagnostics), never a reason to stop."
             )
+            st.radio("Panel size from", ["grid size (sidebar)", "panel edge / panel count below"], index=0,
+                     key="onestring_structured_grid_size_source",
+                     help="2026-11-04: grid size = number of cells across the longer side of Omega's bounding box "
+                          "(3D metric), as in the paper route's overlay grid.")
             st.number_input("Target 3D panel edge length (0 = from panel count below)",
                             min_value=0.0, value=0.0, step=0.01, format="%.4f",
                             key="onestring_structured_grid_panel_edge")

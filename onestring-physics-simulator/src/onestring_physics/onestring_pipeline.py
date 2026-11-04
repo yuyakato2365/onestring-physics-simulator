@@ -1118,6 +1118,7 @@ class PipelineParameters(_original.PipelineParameters):
     structured_grid_corner_scale: float = 0.04
     structured_grid_panel_edge: float = 0.0
     structured_grid_auto_panels: int = 150
+    structured_grid_size_from_grid: bool = False   # 2026-11-04: panel edge from nx (grid size) instead of the two above
     structured_grid_smoothness_weight: float = 1.0
     structured_grid_seam_closure: bool = True
     structured_grid_min_side_ratio: float = 0.7   # every logical side >= ratio x its 3D length / panel edge

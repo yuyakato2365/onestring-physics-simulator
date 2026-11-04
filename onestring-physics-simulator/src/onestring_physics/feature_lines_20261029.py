@@ -652,6 +652,17 @@ FEATURE_PRESETS = {
         "structured_grid_panel_neighbor_size_weight": 20.0,
         "paper_t3d_top_shape_mode": "k3d_rigid",
     },
+    # 2026-11-04 "soft constraint + boundary fit": the align_shape_even_keep_20261030 settings + every seam closes with
+    # 4 panels (seam zipper) + grid corners from the 3D surface's turning.  The OptCuts side (soft sigma1 = sigma2,
+    # interior-slit repair) is switched by optcuts_soft_fit_20261104.configure().
+    "soft_fit_20261104": {
+        "structured_grid_feature_mode": "align", "structured_grid_feature_kinds": "valley",
+        "structured_grid_feature_design": True, "structured_grid_align_weight": 5.0,
+        "structured_grid_size_band": "0.8,1.25", "structured_grid_panel_size_weight": 1.0,
+        "structured_grid_panel_min_size_weight": 20.0, "structured_grid_panel_min_size_ratio": 0.7,
+        "paper_t3d_top_shape_mode": "k3d_rigid",
+        "structured_grid_seam_zipper": True, "structured_grid_turn_reference": "surface",
+    },
 }
 
 

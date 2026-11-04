@@ -165,7 +165,8 @@ def t2d_collision_tile_ids(assembly, hinge_graph=None) -> tuple[np.ndarray,np.nd
     hinge_pairs=set()
     if hinge_graph is not None:
         hinge_pairs={(min(int(h.tile_a),int(h.tile_b)),max(int(h.tile_a),int(h.tile_b))) for h in hinge_graph.hinges}
-    pairs=_collision_pairs_sat(flat,faces,scale*1e-8,exclude_face_pairs=hinge_pairs)
+    from .paper_hinge_solver import t2d_contact_tolerance_rel   # 2026-11-04: same tolerance as the T2D verdicts
+    pairs=_collision_pairs_sat(flat,faces,scale*t2d_contact_tolerance_rel(),exclude_face_pairs=hinge_pairs)
     ids=np.unique(pairs.reshape(-1)) if len(pairs) else np.zeros(0,dtype=int)
     return ids.astype(int),pairs.astype(int)
 
