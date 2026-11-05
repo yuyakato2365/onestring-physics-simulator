@@ -243,7 +243,10 @@ def main():
         cands += add
         print(f"[MS] {len(on)} ranked boundary vertices lie on the mirror plane; {len(add)} added as starting points", flush=True)
     alive = list(cands); budget = 1; rounds = []; final = {}
-    pool = ProcessPoolExecutor(max_workers=2)
+    # 2026-11-05: branches are independent, so run as many at once as the machine allows (results unchanged)
+    workers = int(os.environ.get("MS_WORKERS", max(2, (os.cpu_count() or 4) // 2)))
+    print(f"[MS] {workers} OptCuts runs at a time", flush=True)
+    pool = ProcessPoolExecutor(max_workers=workers)
     while True:
         todo = [v for v in alive if v not in final]
         res = list(pool.map(run_branch, [(mesh, os.path.join(out, f"b{v}"), v, budget, extra) for v in todo]))

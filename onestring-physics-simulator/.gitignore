@@ -87,3 +87,4 @@ third_party/affine-body-dynamics/CONTRIBUTION.md
 # scripts/setup_zhang2021_quad_official.py (no license file; never commit)
 third_party/Zhang2021_QuadCoarseLayout_official/
 third_party/OptCuts_csf_onestring/
+.app_version_cache.json

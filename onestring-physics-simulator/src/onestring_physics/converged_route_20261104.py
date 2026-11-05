@@ -5,8 +5,8 @@ ANIM_TRACE=1), available to the app.  ``install()`` patches the solvers once; th
 * K3D (paper local/global): runs until the best E_Assembled improved by less than 1e-4 (relative) over the last 50
   iterations; the iterate with the smallest E_Assembled is returned (the worst-panel reweighting makes E rise again
   late in the run and trades surface fidelity for squareness).
-* K2D (paper Eq.5): converged when its best E_Flat improved by less than 1 % over the last 1000 iterations (or the
-  solver's own test).
+* K2D (paper Eq.5): converged when its best E_Flat improved by less than 1 % over the last 500 iterations (or the
+  solver's own test; 1000 until 2026-11-05).
 * Grid placement (aligned SLIM of the structured grid): up to 100000 steps, stops when the total energy improved by less
   than 1e-5 (relative) over the last 20 accepted steps.
 * Panel-quality step: L-BFGS stops when f improved by less than 1e-6 (relative) over the last 20 steps (the iteration
@@ -68,9 +68,13 @@ def install() -> None:
     def k2d_converged(records_):
         if not _STATE["active"]:
             return False
-        if len(records_) > 2000:
-            e_ = np.array([r_["EFlat"] for r_ in records_[-2000:]])
-            return bool(e_[1000:].min() >= e_[:1000].min() * (1 - 1e-2))
+        # 2026-11-05: window 500 (was 1000): stop when the best E_Flat of the last 500 iterations is less than 1 %
+        # below the best of the 500 before (env ONESTRING_K2D_PLATEAU_WINDOW / ONESTRING_K2D_PLATEAU_REL)
+        w_ = int(os.environ.get("ONESTRING_K2D_PLATEAU_WINDOW", "500"))
+        rel_ = float(os.environ.get("ONESTRING_K2D_PLATEAU_REL", "0.01"))
+        if len(records_) > 2 * w_:
+            e_ = np.array([r_["EFlat"] for r_ in records_[-2 * w_:]])
+            return bool(e_[w_:].min() >= e_[:w_].min() * (1 - rel_))
         return False
 
     plg._os_k3d_step, plg._os_k3d_best, plg._os_k2d_converged = k3d_step, k3d_best, k2d_converged

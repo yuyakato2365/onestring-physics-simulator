@@ -188,6 +188,8 @@ def _install_optcuts_selector() -> None:
             "optcuts_structured_grid_soft_fit_20261104": "soft_fit_20261104",
             "optcuts_structured_grid_fit_20261104": "soft_fit_20261104",
         }.get(value, "off")
+        # 2026-11-05: the app maps every OptCuts mode to "optcuts_test" afterwards; remember this one explicitly
+        st.session_state["_onestring_fit_artifact_selected"] = (value == "optcuts_structured_grid_fit_20261104")
         st.session_state["_onestring_grid_seam_native_selected"] = (
             value == "optcuts_grid_seam_native")
         st.session_state["_onestring_area_grid_optimizations"] = {

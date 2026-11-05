@@ -244,6 +244,11 @@ MODEL_VERSIONS.append({
 # selected_model_version["id"] where version-specific behavior is needed.
 
 st.title("onestring-physics-simulator")
+try:  # 2026-11-05: version number, raised automatically when the implementation changes (APP_VERSIONS.json)
+    from onestring_physics.app_version_20261105 import version_caption as _version_caption
+    st.caption(_version_caption(Path(__file__).resolve().parent))
+except Exception as _version_error:  # noqa: BLE001
+    print(f"[APP-VERSION] {_version_error}", flush=True)
 st.caption("Strict Figure-5 order: S -> Omega -> M2D -> c^-1 M3D -> K3D/T3D and M2D -> K2D -> T2D Top -> T2D Dual -> lift/string -> PD snap/lift.")
 
 
@@ -859,8 +864,17 @@ with st.sidebar:
     # 2026-11-04: soft sigma1 = sigma2 OptCuts (OneString fork) + interior-slit repair, only for that mode
     from onestring_physics.optcuts_soft_fit_20261104 import configure as _soft_fit_configure
     _fit_active = bool(optcuts_structured_grid_20261028_enabled and structured_grid_feature_preset == "soft_fit_20261104")
-    _fit_artifact_mode = bool(_fit_active and omega_parameterization_mode == "optcuts_structured_grid_fit_20261104")
+    _fit_artifact_mode = bool(_fit_active and (omega_parameterization_mode == "optcuts_structured_grid_fit_20261104"
+                                               or st.session_state.get("_onestring_fit_artifact_selected", False)))
     fit_symremesh_enabled = bool(_fit_artifact_mode and st.session_state.get("onestring_fit_symremesh", False))
+    try:  # 2026-11-05: what the mode switch decided (read by Claude when results do not match)
+        Path("output").mkdir(exist_ok=True)
+        with open("output/fit_debug.log", "a") as _fdl:
+            _fdl.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} mode={omega_parameterization_mode} grid_enabled={optcuts_structured_grid_20261028_enabled} "
+                       f"preset={structured_grid_feature_preset} fit_active={_fit_active} artifact_mode={_fit_artifact_mode} "
+                       f"constraint={st.session_state.get('onestring_fit_constraint')} multistart={st.session_state.get('onestring_fit_multistart')}\n")
+    except Exception:
+        pass
     _soft_fit_configure(_fit_active,
                         constraint=(st.session_state.get("onestring_fit_constraint", "hard") if _fit_artifact_mode else "soft"),
                         multistart=(bool(st.session_state.get("onestring_fit_multistart", True)) if _fit_artifact_mode else False))
@@ -1432,6 +1446,10 @@ with st.sidebar:
         step=1.0, format="%.3f", key="onestring_k3d_square_tail_beta",
         help="β=0はLSEの連続極限＝全パネル歪みの平均値。βが大きいほど最大歪みを重視します。正方性ペナルティ自体を無効化する場合はα=0。",
     ))
+    if _fit_artifact_mode:
+        # 2026-11-04: the artifacts' K3D used alpha 16, beta 100 (converged in ~150 iterations); alpha 4 creeps on
+        square_tail_alpha, square_tail_beta = 16.0, 100.0
+        st.caption("このモードでは、アーティファクトと同じ α = 16、β = 100 を使います（上の欄の値は使いません）。")
     os.environ["ONESTRING_K3D_SQUARE_TAIL_ALPHA"] = str(square_tail_alpha)
     os.environ["ONESTRING_K3D_SQUARE_TAIL_BETA"] = str(square_tail_beta)
     st.caption("d_iは4辺の隣接長さ差と対角線長さ差（計5残差）の無次元RMS。通常のlocal/global段階は従来のESquareを使用。")
@@ -1515,6 +1533,22 @@ with st.sidebar:
     )
     # 2026-11-04: as in the cloud comparison runs, every T2D trial may run until L-BFGS-B stops on its own
     # tolerances (no wall-clock budget, no iteration cap); on by default
+    # 2026-11-05: K2D convergence test of the boundary-fit modes (converged_route_20261104)
+    k2d_plateau_window = int(_param_row(
+        "境界に添わせるモードの K2D を止める判定：直近この回数で、E_Flat の最小値がその前の同じ回数より下の割合しか下がらなければ収束とみなす。"
+        "小さくすると早く止まる（アーティファクトは 1000 回・1%）。",
+        lambda: st.number_input("K2D convergence window (iterations)", min_value=50, max_value=20000,
+                                value=int(os.environ.get("ONESTRING_K2D_PLATEAU_WINDOW", "500")), step=50,
+                                key="onestring_k2d_plateau_window"),
+    ))
+    k2d_plateau_pct = float(_param_row(
+        "上の判定の割合（%）。大きくすると早く止まる。",
+        lambda: st.number_input("K2D convergence threshold (%)", min_value=0.01, max_value=50.0,
+                                value=float(os.environ.get("ONESTRING_K2D_PLATEAU_REL", "0.01")) * 100.0, step=0.1,
+                                format="%.2f", key="onestring_k2d_plateau_pct"),
+    ))
+    os.environ["ONESTRING_K2D_PLATEAU_WINDOW"] = str(k2d_plateau_window)
+    os.environ["ONESTRING_K2D_PLATEAU_REL"] = repr(k2d_plateau_pct / 100.0)
     t2d_run_to_convergence = bool(_param_row(
         "T2D の各試行を、時間や反復回数で打ち切らず、最適化が自分で止まるまで回す（クラウドで比べた実験と同じ条件）。",
         lambda: st.checkbox("T2D trials run to convergence (no time / iteration cap)", value=True,
@@ -2653,6 +2687,10 @@ if run_pipeline:
         progress_status = st.empty()
         progress_log: list[dict[str, object]] = []
         progress_started = time.perf_counter()
+        # 2026-11-05: each stage's result appears below the process figure as soon as it is finished
+        stage_results_box = st.container()
+        with stage_results_box:
+            st.markdown("#### 各段階の結果（終わった順に追加）")
         last_progress_rendered = [-1.0]
 
         def _build_progress(stage: str, fraction: float, detail: str = "") -> None:
@@ -2688,11 +2726,13 @@ if run_pipeline:
             else:
                 st.session_state.pop("onestring_postcut_rebff_report",None)
                 st.session_state.pop("onestring_postcut_rebff_audit",None)
-                st.session_state.onestring_state = build_onestring_design(
-                    build_target(),
-                    pipeline_params,
-                    progress_callback=_build_progress,
-                )
+                from onestring_physics.stage_results_live_20261105 import live_stage_results
+                with live_stage_results(stage_results_box, progress_started):
+                    st.session_state.onestring_state = build_onestring_design(
+                        build_target(),
+                        pipeline_params,
+                        progress_callback=_build_progress,
+                    )
                 st.session_state.pop("paper_split_question", None)
         except _CornerSelectionRequest as _corner_request:
             # Manual corners: pick four boundary points of S before Omega.

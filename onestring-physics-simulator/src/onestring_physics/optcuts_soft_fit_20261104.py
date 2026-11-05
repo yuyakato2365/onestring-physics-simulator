@@ -206,6 +206,8 @@ def _install():
             import dataclasses
             cfg = dataclasses.replace(cfg if cfg is not None else ob.OptCutsConfig(), executable=_STATE["exe"])
         _STATE["cfg"] = cfg
+        print(f"[FIT] OptCuts call: mode active {bool(os.environ.get(_MARK))}, constraint {_STATE['constraint']}, "
+              f"seam start search {_STATE['multistart']}, nested {_STATE['depth']}, executable {getattr(cfg, 'executable', None)}", flush=True)
         if os.environ.get(_MARK) and _STATE["multistart"] and _STATE["depth"] == 0:
             return _multistart(ob, V, F, cfg, trace)
         return orig_once(V, F, cfg, *a, **k) if cfg is not None else orig_once(V, F, *a, **k)
@@ -255,6 +257,7 @@ def configure(active: bool, project_root: str | Path | None = None, constraint: 
         os.environ[_MARK] = "1"
         root = Path(project_root) if project_root else Path(__file__).resolve().parents[2]
         _STATE.update(constraint=constraint, multistart=bool(multistart), root=str(root))
+        print(f"[FIT] configure: constraint {constraint}, seam start search {bool(multistart)}, root {root}", flush=True)
         fork = root / "third_party" / "OptCuts_csf_onestring" / "build2" / "OptCuts_bin"
         exe = os.environ.get("ONESTRING_SOFT_FIT_OPTCUTS_EXECUTABLE") or (str(fork) if fork.is_file() else "")
         _STATE["exe"] = exe
