@@ -2912,6 +2912,15 @@ if _postcut_report is not None:
                 _postcut_report.get("all_postcut_patches_rectangle_verified"),
         })
 
+# 2026-11-05: preview of the printed part (PLA tiles + TPU hinges + string channels) from the T2D Dual Hinge result
+if st.session_state.get("onestring_state") is not None and getattr(st.session_state.onestring_state, "tiles_2d_dual_hinge", None) is not None:
+    st.markdown("### 印刷用データのプレビュー（PLA のタイル＋TPU のヒンジ＋紐の穴）")
+    try:
+        from onestring_physics.print_model_20261105 import render_print_preview as _render_print_preview
+        _render_print_preview(st, st.session_state.onestring_state)
+    except Exception as _print_error:  # noqa: BLE001
+        st.warning(f"印刷用データのプレビューを作れませんでした：{type(_print_error).__name__}: {_print_error}")
+
 # The main-page action is shown after the initial pipeline is available, so
 # it is enabled immediately after the first successful full build.
 st.markdown("### ↻ T2D Dual Hingeのみ再最適化")
