@@ -875,12 +875,21 @@ with st.sidebar:
                        f"constraint={st.session_state.get('onestring_fit_constraint')} multistart={st.session_state.get('onestring_fit_multistart')}\n")
     except Exception:
         pass
-    _soft_fit_configure(_fit_active,
+    # 2026-11-05: while a pipeline runs in the background, a page redraw must not re-switch the mode's environment
+    # underneath it (it would change OptCuts / convergence settings mid-run)
+    try:
+        from onestring_physics.background_run_20261105 import active_job as _bg_active_for_cfg
+        _bg_running_for_cfg = (_bg_active_for_cfg() or {}).get("status") == "running"
+    except Exception:  # noqa: BLE001
+        _bg_running_for_cfg = False
+    if not _bg_running_for_cfg:
+      _soft_fit_configure(_fit_active,
                         constraint=(st.session_state.get("onestring_fit_constraint", "hard") if _fit_artifact_mode else "soft"),
                         multistart=(bool(st.session_state.get("onestring_fit_multistart", True)) if _fit_artifact_mode else False))
     # 2026-11-04: K3D / K2D / grid placement / panel step run until converged, as in the cloud comparison runs
     from onestring_physics import converged_route_20261104 as _converged_route
-    _converged_route.set_active(_fit_active)
+    if not _bg_running_for_cfg:
+        _converged_route.set_active(_fit_active)
     if optcuts_structured_grid_20261028_enabled:
         # 2026-11-04: settings this route never reads (found by recording which parameters a structured-grid run
         # actually reads); shown so that changing them is not mistaken for an effect
@@ -1718,13 +1727,14 @@ with st.sidebar:
     st.header("Actuation Simulation")
     physics_backend = st.selectbox(
         "physics backend",
-        ["paper_pd", "native", "legacy", "abd"],
+        ["paper_pd", "native", "legacy", "abd", "ipc_python"],
         index=0,
         format_func=lambda name: {
             "paper_pd": "Paper Sec 5.4 / Appendix E — Snap + Lift PD (reference)",
             "native": "Native rigid-body + routed string (experimental, CPU)",
             "legacy": "Legacy snap/lift + target guidance (not physical string)",
             "abd": "Autodesk ABD + IPC/CCD (external executable required)",
+            "ipc_python": "ABD + IPC（ipctk・Python）— タイルがすり抜けない接触＋論文の Snap/Lift（2026-11-05）",
         }[name],
         help="Native: T2D-start rigid tile dynamics, point hinges, gravity, "
              "one tension-only routed string, approximate discrete 3D OBB contact. "
@@ -1732,6 +1742,41 @@ with st.sidebar:
     )
     paper_pd_steps = 120
     paper_pd_timestep = 0.015
+    ipc_settings = {}
+    if physics_backend == "ipc_python":
+        # 2026-11-05: ABD + IPC deployment (src/onestring_physics/ipc_deployment_20261105.py; needs `pip install ipctk`)
+        with st.expander("ABD + IPC の設定", expanded=True):
+            # 2026-11-06: how the layout is pulled together
+            _ipc_mode = st.radio("引き寄せ方", ["drawstring", "snap_lift"], horizontal=True, key="ipc_actuation_mode",
+                                 format_func=lambda m: {"drawstring": "外周の巾着の紐を絞る",
+                                                        "snap_lift": "紐の経路の Snap と Lift（元論文 5.4）"}[m])
+            _ds = _ipc_mode == "drawstring"
+            _ic = st.columns(3)
+            ipc_settings = dict(
+                actuation_seconds=float(_ic[0].number_input("引き上げにかける時間 (s)", 0.5, 30.0, 4.0, 0.5, key="ipc_actuation_s")),
+                dt=1.0 / float(_ic[1].number_input("1 秒あたりの時間ステップ数", 20, 400, 60, 10, key="ipc_steps_per_s")),
+                mm_per_unit=float(_ic[2].number_input("実寸の倍率 (mm / 単位、重力の大きさに使う)", 1.0, 2000.0, 113.0, 1.0, key="ipc_mm_per_unit")),
+            )
+            _ic2 = st.columns(3)
+            ipc_settings["dhat_rel"] = float(_ic2[0].number_input("接触が効き始める距離（タイルの辺の %）", 0.05, 10.0, 0.2 if _ds else 1.0, 0.05,
+                                                                  key=f"ipc_dhat_pct_{_ipc_mode}")) / 100.0
+            ipc_settings["collision_shrink"] = float(_ic2[1].number_input("接触用にタイルを縮める割合 (%)", 0.1, 10.0, 0.2 if _ds else 3.0, 0.1,
+                                                                          key=f"ipc_shrink_pct_{_ipc_mode}")) / 100.0
+            ipc_settings["actuation"] = _ipc_mode
+            if _ds:
+                ipc_settings["string_route"] = st.radio(
+                    "紐の通し方", ["seam", "loop"], horizontal=True, key="ipc_string_route",
+                    format_func=lambda r: {"seam": "切れ目（seam）の両側をかがる", "loop": "外周を一周（切れ目の両側に沿って回る）"}[r],
+                    help="かがる：切れ目の両側で向かい合うタイルどうしに紐を渡し、絞ると切れ目が閉じます。"
+                         "一周：外周をそのまま一周し、切れ目の片側を奥まで行って反対側を戻ってきます。")
+                ipc_settings["string_tension"] = float(st.number_input(
+                    "紐を引く力（タイル 1 枚の重さの何倍か）", 0.5, 500.0, 20.0, 1.0, key="ipc_string_tension",
+                    help="引き上げにかける時間でこの力まで上げ、そのあとは保ちます。紐はタイルの中を滑るので、紐全体で同じ力です。"))
+                st.caption("外周のタイルに 1 本の閉じた紐を通して絞ります。Snap と Lift は使わず、形はヒンジ・接触・重力・床だけで決まります。"
+                           "完成形で面が接するように、接触用の縮めは 0.2%、接触が効き始める距離も 0.2% にしています。")
+            ipc_settings["gravity_on"] = bool(_ic2[2].checkbox("重力", value=True, key="ipc_gravity"))
+            st.caption("引き上げが終わったあとは、タイルが止まる（速さがタイルの辺の 0.01% / s 未満）まで計算を続けます。"
+                       "シミュレーション内の時間で 30 秒を超えたら打ち切ります。")
     if physics_backend == "paper_pd":
         st.info(
             "元論文 Section 5.4 / Supplement Appendix E の Snap（紐が通る"
@@ -1875,6 +1920,7 @@ with st.sidebar:
             "native": "Run native rigid string-pull",
             "legacy": "Run snap/lift actuation",
             "abd": "Run ABD OneString assembly",
+            "ipc_python": "Run ABD + IPC deployment",
         }[physics_backend]),
         tight_note=True,
     )
@@ -2654,6 +2700,17 @@ if st.session_state.get("paper_split_question") and not run_pipeline:
     from onestring_physics.split_direction_ui import render_split_question
     render_split_question(st)
     st.stop()
+# 2026-11-05: saved stages of earlier runs (output/stage_results/<date>/): load a finished result or continue from a stage
+_stage_store_resume = st.session_state.pop("_stage_store_resume", None)
+if _stage_store_resume is not None:
+    run_pipeline = True
+try:
+    from onestring_physics.stage_store_20261105 import render_panel as _render_stage_store_panel
+    _render_stage_store_panel(st)
+except Exception as _stage_store_exc:  # noqa: BLE001
+    if type(_stage_store_exc).__name__ in ("StopException", "RerunException"):
+        raise
+    st.caption(f"保存した各段階の結果を表示できませんでした：{type(_stage_store_exc).__name__}: {_stage_store_exc}")
 if "onestring_state" not in st.session_state and not run_pipeline:
     st.info("Set parameters, then click Run OneString pipeline. The paper-default path stops at unimplemented stages; enable the experimental pipeline explicitly to run the old prototype path.")
     st.stop()
@@ -2668,6 +2725,15 @@ if stored_pipeline_key is not None and stored_pipeline_key != pipeline_key and n
 # Streamlit reruns this script for display-only widgets such as View stage.
 # Rebuild only on the explicit Run button; the completed state remains in the
 # session and changing the view never repeats the expensive pipeline.
+# 2026-11-05: the pipeline runs in a background thread (background_run_20261105); a page opened while it runs, or
+# after it finished unseen, takes it over instead of losing it
+try:
+    from onestring_physics.background_run_20261105 import active_job as _bg_active_job
+    _bg_job = _bg_active_job()
+except Exception:  # noqa: BLE001
+    _bg_job = None
+if _bg_job is not None and not run_pipeline:
+    run_pipeline = True
 if run_pipeline:
     # Keep the previous *successful* state intact until the replacement
     # pipeline has actually returned. The old grid is used to reset stale
@@ -2691,6 +2757,7 @@ if run_pipeline:
         stage_results_box = st.container()
         with stage_results_box:
             st.markdown("#### 各段階の結果（終わった順に追加）")
+            st.caption("計算は裏で動いています。画面を閉じたり設定を触ったりしても止まりません。開き直すと、ここまでの結果と続きが表示されます。")
         last_progress_rendered = [-1.0]
 
         def _build_progress(stage: str, fraction: float, detail: str = "") -> None:
@@ -2726,13 +2793,38 @@ if run_pipeline:
             else:
                 st.session_state.pop("onestring_postcut_rebff_report",None)
                 st.session_state.pop("onestring_postcut_rebff_audit",None)
-                from onestring_physics.stage_results_live_20261105 import live_stage_results
-                with live_stage_results(stage_results_box, progress_started):
-                    st.session_state.onestring_state = build_onestring_design(
-                        build_target(),
-                        pipeline_params,
-                        progress_callback=_build_progress,
-                    )
+                from onestring_physics.stage_results_live_20261105 import capture_stage_results, render_stage_result
+                from onestring_physics.background_run_20261105 import start_job, wait_job
+                if _bg_job is None:
+                    _target_for_job = build_target()
+                    _params_for_job = pipeline_params
+
+                    from onestring_physics.stage_store_20261105 import RunRecorder, recording
+                    _recorder = RunRecorder(resume=_stage_store_resume)
+                    _pipeline_key_for_job = pipeline_key
+
+                    def _pipeline_job(_progress_cb, _stage_sink):
+                        _recorder.sink = _stage_sink
+                        with capture_stage_results(_stage_sink, time.perf_counter()), recording(_recorder):
+                            _out = build_onestring_design(_target_for_job, _params_for_job,
+                                                          progress_callback=_progress_cb)
+                        _recorder.save_final(_out, _pipeline_key_for_job, _params_for_job)
+                        return _out
+                    _bg_job = start_job(_pipeline_job, meta=dict(pipeline_key=pipeline_key, params=pipeline_params,
+                                                                 grid_size=grid_size))
+                else:
+                    st.info(f"裏で動いている計算（{_bg_job['id']}、{time.strftime('%H:%M', time.localtime(_bg_job['started']))} 開始）の"
+                            "続きを表示しています。画面を閉じたり設定を触ったりしても、計算は止まりません。")
+                    pipeline_key = _bg_job["meta"].get("pipeline_key", pipeline_key)
+                    pipeline_params = _bg_job["meta"].get("params", pipeline_params)
+                    grid_size = _bg_job["meta"].get("grid_size", grid_size)
+                st.session_state.onestring_state = wait_job(
+                    _bg_job, on_progress=_build_progress,
+                    on_stage=lambda _i, _item: render_stage_result(stage_results_box, _i, _item))
+                try:
+                    st.session_state["eq5_history"] = getattr(st.session_state.onestring_state.mesh_2d_optimized, "eq5_history", None)
+                except Exception:  # noqa: BLE001
+                    pass
                 st.session_state.pop("paper_split_question", None)
         except _CornerSelectionRequest as _corner_request:
             # Manual corners: pick four boundary points of S before Omega.
@@ -2792,6 +2884,11 @@ if run_pipeline:
     st.rerun()
 
 state = st.session_state.onestring_state
+try:
+    from onestring_physics.stage_store_20261105 import save_shown_result as _save_shown_result
+    _save_shown_result(st.session_state)
+except Exception:  # noqa: BLE001
+    pass
 if bool(state.surface_parameterization.metrics.get("official_bff_free_boundary_recovery_used", False)):
     st.warning(
         "【Paper Ω 境界条件を変更】矩形BFFの全候補でUVが退化／反転したため、"
@@ -2911,6 +3008,18 @@ if _postcut_report is not None:
             "rectangle_boundary_verified":
                 _postcut_report.get("all_postcut_patches_rectangle_verified"),
         })
+
+# 2026-11-06: interactive assembly bench (browser rigid-body physics) for the current result
+if st.session_state.get("onestring_state") is not None and getattr(st.session_state.onestring_state, "tiles_2d_dual_hinge", None) is not None:
+    with st.expander("インタラクティブに組み上げる（ブラウザの物理エンジンで、つかむ・紐を絞る）", expanded=False):
+        try:
+            from onestring_physics.interactive_assembly_20261106 import render_in_app as _render_bench, page_html as _bench_html
+            _render_bench(st, st.session_state.onestring_state)
+            st.download_button("このページを HTML で保存（iPad などでも開けます）",
+                               _bench_html(st.session_state.onestring_state, mode="file").encode("utf-8"),
+                               file_name="onestring_assembly_bench.html", mime="text/html", key="bench_download")
+        except Exception as _bench_error:  # noqa: BLE001
+            st.warning(f"インタラクティブな組み上げを表示できませんでした：{type(_bench_error).__name__}: {_bench_error}")
 
 # 2026-11-05: preview of the printed part (PLA tiles + TPU hinges + string channels) from the T2D Dual Hinge result
 if st.session_state.get("onestring_state") is not None and getattr(st.session_state.onestring_state, "tiles_2d_dual_hinge", None) is not None:
@@ -3069,6 +3178,7 @@ if run_actuation:
         "native": "Native rigid panels + unilateral routed-string pulling",
         "legacy": "Projective-Dynamics-style snap/lift actuation",
         "abd": "Autodesk ABD OneString assembly",
+        "ipc_python": "ABD + IPC deployment (ipctk)",
     }[physics_backend]
     with st.spinner(f"Solving {run_label}"):
         progress_bar = st.progress(0.0, text="Preparing deployment simulation…")
@@ -3084,11 +3194,15 @@ if run_actuation:
             progress_log.append({"elapsed_sec": elapsed, "progress_%": fraction * 100.0, "stage": stage, "detail": detail})
 
         try:
-            state.simulation_result = simulate_onestring_deployment(
-                state,
-                deployment_params,
-                progress_callback=_actuation_progress,
-            )
+            if physics_backend == "ipc_python":
+                from onestring_physics.ipc_deployment_20261105 import simulate_for_app as _ipc_simulate
+                state.simulation_result = _ipc_simulate(state, progress_callback=_actuation_progress, **ipc_settings)
+            else:
+                state.simulation_result = simulate_onestring_deployment(
+                    state,
+                    deployment_params,
+                    progress_callback=_actuation_progress,
+                )
         except RuntimeError as exc:
             st.session_state.actuation_progress_log = progress_log
             st.error(str(exc))
@@ -4838,6 +4952,7 @@ elif view_stage == "Assembly Animation":
         "native": "Native rigid-body + tension-only string (experimental PBD)",
         "legacy": "Legacy Projective Dynamics + 2D SAT/target guidance",
         "abd": "Autodesk ABD + IPC/CCD + unilateral OneString constraint",
+        "ipc_python": "ABD + IPC (ipctk): affine-body tiles, barrier contact with CCD, ball-joint hinges, ramped Snap/Lift",
     }[physics_backend]
     st.caption(f"Selected simulation: {selected_simulation_name}. This view displays solver output frames, not design interpolation.")
     if physics_backend == "abd":
@@ -4885,10 +5000,11 @@ elif view_stage == "Assembly Animation":
         "native": "T2D-origin rigid-body PBD with one routed string (experimental)",
         "legacy": "Legacy target-guided Projective Dynamics",
         "abd": "Autodesk ABD simulation",
+        "ipc_python": "ABD + IPC (ipctk) simulation",
     }[physics_backend]
     st.caption(f"Animation source: {source_label}.")
 
-    if physics_backend in {"paper_pd", "native", "legacy", "abd"}:
+    if physics_backend in {"paper_pd", "native", "legacy", "abd", "ipc_python"}:
         if physics_backend == "paper_pd":
             st.info(
                 "論文準拠の駆動拘束：MILPで最適化された有効な閉経路上の"
@@ -4928,13 +5044,14 @@ elif view_stage == "Assembly Animation":
             state.simulation_result is None
             or current_result_backend != physics_backend
             or len(getattr(state.simulation_result, "frames", [])) < 2
-            or (physics_backend != "abd" and st.session_state.get("paper_pd_animation_key") != paper_sim_key)
+            or (physics_backend not in ("abd", "ipc_python") and st.session_state.get("paper_pd_animation_key") != paper_sim_key)
         )
         refresh_label = {
             "paper_pd": "Run / refresh Paper Appendix E PD",
             "native": "Run / refresh native string simulation",
             "legacy": "Run / refresh legacy PD",
             "abd": "Run / refresh ABD simulation",
+            "ipc_python": "Run / refresh ABD + IPC simulation",
         }[physics_backend]
         refresh_sim = c0.button(refresh_label, type="primary")
         player_mode = c1.radio(
@@ -4946,10 +5063,10 @@ elif view_stage == "Assembly Animation":
         if c2.button("⏮ Reset"):
             st.session_state.paper_pd_frame = 0
 
-        if need_sim_frames and physics_backend == "abd" and not refresh_sim:
+        if need_sim_frames and physics_backend in ("abd", "ipc_python") and not refresh_sim:
             st.warning("No ABD result matching the current settings is loaded. Press 'Run / refresh ABD simulation'.")
 
-        if refresh_sim or (need_sim_frames and physics_backend != "abd"):
+        if refresh_sim or (need_sim_frames and physics_backend not in ("abd", "ipc_python")):
             paper_params = replace(
                 deployment_params,
                 steps=(native_solver_steps if physics_backend == "native"
@@ -5036,11 +5153,16 @@ elif view_stage == "Assembly Animation":
 
             with st.spinner(f"Running {selected_simulation_name}"):
                 try:
-                    state.simulation_result = simulate_onestring_deployment(
-                        state,
-                        paper_params,
-                        progress_callback=_paper_sim_progress,
-                    )
+                    if physics_backend == "ipc_python":
+                        from onestring_physics.ipc_deployment_20261105 import simulate_for_app as _ipc_simulate
+                        state.simulation_result = _ipc_simulate(state, progress_callback=_paper_sim_progress,
+                                                                **dict(ipc_settings, frames=frame_count))
+                    else:
+                        state.simulation_result = simulate_onestring_deployment(
+                            state,
+                            paper_params,
+                            progress_callback=_paper_sim_progress,
+                        )
                 except (RuntimeError, ValueError) as exc:
                     st.error(str(exc))
                     st.stop()
@@ -5058,7 +5180,7 @@ elif view_stage == "Assembly Animation":
         result = state.simulation_result
         if result is not None and str(result.metrics.get("physics_backend", "")) != physics_backend:
             result = None
-        if result is None and physics_backend == "abd":
+        if result is None and physics_backend in ("abd", "ipc_python"):
             st.stop()
         frames = result.frames if result is not None and result.frames else [state.tiles_2d_dual_hinge.vertices]
         max_frame = max(0, len(frames) - 1)
@@ -5244,6 +5366,7 @@ elif view_stage == "Assembly Animation":
                         "native": "Approximate rigid-body PBD: hinge + 3D OBB contact + floor + unilateral total string length; T3D NOT an actuator",
                         "legacy": "Legacy target-guided snap/lift Projective Dynamics",
                         "abd": "Autodesk ABD affine bodies + IPC/CCD + unilateral total-path-length string",
+                        "ipc_python": "ABD + IPC (ipctk) affine bodies, barrier contact, ramped Snap/Lift",
                     }[physics_backend],
                     "actual_backend": result.metrics.get("actual_backend"),
                     "dominant_backend": result.metrics.get("dominant_backend"),

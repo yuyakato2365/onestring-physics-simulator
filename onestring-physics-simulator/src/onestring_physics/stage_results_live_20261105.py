@@ -159,3 +159,78 @@ def live_stage_results(container, started=None):
     finally:
         for mod, name, f in originals.values():
             setattr(mod, name, f)
+
+
+
+# ---- 2026-11-05 (later): background-thread version -----------------------------------------------------------
+@contextlib.contextmanager
+def capture_stage_results(sink: list, started=None):
+    """Like live_stage_results, but only records each finished stage in ``sink`` (no Streamlit call, so it can run in
+    the background thread); the page draws them with render_stage_result."""
+    import sys
+    from . import legacy_pipeline_base as lb
+    t0 = started if started is not None else time.perf_counter()
+    plan = [
+        ("_build_surface_parameterization", "S → Ω：OptCuts の平面図", "omega", None),
+        ("_build_m2d", "Ω → M2D：平面図の上の四角形メッシュ", "mesh2d", None),
+        ("_lift_m2d_to_m3d", "M2D → M3D：立体に持ち上げたメッシュ", "mesh3d", 0),
+        ("_optimize_k3d", "M3D → K3D：3D 最適化", "mesh3d", 0),
+        ("_extrude_tiles", "K3D → T3D：押し出したタイル", "tiles3d", 0),
+        ("_optimize_k2d", "M2D → K2D：2D 最適化", "mesh2d", 0),
+        ("_make_t2d_from_transforms", "K2D → T2D：Top Hinge", "tiles2d", 0),
+        ("_optimize_dual_hinges", "T2D：Dual Hinge（最終）", "tiles2d", 0),
+    ]
+    targets, seen = [], set()
+    cands = [lb] + [getattr(m, "_original", None) for m in list(sys.modules.values())
+                    if getattr(m, "__name__", "").startswith("onestring_physics")]
+    for m in cands:
+        if m is not None and str(getattr(m, "__file__", "")).endswith("legacy_pipeline_base.py") and id(m) not in seen:
+            seen.add(id(m)); targets.append(m)
+    originals, depth, count = {}, {}, {"extrude": 0}
+
+    def wrap(mod, name, title, kind, item):
+        f = getattr(mod, name, None)
+        if f is None:
+            return
+        originals[(id(mod), name)] = (mod, name, f)
+
+        def wrapped(*a, **k):
+            depth[name] = depth.get(name, 0) + 1
+            try:
+                out = f(*a, **k)
+            finally:
+                depth[name] -= 1
+            if depth[name] > 0:
+                return out
+            if name == "_extrude_tiles":
+                count["extrude"] += 1
+                if count["extrude"] > 1:
+                    return out
+            obj = out[item] if (item is not None and isinstance(out, tuple)) else out
+            sink.append(dict(title=title, kind=kind, obj=obj, seconds=time.perf_counter() - t0))
+            return out
+        wrapped.__wrapped__ = f
+        setattr(mod, name, wrapped)
+
+    for mod in targets:
+        for name, title, kind, item in plan:
+            wrap(mod, name, title, kind, item)
+    try:
+        yield
+    finally:
+        for mod, name, f in originals.values():
+            setattr(mod, name, f)
+
+
+def render_stage_result(container, index: int, item: dict) -> None:
+    import streamlit as st
+    try:
+        with container:
+            st.markdown(f"**{index + 1}. {item['title']}**　<span style='color:gray'>{item['seconds']:6.0f} 秒 ・ "
+                        f"{_summary(item['kind'], item['obj'])}</span>", unsafe_allow_html=True)
+            st.plotly_chart(_figure(item["kind"], item["obj"]), use_container_width=True,
+                            key=f"live_stage_{index}_{id(item)}")
+    except Exception as e:   # noqa: BLE001
+        if type(e).__name__ in ("StopException", "RerunException"):
+            raise
+        print(f"[LIVE-STAGE] could not draw {item.get('title')}: {type(e).__name__}: {e}", flush=True)
