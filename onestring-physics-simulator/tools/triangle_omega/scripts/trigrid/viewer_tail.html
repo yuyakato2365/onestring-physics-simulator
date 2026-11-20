@@ -1,0 +1,81 @@
+;
+(function(){
+const stage=document.getElementById('stage');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+stage.appendChild(renderer.domElement);
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(35,1,0.01,50);
+camera.position.set(1.3,0.55,1.6);
+const controls=new THREE.OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true; controls.target.set(0,0,0);
+scene.add(new THREE.HemisphereLight(0xffffff,0x445566,0.75));
+const dl=new THREE.DirectionalLight(0xffffff,0.65); dl.position.set(1,2,1.5); scene.add(dl);
+const dl2=new THREE.DirectionalLight(0xffffff,0.25); dl2.position.set(-1.5,-0.5,-1); scene.add(dl2);
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+// magma-like ramp 0..30 deg
+const stops=[[0,[252,253,191]],[0.33,[252,137,97]],[0.55,[183,55,121]],[0.78,[81,18,124]],[1,[0,0,4]]];
+function ramp(t){t=Math.max(0,Math.min(1,t));for(let i=1;i<stops.length;i++){if(t<=stops[i][0]){const a=stops[i-1],b=stops[i],u=(t-a[0])/(b[0]-a[0]);return a[1].map((x,k)=>(x+(b[1][k]-x)*u)/255);}}return [0,0,0];}
+function geomFrom(v,f){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(v.flat(),3));g.setIndex(f.flat());g.computeVertexNormals();return g;}
+// ghost surface
+const surf=new THREE.Mesh(geomFrom(DATA.surface.v,DATA.surface.f),new THREE.MeshStandardMaterial({color:0x9aa7b4,transparent:true,opacity:0.28,roughness:0.9,side:THREE.DoubleSide,depthWrite:false}));
+scene.add(surf);
+function lines(arr,color,width){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(arr.flat(),3));return new THREE.LineSegments(g,new THREE.LineBasicMaterial({color}));}
+const seamLines=lines(DATA.seams,0xc8324f); seamLines.renderOrder=3; seamLines.material.depthTest=true; scene.add(seamLines);
+let group=null, cur='runK';
+function build(run){
+  if(group){scene.remove(group);group.traverse(o=>{if(o.geometry)o.geometry.dispose();});}
+  group=new THREE.Group(); const R=DATA.runs[run];
+  { const S_=R.surface||DATA.surface, SM=R.seams||DATA.seams;            // per-run shape and cut
+    surf.geometry.dispose(); surf.geometry=geomFrom(S_.v,S_.f);
+    seamLines.geometry.dispose(); const sg=new THREE.BufferGeometry(); sg.setAttribute('position',new THREE.Float32BufferAttribute(SM.flat(),3)); seamLines.geometry=sg; }
+  // non-indexed so each panel gets its own flat colour
+  const pos=[],col=[]; const mode=document.getElementById('s-colour').value;
+  const vir=[[0,[68,1,84]],[0.25,[59,82,139]],[0.5,[33,145,140]],[0.75,[94,201,98]],[1,[253,231,37]]];
+  const vramp=t=>{t=Math.max(0,Math.min(1,t));for(let i=1;i<vir.length;i++){if(t<=vir[i][0]){const a=vir[i-1],b=vir[i],u=(t-a[0])/(b[0]-a[0]);return a[1].map((x,k)=>(x+(b[1][k]-x)*u)/255);}}return [1,1,1];};
+  R.f.forEach((t,i)=>{const c=mode==='dev'?ramp(R.dev[i]/30):mode==='size'?vramp((R.size[i]-0.5)/1.0):[0.80,0.84,0.88];t.forEach(k=>{pos.push(...R.v[k]);col.push(...c);});});
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));g.computeVertexNormals();
+  const mesh=new THREE.Mesh(g,new THREE.MeshStandardMaterial({vertexColors:true,roughness:0.75,metalness:0,side:THREE.DoubleSide,flatShading:true,polygonOffset:true,polygonOffsetFactor:1,polygonOffsetUnits:1}));
+  group.add(mesh);
+  const ep=[]; const seen=new Set();
+  R.f.forEach(t=>{for(let k=0;k<3;k++){const a=t[k],b=t[(k+1)%3],key=a<b?a+'_'+b:b+'_'+a;if(!seen.has(key)){seen.add(key);ep.push(R.v[a],R.v[b]);}}});
+  const edges=lines(ep,0x2b3540); edges.name='edges'; edges.visible=document.getElementById('c-edges').checked; group.add(edges);
+  const sp=new THREE.BufferGeometry(); sp.setAttribute('position',new THREE.Float32BufferAttribute(R.seamv.map(k=>R.v[k]).flat(),3));
+  const pts=new THREE.Points(sp,new THREE.PointsMaterial({color:0xc8324f,size:0.012,sizeAttenuation:true})); pts.name='seamv'; pts.visible=document.getElementById('c-seamv').checked; group.add(pts);
+  scene.add(group);
+  const s=R.stats; const closed=(run==='runC'||run==='runD'||run==='runE'||run==='runF'||run==='runG'||run==='runGu'||run==='runI06'||run==='runI08'||run==='runK'); const rows=[['Panels',s.panels],['Panel size ratio in 3D (p95/p5)',s.size_ratio],[closed?'6-valent interior vertices (3D)':'Interior vertices (all 6-valent)',s.interior6],...(s.sd_final!==null?[['Ω distortion SD (OptCuts 4.099)',s.sd_final]]:[]),
+    ['Mean |angle − 60°| in 3D',s.dev_mean+'°'],['95th percentile',s.dev_p95+'°'],['Seam mismatch, max',s.seam_gap_max===null?'—':s.seam_gap_max+(closed?' (welded)':' edge')]];
+  if(s.other_valence) rows.splice(2,0,['Other interior valences (3D)',s.other_valence]);
+  document.getElementById('stats').innerHTML=rows.map(r=>`<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join('');
+}
+function setRun(run){cur=run;['runK','runI08','runI06','runG','runGu','runF','runE','runD','runC','runA','runB'].forEach(r=>document.getElementById('b-'+r).setAttribute('aria-pressed',String(r===run)));build(run);}
+document.getElementById('b-runK').onclick=()=>setRun('runK');
+document.getElementById('b-runI08').onclick=()=>setRun('runI08');
+document.getElementById('b-runI06').onclick=()=>setRun('runI06');
+document.getElementById('b-runG').onclick=()=>setRun('runG');
+document.getElementById('b-runGu').onclick=()=>setRun('runGu');
+document.getElementById('b-runF').onclick=()=>setRun('runF');
+document.getElementById('b-runE').onclick=()=>setRun('runE');
+document.getElementById('b-runD').onclick=()=>setRun('runD');
+document.getElementById('b-runC').onclick=()=>setRun('runC');
+document.getElementById('b-runA').onclick=()=>setRun('runA');
+document.getElementById('b-runB').onclick=()=>setRun('runB');
+document.getElementById('s-colour').onchange=e=>{build(cur);const m=e.target.value;
+  document.getElementById('lg-title').textContent=m==='size'?'Panel size in 3D relative to the median':'Largest |angle − 60°| of each panel in 3D';
+  document.getElementById('lg-ramp').className='ramp'+(m==='size'?' size':'');
+  document.getElementById('lg-ticks').innerHTML=m==='size'?'<span>0.5</span><span>1.0</span><span>1.5+</span>':'<span>0°</span><span>10°</span><span>20°</span><span>30°+</span>';
+  document.querySelector('.legend').hidden=(m==='none');};
+document.getElementById('c-surface').onchange=e=>surf.visible=e.target.checked;
+document.getElementById('c-seams').onchange=e=>seamLines.visible=e.target.checked;
+document.getElementById('c-edges').onchange=e=>{const o=group.getObjectByName('edges');if(o)o.visible=e.target.checked;};
+document.getElementById('c-seamv').onchange=e=>{const o=group.getObjectByName('seamv');if(o)o.visible=e.target.checked;};
+surf.visible=false;
+function theme(){scene.background=new THREE.Color(css('--stage')||'#e9edf1');}
+theme(); matchMedia('(prefers-color-scheme: dark)').addEventListener('change',theme);
+new MutationObserver(theme).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+function resize(){const w=stage.clientWidth,h=stage.clientHeight||400;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+new ResizeObserver(resize).observe(stage); resize();
+build('runK');
+(function loop(){controls.update();renderer.render(scene,camera);requestAnimationFrame(loop);})();
+})();
+</script>

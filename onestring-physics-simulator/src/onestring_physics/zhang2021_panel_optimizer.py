@@ -382,6 +382,16 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
     ``line_triples`` (a, i, b): consecutive vertices along a grid line; with
     ``weights.smooth > 0`` adds sum |X_a - 2 X_i + X_b|^2 / L^2 (3D smoothness).
     """
+    if boundary_slide:
+        base_uv, base_xyz, base_report = optimize_panel_quality(
+            lift, quad_uv, quads, fixed, weights=weights, max_iter=max_iter,
+            reference_length=reference_length, line_triples=line_triples,
+            allow_invalid=allow_invalid, principal_field=principal_field,
+            crease_slide=crease_slide, boundary_slide=None, size_band=size_band)
+        if not _lift_is_valid(base_xyz, quads):
+            base_report["panel_optimizer_boundary_slide_undone"] = "initial M3D is not feasible"
+            return base_uv, base_xyz, base_report
+        quad_uv = base_uv
     w = weights or PanelOptimizerWeights()
     quads = np.asarray(quads, int)
     P = np.asarray(quad_uv, float).copy()
@@ -413,6 +423,10 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
         raise PanelOptimizationError(
             f"ZHANG2021_ONESTRING_QUAD_VERTEX_OUTSIDE_CHART: {int(np.sum(tri < 0))} vertices")
     X = lift.lift(P, tri)
+    # UV validity alone does not imply convex lifted panels on a curved surface.
+    # Preserve a feasible 3D start during the interior-only stage as well as slides.
+    preserve_lift = _lift_is_valid(X, quads)
+    report["panel_optimizer_preserves_valid_3d"] = preserve_lift
     ref_area = np.maximum(np.abs(np.sum(uv_corner_areas(P, quads), axis=1)) / 4.0, 1e-300)
     if reference_length is None:
         edges = np.unique(np.sort(np.concatenate([quads[:, [k, (k + 1) % 4]] for k in range(4)]), axis=1), axis=0)
@@ -466,6 +480,11 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
         report["panel_optimizer_principal_weighted_panels"] = float(np.sum(pf[2]))
 
     sl = _boundary_slide_setup(lift, P, X, quads, fixed, L, boundary_slide) if boundary_slide else None
+    slide_angle_floor = 0.0
+    if sl is not None:
+        from .zhang2021_panel_quality import per_panel_geometry
+        slide_angle_floor = min(15.0, float(np.min(per_panel_geometry(X, quads)["angles"]))) * (1.0 - 1e-8)
+        report["panel_optimizer_boundary_slide_min_angle_floor"] = slide_angle_floor
     nfz = 2 * len(free)
     if sl is not None:
         report["panel_optimizer_boundary_slide_groups"] = len(sl["groups"])
@@ -498,6 +517,9 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
             return np.inf, None
         state["tri"] = t
         Xz = lift.lift(Pz, t)
+        if (preserve_lift or sl is not None) and not _lift_is_valid(
+                Xz, quads, min_angle=max(0.5, slide_angle_floor)):
+            return np.inf, None
         Eq, GX, _ = _quad_terms(Xz, quads, Lq, w)
         if tri_lines is not None:
             a, i, b = tri_lines[:, 0], tri_lines[:, 1], tri_lines[:, 2]
@@ -570,7 +592,33 @@ def optimize_panel_quality(lift: ChartLift, quad_uv: np.ndarray, quads: np.ndarr
                    "panel_optimizer_weights": dict(vars(w))})
     if np.any(quad_validity(P, quads)[0] <= 0) and not allow_invalid:
         raise PanelOptimizationError("ZHANG2021_ONESTRING_PANEL_OPTIMIZER_FLIPPED_A_QUAD")
+    if preserve_lift and not _lift_is_valid(X, quads):
+        raise PanelOptimizationError("ZHANG2021_PANEL_OPTIMIZER_LOST_3D_FEASIBILITY")
+    if boundary_slide:
+        paired_error = 0.0
+        if sl is not None:
+            paired_error = max((float(np.max(np.linalg.norm(X[g["members"]] - X[g["members"][0]], axis=1)))
+                                for g in sl["groups"]), default=0.0)
+        if (not _lift_is_valid(X, quads, min_angle=slide_angle_floor)
+                or paired_error > 1e-7 * L or not np.isfinite(E1) or E1 > E0 + 1e-10):
+            base_report["panel_optimizer_boundary_slide_undone"] = "trial failed geometry, seam or energy check"
+            return base_uv, base_xyz, base_report
+        report["panel_optimizer_boundary_slide_pair_error"] = paired_error
+        report["panel_optimizer_boundary_slide_baseline"] = base_report
     return P, X, report
+
+
+def _lift_is_valid(points, quads, *, min_angle=0.5):
+    """Hard feasibility check, separate from soft shape-quality objectives."""
+    from .zhang2021_panel_quality import per_panel_geometry
+    if not np.all(np.isfinite(points)):
+        return False
+    g = per_panel_geometry(points, quads)
+    scale = max(float(np.mean(g["lengths"])), 1e-300)
+    return bool(np.all(g["corner_orientation"] > 1e-10)
+                and np.all(g["area"] > 1e-8 * scale * scale)
+                and np.all(g["lengths"] > 1e-6 * scale)
+                and np.all(g["angles"] >= min_angle))
 
 
 def _boundary_slide_setup(lift, P, X, quads, fixed, L, opts):
@@ -637,13 +685,29 @@ def _boundary_slide_setup(lift, P, X, quads, fixed, L, opts):
         elif t_ >= 1.0 - 1e-9:
             blocked.add(int(xid[loop[(i_ + 1) % nb]]))
     tree = cKDTree(X[gb])
-    groups_raw = {}
+    parent = {v: v for v in gb}
+    def find(v):
+        while parent[v] != v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return v
     for a_, b_ in tree.query_pairs(1e-7 * max(L, 1e-12)):
-        groups_raw.setdefault(gb[a_], {gb[a_]}).add(gb[b_])
-    copy_of = {}
-    for m, mem in groups_raw.items():
-        for v in mem:
-            copy_of[v] = mem
+        parent[find(gb[b_])] = find(gb[a_])
+    groups_raw = {}
+    for v in gb:
+        groups_raw.setdefault(find(v), set()).add(v)
+    copy_of = {v: mem for mem in groups_raw.values() for v in mem}
+    chart_cum = np.r_[0.0, np.cumsum(seg3)]
+    perimeter = chart_cum[-1]
+    arc = {v: chart_cum[i] + t * seg3[i] for v, (i, t) in where.items()}
+    clearance = {}
+    for v, a in arc.items():
+        gaps = [(b - a) % perimeter for u, b in arc.items() if u != v]
+        if gaps:
+            # Both neighbours can move: disjoint intervals retain >=10% of every original gap.
+            clearance[v] = 0.45 * min(min(gaps), min(perimeter - g for g in gaps))
+        else:
+            clearance[v] = 0.0
     max_shift = float((opts or {}).get("max_shift", 0.35)) * L
     groups, seen = [], set()
     extra_fixed = set(int(v) for v in (opts or {}).get("keep", []))
@@ -703,6 +767,7 @@ def _boundary_slide_setup(lift, P, X, quads, fixed, L, opts):
         k0 = idx.index(i0)
         a0 = cum[k0] + t0 * lens[k0]
         w = min(max_shift, a0 - 1e-9 * L, cum[-1] + lens[-1] - a0 - 1e-9 * L) * 0.999
+        w = min(w, *(clearance[u] for u in mem))
         if w <= 1e-6 * L:
             continue
         groups.append({"members": mem, "a0": a0, "w": w, "cum": cum, "len": lens,

@@ -956,6 +956,7 @@ class PipelineParameters(_original.PipelineParameters):
     # User-selected defaults for this app; not the paper authors' weights.
     w_square: float = 100.0
     hinge_layout_iterations: int = 1000
+    t2d_hinge_run_to_convergence: bool = False
     paper_fidelity_mode: bool = False
     # Experimental paper-interpretation studies; defaults remain unchanged.
     bff_rectangle_selection_mode: Literal[

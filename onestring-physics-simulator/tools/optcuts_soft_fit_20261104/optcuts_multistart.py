@@ -210,7 +210,7 @@ def main():
     trace("optcuts.multistart", "start", mesh=mesh, env={k: v for k, v in os.environ.items() if k.startswith(("ONESTRING_", "MS_"))})
     w_angle = float(os.environ.get("ONESTRING_ANGLE_W", "0")); bound_sd = os.environ.get("ONESTRING_ANGLE_BOUND_SD", "0") == "1"
     w_bend = float(os.environ.get("ONESTRING_SEAM_BEND_W", "0"))
-    extra = {k: os.environ[k] for k in ("ONESTRING_ANGLE_W", "ONESTRING_ANGLE_BOUND_SD", "ONESTRING_SEAM_BEND_W", "ONESTRING_NO_BRANCH") if k in os.environ}
+    extra = {k: os.environ[k] for k in ("ONESTRING_ANGLE_W", "ONESTRING_ANGLE_BOUND_SD", "ONESTRING_SEAM_BEND_W", "ONESTRING_NO_BRANCH", "ONESTRING_KEEP_CONNECTED") if k in os.environ}
     V, F = load_mesh(mesh)
     R = math.sqrt(0.5 * np.linalg.norm(np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]]), axis=1).sum() / math.pi)
     global SYM

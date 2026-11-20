@@ -662,6 +662,7 @@ FEATURE_PRESETS = {
         "structured_grid_panel_min_size_weight": 20.0, "structured_grid_panel_min_size_ratio": 0.7,
         "paper_t3d_top_shape_mode": "k3d_rigid",
         "structured_grid_seam_zipper": True, "structured_grid_turn_reference": "surface",
+        "structured_grid_panel_boundary_slide": True,
     },
 }
 

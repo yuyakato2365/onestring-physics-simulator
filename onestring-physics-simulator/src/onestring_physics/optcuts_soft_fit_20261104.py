@@ -5,6 +5,7 @@
   OptCuts (tools/optcuts_soft_fit_20261104/optcuts_onestring_fork_20261104.patch); the mode runs
   third_party/OptCuts_csf_onestring/build2/OptCuts_bin (or ONESTRING_SOFT_FIT_OPTCUTS_EXECUTABLE) instead of the
   binary the app would otherwise use.
+* Native seam candidates that would disconnect the surface are rejected (ONESTRING_KEEP_CONNECTED=1).
 * When OptCuts leaves a seam inside the surface that does not reach the boundary (the UV chart then has 2+ boundary
   loops, which the one-chart pipeline refuses), every such cut (a slit or a branched tree) is connected to the boundary
   along the least visible edge path that touches no other seam (connect_interior_slits), and the cut surface is given back to OptCuts, whose bijective
@@ -31,7 +32,7 @@ CONSTRAINTS = {
 }
 # seam start search (multi-start): the symmetry term and the no-branch rule used with each constraint
 MULTISTART = {"soft": {"ONESTRING_SYM_W": "1"}, "hard": {"ONESTRING_SYM_W": "0.5", "ONESTRING_NO_BRANCH": "1"}, "none": {}}
-_ALL_KEYS = ("ONESTRING_ANGLE_W", "ONESTRING_ANGLE_BOUND_SD", "ONESTRING_SEAM_BEND_W", "ONESTRING_SYM_W", "ONESTRING_NO_BRANCH")
+_ALL_KEYS = ("ONESTRING_ANGLE_W", "ONESTRING_ANGLE_BOUND_SD", "ONESTRING_SEAM_BEND_W", "ONESTRING_SYM_W", "ONESTRING_NO_BRANCH", "ONESTRING_KEEP_CONNECTED")
 _MARK = "ONESTRING_SOFT_FIT_20261104_ACTIVE"
 _STATE = {"installed": False, "orig_read": None, "orig_once": None, "cfg": None, "depth": 0, "exe": "", "constraint": "soft", "multistart": False, "root": None}
 
@@ -249,8 +250,8 @@ def _multistart(ob, V, F, cfg, trace):
         if pieces > 1:
             # connecting cuts can only open a chart further; pieces that OptCuts cut off completely cannot be joined
             raise RuntimeError(f"OptCuts cut the surface into {pieces} separate pieces (not one chart with inner cuts); "
-                               "connecting cuts to the boundary cannot join them.  Use a coarser surface or the soft "
-                               f"constraint, or split the design into pieces (see {out})")
+                               "the single-chart constraint was not satisfied. Check that the OneString OptCuts "
+                               f"binary includes ONESTRING_KEEP_CONNECTED (see {out})")
         # connect the inner cuts to the boundary and let OptCuts' bijective solver re-solve the UV map; OptCuts may
         # add cuts again, so repeat until the chart has one boundary loop (stop if a round does not reduce them)
         prev_loops = None
@@ -314,7 +315,8 @@ def _install():
         pieces = _chart_pieces(np.asarray(f2, int), len(uv))
         if pieces > 1:
             raise RuntimeError(f"OptCuts cut the surface into {pieces} separate pieces (not one chart with inner cuts); "
-                               "connecting cuts to the boundary cannot join them.  Use a coarser surface or the soft constraint.")
+                               "the single-chart constraint was not satisfied. Check that the OneString OptCuts "
+                               "binary includes ONESTRING_KEEP_CONNECTED.")
         vmap, f2n, uvn, report = connect_interior_slits(xyz, f3, uv, f2)
         print(f"[SOFT-FIT] OptCuts left {len(loops) - 1} cut(s) inside the surface; connected to the boundary along hidden "
               f"paths ({sum(r_['path_edges'] for r_ in report)} edges)", flush=True)
@@ -348,6 +350,8 @@ def configure(active: bool, project_root: str | Path | None = None, constraint: 
     if active:
         constraint = constraint if constraint in CONSTRAINTS else "soft"
         os.environ.update(CONSTRAINTS[constraint])
+        # This mode always requires a single connected chart.
+        os.environ["ONESTRING_KEEP_CONNECTED"] = "1"
         if multistart:
             os.environ.update(MULTISTART[constraint])
         os.environ[_MARK] = "1"

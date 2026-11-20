@@ -69,6 +69,7 @@ def install_optcuts_test_k2d_hard_feasibility_patch() -> None:
         *,
         max_sweeps: int,
         penetration_tolerance: float,
+        progress_callback=None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         x = np.asarray(tiles, dtype=float).copy()
         effective_tol = strict_tol_for_tiles(x, penetration_tolerance)
@@ -81,10 +82,13 @@ def install_optcuts_test_k2d_hard_feasibility_patch() -> None:
             raise RuntimeError("OPTCUTS_TEST_K2D_HARD_COLLISION_BACKEND_UNAVAILABLE")
 
         sweeps_used = 0
-        for sweep in range(max(1, int(max_sweeps))):
-            bad = mod._penetrating_pairs(pipeline, x, effective_tol)
+        bad = before
+        sweep_limit = max(1, int(max_sweeps))
+        for sweep in range(sweep_limit):
             if not bad:
                 break
+            if progress_callback is not None and sweep % 10 == 0:
+                progress_callback(sweep + 1, sweep_limit, len(bad))
             bad = sorted(bad, key=lambda item: item[3], reverse=True)
             moved = False
             for i, j, _old_mtv, _old_depth in bad:
@@ -101,8 +105,9 @@ def install_optcuts_test_k2d_hard_feasibility_patch() -> None:
             sweeps_used = sweep + 1
             if not moved:
                 break
+            bad = mod._penetrating_pairs(pipeline, x, effective_tol)
 
-        after_gs = mod._penetrating_pairs(pipeline, x, effective_tol)
+        after_gs = bad
         gs_count = len(after_gs)
         expansion_used = False
         expansion_factor = 1.0

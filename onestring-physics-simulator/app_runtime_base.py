@@ -668,8 +668,8 @@ with st.sidebar:
 
     st.header("Target Input")
     target_kind = _param_row(
-        "目標曲面 S。Remeshed_Bunny.stl はリポジトリ内または一般的なローカル配置から自動探索します。",
-        lambda: st.selectbox("target shape", ["Remeshed_Bunny.stl", "vessel.stl", "paper_bulb_neck", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="Default target is Remeshed_Bunny.stl. You can still upload another OBJ/STL/PLY below."),
+        "モードの既定は、三角形 Kagome では Bunny_S45_volume の入力、それ以外では3,500頂点の軽量Bunnyです。",
+        lambda: st.selectbox("target shape", ["モードの既定", "Bunny_open_LargeSteps_3500.obj", "Bunny_S45_volume（当時の入力）", "Bunny_open_LargeSteps.obj", "Remeshed_Bunny.stl", "vessel.stl", "paper_bulb_neck", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="OBJ/STL/PLY をアップロードすると、そのファイルを使います。"),
     )
     uploaded = _param_row(
         "OBJ/STL/PLY を読み込む。閉じた形状では Ω の切断・境界条件が難しくなるので注意。",
@@ -742,8 +742,12 @@ with st.sidebar:
                 # 2026-11-04: soft sigma1 = sigma2 OptCuts + boundary-fit structured grid (seam zipper, 3D turning)
                 "optcuts_structured_grid_soft_fit_20261104",
                 "optcuts_structured_grid_fit_20261104",
+                "triangle_omega_20261118",
+                "triangle_kagome_controls_20261118",
             ],
             format_func=lambda mode: {
+                "triangle_kagome_controls_20261118": "三角形 Kagome | Ω・ヒンジ・印刷",
+                "triangle_omega_20261118": "三角形パネル Ω2 | 耳の細分化・Rolling Guidance",
                 "bff":"bff — LEGACY harmonic, NOT official BFF",
                 "paper_reference_bff":"paper_reference_bff — official BFF CLI",
                 "rectangular_harmonic_legacy":"rectangular_harmonic_legacy — NOT BFF",
@@ -770,6 +774,15 @@ with st.sidebar:
             help="Paper mode always uses official BFF CLI. bff is a legacy harmonic alias.",
         ),
     )
+    if target_kind == "モードの既定":
+        target_kind = ("Bunny_S45_volume（当時の入力）" if omega_parameterization_mode == "triangle_kagome_controls_20261118"
+                       else "Bunny_open_LargeSteps_3500.obj")
+    if omega_parameterization_mode == "triangle_omega_20261118":
+        from tools.triangle_omega.ui import triangle_settings
+        triangle_options = triangle_settings(target_kind, uploaded)
+    elif omega_parameterization_mode == "triangle_kagome_controls_20261118":
+        from tools.triangle_omega.controlled.ui import settings as kagome_settings
+        kagome_options = kagome_settings(target_kind, uploaded)
     if paper_fidelity_enabled:
         st.caption(
             "To select the 2026-10-26 OptCuts → Planar Quad mode or the "
@@ -1533,11 +1546,11 @@ with st.sidebar:
     st.caption("T2D Dual Hinge: パネル中心の移動距離制限なし（Soft / Hard共通）。各パネルの形状は剛体のままです。")
     hinge_layout_time_budget_sec = _param_row(
         "通常パイプラインのT2Dでは、各L-BFGS-B試行にこの秒数を割り当てます。"
-        "Multi-startなら入力した全試行に個別の制限時間を適用します（回数分だけ計算時間が増えます）。",
+        "Multi-start では各試行に適用します。OptCuts の剛体 K2D にもこの秒数を適用します。",
         lambda: st.slider(
             "hinge layout time budget / trial (full pipeline)",
             1.0, 120.0, 8.0, 1.0,
-            help="Full pipeline: seconds PER T2D attempt, not total across restarts. Each requested trial is executed. Other hinge stages use their existing stage budget.",
+            help="Seconds for the OptCuts rigid K2D solve and for each bounded T2D trial.",
         ),
     )
     # 2026-11-04: as in the cloud comparison runs, every T2D trial may run until L-BFGS-B stops on its own
@@ -1559,13 +1572,10 @@ with st.sidebar:
     os.environ["ONESTRING_K2D_PLATEAU_WINDOW"] = str(k2d_plateau_window)
     os.environ["ONESTRING_K2D_PLATEAU_REL"] = repr(k2d_plateau_pct / 100.0)
     t2d_run_to_convergence = bool(_param_row(
-        "T2D の各試行を、時間や反復回数で打ち切らず、最適化が自分で止まるまで回す（クラウドで比べた実験と同じ条件）。",
+        "T2D の L-BFGS-B 試行をソルバーの収束判定まで回します。",
         lambda: st.checkbox("T2D trials run to convergence (no time / iteration cap)", value=True,
                             key="onestring_t2d_run_to_convergence"),
     ))
-    if t2d_run_to_convergence:
-        hinge_layout_time_budget_sec = 0.0
-        hinge_layout_iterations = 10 ** 7
     # 2026-11-04: penetration shallower than this is contact, not a collision (T2D verdicts, Hard repair, collision map)
     t2d_contact_tolerance_pct = float(_param_row(
         "これより浅いパネル同士のめり込みは「接触」とみなし、衝突として数えない（T2D の判定・Hard の修復・衝突マップ共通）。"
@@ -2236,6 +2246,10 @@ def _default_vessel_path():
 
 
 def build_target():
+    if uploaded is None and target_kind == "Bunny_S45_volume（当時の入力）":
+        return load_target_shape(Path(__file__).resolve().parent / "tools/triangle_omega/controlled/bunny_open_bottom_repaired.obj")
+    if uploaded is None and target_kind in ("Bunny_open_LargeSteps_3500.obj", "Bunny_open_LargeSteps.obj"):
+        return load_target_shape(Path(__file__).resolve().parent / "assets" / target_kind)
     if uploaded is None and target_kind == "paper_bulb_neck":
         st.caption("Built-in closed bulb + neck target (procedural approximation of the paper reference figure).")
         st.warning(CLOSED_SHAPE_WARNING)
@@ -2285,7 +2299,7 @@ def build_target():
                        temp_path, _rm_out], capture_output=True, text=True)
         print(_rm.stdout[-2000:], _rm.stderr[-2000:], flush=True)
         if _rm.returncode != 0 or not Path(_rm_out).exists():
-            raise RuntimeError("symmetric remesh failed (gpytoolbox installed in this environment?): " + _rm.stderr[-500:])
+            raise RuntimeError("symmetric remesh failed: " + _rm.stderr[-500:])
         st.caption("対称リメッシュ: " + " / ".join(l for l in _rm.stdout.splitlines() if l.startswith(("original:", "remeshed:"))))
         temp_path = _rm_out
     result = load_target_shape(temp_path)
@@ -2310,6 +2324,18 @@ def build_target():
     else:
         st.caption(f"入力メッシュ: {uploaded.name}（OBJ/STL/PLY）")
     return result
+
+
+if omega_parameterization_mode == "triangle_omega_20261118":
+    from tools.triangle_omega.ui import render as render_triangle_omega
+    render_triangle_omega(build_target, triangle_options, run_pipeline)
+    st.stop()
+
+
+if omega_parameterization_mode == "triangle_kagome_controls_20261118":
+    from tools.triangle_omega.controlled.ui import render as render_kagome
+    render_kagome(build_target, kagome_options, run_pipeline)
+    st.stop()
 
 
 def current_pipeline_key() -> tuple:
@@ -2440,6 +2466,7 @@ def current_pipeline_key() -> tuple:
         hinge_layout_anchor_weight,
         hinge_layout_initial_expansion,
         hinge_layout_time_budget_sec,
+        t2d_run_to_convergence,
         t2d_search_mode,
         t2d_collision_mode,
         t2d_restart_count,
@@ -2644,6 +2671,7 @@ pipeline_params = PipelineParameters(
     hinge_layout_anchor_weight=hinge_layout_anchor_weight,
     hinge_layout_initial_expansion=hinge_layout_initial_expansion,
     hinge_layout_time_budget_sec=hinge_layout_time_budget_sec,
+    t2d_hinge_run_to_convergence=t2d_run_to_convergence,
     hinge_layout_search_mode=t2d_search_mode,
     hinge_layout_collision_mode=t2d_collision_mode,
     hinge_layout_budget_mode="per_trial",
@@ -3050,7 +3078,7 @@ if rerun_t2d_only and not run_pipeline:
     # Do not mutate the parameters shared with a future full pipeline run.
     import copy as _copy
     t2d_rerun_params = _copy.copy(pipeline_params)
-    t2d_rerun_params.hinge_layout_time_budget_sec = (0.0 if t2d_run_to_convergence else float(t2d_rerun_time_budget_sec))
+    t2d_rerun_params.hinge_layout_time_budget_sec = float(t2d_rerun_time_budget_sec)
     t2d_rerun_params.hinge_layout_budget_mode = "total_shared"
     t2d_rerun_params.collision_split_enabled = False  # requires complete M2D rebuild
     t2d_rerun_params.hinge_layout_search_mode = t2d_search_mode

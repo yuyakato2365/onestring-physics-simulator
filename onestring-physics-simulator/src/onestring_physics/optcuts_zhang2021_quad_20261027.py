@@ -424,7 +424,7 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
                        panel_weights: Any = None, report_only: bool = False,
                        keep_interior_3d: bool = False, extra_fixed: Any = None,
                        principal_field: Any = None, crease_slide: Any = None,
-                       boundary_slide: Any = None) -> Zhang2021M2DPlan:
+                       boundary_slide: Any = None, require_valid_geometry: bool = False) -> Zhang2021M2DPlan:
     """Paper stage + OneString adapter on one chart (raises on failure).
 
     1. [paper]     Zhang et al. 2021 reference programs -> Q (``zhang_result`` may
@@ -523,7 +523,7 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
             quv, m3d, opt_report = optimize_panel_quality(
                 lift, quv, faces_ccw, fixed, weights=panel_weights or PanelOptimizerWeights(),
                 max_iter=int(getattr(params, "zhang2021_panel_optimization_iterations", 300)),
-                line_triples=panel_line_triples, allow_invalid=report_only, principal_field=principal_field,
+                line_triples=panel_line_triples, allow_invalid=report_only and not require_valid_geometry, principal_field=principal_field,
                 crease_slide=crease_slide, boundary_slide=boundary_slide, size_band=_size_band(params))
         except PanelOptimizationError as exc:
             raise Zhang2021QuadModeError(str(exc)) from exc
@@ -548,7 +548,7 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
                 quv, m3d, opt_report = optimize_panel_quality(
                     lift, quv_in.copy(), faces_ccw, fixed, weights=panel_weights or PanelOptimizerWeights(),
                     max_iter=int(getattr(params, "zhang2021_panel_optimization_iterations", 300)),
-                    line_triples=panel_line_triples, allow_invalid=report_only, principal_field=principal_field,
+                    line_triples=panel_line_triples, allow_invalid=report_only and not require_valid_geometry, principal_field=principal_field,
                     crease_slide=crease_slide, boundary_slide=None, size_band=_size_band(params))
                 opt_report["panel_optimizer_enabled"] = True
                 opt_report["chart_conform_status"] = f"failed, slide undone: {str(exc)[:200]}"
@@ -569,6 +569,48 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
     q2 = panel_quality(quv, faces_ccw, stage="M2D", thresholds=stage_thresholds(params, "m2d"),
                        planar_2d_orientation=1.0)
     q3 = panel_quality(m3d, faces_ccw, stage="M3D", thresholds=stage_thresholds(params, "m3d"))
+    invalid_lift = (q3.metrics.get("flipped_or_nonconvex_panels", 0)
+                    or q3.metrics.get("degenerate_panels", 0))
+    if boundary_slide and invalid_lift and int(opt_report.get("panel_optimizer_boundary_slide_groups", 0) or 0):
+        plan = plan_zhang2021_m2d(
+            xyz, f3, uv, f2, params, zhang_result=zhang_result,
+            panel_line_triples=panel_line_triples, strict_node_valence=strict_node_valence,
+            panel_weights=panel_weights, report_only=report_only,
+            keep_interior_3d=keep_interior_3d, extra_fixed=extra_fixed,
+            principal_field=principal_field, crease_slide=crease_slide, boundary_slide=None,
+            require_valid_geometry=require_valid_geometry)
+        plan.metrics["panel_optimizer_boundary_slide_undone"] = "invalid M3D after chart conformance"
+        return plan
+    if require_valid_geometry:
+        if not topology_ok or np.any(validity <= 0):
+            raise Zhang2021QuadModeError(f"SG_M2D_GEOMETRY_REJECTED: {topology_detail}")
+        if invalid_lift or not np.all(np.isfinite(m3d)):
+            raise Zhang2021QuadModeError(
+                f"SG_M3D_GEOMETRY_REJECTED: nonconvex={q3.metrics.get('flipped_or_nonconvex_panels')}, "
+                f"degenerate={q3.metrics.get('degenerate_panels')}")
+        from shapely.geometry import Polygon
+        final_loop = quad_boundary_loop(faces_ccw)
+        final_polygon = Polygon(quv[final_loop])
+        if not final_polygon.is_valid or final_polygon.area <= 0:
+            raise Zhang2021QuadModeError("SG_M2D_BOUNDARY_SELF_INTERSECTION")
+        # Compare the final chart to the final grid, after any boundary slide.
+        chart_loops = oriented_boundary_loops(rp.f2)
+        if len(chart_loops) != 1:
+            raise Zhang2021QuadModeError("SG_FINAL_CHART_NOT_A_DISK")
+        chart_polygon = Polygon(rp.uv[chart_loops[0]])
+        if (not chart_polygon.is_valid or
+                chart_polygon.symmetric_difference(final_polygon).area > 1e-8 * final_polygon.area):
+            raise Zhang2021QuadModeError("SG_FINAL_CHART_BOUNDARY_MISMATCH")
+        chart_areas = signed_uv_areas(rp.uv, rp.f2)
+        # Chart winding may be globally CW (the mirrored Omega convention).
+        # A consistent global orientation is valid; mixed signs or collapse are not.
+        chart_sign = np.sign(np.sum(chart_areas))
+        if np.any(chart_areas * chart_sign <= 0):
+            raise Zhang2021QuadModeError("SG_FINAL_CHART_INVERSION")
+        final_chart_area = float(abs(np.sum(chart_areas)))
+        rel = abs(final_chart_area - final_polygon.area) / final_polygon.area
+        if rel > 1e-8:
+            raise Zhang2021QuadModeError(f"SG_FINAL_CHART_COVERAGE_MISMATCH: {rel:g}")
     legacy2 = _quad_quality(np.column_stack((quv, np.zeros(len(quv)))), faces_ccw)
     legacy3 = _quad_quality(m3d, faces_ccw)
     sj = scaled_jacobians(quv, faces_ccw)
@@ -577,6 +619,7 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
     if len(src_loop) != 1:
         raise Zhang2021QuadModeError("ZHANG2021_SOURCE_CHART_NOT_DISK")
     src_loop_uv = uv[src_loop[0]]
+    q_poly = quv[quad_boundary_loop(faces_ccw)]
     dh, _dh_q_to_src, _dh_src_to_q = two_sided_boundary_hausdorff(
         src_loop_uv, [list(range(len(src_loop_uv)))], q_poly, [list(range(len(q_poly)))])
     bbox_diag = float(np.linalg.norm(np.ptp(uv, axis=0)))
@@ -590,7 +633,8 @@ def plan_zhang2021_m2d(xyz, f3, uv, f2, params: Any, *, zhang_result: Any = None
                                   panel_line_triples=panel_line_triples, strict_node_valence=strict_node_valence,
                                   panel_weights=panel_weights, report_only=report_only,
                                   keep_interior_3d=keep_interior_3d, extra_fixed=extra_fixed,
-                                  principal_field=principal_field, crease_slide=crease_slide, boundary_slide=None)
+                                  principal_field=principal_field, crease_slide=crease_slide, boundary_slide=None,
+                                  require_valid_geometry=require_valid_geometry)
         plan.metrics["panel_optimizer_boundary_slide_undone"] = "seam not hard-closable after the slide"
         return plan
     odd = odd_valence_interior_vertices(faces_ccw)

@@ -1,0 +1,87 @@
+<title>Triangle Panels</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* layout: full-height 3D stage with a narrow instrument panel at the side (stacked under the stage on phones) */
+:root{
+  --bg:#f3f5f7; --panel:#ffffff; --fg:#17202a; --muted:#5b6672; --line:#d6dce2;
+  --accent:#1f5fbf; --seam:#c8324f; --stage:#e9edf1;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f1418; --panel:#161d23; --fg:#e4e9ee; --muted:#93a0ad; --line:#2a343d; --accent:#6ea0f0; --seam:#ff6b86; --stage:#121920; color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1418; --panel:#161d23; --fg:#e4e9ee; --muted:#93a0ad; --line:#2a343d; --accent:#6ea0f0; --seam:#ff6b86; --stage:#121920; color-scheme:dark}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);margin:0}
+.app{display:grid;grid-template-columns:minmax(0,1fr) 300px;height:100%;min-height:0}
+#stage{position:relative;min-width:0;min-height:0;background:var(--stage)}
+#stage canvas{display:block;width:100%;height:100%;touch-action:none}
+aside{background:var(--panel);border-left:1px solid var(--line);overflow:auto;padding-block:18px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:18px}
+h1{font-size:17px;font-weight:600;margin:0;text-wrap:balance}
+.sub{color:var(--muted);font-size:12.5px;line-height:1.5;margin:4px 0 0}
+fieldset{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+legend{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;padding:0}
+.seg{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{font:inherit;font-size:12.5px;padding:8px 6px;border:0;background:transparent;color:var(--fg);cursor:pointer;line-height:1.3}
+.seg button:nth-child(even){border-left:1px solid var(--line)}.seg button:nth-child(n+3){border-top:1px solid var(--line)}.seg button:last-child:nth-child(odd){grid-column:1/-1;border-left:0}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--panel)}
+.seg button:focus-visible,label:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+label{display:flex;gap:8px;align-items:center;font-size:13px;cursor:pointer}
+select{font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+.ramp.size{background:linear-gradient(90deg,#440154,#3b528b,#21918c,#5ec962,#fde725)}
+dl{display:grid;grid-template-columns:1fr auto;gap:6px 12px;margin:0;font-size:12.5px}
+dt{color:var(--muted)} dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+.legend{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted)}
+.ramp{height:10px;border-radius:2px;background:linear-gradient(90deg,#fcfdbf,#fc8961,#b73779,#51127c,#000004)}
+.ticks{display:flex;justify-content:space-between;font-family:var(--mono)}
+.key{display:flex;gap:14px;flex-wrap:wrap}
+.key span{display:inline-flex;gap:6px;align-items:center}
+.sw{width:14px;height:3px;background:var(--seam);display:inline-block}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--seam);display:inline-block}
+.hint{font-size:11.5px;color:var(--muted)}
+@media (max-width:760px){.app{grid-template-columns:1fr;grid-template-rows:62vh auto;height:auto}aside{border-left:0;border-top:1px solid var(--line)}}
+</style>
+<div class="app">
+  <div id="stage" aria-label="3D view of the M3D panels"></div>
+  <aside>
+    <div>
+      <h1>Triangle panels (M3D)</h1>
+      <p class="sub">The triangle grid is fitted to the planar outline, mapped onto the surface and joined along the OptCuts seams.</p>
+    </div>
+    <fieldset><legend>Run</legend>
+      <div class="seg" role="group" aria-label="Run">
+        <button id="b-runK" aria-pressed="true">RUN_SETTINGS</button>
+        <button id="b-runI08" aria-pressed="false">Ear tips inflated<br><small>sphere radius ≥ 0.08</small></button>
+        <button id="b-runI06" aria-pressed="false">Ear tips inflated<br><small>sphere radius ≥ 0.06</small></button>
+        <button id="b-runG" aria-pressed="false">Thickness-limited<br><small>panels ≤ local thickness, relaxed in 3D</small></button>
+        <button id="b-runGu" aria-pressed="false">Thickness-limited<br><small>before 3D relaxation</small></button>
+        <button id="b-runF" aria-pressed="false">Ear tips sized<br><small>panel-scale curvature, closed</small></button>
+        <button id="b-runE" aria-pressed="false">Relaxed in 3D<br><small>curvature-sized, closed</small></button>
+        <button id="b-runD" aria-pressed="false">Curvature-sized<br><small>seams closed</small></button>
+        <button id="b-runC" aria-pressed="false">Seams closed<br><small>paired banks, welded</small></button>
+        <button id="b-runA" aria-pressed="false">Step 2 on<br><small>seams open</small></button>
+        <button id="b-runB" aria-pressed="false">Step 2 off<br><small>seams open</small></button>
+      </div>
+    </fieldset>
+    <fieldset><legend>Show</legend>
+      <label for="s-colour">Colour panels by</label>
+      <select id="s-colour"><option value="dev">angle error</option><option value="size">panel size</option><option value="none">nothing</option></select>
+      <label><input type="checkbox" id="c-surface"> Original surface (ghost)</label>
+      <label><input type="checkbox" id="c-seams" checked> OptCuts seams</label>
+      <label><input type="checkbox" id="c-seamv" checked> Panel vertices on seam banks</label>
+      <label><input type="checkbox" id="c-edges" checked> Panel edges</label>
+    </fieldset>
+    <div class="legend">
+      <div id="lg-title">Largest |angle − 60°| of each panel in 3D</div>
+      <div class="ramp" id="lg-ramp"></div><div class="ticks" id="lg-ticks"><span>0°</span><span>10°</span><span>20°</span><span>30°+</span></div>
+      <div class="key"><span><i class="sw"></i>seam</span><span><i class="dot"></i>panel vertex on a seam bank</span></div>
+    </div>
+    <dl id="stats"></dl>
+    <p class="hint">Drag to rotate, scroll or pinch to zoom, right-drag or two-finger drag to pan.</p>
+  </aside>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const DATA =

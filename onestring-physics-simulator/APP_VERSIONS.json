@@ -240,5 +240,649 @@
   "changed": [
    "src/onestring_physics/optcuts_soft_fit_20261104.py"
   ]
+ },
+ {
+  "n": 30,
+  "hash": "f4454487cc3cbfe7571a7379d828eefe95732212",
+  "time": "2026-11-09 13:57",
+  "changed": [
+   "src/onestring_physics/feature_lines_20261029.py",
+   "src/onestring_physics/optcuts_zhang2021_quad_20261027.py",
+   "src/onestring_physics/structured_grid_20261028.py",
+   "src/onestring_physics/zhang2021_panel_optimizer.py"
+  ]
+ },
+ {
+  "n": 31,
+  "hash": "4005f59915b359d9ec8d2b07ab235588690f1661",
+  "time": "2026-11-16 12:35",
+  "changed": [
+   "app_runtime_base.py",
+   "tools/optcuts_soft_fit_20261104/remesh_topology.py",
+   "tools/optcuts_soft_fit_20261104/symremesh.py"
+  ]
+ },
+ {
+  "n": 32,
+  "hash": "9a969fb3974edcfdda196508275611e335f89574",
+  "time": "2026-11-16 12:45",
+  "changed": [
+   "src/onestring_physics/zhang2021_panel_optimizer.py"
+  ]
+ },
+ {
+  "n": 33,
+  "hash": "1c9969e1e092172b26070006250ee1388d7f4117",
+  "time": "2026-11-16 13:20",
+  "changed": [
+   "src/onestring_physics/optcuts_soft_fit_20261104.py",
+   "tools/optcuts_soft_fit_20261104/optcuts_multistart.py"
+  ]
+ },
+ {
+  "n": 34,
+  "hash": "9e1c541ecdcfe070ed1df5a1a1ea700cb3e333b7",
+  "time": "2026-11-17 07:10",
+  "changed": [
+   "app_runtime_base.py",
+   "src/onestring_physics/onestring_pipeline.py",
+   "src/onestring_physics/optcuts_test_k2d_relative_layout_patch.py"
+  ]
+ },
+ {
+  "n": 35,
+  "hash": "0938b37fc1eb0daf44ec637c84e5f203fd8b6017",
+  "time": "2026-11-17 07:13",
+  "changed": [
+   "app_runtime_base.py",
+   "src/onestring_physics/optcuts_test_k2d_relative_layout_patch.py"
+  ]
+ },
+ {
+  "n": 36,
+  "hash": "097df04490652452f905a7151593e44e6ddcc429",
+  "time": "2026-11-17 07:14",
+  "changed": [
+   "src/onestring_physics/optcuts_test_k2d_hard_feasibility_patch.py",
+   "src/onestring_physics/optcuts_test_k2d_relative_layout_patch.py"
+  ]
+ },
+ {
+  "n": 37,
+  "hash": "412af6ead19e832621558b75c2a50efbd13c6b7c",
+  "time": "2026-11-17 07:16",
+  "changed": [
+   "app_runtime_base.py",
+   "src/onestring_physics/onestring_pipeline.py",
+   "src/onestring_physics/optcuts_test_k2d_relative_layout_patch.py",
+   "src/onestring_physics/paper_hinge_solver.py"
+  ]
+ },
+ {
+  "n": 38,
+  "hash": "96784ff5327d098dc5721b76f7ae408f5d234b84",
+  "time": "2026-11-17 07:22",
+  "changed": [
+   "src/onestring_physics/paper_hinge_solver.py"
+  ]
+ },
+ {
+  "n": 39,
+  "hash": "01899dfffc0eaca32c84a23236199eafba12c1fc",
+  "time": "2026-11-17 07:28",
+  "changed": [
+   "src/onestring_physics/visualization.py"
+  ]
+ },
+ {
+  "n": 40,
+  "hash": "69f099b735b5a16571bede2949f9215bfa7d3f52",
+  "time": "2026-11-18 15:44",
+  "changed": [
+   "app_runtime_base.py",
+   "tools/triangle_omega/filter_surface.py",
+   "tools/triangle_omega/hinges.py",
+   "tools/triangle_omega/run.py",
+   "tools/triangle_omega/scripts/check_results.py",
+   "tools/triangle_omega/scripts/even/dmesh.py",
+   "tools/triangle_omega/scripts/fair/inflate.py",
+   "tools/triangle_omega/scripts/neck/analyze.py",
+   "tools/triangle_omega/scripts/optcuts/chart_still.py",
+   "tools/triangle_omega/scripts/optcuts/normalize_mesh.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py",
+   "tools/triangle_omega/scripts/os_simple/anim.py",
+   "tools/triangle_omega/scripts/os_simple/common.py",
+   "tools/triangle_omega/scripts/os_simple/flow.py",
+   "tools/triangle_omega/scripts/os_simple/stage2_anim.py",
+   "tools/triangle_omega/scripts/trigrid/build_viewer.py",
+   "tools/triangle_omega/scripts/trigrid/omega2.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 41,
+  "hash": "0747fff00a854cf5e1808b146ac8ea7b696e8140",
+  "time": "2026-11-18 15:52",
+  "changed": [
+   "tools/triangle_omega/run.py",
+   "tools/triangle_omega/scripts/os_simple/anim.py",
+   "tools/triangle_omega/scripts/trigrid/build_viewer.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 42,
+  "hash": "f2753b5fba7e21d49350a7768dff59fec835a382",
+  "time": "2026-11-18 15:56",
+  "changed": [
+   "tools/triangle_omega/scripts/trigrid/build_viewer.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 43,
+  "hash": "e3254b0cdcc0448f79404f26e266d2f9e8887d10",
+  "time": "2026-11-18 16:23",
+  "changed": [
+   "tools/triangle_omega/run.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 44,
+  "hash": "14c39bffa3d964658c6d62980f474810fdf895f1",
+  "time": "2026-11-18 16:37",
+  "changed": [
+   "tools/triangle_omega/run.py",
+   "tools/triangle_omega/scripts/trigrid/omega2.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 45,
+  "hash": "7289c81fcad2bc3598a26a1b929e292c7d440906",
+  "time": "2026-11-18 16:49",
+  "changed": [
+   "app_runtime_base.py",
+   "src/onestring_physics/visualization.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py",
+   "tools/triangle_omega/ui.py",
+   "tools/triangle_omega/views.py"
+  ]
+ },
+ {
+  "n": 46,
+  "hash": "190b526620588546934daa75f432afdb166b5e64",
+  "time": "2026-11-18 16:50",
+  "changed": [
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 47,
+  "hash": "a0216461f3f4946d1d28fa7186c83a55ed66ef94",
+  "time": "2026-11-18 16:54",
+  "changed": [
+   "src/onestring_physics/visualization.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 48,
+  "hash": "22c6f276885b5cc36cb050a26ab911a44b8d45ee",
+  "time": "2026-11-18 17:14",
+  "changed": [
+   "app_runtime_base.py",
+   "tools/triangle_omega/controlled/build_optcuts.py",
+   "tools/triangle_omega/controlled/contact.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/mac_hinges.py",
+   "tools/triangle_omega/controlled/manufacturing.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/rolling.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/fair/inflate.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py",
+   "tools/triangle_omega/scripts/trigrid/omega2.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 49,
+  "hash": "9e49c6dcbe5d67f22d2707053a1cab7dbe9efba8",
+  "time": "2026-11-18 17:30",
+  "changed": [
+   "tools/triangle_omega/controlled/build_optcuts.py",
+   "tools/triangle_omega/controlled/cap.py",
+   "tools/triangle_omega/controlled/contact.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/manufacturing.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py",
+   "tools/triangle_omega/scripts/trigrid/omega2.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 50,
+  "hash": "0cf0f9e9960297845166633e22a6afac71d1decd",
+  "time": "2026-11-18 17:44",
+  "changed": [
+   "src/onestring_physics/optcuts_backend.py",
+   "tools/triangle_omega/controlled/build_optcuts.py",
+   "tools/triangle_omega/controlled/manufacturing.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 51,
+  "hash": "c2dfb4ed8b1243035dcb9a1d7105c1e78c98dd78",
+  "time": "2026-11-18 17:50",
+  "changed": [
+   "tools/triangle_omega/controlled/build_optcuts.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py"
+  ]
+ },
+ {
+  "n": 52,
+  "hash": "21b2aa18e1873fa2e259f8db2d8504ce7899eed9",
+  "time": "2026-11-18 18:20",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/post_rolling.py",
+   "tools/triangle_omega/controlled/rolling.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 53,
+  "hash": "7b70ef73adf558d45ae16ffc3940bd5b68db461e",
+  "time": "2026-11-18 18:54",
+  "changed": [
+   "src/onestring_physics/optcuts_backend.py",
+   "tools/triangle_omega/controlled/build_optcuts.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/fair/inflate.py",
+   "tools/triangle_omega/scripts/fair/round_creases.py",
+   "tools/triangle_omega/scripts/fair/round_profile.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py"
+  ]
+ },
+ {
+  "n": 54,
+  "hash": "626f5bf20f124b8dcf621a52e179d703aba02e76",
+  "time": "2026-11-18 19:09",
+  "changed": [
+   "app_runtime_base.py",
+   "src/onestring_physics/large_steps_mesh_conditioning.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/run.py",
+   "tools/triangle_omega/scripts/fair/inflate.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 55,
+  "hash": "5b6f9cc3f83bd36cf1f685a37adec3ca6f04097a",
+  "time": "2026-11-18 19:48",
+  "changed": [
+   "app_runtime_base.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/run.py"
+  ]
+ },
+ {
+  "n": 56,
+  "hash": "1798a3a04f0eba73fe2a5c244e4c17cbe5189b92",
+  "time": "2026-11-18 19:59",
+  "changed": [
+   "tools/triangle_omega/controlled/rolling.py"
+  ]
+ },
+ {
+  "n": 57,
+  "hash": "b322dd117376e40f5fdb9c533e06e6dd3e9a76b5",
+  "time": "2026-11-18 20:22",
+  "changed": [
+   "app_runtime_base.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/rolling.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/fair/round_profile.py",
+   "tools/triangle_omega/scripts/fair/round_profile_s45.py"
+  ]
+ },
+ {
+  "n": 58,
+  "hash": "6a7aaedd47fe0ffa4ece498e6010e04369604378",
+  "time": "2026-11-18 20:33",
+  "changed": [
+   "app_runtime_base.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 59,
+  "hash": "843f0b1e9b1e7e5fb708e8b2df4c80ca6f3a4be8",
+  "time": "2026-11-18 20:34",
+  "changed": [
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 60,
+  "hash": "de5b524c745964412fe222977af2cf6bdd06a4ee",
+  "time": "2026-11-18 20:47",
+  "changed": [
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/fair/round_profile_s45.py"
+  ]
+ },
+ {
+  "n": 61,
+  "hash": "64ec54c048e3105d8e5e8e3f5fa14be241173550",
+  "time": "2026-11-18 20:50",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/post_rolling.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 62,
+  "hash": "e2d94fbefe7a7e624890bff13f364d3757fc92bf",
+  "time": "2026-11-18 21:01",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/omega2.py",
+   "tools/triangle_omega/scripts/trigrid/omega2_metric.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 63,
+  "hash": "7ae932fca3993018498405914200706fce18bb5e",
+  "time": "2026-11-18 21:46",
+  "changed": [
+   "tools/triangle_omega/controlled/contact.py",
+   "tools/triangle_omega/controlled/manufacturing.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/shell_geometry.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py"
+  ]
+ },
+ {
+  "n": 64,
+  "hash": "f2d05f64842e3f21c1580517352090284fc67971",
+  "time": "2026-11-18 22:04",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 65,
+  "hash": "85098ee37391b5e5cc4545002fd6c371e5bb5a1c",
+  "time": "2026-11-18 22:08",
+  "changed": [
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 66,
+  "hash": "efd69af16ffbf2a21e5af299f67cc29a332e0821",
+  "time": "2026-11-18 22:34",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 67,
+  "hash": "cef6a65045e4d2a5625a3d182bfc350c2811a406",
+  "time": "2026-11-18 22:45",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 68,
+  "hash": "82c567d00e4c7e6683e1e5396100cca6c923e0f3",
+  "time": "2026-11-18 22:47",
+  "changed": [
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 69,
+  "hash": "ee660f24a72dd26ad4eeb33b639e4330d7c55669",
+  "time": "2026-11-18 22:50",
+  "changed": [
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 70,
+  "hash": "8d541b861a9b830b2997515deff1318b7a7b6445",
+  "time": "2026-11-18 22:55",
+  "changed": [
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 71,
+  "hash": "f2fc4c85f38a9fd13177398b0ee77c75751af93d",
+  "time": "2026-11-18 23:53",
+  "changed": [
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/boundary_design.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 72,
+  "hash": "bccb35652695e33daa3a5e2093237c438e13fe0c",
+  "time": "2026-11-19 01:05",
+  "changed": [
+   "tools/triangle_omega/controlled/contact.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/boundary_design.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py"
+  ]
+ },
+ {
+  "n": 73,
+  "hash": "2e9e0ffbabd6cdd1be7423908985e62750611e0e",
+  "time": "2026-11-19 05:48",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/boundary_design.py",
+   "tools/triangle_omega/scripts/trigrid/boundary_lift.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
+ },
+ {
+  "n": 74,
+  "hash": "b0415cc98391f10a9d3813c62a5974edcbbc17e4",
+  "time": "2026-11-19 10:47",
+  "changed": [
+   "tools/triangle_omega/scripts/trigrid/boundary_lift.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py"
+  ]
+ },
+ {
+  "n": 75,
+  "hash": "a12bfaab2423a81b9ab0a39c0b1681a9ccef67ea",
+  "time": "2026-11-19 14:42",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/flexible_rim.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py"
+  ]
+ },
+ {
+  "n": 76,
+  "hash": "ea3cff6f659742de0ec616f4627b1779adba280a",
+  "time": "2026-11-19 14:44",
+  "changed": [
+   "tools/triangle_omega/scripts/trigrid/flexible_rim.py"
+  ]
+ },
+ {
+  "n": 77,
+  "hash": "da8a2bd4f6514108cef645b07de07df558b8ebf4",
+  "time": "2026-11-19 18:00",
+  "changed": [
+   "tools/triangle_omega/controlled/contact.py",
+   "tools/triangle_omega/controlled/fixed_skin.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/planar_sides.py",
+   "tools/triangle_omega/controlled/separated_layout.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/boundary_lift.py",
+   "tools/triangle_omega/scripts/trigrid/lift_quality.py",
+   "tools/triangle_omega/scripts/trigrid/omega2.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py",
+   "tools/triangle_omega/scripts/trigrid/surface_fit.py"
+  ]
+ },
+ {
+  "n": 78,
+  "hash": "0aed09b8d559975558d7e9399c57995e2e908541",
+  "time": "2026-11-19 18:14",
+  "changed": [
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 79,
+  "hash": "fed0964fe7f918741fda99577566ac9006b3ce32",
+  "time": "2026-11-19 19:01",
+  "changed": [
+   "tools/triangle_omega/controlled/fixed_skin.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/outer_layer.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 80,
+  "hash": "311ff86a7b7178648a780c247e0a164de295739f",
+  "time": "2026-11-19 19:09",
+  "changed": [
+   "tools/triangle_omega/controlled/face_membrane.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 81,
+  "hash": "ba771ac3e650c9cce533a99071bd7acda6bbe238",
+  "time": "2026-11-19 20:01",
+  "changed": [
+   "tools/triangle_omega/controlled/dual_triangle.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/triangle_linkage.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 82,
+  "hash": "7fa51e20c726c3fe7de5f741550c8edc9295a620",
+  "time": "2026-11-19 20:30",
+  "changed": [
+   "tools/triangle_omega/controlled/fixed_skin.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/outer_layer.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 83,
+  "hash": "450cd09dc6d563044b8acd895fc60c738914e3ae",
+  "time": "2026-11-19 20:42",
+  "changed": [
+   "tools/triangle_omega/controlled/fixed_skin.py",
+   "tools/triangle_omega/controlled/outer_layer.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 84,
+  "hash": "32aa139b4ec12b77867281c0438ec45eb920ff65",
+  "time": "2026-11-19 21:17",
+  "changed": [
+   "tools/triangle_omega/controlled/dual_triangle.py",
+   "tools/triangle_omega/controlled/triangle_linkage.py"
+  ]
+ },
+ {
+  "n": 85,
+  "hash": "297b23b310b1a6c9ab832f646ecde8346ffdf718",
+  "time": "2026-11-19 21:51",
+  "changed": [
+   "tools/triangle_omega/controlled/dual_triangle.py",
+   "tools/triangle_omega/controlled/fixed_skin.py",
+   "tools/triangle_omega/controlled/outer_layer.py",
+   "tools/triangle_omega/controlled/separated_layout.py",
+   "tools/triangle_omega/controlled/triangle_linkage.py"
+  ]
+ },
+ {
+  "n": 86,
+  "hash": "c9e747a4042b1c80ce8a53e5febb19364dc4eaab",
+  "time": "2026-11-19 22:19",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/scripts/trigrid/fan_clearance.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py"
+  ]
+ },
+ {
+  "n": 87,
+  "hash": "db0eb71d12b81aa892bbd7567d9d5961e15685de",
+  "time": "2026-11-19 23:01",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/trigrid/curvature_sampling.py",
+   "tools/triangle_omega/scripts/trigrid/fan_clearance.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py"
+  ]
  }
 ]

@@ -61,6 +61,10 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
     budget=float(params.hinge_layout_time_budget_sec)
     if not np.isfinite(budget) or budget < 0:
         raise ValueError('hinge_layout_time_budget_sec must be finite and nonnegative (0 = unlimited)')
+    run_to_convergence = bool(getattr(params, "t2d_hinge_run_to_convergence", False))
+    iterations = 10 ** 7 if run_to_convergence else max(1, int(params.hinge_layout_iterations))
+    if run_to_convergence and not getattr(params, "paper_fidelity_mode", False):
+        budget = 0.0
     # Each requested local solve gets an independent wall-clock allowance.
     # Preparing an initial frame is not charged to that trial's solver budget.
     deadline=float('inf')
@@ -99,7 +103,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         raise ValueError('Hinge perturbation scales must be finite and nonnegative')
     rotation_sigma=np.deg2rad(rotation_sigma)
     rng=np.random.default_rng(seed)
-    history_stride=max(1, int(np.ceil(max(1, params.hinge_layout_iterations)/180)))
+    history_stride=max(1, int(np.ceil(iterations/180)))
     trial_summaries=[]
     trial_trajectories=[]
     def positions(pose):
@@ -187,7 +191,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
             current=z.reshape(-1,3).copy()
             stats=record(current)
             if progress_callback and (len(records)%10==0 or len(records)==2):
-                progress_callback('Eq.6 rigid tile poses',min(.99,(len(records)-1)/max(1,params.hinge_layout_iterations)),
+                progress_callback('Eq.6 rigid tile poses',min(.99,(len(records)-1)/iterations),
                                   f"trial {trial_id}/{restarts}; {source}; iter {len(records)-1}; EHinge={stats['EHinge']:.5g}; collisions={stats['collisions']}")
 
         success=False
@@ -198,7 +202,7 @@ def optimize_hinge_poses(grid, mesh_faces, t2d, t3d, params, pipeline, progress_
         message='not started'
         try:
             result=minimize(fun,current.ravel(),jac=True,method='L-BFGS-B',bounds=bounds,callback=callback,
-                            options=dict(maxiter=max(1,params.hinge_layout_iterations),maxls=30,maxcor=20,ftol=1e-13,gtol=1e-8))
+                            options=dict(maxiter=iterations,maxls=30,maxcor=20,ftol=1e-13,gtol=1e-8))
             proposed=result.x.reshape(-1,3)
             success=bool(result.success)
             status=int(result.status)

@@ -138,7 +138,9 @@ def _penetrating_pairs(pipeline: Any, tiles: np.ndarray, penetration_tolerance: 
     if pair_fn is None or sat_fn is None:
         raise RuntimeError("OPTCUTS_TEST_K2D_HARD_COLLISION_BACKEND_UNAVAILABLE")
     scale = _tile_scale(t)
-    pairs = pair_fn(t, pad=max(scale * 0.08, 1e-5))
+    # Positive-area overlap requires intersecting AABBs. The soft layout solve
+    # still uses padded candidates for clearance, which this check does not use.
+    pairs = pair_fn(t, pad=0.0)
     bad: list[tuple[int, int, np.ndarray, float]] = []
     tol = max(float(penetration_tolerance), scale * 1e-12, 1e-12)
     for i, j in pairs:
@@ -158,6 +160,7 @@ def _hard_nonoverlap_project(
     *,
     max_sweeps: int,
     penetration_tolerance: float,
+    progress_callback=None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Rigidly translate penetrating tiles until SAT penetration is zero.
 
@@ -175,6 +178,8 @@ def _hard_nonoverlap_project(
         bad = _penetrating_pairs(pipeline, x, penetration_tolerance)
         if not bad:
             break
+        if progress_callback is not None and sweep % 10 == 0:
+            progress_callback(sweep + 1, max_sweeps, len(bad))
         shifts = np.zeros((len(x), 2), dtype=float)
         counts = np.zeros(len(x), dtype=float)
         for i, j, mtv, _depth in bad:
@@ -270,11 +275,21 @@ def _build_rigid_k2d_layout(pipeline: Any, mesh_2d: Any, mesh_3d: Any, params: A
         fallback = False
 
     penetration_tol = max(tile_size * float(getattr(params, "k2d_hard_nonoverlap_relative_tolerance", 1e-9)), 1e-12)
+    emit_progress = getattr(owner, "_emit_progress", None)
+
+    def projection_progress(sweep, limit, remaining):
+        if emit_progress is not None:
+            emit_progress(
+                progress_callback, "K2D hard non-overlap projection", 0.997,
+                f"Sweep {sweep}/{limit}, overlapping pairs: {remaining}",
+            )
+
     solved, hard_metrics = _hard_nonoverlap_project(
         pipeline,
         solved,
         max_sweeps=int(getattr(params, "k2d_hard_nonoverlap_max_sweeps", 400)),
         penetration_tolerance=penetration_tol,
+        progress_callback=projection_progress,
     )
     after_hinge = _hinge_rms(solved, constraints)
     after_rel = _relative_center_rms(solved, rest, constraints)

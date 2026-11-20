@@ -15,22 +15,14 @@ m = trimesh.load(src, force="mesh", process=False); V = np.asarray(m.vertices, f
 n, d, err = M.detect_mirror_plane(V, F)
 print(f"mirror plane n {np.round(n, 5)} d {d:.5f} (mirror error {err:.1e} of the diagonal)", flush=True)
 h = float(trimesh.Trimesh(V, F, process=False).edges_unique_length.mean())
-# the vertex rows just beside the plane (and their mirror images) are moved onto it and welded, so the plane becomes a
-# row of edges; otherwise the cut leaves vertices a fraction of an edge away from it, which the remesher cannot
-# collapse onto the cut (it is a feature line) and which stay as slivers
-dist0 = V @ n - d
-sel = np.abs(dist0) < 0.3 * h
-V1 = V.copy(); V1[sel] -= np.outer(dist0[sel], n)
-w = trimesh.Trimesh(V1, F, process=False); w.merge_vertices(digits_vertex=7)
-Fw = np.asarray(w.faces); Vw = np.asarray(w.vertices, float)
-P_ = Vw[Fw]; area = 0.5 * np.linalg.norm(np.cross(P_[:, 1] - P_[:, 0], P_[:, 2] - P_[:, 0]), axis=1)
-Fw = Fw[(area > 1e-12 * h * h) & (Fw[:, 0] != Fw[:, 1]) & (Fw[:, 1] != Fw[:, 2]) & (Fw[:, 0] != Fw[:, 2])]
-print(f"snapped {int(sel.sum())} vertices within 0.3 edge of the plane onto it; {len(Fw)} faces left", flush=True)
-# keep the half on the positive side of the plane (no cap: the cut becomes a boundary on the plane)
-half = trimesh.intersections.slice_mesh_plane(trimesh.Trimesh(Vw, Fw, process=False), plane_normal=n, plane_origin=n * d, cap=False)
-half.merge_vertices(); Vh = np.asarray(half.vertices, float); Fh = np.asarray(half.faces, np.int32)
-dist = Vh @ n - d
-Vh[np.abs(dist) < 1e-9] -= np.outer(dist[np.abs(dist) < 1e-9], n)        # exactly on the plane
+# A wide snap band can collapse several rows around a dense pole. Validate the
+# snapped mesh and the cut half, then fall back to a direct cut if necessary.
+from remesh_topology import prepare_half, require_manifold
+Vh, Fh, preparation = prepare_half(V, F, n, d, h)
+for reason in preparation["rejected_attempts"]:
+    print(f"unsafe plane snap rejected: {reason}", flush=True)
+print(f"half preparation: {'0.3-edge snap' if preparation['broad_snap'] else 'direct plane cut (no broad snap)'}, "
+      f"snapped {preparation['snapped_vertices']} vertices", flush=True)
 def bedges(F_):
     E = np.sort(np.concatenate([F_[:, [0, 1]], F_[:, [1, 2]], F_[:, [2, 0]]]), 1); u, c = np.unique(E, axis=0, return_counts=True); return u[c == 1]
 def corners(V_, F_):
@@ -78,10 +70,16 @@ def collapse_short_boundary(V_, F_, fixed, thr):
 prev = stats(Vh, Fh); calm = 0; k = 0
 while calm < 5 and k < 1000:            # 1000 only guards against a loop that never settles
     fe = bedges(Fh)
+    require_manifold(Vh, Fh, f"before Botsch pass {k+1}")
     Vh, Fh = gpy.remesh_botsch(Vh, Fh, i=1, h=h, project=True, feature=fix, feature_edges=fe)
     Fh = np.asarray(Fh, np.int32)
     fix = corners(Vh, Fh)
-    Vh, Fh, ncol = collapse_short_boundary(Vh, Fh, fix, 0.5 * h)
+    Vc, Fc, ncol = collapse_short_boundary(Vh, Fh, fix, 0.5 * h)
+    try:
+        require_manifold(Vc, Fc, "after short boundary collapse")
+        Vh, Fh = Vc, Fc
+    except ValueError as exc:
+        print(f"short boundary collapse skipped: {exc}", flush=True)
     fix = corners(Vh, Fh)
     k += 1; cur = stats(Vh, Fh); ch = np.abs(cur - prev) / np.maximum(np.abs(prev), 1e-12)
     calm = calm + 1 if ch.max() < tol else 0; prev = cur
@@ -111,6 +109,7 @@ st0, st1 = stats(V, F), stats(Vf, Ff)
 print(f"original: {int(st0[0])} v, edge spread {st0[2]:.3f}, 1% angle {st0[3]:.1f} deg, min angle {np.degrees(trimesh.Trimesh(V, F, process=False).face_angles.min()):.1f}", flush=True)
 print(f"remeshed: {len(Vf)} v {len(Ff)} f, edge spread {st1[2]:.3f}, 1% angle {st1[3]:.1f} deg, min angle {np.degrees(trimesh.Trimesh(Vf, Ff, process=False).face_angles.min()):.1f}, "
       f"euler {len(Vf) - len(u) + len(Ff)}, non-manifold edges {(c > 2).sum()}, boundary loops {len(loops)}, vertices on the plane {int((np.abs(Vf @ n - d) < 1e-9).sum())}", flush=True)
+require_manifold(Vf, Ff, "final mirrored mesh")
 trimesh.Trimesh(Vf, Ff, process=False).export(dst)
 _, dd, _ = trimesh.proximity.closest_point(trimesh.Trimesh(V, F, process=False), Vf)
 print(f"distance of the new vertices to the original surface: max {dd.max() / h:.4f} x mean edge", flush=True)

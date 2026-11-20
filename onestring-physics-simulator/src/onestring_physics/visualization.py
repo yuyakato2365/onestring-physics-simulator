@@ -720,6 +720,7 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
     metrics = getattr(parameterization, "metrics", {}) or {}
     uv = np.asarray(parameterization.uv_vertices_2d, dtype=float)
     boundary_loop = [int(value) for value in (metrics.get("boundary_loop", []) or [])]
+    has_boundary_loop = bool(boundary_loop) and max(boundary_loop) < len(uv)
     target_corners = np.asarray(metrics.get("boundary_target_corners", np.zeros((0, 2))), dtype=float)
     if target_corners.shape == (4, 2):
         target_boundary = np.vstack([target_corners, target_corners[0]])
@@ -733,7 +734,7 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
             )
         )
 
-    if boundary_loop and max(boundary_loop) < len(uv):
+    if has_boundary_loop:
         boundary = uv[np.asarray(boundary_loop + [boundary_loop[0]], dtype=int)]
     else:
         boundary = np.asarray(parameterization.omega_boundary, dtype=float)
@@ -770,6 +771,7 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
             )
         )
 
+    color_overlay_start = len(fig.data)
     # Stable Omega-position colors; the same field is reused for M2D/M3D/K3D and panels.
     if len(uv):
         corr=correspondence_colors(uv, uv)
@@ -825,7 +827,7 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
             )
         )
 
-    if boundary_loop and max(boundary_loop) < len(uv):
+    if has_boundary_loop:
         boundary_vertices = uv[np.asarray(boundary_loop, dtype=int)]
         fig.add_trace(
             go.Scatter(
@@ -844,6 +846,9 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
                 name="boundary correspondence order",
             )
         )
+
+    color_overlays = list(range(color_overlay_start, len(fig.data)))
+    if has_boundary_loop:
         corner_ids = [int(value) for value in (metrics.get("boundary_corner_vertex_ids", []) or [])]
         valid_corner_ids = [value for value in corner_ids if 0 <= value < len(uv)]
         if valid_corner_ids:
@@ -927,6 +932,22 @@ def figure_domain(state: OneStringDesignState) -> go.Figure:
         yaxis=dict(scaleanchor="x", scaleratio=1),
         legend=dict(orientation="h", x=0.0, y=-0.18, xanchor="left", yanchor="top"),
     )
+    if color_overlays:
+        fig.update_layout(
+            margin=dict(t=100),
+            updatemenus=[dict(
+                type="buttons",
+                direction="right",
+                x=0,
+                xanchor="left",
+                y=1.02,
+                yanchor="bottom",
+                buttons=[
+                    dict(label="虹色表示", method="restyle", args=[{"visible": True}, color_overlays]),
+                    dict(label="色分けなし", method="restyle", args=[{"visible": False}, color_overlays]),
+                ],
+            )],
+        )
     return fig
 
 
@@ -1309,9 +1330,13 @@ def _add_quad_mesh_surface(
         x.extend(pts[:, 0].tolist())
         y.extend(pts[:, 1].tolist())
         z.extend(pts[:, 2].tolist())
-        i_idx.extend([base, base])
-        j_idx.extend([base + 1, base + 2])
-        k_idx.extend([base + 2, base + 3])
+        i_idx.append(base)
+        j_idx.append(base + 1)
+        k_idx.append(base + 2)
+        if len(face) >= 4:
+            i_idx.append(base)
+            j_idx.append(base + 2)
+            k_idx.append(base + 3)
         if vertex_colors is not None and len(vertex_colors)==len(vertices):
             mesh_vertex_colors.extend([vertex_colors[int(v)] for v in face])
         closed = np.vstack([pts, pts[0]])

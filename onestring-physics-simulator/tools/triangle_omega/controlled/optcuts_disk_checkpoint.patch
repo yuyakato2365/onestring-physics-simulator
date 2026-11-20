@@ -1,0 +1,27 @@
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -345,6 +345,24 @@
+             }
+         }
+ 
++        if (std::getenv("ONESTRING_KEEP_DISK_RESULT") && (converged || iterNum == 1)) {
++            const OptCuts::TriMesh& mesh = *triSoup[channel_result];
++            std::vector<std::vector<int>> loops;
++            igl::boundary_loop(mesh.F, loops);
++            if (loops.size() == 1) {
++                double sd, seam, penalty = 0.0;
++                energyTerms[0]->computeEnergyVal(mesh, sd);
++                if (energyTerms.size() > 1) { energyTerms[1]->computeEnergyVal(mesh, penalty); }
++                mesh.computeSeamSparsity(seam);
++                const double violation = std::max(0.0, sd-upperBound);
++                const double cost = seam/mesh.virtualRadius + penalty;
++                static double bestViolation = 1.e300, bestCost = 1.e300;
++                if (violation < bestViolation || (violation == bestViolation && cost < bestCost)) {
++                    bestViolation=violation; bestCost=cost;
++                    mesh.saveAsMesh(outputFolderPath+"singleDisk_mesh.obj", F);
++                }
++            }
++        }
+         dumpState();
+     }
+ }

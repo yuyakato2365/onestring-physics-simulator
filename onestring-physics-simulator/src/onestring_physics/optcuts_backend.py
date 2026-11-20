@@ -35,6 +35,10 @@ class OptCutsOutputError(OptCutsError):
     """Raised when OptCuts completed without a usable UV OBJ."""
 
 
+class OptCutsBoundaryCountError(OptCutsOutputError):
+    """The native chart did not have a single UV boundary."""
+
+
 @dataclass(frozen=True)
 class OptCutsConfig:
     executable: str | None = None
@@ -380,6 +384,7 @@ def _run_official_optcuts_once(
     surface_vertices: np.ndarray,
     surface_faces: np.ndarray,
     config: OptCutsConfig | None = None,
+    *, initial_uv_chart=None, recover_single_disk=False,
 ) -> OptCutsResult:
     cfg = config or OptCutsConfig()
     if not (4.0 < float(cfg.distortion_bound) < float("inf")):
@@ -407,7 +412,15 @@ def _run_official_optcuts_once(
     try:
         temp_dir = Path(temp_ctx.name)
         input_obj = temp_dir / "surface.obj"
-        _write_triangle_obj(input_obj, surface_vertices, surface_faces)
+        if initial_uv_chart is None:
+            _write_triangle_obj(input_obj, surface_vertices, surface_faces)
+        else:
+            uv, uv_faces=initial_uv_chart
+            with input_obj.open("w") as stream:
+                np.savetxt(stream,surface_vertices,fmt="v %.17g %.17g %.17g")
+                np.savetxt(stream,uv,fmt="vt %.17g %.17g")
+                corners=np.stack((surface_faces,uv_faces),axis=2).reshape(-1,6)+1
+                np.savetxt(stream,corners,fmt="f %d/%d %d/%d %d/%d")
         command = [
             str(executable),
             "100",
@@ -450,6 +463,7 @@ def _run_official_optcuts_once(
                     command,
                     cwd=str(root),
                     capture_output=True,
+                    env=dict(os.environ, ONESTRING_KEEP_DISK_RESULT="1") if recover_single_disk else None,
                     text=True,
                     timeout=float(cfg.timeout_seconds),
                     check=False,
@@ -479,11 +493,23 @@ def _run_official_optcuts_once(
             )
 
         result_obj = _find_output_obj(root, tag, started)
+        if recover_single_disk and tag not in result_obj.parent.name:
+            raise OptCutsOutputError("No OptCuts result for this run tag")
         xyz, faces, uv, uv_faces = _read_obj_with_uv(result_obj)
-        uv, uv_scale = _normalize_uv_area(xyz, faces, uv, uv_faces)
         loops = _boundary_loops(uv_faces)
+        final_loop_count=len(loops)
+        checkpoint=result_obj.with_name("singleDisk_mesh.obj")
+        if recover_single_disk and len(loops)!=1 and checkpoint.is_file():
+            cx,cf,cu,ct=_read_obj_with_uv(checkpoint)
+            if not np.array_equal(cf,faces) or not np.array_equal(cx,xyz):
+                raise OptCutsOutputError("The disk checkpoint changed the input surface")
+            xyz,faces,uv,uv_faces=cx,cf,cu,ct
+            loops=_boundary_loops(uv_faces)
+            result_obj=checkpoint
+            print(f"[OptCuts] final UV boundaries={final_loop_count}; checkpoint boundaries={len(loops)}",flush=True)
+        uv, uv_scale = _normalize_uv_area(xyz, faces, uv, uv_faces)
         if len(loops) != 1:
-            raise OptCutsOutputError(
+            raise OptCutsBoundaryCountError(
                 "The first OneString OptCuts bridge currently requires exactly one UV boundary "
                 f"loop after cutting; got {len(loops)}."
             )
@@ -512,6 +538,8 @@ def _run_official_optcuts_once(
             "optcuts_stderr_tail": "\n".join(completed.stderr.splitlines()[-40:]),
             "optcuts_uv_area_normalization_scale": float(uv_scale),
             "optcuts_uv_boundary_loop_count": int(len(loops)),
+            "optcuts_final_boundary_loops": final_loop_count,
+            "optcuts_used_disk_checkpoint": result_obj==checkpoint,
             "optcuts_uv_boundary_vertex_count": int(len(loops[0])),
             "surface_vertex_count_after_cut_export": int(len(xyz)),
             "surface_triangle_count_after_cut_export": int(len(faces)),

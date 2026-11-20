@@ -387,20 +387,27 @@ def _project_movable_vertices_torch(
 ) -> tuple[Any, Any]:
     if movable_ids.numel() == 0:
         return vertices, torch.zeros((0,), dtype=vertices.dtype, device=vertices.device)
-    points = vertices[movable_ids]
-    candidate_triangles = original_triangles[candidate_face_ids]
-    expanded_points = points[:, None, :].expand(-1, candidate_triangles.shape[1], -1)
-    closest = _closest_points_to_triangles_torch(torch, expanded_points, candidate_triangles)
-    distance2 = torch.sum((expanded_points - closest) ** 2, dim=-1)
-    infinity = torch.full_like(distance2, float("inf"))
-    distance2 = torch.where(candidate_valid, distance2, infinity)
-    best = torch.argmin(distance2, dim=1)
-    row = torch.arange(len(points), device=vertices.device)
-    projected = closest[row, best]
-    best_distance2 = distance2[row, best]
+    # Bound the temporary point/triangle arrays for full-resolution scan inputs.
+    batch_size = max(1, 131072 // candidate_face_ids.shape[1])
     out = vertices.clone()
-    out[movable_ids] = projected
-    return out, best_distance2
+    distances = vertices.new_empty(len(movable_ids))
+    for start in range(0, len(movable_ids), batch_size):
+        stop = min(start + batch_size, len(movable_ids))
+        ids = movable_ids[start:stop]
+        points = vertices[ids]
+        candidate_triangles = original_triangles[candidate_face_ids[start:stop]]
+        expanded_points = points[:, None, :].expand(-1, candidate_triangles.shape[1], -1)
+        closest = _closest_points_to_triangles_torch(torch, expanded_points, candidate_triangles)
+        distance2 = torch.sum((expanded_points - closest) ** 2, dim=-1)
+        infinity = torch.full_like(distance2, float("inf"))
+        distance2 = torch.where(candidate_valid[start:stop], distance2, infinity)
+        best = torch.argmin(distance2, dim=1)
+        row = torch.arange(len(points), device=vertices.device)
+        projected = closest[row, best]
+        best_distance2 = distance2[row, best]
+        out[ids] = projected
+        distances[start:stop] = best_distance2
+    return out, distances
 
 
 def _orientation_ratios_torch(
@@ -514,6 +521,7 @@ def condition_mesh_with_large_steps(
     faces: np.ndarray,
     config: LargeStepsMeshConditioningConfig | None = None,
     progress_callback: ProgressCallback | None = None,
+    *, fixed_vertex_ids: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Redistribute an open triangle mesh using CUDA-capable Large Steps.
 
@@ -534,9 +542,13 @@ def condition_mesh_with_large_steps(
     started = time.perf_counter()
     before = _triangle_quality_metrics(xyz0, tris)
     boundary = _boundary_vertices(tris, len(xyz0))
-    boundary_mask = np.zeros(len(xyz0), dtype=bool)
-    boundary_mask[boundary] = True
-    interior = np.flatnonzero(~boundary_mask)
+    fixed = boundary
+    if fixed_vertex_ids is not None:
+        pins = np.asarray(fixed_vertex_ids)
+        if pins.ndim != 1 or not np.issubdtype(pins.dtype, np.integer) or np.any((pins < 0) | (pins >= len(xyz0))):
+            raise ValueError("fixed_vertex_ids must contain valid vertex indices")
+        fixed = np.union1d(boundary, pins)
+    interior = np.setdiff1d(np.arange(len(xyz0)), fixed)
     edges_np = _unique_edges(tris)
     target_edge = max(float(before["edge_length_median"]), _EPS)
     original_vertex_normals_np = _vertex_normals(xyz0, tris)
@@ -555,6 +567,7 @@ def condition_mesh_with_large_steps(
         "large_steps_laplacian": "uniform_combinatorial",
         "large_steps_lambda": float(cfg.lambda_),
         "large_steps_boundary_fixed": True,
+        "large_steps_additional_fixed_vertices": int(len(fixed)-len(boundary)),
         "large_steps_connectivity_changed": False,
         "large_steps_project_to_original_surface": bool(cfg.project_to_original_surface),
         "large_steps_requested_iterations": int(cfg.max_iterations),
@@ -604,7 +617,7 @@ def condition_mesh_with_large_steps(
     faces_t = torch.tensor(tris, dtype=torch.long, device=device)
     edges_t = torch.tensor(edges_np, dtype=torch.long, device=device)
     interior_t = torch.tensor(interior, dtype=torch.long, device=device)
-    boundary_t = torch.tensor(boundary, dtype=torch.long, device=device)
+    boundary_t = torch.tensor(fixed, dtype=torch.long, device=device)
     vertex_normals_t = torch.tensor(original_vertex_normals_np, dtype=dtype, device=device)
     face_normals_t = torch.tensor(original_face_normals_np, dtype=dtype, device=device)
     original_area2_t = torch.tensor(original_area2_np, dtype=dtype, device=device)
@@ -621,7 +634,7 @@ def condition_mesh_with_large_steps(
         faces=tris,
         vertices=xyz0,
         interior=interior,
-        boundary=boundary,
+        boundary=fixed,
         lambda_=float(cfg.lambda_),
         device=device,
         dtype=dtype,
