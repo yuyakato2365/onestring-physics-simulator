@@ -537,4 +537,9 @@ if __name__=='__main__':
         from manufacturing import manufacture
         manufacture(out)
     else:
-        {'tiles':tiles,'flat':flat,'closure':closure}[stage](out)
+        from drift_preview import ThicknessConflict
+        try:
+            {'tiles':tiles,'flat':flat,'closure':closure}[stage](out)
+        except ThicknessConflict as exc:
+            print(exc,flush=True)
+            sys.exit(3)

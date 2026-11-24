@@ -65,15 +65,10 @@ def build_shell(out, mesh, baseline, layout, cfg, depth):
     raw = baseline * mm
     top = raw[:, :3]
     n = len(top)
-    if cfg.get("extrusion_mode") == "outer_layer":
-        from outer_layer import check_shared_vertex_clearance
-        check_shared_vertex_clearance(F, basis(top)[:, 2], depth * mm,
-                                      cfg.get("outer_lateral_mm", 1.), cfg.get("depth_tolerance_mm"))
     thin = layout["rest"].copy()
     thin[:, 3:, :2] = thin[:, :3, :2]
     plane = thin[:, :3] * mm
     independent_shell = (cfg.get("extrusion_mode") == "outer_layer"
-                         and cfg.get("depth_tolerance_mm") is not None
                          and cfg.get("outer_spacing_percent", 0.) == 0)
     if len(layout["hinges"]) and not independent_shell:
         pose = separated_layout(
@@ -112,18 +107,25 @@ def build_shell(out, mesh, baseline, layout, cfg, depth):
     if outward:
         from outer_layer import outward_offsets
 
-        delta = expanded(
-            outward_offsets(
-                top,
-                F,
-                basis(top),
-                R,
-                None if independent_shell else flatten(top),
-                depth * mm,
-                cfg.get("outer_lateral_mm", 1.0),
-                cfg.get("depth_tolerance_mm"),
+        from drift_preview import ThicknessConflict, save_preview
+        (out/'drift_preview.npz').unlink(missing_ok=True)
+        try:
+            delta = expanded(
+                outward_offsets(
+                    top,
+                    F,
+                    basis(top),
+                    R,
+                    None if independent_shell else flatten(top),
+                    depth * mm,
+                    cfg.get("outer_lateral_mm", 1.0),
+                    cfg.get("depth_tolerance_mm"),
+                )
             )
-        )
+        except ThicknessConflict:
+            save_preview(out, X0, F, basis(top)[:,2], depth*mm, cfg['depth_tolerance_mm'],
+                         cfg.get('outer_lateral_mm',1.),mm)
+            raise
     else:
         delta = expanded(raw[:, 3:]) - outer
     if independent_shell and len(layout["hinges"]):
@@ -133,7 +135,7 @@ def build_shell(out, mesh, baseline, layout, cfg, depth):
         hinges = layout["hinges"]
         side = choose(shell, hinges)
         best, _ = place_shell(rest, hinges, side, layout["regular_cells"], layout["lattice_up"],
-                              (30, -30, 15, -15, 0, None))
+                              (None, 30, -30, 15, -15, 0))
         plane = best[:, :3]
         R = basis(plane).transpose(0, 2, 1) @ basis(top)
         trans = plane.mean(1) - np.einsum("nij,nj->ni", R, top.mean(1))
@@ -241,6 +243,7 @@ def build_shell(out, mesh, baseline, layout, cfg, depth):
         bot = outer + delta * scale[id7, None]
         fold = [solid(i) for i in range(n)]
     area_move_mm = 0.0
+    initial_area_layer = bot.copy()
     if outward and cfg.get("restore_panel_area"):
         from area_relaxation import repair_offset
         shared = X0.copy()
@@ -324,6 +327,16 @@ def build_shell(out, mesh, baseline, layout, cfg, depth):
     if outward:
         normal = basis(top)[:, 2]
         lateral = (bot - outer) - actual[:, :, None] * normal[:, None]
+        def projected_ratio(layer):
+            cross = np.cross(layer[:,1]-layer[:,0],layer[:,2]-layer[:,0])
+            base_area = np.linalg.norm(np.cross(top[:,1]-top[:,0],top[:,2]-top[:,0]),axis=1)
+            return np.einsum("ij,ij->i",cross,normal)/base_area
+        report["panel_area_before_after"] = [
+            {"min_projected_ratio": float(ratio.min()), "below_65_percent": int((ratio < .65).sum())}
+            for ratio in (projected_ratio(initial_area_layer),projected_ratio(bot))
+        ]
+        drift = np.linalg.norm(lateral,axis=2).max(axis=1)
+        report["lateral_warning_panels"] = np.flatnonzero(drift>cfg.get("outer_lateral_mm",1.)+1e-6).tolist()
         report["maximum_lateral_mm"] = float(np.linalg.norm(lateral, axis=2).max())
         report["near_zero_columns"] = len(
             np.unique(id7[actual < 0.01 * mm * depth[:, None]])

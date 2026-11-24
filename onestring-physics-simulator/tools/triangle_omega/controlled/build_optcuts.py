@@ -13,7 +13,7 @@ dest = Path(sys.argv[1]).resolve()
 dest.mkdir(parents=True, exist_ok=True)
 archive = subprocess.check_output(['git','-C',str(source),'archive','cd23026','src','CMakeLists.txt'])
 subprocess.run(['tar','xf','-','-C',str(dest)],input=archive,check=True)
-for patch in ('optcuts_fork_onestring.patch','optcuts_convergence.patch','optcuts_disk_checkpoint.patch'):
+for patch in ('optcuts_fork_onestring.patch','optcuts_convergence.patch','optcuts_disk_checkpoint.patch','optcuts_seam_curvature.patch'):
     subprocess.run(['patch','-p1','-i',str(here/patch)],cwd=dest,check=True)
 config = build/'CMakeFiles/OptCuts_bin.dir'
 flags = dict(line.split(' = ',1) for line in (config/'flags.make').read_text().splitlines() if ' = ' in line)

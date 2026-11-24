@@ -356,10 +356,24 @@ if os.path.isfile(settings_path):
                 hist.append(float(ef(jnp.asarray(X), jnp.asarray(ell))))
                 if shape_first:
                     surface_check = surface_quality(X, T, V3)
+from reference_folds import repair_reference_folds
+candidate, fold_report = repair_reference_folds(X, T, V3, F3)
+if fold_report['moved_vertices']:
+    accepted = surface_quality(candidate, T, V3) if shape_first else None
+    if accepted is None or (accepted['valid'] and accepted['max_distance_over_pitch'] <= 1.):
+        X = candidate
+        frames.append(X.copy())
+        hist.append(float(ef(jnp.asarray(X), jnp.asarray(ell))))
+        if accepted is not None:
+            surface_check = accepted
+    else:
+        fold_report.update(status='surface_quality_rejected', moved_vertices=0,
+                           remaining_edges=fold_report['detected_edges'])
+print('[M3D reference folds]', fold_report, flush=True)
 if relaxation_checkpoint is not None:
     surface_check['accepted_relaxation_checkpoint'] = relaxation_checkpoint
 after, Aa = ang_stats(X)
-res = dict(panels=len(T), fins_removed=int(len(removed_panels) // 2), crossing_panels_start=int((tilt0 > 60).sum()), crossing_panels_end=int((tilt(X) > 60).sum()), iterations=it, energy_start=initial_energy, energy_end=hist[-1], before=before, after=after, w_shape=W_SHAPE, small_panel_weight=small_weight)
+res = dict(reference_folds=fold_report, panels=len(T), fins_removed=int(len(removed_panels) // 2), crossing_panels_start=int((tilt0 > 60).sum()), crossing_panels_end=int((tilt(X) > 60).sum()), iterations=it, energy_start=initial_energy, energy_end=hist[-1], before=before, after=after, w_shape=W_SHAPE, small_panel_weight=small_weight)
 if small_weight:
     res.update(relative_energy_tolerance_per_10_steps=1e-4, local_target_range=[float(edge_size.min()),float(edge_size.max())],
                max_displacement_over_local_edge=float((np.linalg.norm(X-X_start,axis=1)/local_size).max()))
@@ -385,6 +399,9 @@ if fan_summary is not None:
 json.dump(res, open(os.path.join(run, 'remesh3d_summary.json'), 'w'), indent=1)
 pickle.dump(dict(X=X, T=T, removed_panels=removed_panels, kept_vertices=used), open(os.path.join(run, 'remesh3d.pkl'), 'wb'))
 print(json.dumps(res, indent=1))
+if fold_report.get('remaining_edges', 0):
+    raise ValueError(f"参照面にない強い折れ込みが {fold_report['remaining_edges']} 辺で残りました。M3Dの途中結果を保存しました。")
+
 rec = Recorder(run, 'anim_remesh3d'); b3 = (V3.min(0), V3.max(0))
 for k in pick_frames(len(frames), 100):
     fig = plt.figure(figsize=(11, 5.4), dpi=90)

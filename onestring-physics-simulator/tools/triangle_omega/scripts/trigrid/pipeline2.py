@@ -498,6 +498,12 @@ def designed_targets(points, pins, per_sec, pitch):
     return np.array(list(targets)), np.array(list(targets.values()))
 
 
+def initial_selection(points, faces):
+    if initial_rule == 'centroid':
+        return outline_path.contains_points(points[faces].mean(axis=1))
+    return initial_area_mask(points, faces)
+
+
 cands_l = []
 prior_path = os.path.join(os.path.dirname(chart), 'curvature_reference_grid.json')
 prior_lattice = None
@@ -511,10 +517,7 @@ for th in np.radians(np.arange(0, 60, 5)):
                                   or (ox,oy) != tuple(prior_lattice['offset'])):
                 continue
             P_, T_ = build_lattice(th, (ox, oy))
-            if initial_rule == 'centroid':
-                initial = outline_path.contains_points(P_[T_].mean(axis=1))
-            else:
-                initial = initial_area_mask(P_, T_)
+            initial = initial_selection(P_, T_)
             adjacency = outside_adjacency(P_, T_) if paired_protrusions else None
             keep = clean_selection(T_, initial, adjacency)
             if not valid_set(T_, keep): continue
@@ -756,7 +759,7 @@ def lift_grid(Xg, Tg, B, pin_g, sec_g, boundary_source, keep, T_, adjacency, ap,
     corner_vertex = {}
     for g_, (e, f) in corner_pos.items():
         if f < 1e-9 and (e not in splits or all(g2 != g_ for _, g2 in splits.get(e, []))): corner_vertex[g_] = int(L[e])
-    source_uv = r.get("original_uv")
+    source_uv = r["uv"] if os.environ.get("TRI_DIRECT_OMEGA") == "1" else r.get("original_uv")
     uv_split = list(source_uv) if source_uv is not None else []
     new_loop = []
     Fw = [list(ff) for ff in Fw]; Uw = list(Uw); Xw = list(Xw)
@@ -820,7 +823,7 @@ def lift_grid(Xg, Tg, B, pin_g, sec_g, boundary_source, keep, T_, adjacency, ap,
     # Fit the panel outline in the metric of the chart that received the grid.
     # Using the 3D surface as the rest metric here undoes Omega2's interior scale
     # field. Keep the real Xw separately for the barycentric lift below.
-    if source_uv is not None:
+    if 'original_uv' in r:
         fit_reference = np.column_stack((Uw, np.zeros(len(Uw))))
         log['step4_reference'] = 'omega2'
     else:
@@ -1018,6 +1021,10 @@ if best is None:
                 sys.exit(retry.returncode)
     raise ValueError('目標枚数で、継ぎ目の溶接・外形・押し出し方向を同時に保てる格子が見つかりません。')
 _, result, log, relax_frames, trial_frames = best
+chosen = log['lattice']
+points, faces = build_lattice(np.radians(chosen['rotation_deg']), chosen['offset'])
+result['initial_triangles'] = points[faces[initial_selection(points, faces)]]
+
 if focus or feedback:
     result['sampling_uv'] = U
 frames = upstream_frames + trial_frames

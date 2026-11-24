@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@@MODEL@@ · M3D</title>
+<style>
+*{box-sizing:border-box}body{margin:0;color:#223c39;background:white;font:15px system-ui,sans-serif;height:100vh;height:100dvh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 14px;border-bottom:1px solid #dae3e1}
+h1{font-size:1.04rem;margin:0 auto 0 0}select,button{font:inherit;min-height:38px;border:1px solid #bdcfcb;border-radius:6px;background:#fff;color:inherit;padding:4px 9px}
+main{flex:1;min-height:0;position:relative}section{position:absolute;inset:0}section[hidden]{display:none}
+#model>div,#surface3d{width:100%;height:100%}#flat img{width:100%;height:100%;object-fit:contain}#flat small{position:absolute;bottom:6px;left:10px;background:white;padding:3px}
+@media(max-width:520px){header{padding:5px 6px;gap:4px}h1{font-size:.85rem}select,button{font-size:13px;padding:3px 5px}}
+</style></head><body>
+<header><h1>@@MODEL@@ · @@COUNT@@枚</h1>
+<select id="stage" aria-label="表示する工程"><option value="0">M3D</option><option value="1">M3D · 最小角</option><option value="2">入力曲面</option><option value="3">Ω ＋ Grid</option><option value="4">M2D</option></select>
+<label id="seamControl"><input id="seams" type="checkbox" checked> seam</label>
+<button id="reset" type="button">視点を戻す</button><button id="full" type="button" hidden>全画面</button></header>
+<main><section id="model" aria-label="3Dビュー">@@PLOT@@</section><section id="flat" hidden><img id="grid" alt="Ωに重ねたGrid" src="data:image/svg+xml;base64,@@GRID@@"><img id="m2d" alt="最終M2D" hidden src="data:image/svg+xml;base64,@@M2D@@"><small>赤線は格子を配置した展開の外周</small></section></main>
+<script>
+const el=id=>document.getElementById(id);
+const plot=el('surface3d'), stage=el('stage'), model=el('model');
+function resetView(){
+  const ratio=model.clientWidth/model.clientHeight;
+  const factor=Math.max(1,.76/ratio);
+  return Plotly.relayout(plot,{'scene.camera':{eye:{x:-.92*factor,y:.29*factor,z:1.44*factor},up:{x:0,y:1,z:0},center:{x:0,y:0,z:0}}});
+}
+function updateLayers(){
+ const i=Number(stage.value);
+ const visible=plot.data.map((trace,k)=>trace.meta
+   ? el('seams').checked && trace.meta===(i===2?'input':'panel')
+   : Math.floor(k/2)===i);
+ return Plotly.restyle(plot,{visible});
+}
+el('seams').addEventListener('change',updateLayers);
+stage.addEventListener('change',async()=>{
+ const i=Number(stage.value), spatial=i<3;
+ model.hidden=!spatial;el('flat').hidden=spatial;el('reset').hidden=!spatial;el('seamControl').hidden=!spatial;
+ if(spatial){await Plotly.Plots.resize(plot);await updateLayers();}
+ else {el('grid').hidden=i!==3;el('m2d').hidden=i!==4;}
+});
+el('reset').onclick=resetView;
+if(document.fullscreenEnabled&&document.documentElement.requestFullscreen){
+ el('full').hidden=false;
+ el('full').onclick=()=>document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();
+ document.addEventListener('fullscreenchange',()=>{el('full').textContent=document.fullscreenElement?'全画面を解除':'全画面';});
+}
+new ResizeObserver(()=>{if(!model.hidden&&plot._fullLayout)Plotly.Plots.resize(plot);}).observe(model);
+if(plot._fullLayout)resetView();else plot.once('plotly_afterplot',resetView);
+</script></body></html>

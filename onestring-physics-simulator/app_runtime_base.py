@@ -668,8 +668,8 @@ with st.sidebar:
 
     st.header("Target Input")
     target_kind = _param_row(
-        "モードの既定は、三角形 Kagome では Bunny_S45_volume の入力、それ以外では3,500頂点の軽量Bunnyです。",
-        lambda: st.selectbox("target shape", ["モードの既定", "Bunny_open_LargeSteps_3500.obj", "Bunny_S45_volume（当時の入力）", "Bunny_open_LargeSteps.obj", "Remeshed_Bunny.stl", "vessel.stl", "paper_bulb_neck", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="OBJ/STL/PLY をアップロードすると、そのファイルを使います。"),
+        "モードの既定は、三角形 Kagome では10,251頂点のBunny、それ以外では3,500頂点の軽量Bunnyです。",
+        lambda: st.selectbox("target shape", ["モードの既定", "Bunny_open_isotropic_10251.obj", "Bunny_open_LargeSteps_3500.obj", "Bunny_S45_volume（当時の入力）", "Bunny_open_LargeSteps.obj", "Remeshed_Bunny.stl", "vessel.stl", "paper_bulb_neck", "dome", "flat", "half_gourd", "snowman_half", "snowman_full", "saddle", "wave", "gaussian"], index=0, help="OBJ/STL/PLY をアップロードすると、そのファイルを使います。"),
     )
     uploaded = _param_row(
         "OBJ/STL/PLY を読み込む。閉じた形状では Ω の切断・境界条件が難しくなるので注意。",
@@ -775,7 +775,7 @@ with st.sidebar:
         ),
     )
     if target_kind == "モードの既定":
-        target_kind = ("Bunny_S45_volume（当時の入力）" if omega_parameterization_mode == "triangle_kagome_controls_20261118"
+        target_kind = ("Bunny_open_isotropic_10251.obj" if omega_parameterization_mode == "triangle_kagome_controls_20261118"
                        else "Bunny_open_LargeSteps_3500.obj")
     if omega_parameterization_mode == "triangle_omega_20261118":
         from tools.triangle_omega.ui import triangle_settings
@@ -2248,7 +2248,7 @@ def _default_vessel_path():
 def build_target():
     if uploaded is None and target_kind == "Bunny_S45_volume（当時の入力）":
         return load_target_shape(Path(__file__).resolve().parent / "tools/triangle_omega/controlled/bunny_open_bottom_repaired.obj")
-    if uploaded is None and target_kind in ("Bunny_open_LargeSteps_3500.obj", "Bunny_open_LargeSteps.obj"):
+    if uploaded is None and target_kind in ("Bunny_open_isotropic_10251.obj", "Bunny_open_LargeSteps_3500.obj", "Bunny_open_LargeSteps.obj"):
         return load_target_shape(Path(__file__).resolve().parent / "assets" / target_kind)
     if uploaded is None and target_kind == "paper_bulb_neck":
         st.caption("Built-in closed bulb + neck target (procedural approximation of the paper reference figure).")

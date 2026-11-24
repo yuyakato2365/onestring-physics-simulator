@@ -71,6 +71,11 @@ def audited_layout(out, cfg):
         hinges = f["hinges"]
         cells = f["regular_cells"]
         up = f["lattice_up"]
+        if cfg.get("extrusion_mode") == "outer_layer" and cfg.get("outer_spacing_percent",0.) == 0:
+            from fixed_skin import basis
+            plane = f["K2D"]*mm
+            rotation = basis(plane).transpose(0,2,1) @ basis(folded[:,:3])
+            flat = (folded-folded[:,:3].mean(1)[:,None]) @ rotation.transpose(0,2,1) + plane.mean(1)[:,None]
     side = choose(folded, hinges)
     a, k, b, l = hinges.T
     initial = np.linalg.norm(flat[a, k + side] - flat[b, l + side], axis=1)
@@ -184,6 +189,9 @@ def make_linkage(out, cfg):
     if cfg.get("string_route") == "perimeter":
         from perimeter_string import perimeter_channels
         rim_channels = perimeter_channels(out, folded, p, r)
+    if cfg.get("string_route") == "smooth_rim":
+        from smooth_rim import smooth_channels
+        rim_channels = smooth_channels(out, folded, p, r, faces)
     for i, q in enumerate(p):
         low = q[:7]
         high = q[7:]
@@ -214,8 +222,18 @@ def make_linkage(out, cfg):
                 d /= np.linalg.norm(d)
                 arms.append(bore(center - r * d, mouth + 2 * r * d, r))
             channel = union(arms)
+        drilled_body=rigid-channel
+        if cfg.get("string_route") == "smooth_rim":
+            pieces=sorted((g for g in drilled_body.decompose() if g.volume()>1e-8),
+                          key=lambda g:g.volume(),reverse=True)
+            if len(pieces)>1:
+                debris=union(pieces[1:])
+                if debris.volume()>.02*rigid.volume():
+                    raise ValueError(f"外周ガイドがパネル {i} を分断します。")
+                drilled_body=pieces[0]
+                channel=channel+debris
         holes.append(channel)
-        bodies.append(rigid - channel)
+        bodies.append(drilled_body)
         for layer, slab in [
             (0, np.vstack([low, lower])),
             (1, np.vstack([upper, high])),
@@ -314,6 +332,16 @@ def make_linkage(out, cfg):
                 m = trimesh.load(path, force="mesh")
                 if m.is_volume:
                     break
+            if name == "PLA_tiles" and cfg.get("string_route") == "smooth_rim" and (not m.is_volume or len(m.split())!=n):
+                individual=[]
+                for i,body in enumerate(bodies):
+                    for tolerance in (.0001,.001,.005,.012):
+                        shape=weld(mesh_of(body.simplify(tolerance)),tolerance)
+                        if shape.is_volume and len(shape.split())==1: break
+                    else: raise ValueError(f"パネル {i} の個別STLを閉じられません。")
+                    individual.append(shape)
+                trimesh.util.concatenate(individual).export(path)
+                m=trimesh.load(path,force="mesh")
             if not m.is_volume:
                 raise ValueError(f"{name} のSTLが閉じていません。")
             if name == "PLA_tiles" and len(m.split()) != n:

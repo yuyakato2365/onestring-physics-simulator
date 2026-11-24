@@ -884,5 +884,100 @@
    "tools/triangle_omega/scripts/trigrid/pipeline2.py",
    "tools/triangle_omega/scripts/trigrid/remesh3d.py"
   ]
+ },
+ {
+  "n": 88,
+  "hash": "30c96841ff20eb5505a7071a45e316497760530f",
+  "time": "2026-11-21 03:25",
+  "changed": [
+   "tools/triangle_omega/controlled/area_relaxation.py",
+   "tools/triangle_omega/controlled/fixed_skin.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/perimeter_string.py",
+   "tools/triangle_omega/controlled/smooth_rim.py",
+   "tools/triangle_omega/controlled/triangle_linkage.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
+ },
+ {
+  "n": 89,
+  "hash": "3e3f1e0508867850ec2eb4442422a4f744608e3d",
+  "time": "2026-11-21 03:53",
+  "changed": [
+   "tools/triangle_omega/controlled/drift_preview.py",
+   "tools/triangle_omega/controlled/fixed_skin.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/outer_layer.py",
+   "tools/triangle_omega/controlled/panels.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/ui.py"
+  ]
+ },
+ {
+  "n": 90,
+  "hash": "432571187d3c1301e98f296d5a553333e1ea546c",
+  "time": "2026-11-21 19:23",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py"
+  ]
+ },
+ {
+  "n": 91,
+  "hash": "4abecdc1efa4debd97c7cfd2031700af9ce25664",
+  "time": "2026-11-24 16:44",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/optcuts/conformal_bound.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py",
+   "tools/triangle_omega/scripts/trigrid/reference_folds.py",
+   "tools/triangle_omega/scripts/trigrid/remesh3d.py"
+  ]
+ },
+ {
+  "n": 92,
+  "hash": "0eae5f3a209cff69b48a27fc2c7e52d8be71fd10",
+  "time": "2026-11-24 20:05",
+  "changed": [
+   "app_runtime_base.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py"
+  ]
+ },
+ {
+  "n": 93,
+  "hash": "17b1ad5c52f0c82619232bc9666c35a3a5ae4d60",
+  "time": "2026-11-24 20:12",
+  "changed": [
+   "tools/triangle_omega/controlled/build_optcuts.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py"
+  ]
+ },
+ {
+  "n": 94,
+  "hash": "89f073ba6eba0be7eb6e88a3526a894780b69336",
+  "time": "2026-11-24 20:16",
+  "changed": [
+   "tools/triangle_omega/controlled/job.py"
+  ]
+ },
+ {
+  "n": 95,
+  "hash": "495097659a14f7576a9db1dbce0d18deb03deb1d",
+  "time": "2026-11-24 23:04",
+  "changed": [
+   "app_runtime_base.py",
+   "tools/triangle_omega/controlled/export_view.py",
+   "tools/triangle_omega/controlled/job.py",
+   "tools/triangle_omega/controlled/seam_view.py",
+   "tools/triangle_omega/controlled/ui.py",
+   "tools/triangle_omega/scripts/optcuts/run_optcuts.py",
+   "tools/triangle_omega/scripts/trigrid/pipeline2.py"
+  ]
  }
 ]

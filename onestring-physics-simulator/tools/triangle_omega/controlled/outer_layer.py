@@ -41,6 +41,7 @@ def outward_offsets(top, faces, frame, rotation, planar, depth, lateral_limit=1.
     objective = np.zeros((count, 3))
     rows, columns, values, limits = [], [], [], []
     lower_rows = []
+    lateral_rows = []
 
     def constraint(vertex_ids, vectors, limit):
         columns.extend((3 * np.asarray(vertex_ids)[:, None] + np.arange(3)).ravel())
@@ -66,6 +67,7 @@ def outward_offsets(top, faces, frame, rotation, planar, depth, lateral_limit=1.
             lower_rows.append(len(limits))
             constraint([vertex], [-normal], -minimum)
             for tangent in directions @ frame[i, :2]:
+                lateral_rows.append(len(limits))
                 constraint([vertex], [tangent], cap[i] * np.cos(np.pi / 12))
         for direction in directions:
             constraint(
@@ -111,11 +113,21 @@ def outward_offsets(top, faces, frame, rotation, planar, depth, lateral_limit=1.
     result = linprog(
         objective.ravel(), A_ub=mat, b_ub=limits, bounds=(None, None), method="highs"
     )
+    if result.status == 2:
+        # A single nonnegative slack gives the least necessary increase of the
+        # lateral warning threshold while preserving the physical constraints.
+        slack = coo_matrix((-np.ones(len(lateral_rows)), (lateral_rows, np.zeros(len(lateral_rows),int))),
+                           shape=(len(limits),1))
+        relaxed = linprog(np.r_[np.zeros(3*count),1.], A_ub=hstack((mat,slack)),
+                          b_ub=limits, bounds=[(None,None)]*(3*count)+[(0,None)], method="highs")
+        if relaxed.success:
+            return relaxed.x[:-1].reshape(-1,3)[faces]
     if not result.success:
         if tolerance_mm is not None and result.status == 2 and planar is None:
-            raise ValueError(
-                f"組立姿勢で指定厚み（許容する薄化 {tolerance_mm:g} mm）、横ずれ上限、"
-                "共有側面および外面の傾斜上限を同時に満たせません。"
+            from drift_preview import ThicknessConflict
+            raise ThicknessConflict(
+                f"組立姿勢で指定厚み（許容する薄化 {tolerance_mm:g} mm）、"
+                "共有側面および外面の傾斜上限を、横ずれを自由にしても同時に満たせません。"
             )
         if tolerance_mm is not None and result.status == 2:
             raise ValueError(

@@ -1,0 +1,191 @@
+--- /dev/null
++++ b/src/SeamCurvature.hpp
+@@ -0,0 +1,79 @@
++#pragma once
++#include <Eigen/Geometry>
++#include <array>
++#include <cmath>
++#include <cstdlib>
++#include <fstream>
++#include <iomanip>
++#include <map>
++#include <set>
++#include <stdexcept>
++#include <vector>
++
++// The rest surface is shared by the cut chart and every split/merge trial.
++// Evaluate curvature before UV duplication so the two banks see the same field.
++namespace SeamCurvature {
++using Key = std::array<double, 3>;
++struct Field {
++    double strength = 0.0;
++    std::map<Key, double> value;
++};
++inline Field& field() { static Field f; return f; }
++inline Key key(const Eigen::RowVector3d& p) { return {{p[0], p[1], p[2]}}; }
++
++inline void prepare(const Eigen::MatrixXd& v, const Eigen::MatrixXi& faces) {
++    const char* weight = std::getenv("ONESTRING_SEAM_CURVATURE_W");
++    const double w = weight ? std::atof(weight) : 0.;
++    const char* report = std::getenv("ONESTRING_SEAM_CURVATURE_DUMP");
++    if (w == 0. && !report) return;
++    const int n = v.rows();
++    std::vector<std::set<int>> neighbors(n);
++    Eigen::MatrixXd normals = Eigen::MatrixXd::Zero(n, 3);
++    double twiceArea = 0.;
++    for (int f = 0; f < faces.rows(); ++f) {
++        const Eigen::Vector3i ids = faces.row(f);
++        const Eigen::RowVector3d a = v.row(ids[1]) - v.row(ids[0]), b = v.row(ids[2]) - v.row(ids[0]);
++        const Eigen::RowVector3d normal = a.cross(b);
++        twiceArea += normal.norm();
++        for (int i = 0; i < 3; ++i) {
++            normals.row(ids[i]) += normal;
++            neighbors[ids[i]].insert(ids[(i+1)%3]);
++            neighbors[ids[(i+1)%3]].insert(ids[i]);
++        }
++    }
++    for (int i = 0; i < n; ++i) normals.row(i).normalize();
++    const double radius = std::sqrt(twiceArea / (2. * std::acos(-1.)));
++    Eigen::VectorXd raw(n), smooth(n);
++    for (int i = 0; i < n; ++i) {
++        double normalVariation = 0., squaredLength = 0.;
++        for (int j : neighbors[i]) {
++            normalVariation += (normals.row(i) - normals.row(j)).squaredNorm();
++            squaredLength += (v.row(i) - v.row(j)).squaredNorm();
++        }
++        raw[i] = squaredLength > 0. ? std::sqrt(normalVariation / squaredLength) : 0.;
++    }
++    // A local average limits one-ring sampling noise at irregular vertices.
++    for (int i = 0; i < n; ++i) {
++        double sum = 0.;
++        for (int j : neighbors[i]) sum += raw[j];
++        const double mean = neighbors[i].empty() ? raw[i] : sum / neighbors[i].size();
++        smooth[i] = std::log1p(radius * .5 * (raw[i] + mean));
++    }
++    field().strength = .1 * w * radius;
++    std::ofstream output;
++    if (report) {
++        output.open(report);
++        if (!output) throw std::runtime_error("Cannot write seam curvature field");
++        output << std::setprecision(17);
++    }
++    for (int i = 0; i < n; ++i) {
++        field().value[key(v.row(i))] = smooth[i];
++        if (report) output << smooth[i] << '\n';
++    }
++}
++inline double cost(const Eigen::RowVector3d& a, const Eigen::RowVector3d& b) {
++    const Field& f = field();
++    if (f.strength == 0.) return 0.;
++    return f.strength * std::abs(f.value.at(key(a)) - f.value.at(key(b)));
++}
++}
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,3 +1,4 @@
++#include "SeamCurvature.hpp"
+ #include <cstdlib>
+ #include <set>
+ #include <array>
+@@ -1446,6 +1447,7 @@
+         std::cout << "failed to load mesh!" << std::endl;
+         return -1;
+     }
++    SeamCurvature::prepare(V, F);
+     vertAmt_input = V.rows();
+     
+     Eigen::VectorXi B;
+--- a/src/TriMesh.cpp
++++ b/src/TriMesh.cpp
+@@ -1,3 +1,4 @@
++#include "SeamCurvature.hpp"
+ #include <cstdlib>
+ //
+ //  TriMesh.cpp
+@@ -1089,7 +1090,7 @@
+         bool makeCoh = true;
+         if(!makeCoh) {
+             for(int pI = 0; pI + 1 < path.size(); pI++) {
+-                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm();
++                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm() + SeamCurvature::cost(V_rest.row(path[pI]), V_rest.row(path[pI + 1]));
+             }
+         }
+         
+@@ -1159,7 +1160,7 @@
+         bool makeCoh = true;
+         if(!makeCoh) {
+             for(int pI = 0; pI + 1 < path.size(); pI++) {
+-                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm();
++                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm() + SeamCurvature::cost(V_rest.row(path[pI]), V_rest.row(path[pI + 1]));
+             }
+         }
+         
+@@ -1282,7 +1283,7 @@
+         for(int vI = 0; vI < vNeighbor.size(); vI++) {
+             for(const auto nbI : vNeighbor[vI]) {
+                 if(nbI > vI) {
+-                    graph[nbI][vI] = graph[vI][nbI] = (V_rest.row(vI) - V_rest.row(nbI)).norm();
++                    graph[nbI][vI] = graph[vI][nbI] = (V_rest.row(vI) - V_rest.row(nbI)).norm() + SeamCurvature::cost(V_rest.row(vI), V_rest.row(nbI));
+                 }
+             }
+         }
+@@ -1293,7 +1294,7 @@
+         bool makeCoh = true;
+         if(!makeCoh) {
+             for(int pI = 0; pI + 1 < path.size(); pI++) {
+-                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm();
++                initSeamLen += (V_rest.row(path[pI]) - V_rest.row(path[pI + 1])).norm() + SeamCurvature::cost(V_rest.row(path[pI]), V_rest.row(path[pI + 1]));
+             }
+         }
+         
+@@ -1384,7 +1385,7 @@
+         for(int vI = 0; vI < vNeighbor.size(); vI++) {
+             for(const auto nbI : vNeighbor[vI]) {
+                 if(nbI > vI) {
+-                    graph[nbI][vI] = graph[vI][nbI] = (V_rest.row(vI) - V_rest.row(nbI)).norm();
++                    graph[nbI][vI] = graph[vI][nbI] = (V_rest.row(vI) - V_rest.row(nbI)).norm() + SeamCurvature::cost(V_rest.row(vI), V_rest.row(nbI));
+                 }
+             }
+         }
+@@ -1577,7 +1578,7 @@
+                    ((V.row(cohE(cohI, 0)) - V.row(cohE(cohI, 2))).norm() / avgEdgeLen > thres) ||
+                    ((V.row(cohE(cohI, 1)) - V.row(cohE(cohI, 3))).norm() / avgEdgeLen > thres))
+                 {
+-                    sparsity += edgeLen[cohI];
++                    sparsity += edgeLen[cohI] + SeamCurvature::cost(V_rest.row(cohE(cohI, 0)), V_rest.row(cohE(cohI, 1)));
+                 }
+             }
+         }
+@@ -2324,6 +2325,7 @@
+                 double seDec = (V_rest.row(path_max[0]) - V_rest.row(path_max[1])).norm() /
+                     virtualRadius * (vertWeight[path_max[0]] + vertWeight[path_max[1]]) / 2.0;
+                 seDec *= seamBendFactor(*this, path_max[0], path_max[1]) + osSymTerm(*this, path_max[0], path_max[1]);
++                seDec += SeamCurvature::cost(V_rest.row(path_max[0]), V_rest.row(path_max[1])) / virtualRadius;
+                 // closing up splitted diamond
+                 bool closeup = false;
+                 for(const auto& nbVI : vNeighbor[path_max[0]]) {
+@@ -2331,6 +2333,7 @@
+                         if(isBoundaryVert(nbVI)) {
+                             if(vNeighbor[path_max[2]].find(nbVI) != vNeighbor[path_max[2]].end()) {
+                                 seDec += (V_rest.row(path_max[0]) - V_rest.row(nbVI)).norm() / virtualRadius * (vertWeight[path_max[0]] + vertWeight[nbVI]) / 2.0;
++                                seDec += SeamCurvature::cost(V_rest.row(path_max[0]), V_rest.row(nbVI)) / virtualRadius;
+                                 closeup = true;
+                                 break;
+                             }
+@@ -2389,7 +2392,7 @@
+                     
+                     const double seInc = (V_rest.row(vI) - V_rest.row(nbVI)).norm() /
+                         virtualRadius * (vertWeight[vI] + vertWeight[nbVI]) / 2.0 * (seamBendFactor(*this, vI, nbVI) + osSymTerm(*this, vI, nbVI))
+-                        + osNeckTopoPenalty(*this, nbVI, vI);
++                        + SeamCurvature::cost(V_rest.row(vI), V_rest.row(nbVI)) / virtualRadius + osNeckTopoPenalty(*this, nbVI, vI);
+                     const double curEwDec = (1.0 - lambda_t) * SDDec - lambda_t * seInc;
+                     if(curEwDec > maxEwDec) {
+                         maxEwDec = curEwDec;
+@@ -2453,6 +2456,7 @@
+                     const double seInc = ((V_rest.row(path[0]) - V_rest.row(path[1])).norm() * (vertWeight[path[0]] + vertWeight[path[1]]) +
+                                           (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]])) / virtualRadius / 2.0
+                                           * pathBendFactor(*this, path)
++                                          + (SeamCurvature::cost(V_rest.row(path[0]), V_rest.row(path[1])) + SeamCurvature::cost(V_rest.row(path[1]), V_rest.row(path[2]))) / virtualRadius
+                                           + ((V_rest.row(path[0]) - V_rest.row(path[1])).norm() * (vertWeight[path[0]] + vertWeight[path[1]]) * osSymTerm(*this, path[0], path[1]) +
+                                              (V_rest.row(path[1]) - V_rest.row(path[2])).norm() * (vertWeight[path[1]] + vertWeight[path[2]]) * osSymTerm(*this, path[1], path[2])) / virtualRadius / 2.0;
+                     const double EwDec = (1.0 - lambda_t) * SDDec - lambda_t * (seInc + osNeckTopoPenalty(*this, vI, vI));

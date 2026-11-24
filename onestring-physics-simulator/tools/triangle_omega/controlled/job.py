@@ -14,14 +14,25 @@ from time import monotonic, time
 HERE = Path(__file__).resolve().parent
 BASE = HERE.parent
 REPO = BASE.parents[1]
+DEFAULT_CONFORMAL_LIMIT = 0.02
+DEFAULT_SEAM_BEND_WEIGHT = 2.0
+DEFAULT_SEAM_CURVATURE_WEIGHT = 0.5
 STAGES = ('normalize','rolling_guidance','post_rolling','inflate','post_rounding','cap','optcuts','outline','omega','grid','remesh','tiles','flat','closure','print')
 LABELS = dict(normalize='S（正規化）',rolling_guidance='S（平滑化）',post_rolling='S（平滑化後のLargeSteps）',inflate='S（丸め後）',
               post_rounding='S（丸め後のLargeSteps）',cap='S（底面を閉じた形状）',optcuts='Omega',
               outline='Omega（外形平滑化）',omega='Omega2',grid='M2D',remesh='M3D',tiles='T3D',flat='K2D',closure='T2D',print='印刷用STL')
 
 
+# Reproduce the dense Bunny seam study on the selected input surface.
+DIRECT_GRID = dict(direct_omega=True, cap=False, rolling=False, radius=0., round_method='none',
+                   post_rolling_large_steps=False, post_rounding_large_steps=False, neck=False,
+                   outline=False, size_mode='uniform', stretch=0., seam_spacing=True,
+                   paired_protrusions=True, initial_rule='area_fraction', boundary_lift=False,
+                   rim_move_percent=15., conformal_limit=None)
+
+
 def stages(config):
-    enabled = {'cap':config.get('cap',False),'rolling_guidance':config['rolling'], 'post_rolling':config['rolling'] and config.get('post_rolling_large_steps',True), 'post_rounding':config.get('post_rounding_large_steps', True), 'outline':config['outline']}
+    enabled = {'inflate': not config.get('direct_omega',False),'cap':config.get('cap',False),'rolling_guidance':config['rolling'], 'post_rolling':config['rolling'] and config.get('post_rolling_large_steps',True), 'post_rounding':config.get('post_rounding_large_steps', True), 'outline':config['outline']}
     return [s for s in STAGES[:STAGES.index(config['stop'])+1] if enabled.get(s,True)]
 
 
@@ -83,13 +94,17 @@ def grid_selection_rule(folder, settings):
 
 def copy_through_stage(source, destination, stage):
     """Reuse the completed upstream geometry for a separate grid or thickness trial."""
-    if stage not in ('omega','grid','remesh','flat'):
+    if stage not in ('optcuts_input','omega','grid','remesh','flat'):
         raise ValueError('Unsupported trial starting stage')
     from tempfile import TemporaryDirectory
     with (source/'.job.lock').open('a') as lock, TemporaryDirectory(dir=destination.parent) as temp:
         fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
         events = [json.loads(line) for line in (source/'events.jsonl').read_text().splitlines()]
-        if stage not in completed_stages(events):
+        completed = completed_stages(events)
+        if stage == 'optcuts_input':
+            # Rounding and capping are optional. Reuse exactly the surface used by the saved run.
+            stage = next(s for s in reversed(STAGES[:STAGES.index('optcuts')]) if s in completed)
+        if stage not in completed:
             raise ValueError(LABELS[stage]+' の計算が完了していません。')
         saved = json.loads((source/'settings.json').read_text())
         saved.update(saved_stage_order(saved, completed_stages(events)))
@@ -98,7 +113,7 @@ def copy_through_stage(source, destination, stage):
         dest = Path(temp)/'run'
         dest.mkdir()
         for item in source.iterdir():
-            if item.name in ('input.obj','normalized.obj','filtered.obj','capped.obj','smooth') or item.name.split('.')[0] in prefix or item.name.startswith('omega2_') or ('remesh' in prefix and item.name.startswith('remesh3d')) or (stage=='flat' and item.name in ('hinges.json','tiles_summary.json')):
+            if item.name in ('input.obj','normalized.obj','filtered.obj','capped.obj') or item.name.split('.')[0] in prefix or ('omega' in prefix and (item.name == 'smooth' or item.name.startswith('omega2_'))) or ('remesh' in prefix and item.name.startswith('remesh3d')) or (stage=='flat' and item.name in ('hinges.json','tiles_summary.json')):
                 if item.is_dir():
                     shutil.copytree(item, dest/item.name)
                 else:
@@ -136,10 +151,27 @@ def run_locked(out, source, c, resume):
     completed=set()
     if resume:
         previous=json.loads((out/'settings.json').read_text())
+        c.setdefault('direct_omega', previous.get('direct_omega', False))
+        if c['direct_omega'] != previous.get('direct_omega', False):
+            raise ValueError('Ωの生成方式を変更する場合は新しい計算を開始してください。')
         for key in ('count','rolling','radius','neck','outline','cap'):
             if previous.get(key)!=c.get(key):raise ValueError('計算条件が保存した結果と一致しません。')
         events=[json.loads(line) for line in (out/'events.jsonl').read_text().splitlines()]
         completed=completed_stages(events)
+        saved_variation = previous.get('seam_curvature_weight', 0.)
+        c.setdefault('seam_curvature_weight', saved_variation)
+        if 'optcuts' in completed and c['seam_curvature_weight'] != saved_variation:
+            raise ValueError('曲面の曲率変化の重みを変える場合はΩを再計算してください。')
+        saved_bend = previous.get('seam_bend_weight', 0.)
+        c.setdefault('seam_bend_weight', saved_bend)
+        if 'optcuts' in completed:
+            if c['seam_bend_weight'] != saved_bend:
+                raise ValueError('seamの曲がりの重みを変える場合はΩを再計算してください。')
+            if c.get('conformal_limit', previous.get('conformal_limit')) != previous.get('conformal_limit'):
+                raise ValueError('等角歪み上限を変える場合はΩを再計算してください。')
+            c['conformal_limit'] = previous.get('conformal_limit')
+        else:
+            c.setdefault('conformal_limit', previous.get('conformal_limit', DEFAULT_CONFORMAL_LIMIT))
         c.setdefault('rim_move_percent', previous.get('rim_move_percent', 0.))
         if 'remesh' in completed and c['rim_move_percent'] != previous.get('rim_move_percent', 0.):
             raise ValueError('開口縁の移動幅を変更するときはM2DからM3Dを再計算してください。')
@@ -199,6 +231,19 @@ def run_locked(out, source, c, resume):
         if 'print' in completed:raise ValueError('STLは生成済みです。')
     else:
         shutil.copyfile(source,src)
+    variation_weight = c.setdefault('seam_curvature_weight', DEFAULT_SEAM_CURVATURE_WEIGHT)
+    if not math.isfinite(variation_weight) or variation_weight < 0:
+        raise ValueError('曲面の曲率変化の重みは0以上の有限値で指定してください。')
+    bend_weight = c.setdefault('seam_bend_weight', DEFAULT_SEAM_BEND_WEIGHT)
+    if not math.isfinite(bend_weight) or bend_weight < 0:
+        raise ValueError('seamの曲がりの重みは0以上の有限値で指定してください。')
+    epsilon = c.setdefault('conformal_limit', DEFAULT_CONFORMAL_LIMIT)
+    if epsilon is None and not c.get('direct_omega') and 'optcuts' not in completed:
+        epsilon = c['conformal_limit'] = DEFAULT_CONFORMAL_LIMIT
+    if epsilon is not None and (not math.isfinite(epsilon) or epsilon < 0):
+        raise ValueError('等角歪み上限は0以上の有限値で指定してください。')
+    if 'optcuts' not in completed:
+        c.pop('optcuts_angle_weight', None)
     c.setdefault('boundary_lift', False)
     c.setdefault('seam_spacing', False)
     c.setdefault('paired_protrusions', True)
@@ -212,7 +257,7 @@ def run_locked(out, source, c, resume):
     c.setdefault('crease_inflate',True)
     c.setdefault('post_rolling_large_steps',True)
     if not resume:
-        c['post_rounding_large_steps'] = True
+        c['post_rounding_large_steps'] = not c.get('direct_omega', False)
     rim_percent = c.setdefault('rim_move_percent', 0.)
     if not math.isfinite(rim_percent) or rim_percent < 0:
         raise ValueError('開口縁の移動上限は有限の非負値で指定してください。')
@@ -235,6 +280,10 @@ def run_locked(out, source, c, resume):
     path.replace(out/'settings.json')
     binary=REPO/'third_party/OptCuts_csf_onestring/build2'/('OptCuts_neck_bin' if c['neck'] else 'OptCuts_bin')
     env=dict(os.environ,ONESTRING_REPO=str(REPO),OPTCUTS_BIN=str(binary),TRI_SKIP_VIDEOS='1',
+             TRI_DIRECT_OMEGA=str(int(c.get('direct_omega',False))),
+             TRI_SEAM_CURVATURE_WEIGHT=str(variation_weight),
+             TRI_SEAM_BEND_WEIGHT=str(bend_weight),
+             TRI_OPTCUTS_CONFORMAL_LIMIT=str(epsilon if epsilon is not None else DEFAULT_CONFORMAL_LIMIT),
              TRI_PAIRED_PROTRUSIONS=str(int(c['paired_protrusions'])),
              TRI_RIM_MAX_FRACTION=str(rim_percent/100.),
              TRI_BOUNDARY_LIFT=str(int(c['boundary_lift'])),
@@ -278,7 +327,7 @@ def run_locked(out, source, c, resume):
         ops_feedback = {}
     rounded = out/'inflate/inflated.obj'
     conditioned = out/'post_rounding.obj'
-    final_source = conditioned if c['post_rounding_large_steps'] else rounded
+    final_source = out/'normalized.obj' if c.get('direct_omega') else (conditioned if c['post_rounding_large_steps'] else rounded)
     chart=out/'optcuts/result.pkl'
     smooth=out/'smooth/U2.pkl'
     normalized=out/'normalized.obj'
@@ -315,6 +364,16 @@ def run_locked(out, source, c, resume):
                 shutil.copyfile(ops['inflate'][1],rounded)
                 event(stage,'finished',seconds=monotonic()-start,rounding='off')
                 continue
+            if stage=='omega' and c.get('direct_omega'):
+                import numpy as np
+                with chart.open('rb') as stream:
+                    native = pickle.load(stream)
+                shutil.copyfile(chart, out/'omega2_chart.pkl')
+                with (out/'omega2_fields.pkl').open('wb') as stream:
+                    pickle.dump(dict(U_omega=native['uv'], s_star=np.ones(len(native['xyz']))), stream)
+                (out/'omega2_summary.json').write_text(json.dumps(dict(direct_omega=True, injectivity_limited=False)))
+                event(stage,'finished',seconds=monotonic()-start)
+                continue
             if stage=='omega' and not c['outline']:
                 smooth.parent.mkdir(exist_ok=True)
                 with chart.open('rb') as f:
@@ -325,6 +384,14 @@ def run_locked(out, source, c, resume):
                 subprocess.run([str(py),str(BASE/script),*map(str,args)],env={**env,**opt},stdout=f,stderr=subprocess.STDOUT,check=True)
             version={'rolling_revision':2} if stage=='rolling_guidance' else {}
             event(stage,'finished',seconds=monotonic()-start,**version)
+        except subprocess.CalledProcessError as exc:
+            if stage=='tiles' and exc.returncode==3 and (out/'drift_preview.npz').is_file():
+                event('tiles','preview',reason='共有側面と厚みが両立しないため診断形状を保存')
+                event('run','preview')
+                return
+            event(stage,'failed',error=str(exc),seconds=monotonic()-start)
+            event('run','failed')
+            raise
         except Exception as exc:
             event(stage,'failed',error=str(exc),seconds=monotonic()-start)
             event('run','failed')
@@ -336,7 +403,7 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('out',type=Path)
     parser.add_argument('config',type=Path)
-    parser.add_argument('--input',type=Path,default=REPO/'assets/Bunny_open_LargeSteps_3500.obj')
+    parser.add_argument('--input',type=Path,default=REPO/'assets/Bunny_open_isotropic_10251.obj')
     parser.add_argument('--resume',action='store_true')
     args=parser.parse_args()
     run(args.out.resolve(),args.input,json.loads(args.config.read_text()),args.resume)

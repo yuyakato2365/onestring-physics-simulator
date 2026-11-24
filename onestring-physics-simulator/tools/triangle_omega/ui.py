@@ -106,6 +106,8 @@ def run_with_progress(command, folder, progress, stages, start, labels=None, on_
                 if details or traceback:
                     with st.expander('エラーの詳細'):
                         st.code(details or traceback, language=None)
+            elif (folder/'drift_preview.npz').is_file() and not (folder/'tiles.npz').is_file():
+                progress.progress(len(completed)/len(stages), text=f'T3Dの診断形状を表示 · {count}')
             else:
                 progress.progress(1.0, text=f'生成完了 · {count}')
 

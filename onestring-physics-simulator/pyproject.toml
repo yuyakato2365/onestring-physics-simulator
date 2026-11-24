@@ -13,6 +13,7 @@ authors = [{ name = "OneString Physics Simulator Contributors" }]
 dependencies = [
   "numpy>=1.26",
   "scipy>=1.11",
+  "scs>=3.2,<4",
   "plotly>=5.20,<6",
   "streamlit>=1.34",
   "streamlit-plotly-events>=0.0.6",

@@ -44,4 +44,14 @@ def repair_offset(faces, base, initial, symmetric=False):
     res=minimize(energy,np.zeros_like(limits),jac=True,method='L-BFGS-B',
                  bounds=list(zip(-limits,limits)),options={'maxiter':180,'ftol':1e-11})
     result=initial.copy();result[ids]+=res.x.reshape(-1,3)
-    return result
+    # Retain the existing corner thickness at thin spots and stop thicker
+    # corners at 2 mm. A shared vertex must satisfy every incident panel.
+    initial_height=np.einsum('nki,ni->nk',(initial-base)[F],normal)
+    change=np.einsum('nki,ni->nk',(result-initial)[F],normal)
+    minimum=np.minimum(initial_height,1. if symmetric else 2.)
+    fraction=np.ones_like(change)
+    thinning=change < -1e-12
+    fraction[thinning]=np.minimum(1., (initial_height-minimum)[thinning]/-change[thinning])
+    step=np.ones(len(base))
+    np.minimum.at(step,F,fraction)
+    return initial+(result-initial)*step[:,None]

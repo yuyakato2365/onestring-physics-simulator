@@ -14,7 +14,8 @@ import trimesh
 
 from ..ui import REPO, debug_zip, run_with_progress
 from ..scripts.trigrid.omega2_metric import relative_stretch
-from .job import HERE, STAGES, LABELS, completed_stages, copy_through_stage, grid_selection_rule, panel_depth_spec, saved_stage_order, stages
+from .seam_view import add_paths, chart_paths, panel_paths, final_flat_faces
+from .job import DIRECT_GRID, DEFAULT_CONFORMAL_LIMIT, DEFAULT_SEAM_BEND_WEIGHT, DEFAULT_SEAM_CURVATURE_WEIGHT, HERE, STAGES, LABELS, completed_stages, copy_through_stage, grid_selection_rule, panel_depth_spec, saved_stage_order, stages
 from onestring_physics.visualization import _add_quad_mesh_surface, _style_scene
 
 
@@ -32,56 +33,76 @@ def settings(target_kind, uploaded):
     if reference:
         source = HERE/'bunny_open_bottom_repaired.obj'
         st.caption('Bunny_S45_volume の入力（3,680頂点）。当時の設定は Rolling Guidance オン、体積を保つ丸め、45°、測定幅 0.10 です。')
-    elif uploaded is None and target_kind in ('Bunny_open_LargeSteps_3500.obj', 'Bunny_open_LargeSteps.obj'):
+    elif uploaded is None and target_kind in ('Bunny_open_isotropic_10251.obj', 'Bunny_open_LargeSteps_3500.obj', 'Bunny_open_LargeSteps.obj'):
         source = REPO/'assets'/target_kind
+        if target_kind == 'Bunny_open_isotropic_10251.obj':
+            st.caption('高密度Bunny · 10,251頂点、20,372面、底面開口。出力パネル枚数は下で指定します。')
     preset_key = '_s45' if reference else ''
-    c = {}
-    c['cap'] = st.checkbox('平面の開口部を閉じる', value=source is None, help='同梱Bunnyの底を三角形で塞ぎ、底も含めて展開します。')
-    c['count'] = st.number_input('パネル枚数の目安', 1, value=500, step=1, key='kg_count')
-    c['rolling'] = st.checkbox('Rolling Guidance', value=True, key='kg_rolling'+preset_key,help='面法線を平滑化し、その曲面上でLargeStepsをかけてから耳先を丸めます。')
-    methods = {'profile':'体積と元の形状を保つ（Bunny_S45_volume版）',
-               'profile_strong':'45°超過を強く抑える', 'inflate':'局所的に膨らませる（従来）'}
-    c['round_method'] = st.selectbox('曲面の丸め方', list(methods), format_func=methods.get, key='kg_round_method'+preset_key)
-    profile = c['round_method'] in ('profile','profile_strong')
-    c['crease_angle'] = st.slider('曲がりの許容角（度）', 15, 180, 45, 1, key='kg_angle'+preset_key,
-                                 help='曲面上の指定幅で測る向きの変化の目標です。' if profile else '隣り合う面の法線の角度差で判定します。')
-    if profile:
-        c['profile_span'] = st.number_input('尖りを測る幅（正規化座標）', min_value=.001, value=.10, step=.01, key='kg_span'+preset_key,
-                                           format='%.3f', help='曲面に沿ったこの距離まで、複数の面をまたぐ曲がりを測ります。')
-        c.update(radius=0., crease_inflate=False)
-    else:
-        c['radius'] = st.number_input('耳先の丸め半径（正規化座標）', min_value=0., value=.08,
-                                     step=.005, format='%.3f', help='0 で耳先の膨らませを無効にします。')
-        c['crease_inflate'] = st.checkbox('残った折れ目を局所的に膨らませる', value=True)
+    direct = st.checkbox('OptCutsのΩに直接Gridを配置（700枚設定）', value=False,
+        help='正規化した入力にOptCutsを1回適用します。丸め、追加の等角制約、Ω2の伸縮を省き、同じΩの上で格子を選びます。')
+    c = dict(DIRECT_GRID) if direct else {}
     c['input_label'] = uploaded.name if uploaded is not None else target_kind
-    c['neck'] = st.checkbox('OptCutsにくびれ・細い領域への罰則と切断制限を追加',value=True)
-    c['outline'] = st.checkbox('Ω の外形を平滑化', value=True)
-    adaptive = st.checkbox('曲率の高い部分・薄い部分のパネルを小さくする', value=False, key='kg_adaptive',
-                           help='オフでは3Dの目標辺長を一定にします。オンでは曲率と厚みから場所ごとの目標辺長を求めます。')
-    c['size_mode'] = 'adaptive' if adaptive else 'uniform'
-    c['stretch'] = st.slider('Ω2 の伸縮の強さ', 0., 1., 1., .05, help='0 で Ω の座標を保持し、1 で調和近似の伸縮をすべて適用します。')
-    c['initial_rule'] = st.radio('パネルの仮採用', list(INITIAL_RULE_LABELS), format_func=INITIAL_RULE_LABELS.get,
-                                 key='kg_initial_rule', help='どちらの方式でも、緩和後にΩ2との重なりが50%未満のパネルを除きます。')
-    c['boundary_lift'] = st.checkbox('M3Dの逆写像で境界パネルの歪みを抑える',value=False,
-                                    help='切れ目の両岸を固定し、境界近くの頂点が曲面上で対応する位置を調整します。')
-    flexible_rim = st.checkbox('M3Dの開口縁を柔軟にして境界パネルを整える', value=False,
-                               help='開口縁を段階的に動かし、接する全パネルの内角が40〜80°に入るか、移動上限に達すると終了します。')
-    c['rim_move_percent'] = st.number_input('開口縁の移動上限（代表辺長の%）', min_value=0., value=50., step=5.) if flexible_rim else 0.
-    c['seam_spacing'] = st.checkbox('3Dの長さに応じて境界の辺数を配分（試験）', value=False,
-                                   help='切れ目の両岸に同じ辺数を割り当て、3Dの目標辺長に合わせて対応する頂点の位置を選びます。')
-    c['paired_protrusions'] = st.checkbox('Ω2からの突出は2枚以上が連なる場合に採用', value=True,
-                                          help='格子の採用時に、Ω2の外側で辺を共有するパネルがある突出だけを残します。')
+    if direct:
+        c['count'] = st.number_input('パネル枚数の目安', min_value=1, value=700, key='kg_direct_count')
+        st.caption('仮採用は面積50%以上。seamの両岸で辺数を合わせ、開口縁の移動は代表辺長の15%まで許容します。')
+    else:
+        c['cap'] = st.checkbox('平面の開口部を閉じる', value=source is None, help='同梱Bunnyの底を三角形で塞ぎ、底も含めて展開します。')
+        c['count'] = st.number_input('パネル枚数の目安', 1, value=500, step=1, key='kg_count')
+        c['rolling'] = st.checkbox('Rolling Guidance', value=True, key='kg_rolling'+preset_key,help='面法線を平滑化し、その曲面上でLargeStepsをかけてから耳先を丸めます。')
+        methods = {'profile':'体積と元の形状を保つ（Bunny_S45_volume版）',
+                   'profile_strong':'45°超過を強く抑える', 'inflate':'局所的に膨らませる（従来）'}
+        c['round_method'] = st.selectbox('曲面の丸め方', list(methods), format_func=methods.get, key='kg_round_method'+preset_key)
+        profile = c['round_method'] in ('profile','profile_strong')
+        c['crease_angle'] = st.slider('曲がりの許容角（度）', 15, 180, 45, 1, key='kg_angle'+preset_key,
+                                     help='曲面上の指定幅で測る向きの変化の目標です。' if profile else '隣り合う面の法線の角度差で判定します。')
+        if profile:
+            c['profile_span'] = st.number_input('尖りを測る幅（正規化座標）', min_value=.001, value=.10, step=.01, key='kg_span'+preset_key,
+                                               format='%.3f', help='曲面に沿ったこの距離まで、複数の面をまたぐ曲がりを測ります。')
+            c.update(radius=0., crease_inflate=False)
+        else:
+            c['radius'] = st.number_input('耳先の丸め半径（正規化座標）', min_value=0., value=.08,
+                                         step=.005, format='%.3f', help='0 で耳先の膨らませを無効にします。')
+            c['crease_inflate'] = st.checkbox('残った折れ目を局所的に膨らませる', value=True)
+        c['neck'] = st.checkbox('OptCutsにくびれ・細い領域への罰則と切断制限を追加',value=True)
+    c['seam_bend_weight'] = st.number_input('OptCuts seamの曲がりの重み', min_value=0.,
+        value=DEFAULT_SEAM_BEND_WEIGHT, step=.5,
+        help='3D曲面上でseamが急に折れる候補ほど切断コストが増えます。0で無効。')
+    c['seam_curvature_weight'] = st.number_input('seamに沿った曲面の曲率変化の重み',
+        min_value=0., value=DEFAULT_SEAM_CURVATURE_WEIGHT, step=.5,
+        help='3D入力面の法線変化から曲率の大きさを推定し、辺の両端で値が大きく変わる切り方を抑えます。0で無効。')
+    if not direct:
+        c['conformal_limit'] = st.number_input('OptCuts 各面の等角歪み上限 ε', min_value=0.,
+            value=DEFAULT_CONFORMAL_LIMIT, step=.005, format='%.4f',
+            help='全ての面で σ₁/σ₂ + σ₂/σ₁ − 2 ≤ ε を満たす展開を採用します。0 は完全な等角写像です。')
+        c['outline'] = st.checkbox('Ω の外形を平滑化', value=True)
+        adaptive = st.checkbox('曲率の高い部分・薄い部分のパネルを小さくする', value=False, key='kg_adaptive',
+                               help='オフでは3Dの目標辺長を一定にします。オンでは曲率と厚みから場所ごとの目標辺長を求めます。')
+        c['size_mode'] = 'adaptive' if adaptive else 'uniform'
+        c['stretch'] = st.slider('Ω2 の伸縮の強さ', 0., 1., 1., .05, help='0 で Ω の座標を保持し、1 で調和近似の伸縮をすべて適用します。')
+        c['initial_rule'] = st.radio('パネルの仮採用', list(INITIAL_RULE_LABELS), format_func=INITIAL_RULE_LABELS.get,
+                                     key='kg_initial_rule', help='どちらの方式でも、緩和後にΩ2との重なりが50%未満のパネルを除きます。')
+        c['boundary_lift'] = st.checkbox('M3Dの逆写像で境界パネルの歪みを抑える',value=False,
+                                        help='切れ目の両岸を固定し、境界近くの頂点が曲面上で対応する位置を調整します。')
+        flexible_rim = st.checkbox('M3Dの開口縁を柔軟にして境界パネルを整える', value=False,
+                                   help='開口縁を段階的に動かし、接する全パネルの内角が40〜80°に入るか、移動上限に達すると終了します。')
+        c['rim_move_percent'] = st.number_input('開口縁の移動上限（代表辺長の%）', min_value=0., value=50., step=5.) if flexible_rim else 0.
+        c['seam_spacing'] = st.checkbox('3Dの長さに応じて境界の辺数を配分（試験）', value=False,
+                                       help='切れ目の両岸に同じ辺数を割り当て、3Dの目標辺長に合わせて対応する頂点の位置を選びます。')
+        c['paired_protrusions'] = st.checkbox('Ω2からの突出は2枚以上が連なる場合に採用', value=True,
+                                              help='格子の採用時に、Ω2の外側で辺を共有するパネルがある突出だけを残します。')
     c['extrusion_mode']=st.radio('T3D の押し出し方式', ['miter','fixed_skin','outer_layer'],
         format_func=lambda v: '従来の留め継ぎ' if v=='miter' else ('外面固定・局所押し出し' if v=='fixed_skin' else '外側の対応メッシュをつなぐ'),
         help='外側の対応メッシュ方式では元の三角形と外側の三角形を結び、横ずれに上限を設けます。外面固定ではK3Dを保持し、平面配置で干渉する辺や角の押し出しを浅くします。T2Dでヒンジ付き試作STLを出力します。')
     if c['extrusion_mode']=='outer_layer':
         c['restore_panel_area']=st.checkbox('押し出し後に縮んだパネル面を近傍と調整',value=True)
-        c['outer_lateral_mm']=st.number_input('外側の層の最大横ずれ (mm)',min_value=.05,value=4.,step=.25,
-            help='小さいほど横への張り出しを抑えます。曲率の高い場所では達成できる厚みが小さくなります。')
-        c['outer_spacing_percent']=st.number_input('T2D のパネル中心間隔の拡大 (%)',min_value=0.,value=20.,step=5.,
+        c['outer_lateral_mm']=st.number_input('外側の層の横ずれ警告値 (mm)',min_value=.05,value=4.,step=.25,
+            help='この値以内を優先し、厚みのために超過したパネルは橙色で表示します。')
+        c['outer_spacing_percent']=st.number_input('T2D のパネル中心間隔の拡大 (%)',min_value=0.,value=0.,step=5.,
             help='パネルを剛体のまま平面上で離し、厚みを確保します。ヒンジはその分長くなります。')
     choices=[s for s in STAGES if (s!='print' or c['extrusion_mode'] not in ('fixed_skin','outer_layer')) and (s not in ('rolling_guidance','post_rolling') or c['rolling']) and (s!='outline' or c['outline']) and (s!='cap' or c['cap'])]
-    c['stop'] = st.selectbox('計算を終える工程', choices, index=choices.index('post_rounding' if reference else 'closure'), format_func=LABELS.get, key='kg_stop_s45' if reference else 'kg_stop')
+    if direct:
+        choices = [stage for stage in choices if stage not in ('inflate','post_rounding')]
+    c['stop'] = st.selectbox('計算を終える工程', choices, index=choices.index('remesh' if direct else ('post_rounding' if reference else 'closure')), format_func=LABELS.get, key='kg_direct_stop' if direct else ('kg_stop_s45' if reference else 'kg_stop'))
     mode = st.radio('T3D のパネル厚', ['edge_ratio','mm'], horizontal=True,
                     index=int(c['extrusion_mode'] in ('fixed_skin','outer_layer')),key='kg_depth_rule_'+c['extrusion_mode'],
                     format_func=lambda v: '平均辺長の倍率' if v=='edge_ratio' else 'mm 指定')
@@ -101,7 +122,7 @@ def settings(target_kind, uploaded):
         c['hinge_mm'] = st.number_input('ヒンジ厚 (mm)', min_value=.1,value=2.,step=.1,key='kg_hinge')
         c['hole_mm'] = st.number_input('紐穴の直径 (mm)', min_value=2.,value=2.,step=.1,key='kg_hole')
         if c['extrusion_mode'] in ('fixed_skin','outer_layer'):
-            c['string_route']=st.selectbox('紐経路', ['radial','perimeter'], format_func=lambda x: '従来の中央分岐' if x=='radial' else '外周一周・直線穴と丸い入口')
+            c['string_route']=st.selectbox('紐経路', ['radial','perimeter','smooth_rim'], format_func={'radial':'従来の中央分岐','perimeter':'外周一周・直線穴と丸い入口','smooth_rim':'平面外周一周・大半径ガイド'}.get)
             c['material']='separate'
             st.caption('T2D試作の材料構成 · 符号付き曲率に応じた上下面の角ヒンジ。膜はパネル厚の内側に割り当て、紐穴の外壁を残します。')
         else:
@@ -124,11 +145,23 @@ def load(path):
 
 VIEWS = {'normalize':['S（正規化）'],'rolling_guidance':['S（平滑化）'],'post_rolling':[LABELS['post_rolling']],'inflate':[LABELS['inflate']],
          'post_rounding':[LABELS['post_rounding']],
-         'cap':['S（底面を閉じた形状）'],'optcuts':['Omega'],'outline':['Omega（外形平滑化）'],'omega':['Omega2'],'grid':['Omega2 + Grid','M2D','M3D（逆写像）'],
-         'remesh':['M3D'],'tiles':['K3D','T3D'],'flat':['K2D'],'closure':['T2D'],'print':[]}
+         'cap':['S（底面を閉じた形状）'],'optcuts':['入力曲面（seam）','Omega'],'outline':['Omega（外形平滑化）'],'omega':['Omega2'],'grid':['Omega2 + Grid','M2D','M3D（逆写像）'],
+         'remesh':['M3D（最小角）','M3D'],'tiles':['K3D','T3D'],'flat':['K2D'],'closure':['T2D'],'print':[]}
 
 
-def figure(folder, view):
+def figure(folder, view, show_seams=True):
+    if view=='T3D（横ずれ診断）':
+        with np.load(folder/'drift_preview.npz') as arc:
+            solid=arc['solid']; drift=arc['lateral']; over=drift>float(arc['threshold'])+1e-6
+            thin=arc['off_depth']; lo=arc['depth_min']; hi=arc['depth_max']
+        tri=np.array([[0,2,1],[3,4,5],[0,1,4],[0,4,3],[1,2,5],[1,5,4],[2,0,3],[2,3,5]])
+        faces=(tri+6*np.arange(len(solid))[:,None,None]).reshape(-1,3); xyz=solid.reshape(-1,3)
+        colors=np.repeat(np.select([over,thin],['#e16a18','#915fad'],default='#20a89d'),8)
+        labels=[f'パネル {i} · 横ずれ {d:.2f} mm · 厚み {l:.2f}–{h:.2f} mm' for i,(d,l,h) in enumerate(zip(drift,lo,hi))]
+        fig=go.Figure(go.Mesh3d(x=xyz[:,0],y=xyz[:,1],z=xyz[:,2],i=faces[:,0],j=faces[:,1],k=faces[:,2],
+                                facecolor=colors,text=np.repeat(labels,6),hoverinfo='text',flatshading=True))
+        _style_scene(fig);fig.update_layout(title=view,scene_camera=dict(up=dict(x=0,y=1,z=0)))
+        return fig
     if view=='T3D（紐穴付き同一パネル）':
         with np.load(folder/'assembled_drilled.npz') as arc:
             xyz,faces=arc['vertices'],arc['faces']
@@ -137,9 +170,9 @@ def figure(folder, view):
         _style_scene(fig)
         fig.update_layout(title=view,scene_camera=dict(eye=dict(x=1.3,y=.55,z=1.6),up=dict(x=0,y=1,z=0)))
         return fig
-    if view == 'Omega2 + Grid':
+    if view in ('Omega2 + Grid','Omega + Grid'):
         from shapely.geometry import LineString, Polygon
-        fig = figure(folder, 'Omega2')
+        fig = figure(folder, 'Omega' if view=='Omega + Grid' else 'Omega2', show_seams=False)
         grid = load(folder/'grid/result.pkl')
         log = json.loads((folder/'grid/summary.json').read_text())['lattice']
         count = json.loads((folder/'settings.json').read_text())['count']
@@ -174,13 +207,24 @@ def figure(folder, view):
             points=np.asarray(points)
             fig.add_trace(go.Scatter3d(x=points[:,0],y=points[:,1],z=np.full(len(points),pitch*1e-4),
                 mode='lines',name=name,showlegend=True,visible=visible,line=dict(color=color,width=width),hoverinfo='skip'))
-        draw_lines(segments,'一様格子（緩和前）','#23303b',True,2)
+        if 'initial_triangles' in grid:
+            triangles = grid['initial_triangles']
+            fig = go.Figure()
+            _style_scene(fig)
+            fig.update_layout(scene_camera=dict(eye=dict(x=0,y=0,z=1.65),up=dict(x=0,y=1,z=0)))
+            rows = np.full((len(triangles),5,2), np.nan)
+            rows[:,:4] = triangles[:,[0,1,2,0]]
+            draw_lines(rows.reshape(-1,2),f'仮採用 {len(triangles)} 枚','#34595d',True,2)
+            ring = grid['O']
+            draw_lines(np.vstack((ring,ring[0])),'Ωの輪郭','#ae3865',True,4)
+        else:
+            draw_lines(segments,'一様格子（緩和前）','#23303b',True,2)
         edges=np.unique(np.sort(grid['Tg'][:,[[0,1],[1,2],[2,0]]].reshape(-1,2),axis=1),axis=0)
         fitted=np.concatenate([grid['Xg'][edges],np.full((len(edges),1,2),np.nan)],axis=1).reshape(-1,2)
         draw_lines(fitted,'境界に合わせた M2D','#822e12','legendonly',3)
         fitted_outline = grid['U4'][grid['Lw']]
         draw_lines(np.vstack([fitted_outline, fitted_outline[0]]),'採用パネルに合わせた Ω2 外周','#137769','legendonly',4)
-        fig.update_layout(title='Ω2 ＋ Grid' + ('（格子の局所再配分）' if 'sampling_uv' in grid else ''),showlegend=True,legend=dict(orientation='h',y=-.04))
+        fig.update_layout(title=view.replace('Omega','Ω') + ('（格子の局所再配分）' if 'sampling_uv' in grid else ''),showlegend=True,legend=dict(orientation='h',y=-.04))
         return fig
     if view in (LABELS['inflate'], LABELS['post_rounding']):
         # The comparison HTML uses the solver coordinates before OBJ serialization.
@@ -204,7 +248,10 @@ def figure(folder, view):
             scene=dict(aspectmode='data', camera=dict(eye=dict(x=-.85,y=.23,z=.5), up=dict(x=0,y=1,z=0)),
                        xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)))
         return fig
-    if view.startswith('S（'):
+    if view == '入力曲面（seam）':
+        m=load(folder/'optcuts/result.pkl')
+        xyz,faces=m['xyz'],m['f3']
+    elif view.startswith('S（'):
         path={'S（底面を閉じた形状）':'capped.obj','S（正規化）':'normalized.obj','S（平滑化）':'filtered.obj',LABELS['post_rolling']:'post_rolling.obj'}[view]
         m=trimesh.load(folder/path,process=False)
         xyz,faces=np.asarray(m.vertices),np.asarray(m.faces)
@@ -226,12 +273,12 @@ def figure(folder, view):
             fig.update_layout(title='Ω2 · 一様な拡大を除いた局所伸縮',scene_camera=dict(eye=dict(x=0,y=0,z=2),
                               up=dict(x=0,y=1,z=0)), meta=dict(scale_percentiles=np.percentile(scale,[5,95]).tolist()))
             return fig
-    elif view in ('M2D','M3D（逆写像）','M3D','K3D'):
+    elif view in ('M2D','M3D（逆写像）','M3D','M3D（最小角）','K3D'):
         if view.startswith('M3D（') or view=='M2D':
             m=load(folder/'grid/result.pkl')
             xyz,faces=(m['Xg'],m['Tg']) if view=='M2D' else (m['VW'],m['TW'])
             if view=='M2D' and (folder/'remesh3d.pkl').is_file():
-                faces=np.delete(faces,load(folder/'remesh3d.pkl')['removed_panels'],axis=0)
+                faces=final_flat_faces(m,load(folder/'remesh3d.pkl'))
         else:
             m=load(folder/'remesh3d.pkl');xyz,faces=m['X'],m['T']
     else:
@@ -258,6 +305,11 @@ def figure(folder, view):
         fig.add_trace(go.Mesh3d(x=xyz[:,0],y=xyz[:,1],z=xyz[:,2],
             i=faces[:,0],j=faces[:,1],k=faces[:,2],color='#20a89d',flatshading=True,
             lighting=dict(ambient=.75,diffuse=.48,specular=.04),name=view))
+        if view=='T3D' and (folder/'tiles_summary.json').is_file():
+            marked=json.loads((folder/'tiles_summary.json').read_text()).get('lateral_warning_panels',[])
+            if marked:
+                colors=np.where(np.isin(np.arange(n),marked),'#e16a18','#20a89d')
+                fig.data[0].facecolor=np.repeat(colors,len(faces)//n)
         # Only the three outer edges belong to the panel outline. The other
         # triangles tessellate its variable-depth shell.
         outlines=np.concatenate((solids[:,[0,1,2,0]],np.full((n,1,3),np.nan)),axis=1).reshape(-1,3)
@@ -265,6 +317,17 @@ def figure(folder, view):
             mode='lines',line=dict(color='#25645f',width=1),hoverinfo='skip',showlegend=False))
     else:
         _add_quad_mesh_surface(fig,xyz,faces,color='#7c3aed' if view.startswith('S（') else '#14b8a6',opacity=1.,name=view)
+    if view == 'M3D（最小角）':
+        tri=xyz[faces]
+        a=np.roll(tri,1,axis=1)-tri
+        b=np.roll(tri,-1,axis=1)-tri
+        angles=np.degrees(np.arctan2(np.linalg.norm(np.cross(a,b),axis=2),(a*b).sum(2)))
+        fig.data[0].update(intensity=angles.min(1),intensitymode='cell',cmin=0,cmax=60,
+            colorscale=[[0,'#aa2e37'],[.5,'#f4b670'],[1,'#429c99']],colorbar=dict(title='最小角 °'))
+    if show_seams and view in ('Omega','入力曲面（seam）'):
+        add_paths(fig,chart_paths(m,spatial=view=='入力曲面（seam）'))
+    if show_seams and view in ('M3D','M3D（最小角）','K3D','M2D') and (folder/'remesh3d.pkl').is_file():
+        add_paths(fig,panel_paths(load(folder/'grid/result.pkl'),load(folder/'remesh3d.pkl'),flat=view=='M2D'))
     if view in ('K2D','T2D','T2D（干渉回避案）'):
         with np.load(folder/'flat.npz') as layout:
             joints=layout['hinges'].reshape(-1,4)
@@ -300,6 +363,10 @@ def figure(folder, view):
     _style_scene(fig)
     eye=dict(x=0,y=0,z=2) if horizontal else dict(x=1.3,y=.55,z=1.6)
     fig.update_layout(title=view,scene_camera=dict(eye=eye,up=dict(x=0,y=1,z=0)))
+    if view in ('M3D','M3D（最小角）','入力曲面（seam）'):
+        fig.update_layout(height=760,margin=dict(l=0,r=0,t=30,b=0),showlegend=False,
+            scene_camera=dict(eye=dict(x=-.92,y=.29,z=1.44),up=dict(x=0,y=1,z=0)))
+        fig.update_scenes(xaxis_visible=False,yaxis_visible=False,zaxis_visible=False)
     if fixed_skin_view and view=='T2D':
         span=np.ptp(xyz,axis=0)
         ratios=1.65*span/max(span.max(),1e-12)
@@ -317,7 +384,7 @@ def render(build_target, options, run_pipeline):
         if continuation:
             original = Path(continuation[0])
             if len(continuation)>2:
-                stage = {'new_thickness':'remesh', 'new_grid':'omega', 'curvature_grid':'omega', 'new_rim':'grid', 'new_layout':'flat'}[continuation[2]]
+                stage = {'new_angle':'optcuts_input', 'new_thickness':'remesh', 'new_grid':'omega', 'curvature_grid':'omega', 'new_rim':'grid', 'new_layout':'flat'}[continuation[2]]
                 copy_through_stage(original, folder, stage)
                 if continuation[2]=='curvature_grid':
                     from shutil import copyfile
@@ -326,8 +393,15 @@ def render(build_target, options, run_pipeline):
             else:
                 folder = original
             previous=json.loads((folder/'settings.json').read_text())
+            if bool(previous.get('direct_omega')) != bool(c.get('direct_omega')):
+                c = previous.copy()
             completed = completed_stages(json.loads(line) for line in (folder/'events.jsonl').read_text().splitlines())
             previous.update(saved_stage_order(previous, completed))
+            if 'optcuts' not in completed:
+                previous.pop('optcuts_angle_weight', None)
+                previous['conformal_limit'] = c['conformal_limit']
+                previous['seam_bend_weight'] = c['seam_bend_weight']
+                previous['seam_curvature_weight'] = c['seam_curvature_weight']
             if 'remesh' not in completed:
                 previous['rim_move_percent'] = c['rim_move_percent']
             if 'grid' not in completed:
@@ -347,6 +421,12 @@ def render(build_target, options, run_pipeline):
                     previous.update({k:c[k] for k in ('outer_lateral_mm','outer_spacing_percent','depth_tolerance_mm','restore_panel_area')})
             if len(continuation)>2 and continuation[2]=='curvature_grid':
                 previous=json.loads((original/'settings.json').read_text())
+            if len(continuation)>2 and continuation[2]=='new_angle':
+                previous=json.loads((folder/'settings.json').read_text())
+                previous.pop('optcuts_angle_weight', None)
+                previous['conformal_limit'] = c['conformal_limit']
+                previous['seam_bend_weight'] = c['seam_bend_weight']
+                previous['seam_curvature_weight'] = c['seam_curvature_weight']
             previous['stop']=continuation[1]
             c=previous
         folder.parent.mkdir(parents=True,exist_ok=True)
@@ -381,6 +461,14 @@ def render(build_target, options, run_pipeline):
     cfg=json.loads((folder/'settings.json').read_text())
     events=[json.loads(l) for l in (folder/'events.jsonl').read_bytes().split(b'\n')[:-1]]
     choices=list(dict.fromkeys(v for e in events if e['status']=='finished' for v in VIEWS.get(e['stage'],[])))
+    if cfg.get('direct_omega'):
+        choices = ['Omega + Grid' if v=='Omega2 + Grid' else v for v in choices if v!='Omega2']
+    if 'M3D' not in choices and (folder/'remesh3d_summary.json').is_file() and (folder/'remesh3d.pkl').is_file():
+        report = json.loads((folder/'remesh3d_summary.json').read_text())
+        if report.get('reference_folds', {}).get('remaining_edges'):
+            choices.append('M3D')
+    if (folder/'drift_preview.npz').is_file() and 'T3D' not in choices:
+        choices.append('T3D（横ずれ診断）')
     if 'T2D' in choices and (folder/'assembled_drilled.npz').is_file():
         choices.insert(choices.index('T2D'),'T3D（紐穴付き同一パネル）')
     if 'T2D' in choices and (folder/'closure.json').is_file() and 'separated_layout' in json.loads((folder/'closure.json').read_text()):
@@ -393,7 +481,17 @@ def render(build_target, options, run_pipeline):
         st.error(LABELS[failed]+'で停止しました。'+(tail[-1] if tail else ''))
     if choices:
         view=st.container().selectbox('View stage',choices,index=len(choices)-1,key='kg_stage_'+folder.name+choices[-1])
-        fig = figure(folder,view)
+        show_seams = True
+        if view in ('M3D','M3D（最小角）','K3D','Omega','入力曲面（seam）','M2D'):
+            show_seams = st.checkbox('seamを表示',value=True,key='kg_show_seam')
+        fig = figure(folder,view,show_seams)
+        if cfg.get('direct_omega') and view == 'Omega':
+            st.caption('OptCutsの単一チャートを格子に直接使用します。')
+        if view=='T3D（横ずれ診断）':
+            with np.load(folder/'drift_preview.npz') as arc:
+                count=int(np.sum(arc['lateral']>float(arc['threshold'])+1e-6))
+                st.warning(f"厚みと共有側面が両立しないため、近似形状を表示しています。橙は横ずれ警告 {count} 枚、紫は横ずれ内で厚みが範囲外の面。厚み範囲外は計 {int(arc['off_depth'].sum())} 枚です。")
+
         if view in (LABELS['inflate'], LABELS['post_rounding']):
             input_name = cfg.get('input_label', '保存された入力')
             st.caption(f"表示中の計算 {folder.name} · {input_name} · {len(fig.data[0].x):,} 頂点 · {len(fig.data[0].i):,} 面")
@@ -406,7 +504,29 @@ def render(build_target, options, run_pipeline):
             lo, hi = fig.layout.meta['scale_percentiles']
             sizing = '曲率・厚みに応じたサイズ' if cfg.get('size_mode')=='adaptive' else '3Dで均一なサイズ'
             st.caption(f"{sizing} · この計算の伸縮の強さ {cfg['stretch']:.2f} · 面ごとの長さ倍率（面積比の平方根）の5–95%範囲 {lo:.3f}–{hi:.3f} 倍。赤は拡大、青は縮小です。")
-        st.plotly_chart(fig,use_container_width=True,key='kg_view_'+folder.name+view)
+        if view == 'Omega' and (folder/'optcuts/summary.json').is_file():
+            chart_stats = json.loads((folder/'optcuts/summary.json').read_text())
+            if 'seam_curvature_weight' in chart_stats:
+                st.caption(f"このΩの曲面の曲率変化の重み {chart_stats['seam_curvature_weight']:g}")
+            if 'seam_bend_weight' in chart_stats:
+                st.caption(f"このΩのseamの曲がりの重み {chart_stats['seam_bend_weight']:g}")
+            if 'conformal_limit' in chart_stats:
+                st.caption(f"各面の等角歪み上限 {chart_stats['conformal_limit']:g} · 実測最大 {chart_stats['conformal_max']:.7f} · 対称Dirichlet歪み {chart_stats['conformal_sd']:.5f}")
+            elif 'optcuts_angle_weight' in chart_stats:
+                st.caption(f"正方性の重み {chart_stats['optcuts_angle_weight']:g} · σ₁/σ₂ の95パーセンタイル {chart_stats['sigma_ratio_p95']:.3f} · 最大 {chart_stats['sigma_ratio_max']:.3f}")
+        st.plotly_chart(fig,use_container_width=True,config=dict(scrollZoom=True,displaylogo=False),key='kg_view_'+folder.name+view)
+        if view in ('M3D','M3D（最小角）'):
+            grid = load(folder/'grid/result.pkl')
+            if 'initial_triangles' in grid:
+                if st.button('大画面3Dビューを作成',key='kg_export_'+folder.name):
+                    from .export_view import portable_view
+                    panels = load(folder/'remesh3d.pkl')
+                    with st.spinner('入力曲面とseamを含むビューを作成中'):
+                        html = portable_view(folder,cfg,grid,panels,figure,final_flat_faces(grid,panels))
+                    st.session_state['kg_html_view'] = (str(folder), (folder/'remesh3d.pkl').stat().st_mtime_ns, html)
+                saved = st.session_state.get('kg_html_view')
+                if saved and saved[:2] == (str(folder), (folder/'remesh3d.pkl').stat().st_mtime_ns):
+                    st.download_button('大画面3Dビューを保存',saved[2],file_name='M3D.html',mime='text/html')
         if view == 'S（丸め後）' and (folder/'inflate/inflate_summary.json').is_file():
             summary = json.loads((folder/'inflate/inflate_summary.json').read_text())
             profile_stats = summary.get('profile_rounding')
@@ -467,6 +587,8 @@ def render(build_target, options, run_pipeline):
         info=json.loads((folder/'tiles_summary.json').read_text())
         if info.get('extrusion_mode') in ('fixed_skin','outer_layer'):
             st.caption(f"{'外側の対応メッシュ' if info['extrusion_mode']=='outer_layer' else '外面固定'} · 中央厚の中央値 {info['center_depth_mm'][1]:.2f} mm · T2D / T3Dのパネル交差 {info['flat_body_intersections']} / {info['assembled_body_intersections']} 組")
+            if info.get('lateral_warning_panels'):
+                st.warning(f"横ずれの警告値を超えるパネルが{len(info['lateral_warning_panels'])}枚あります。T3D上に橙色で表示します。")
             if 'maximum_lateral_mm' in info:
                 st.caption(f"元の面に平行な方向への頂点の横ずれ · 最大 {info['maximum_lateral_mm']:.2f} mm")
             if info['near_zero_columns']:
@@ -479,7 +601,15 @@ def render(build_target, options, run_pipeline):
         cut=len(info['miter_apex_panels'])
         if cut: st.caption(f'留め継ぎ面が指定深さより手前で交わるパネルが {cut} 枚あります。')
     completed=completed_stages(events)
+    if bool(cfg.get('direct_omega')) != bool(c.get('direct_omega')):
+        c = cfg
     cfg.update(saved_stage_order(cfg, completed))
+    if 'optcuts' in completed and (c['conformal_limit'] != cfg.get('conformal_limit')
+                                   or c['seam_bend_weight'] != cfg.get('seam_bend_weight', 0.)
+                                   or c['seam_curvature_weight'] != cfg.get('seam_curvature_weight', 0.)):
+        if st.button('同じ入力曲面で変更したOptCuts条件を使ってΩを再計算', key='kg_recut_'+folder.name):
+            st.session_state['kg_continue']=(str(folder),'optcuts','new_angle')
+            st.rerun()
     if 'omega' in completed and c['size_mode'] != cfg.get('size_mode','uniform'):
         st.caption('変更した目標サイズは Run OneString pipeline で新しく計算できます。')
     if 'omega' in completed and c['stretch'] != cfg['stretch']:
@@ -502,6 +632,13 @@ def render(build_target, options, run_pipeline):
             st.caption(f"元のΩ2とM2Dの外周差 · 最大距離は目標辺長の {design['max_gap_over_pitch']:.2f} 倍 · 面積差（対称差）はΩ2の {100*design['area_difference_fraction']:.2f}%")
         if (folder/'remesh3d_summary.json').exists():
             summary=json.loads((folder/'remesh3d_summary.json').read_text())
+            folds=summary.get('reference_folds')
+            if folds:
+                text=f"参照曲面にない内折れ {folds['detected_edges']} 辺 · 補正した頂点 {folds['moved_vertices']} 個"
+                if folds.get('remaining_edges'):
+                    st.warning(text+f" · 未解消 {folds['remaining_edges']} 辺")
+                else:
+                    st.caption(text)
             comparison=summary.get('curvature_sampling_comparison')
             if comparison:
                 st.caption(f"格子の再配分前後の最大法線角 {comparison['before_max']:.1f}° → {comparison['after_max']:.1f}°")
@@ -545,8 +682,18 @@ def render(build_target, options, run_pipeline):
         st.rerun()
     if cfg.get('extrusion_mode') in ('fixed_skin','outer_layer'):
         if (folder/'prototype/TPU_membrane.stl').is_file():
-            current=json.loads((folder/'closure.json').read_text()).get('hinge_design')=='dual_triangle'
-            st.caption('PLA・TPUを共通原点で読み込みます。3側面の紐穴はパネル中心で交わります。' if current else '以前の底面膜の試作です。紐穴は含まれません。')
+            result=json.loads((folder/'closure.json').read_text())
+            if result.get('hinge_design')=='dual_triangle':
+                route=result.get('string_route', cfg.get('string_route', 'radial'))
+                description={'radial':'3側面の紐穴はパネル中心で交わります。',
+                             'perimeter':'外周一周の直線穴と丸い入口を造形します。',
+                             'smooth_rim':'平面配置の外周一周に沿って、曲線状の紐穴を造形します。'}
+                st.caption('PLA・TPUを共通原点で読み込みます。'+description.get(route, ''))
+                if route=='smooth_rim' and (folder/'perimeter_route.json').is_file():
+                    guide=json.loads((folder/'perimeter_route.json').read_text())
+                    st.caption(f"外周ガイド {guide['usable_guides']}/{guide['physical_rim_total']} 枚 · 紐穴径 {guide['diameter_mm']:.1f} mm · 平面経路の最小曲げ半径 {guide['bend_radius_mm']:.2f} mm")
+            else:
+                st.caption('以前の底面膜の試作です。紐穴は含まれません。')
             for name in ('PLA_tiles','TPU_membrane'):
                 path=folder/'prototype'/(name+'.stl')
                 st.download_button(name+'.stl',path.read_bytes(),file_name=path.name)
