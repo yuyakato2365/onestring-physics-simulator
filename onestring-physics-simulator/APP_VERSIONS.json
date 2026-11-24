@@ -979,5 +979,15 @@
    "tools/triangle_omega/scripts/optcuts/run_optcuts.py",
    "tools/triangle_omega/scripts/trigrid/pipeline2.py"
   ]
+ },
+ {
+  "n": 96,
+  "hash": "13a0ca35efe9e0e597641dae2876e4cfa615cf8a",
+  "time": "2026-11-24 23:08",
+  "changed": [
+   "tools/triangle_omega/controlled/export_view.py",
+   "tools/triangle_omega/controlled/seam_view.py",
+   "tools/triangle_omega/controlled/ui.py"
+  ]
  }
 ]
